@@ -1,0 +1,50 @@
+[
+  {
+    "id": "k1",
+    "name": "Копейщик",
+    "src": "/cursors/k1.png",
+    "preview": "/cursors/k1-preview.png",
+    "hotx": 0,
+    "hoty": 5
+  },
+  {
+    "id": "k2",
+    "name": "Мечник",
+    "src": "/cursors/k2.png",
+    "preview": "/cursors/k2-preview.png",
+    "hotx": 7,
+    "hoty": 2
+  },
+  {
+    "id": "k3",
+    "name": "Рукавица",
+    "src": "/cursors/k3.png",
+    "preview": "/cursors/k3-preview.png",
+    "hotx": 4,
+    "hoty": 7
+  },
+  {
+    "id": "k4",
+    "name": "Меч-стрелка",
+    "src": "/cursors/k4.png",
+    "preview": "/cursors/k4-preview.png",
+    "hotx": 5,
+    "hoty": 0
+  },
+  {
+    "id": "k5",
+    "name": "Шлем",
+    "src": "/cursors/k5.png",
+    "preview": "/cursors/k5-preview.png",
+    "hotx": 0,
+    "hoty": 11
+  },
+  {
+    "id": "k6",
+    "name": "Бумажный",
+    "src": "/cursors/k6.png",
+    "preview": "/cursors/k6-preview.png",
+    "hotx": 7,
+    "hoty": 0
+  }
+]
