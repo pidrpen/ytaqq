@@ -487,10 +487,15 @@ static BOOL plm_lookup(const wchar_t *query, wchar_t *out, int cap) {
   g_plmCount = 0;
   wchar_t pat[420];
   like_escape(query, pat, 420);
-  wchar_t sql[3600];
+  wchar_t sql[3800];
   _snwprintf(
-      sql, 3600,
-      L"SELECT TOP 20 o0.InfoObjectId, o0.Name FROM InfoObjects AS o0 WITH(NOLOCK) "
+      sql, 3800,
+      L"SELECT TOP 20 "
+      L"CASE WHEN o0.TemplateId=1794 AND ISNULL(o0.ParentId,0)<>0 "
+      L"THEN o0.ParentId ELSE o0.InfoObjectId END AS OpenId, "
+      L"o0.TemplateId, o0.Name, p.Name "
+      L"FROM InfoObjects AS o0 WITH(NOLOCK) "
+      L"LEFT JOIN InfoObjects AS p WITH(NOLOCK) ON p.InfoObjectId=o0.ParentId "
       L"WHERE o0.Erased=0 AND ("
       L"o0.TemplateId IN (1767) OR o0.TemplateId IN (20,39) OR o0.TemplateId IN (633) "
       L"OR (o0.TemplateId IN (1794) AND o0.InfoObjectId IN ("
@@ -523,17 +528,24 @@ static BOOL plm_lookup(const wchar_t *query, wchar_t *out, int cap) {
     SQLFreeHandle(SQL_HANDLE_ENV, env);
     return FALSE;
   }
-  SQLINTEGER id = 0;
-  SQLWCHAR nm[200];
-  SQLLEN idInd = 0, nmInd = 0;
-  SQLBindCol(st, 1, SQL_C_SLONG, &id, sizeof(id), &idInd);
-  SQLBindCol(st, 2, SQL_C_WCHAR, nm, sizeof(nm), &nmInd);
+  SQLINTEGER openId = 0, tmpl = 0;
+  SQLWCHAR nm[200], pnm[200];
+  SQLLEN idInd = 0, tmInd = 0, nmInd = 0, pInd = 0;
+  SQLBindCol(st, 1, SQL_C_SLONG, &openId, sizeof(openId), &idInd);
+  SQLBindCol(st, 2, SQL_C_SLONG, &tmpl, sizeof(tmpl), &tmInd);
+  SQLBindCol(st, 3, SQL_C_WCHAR, nm, sizeof(nm), &nmInd);
+  SQLBindCol(st, 4, SQL_C_WCHAR, pnm, sizeof(pnm), &pInd);
   int n = 0;
   wchar_t links[1800] = {0};
   while (SQLFetch(st) == SQL_SUCCESS && n < 20) {
-    make_plm_link(g_plmLinks[n], 420, (long)id);
-    if (nmInd > 0) lstrcpynW(g_plmLabels[n], (wchar_t *)nm, 240);
-    else _snwprintf(g_plmLabels[n], 240, L"IO.%ld", (long)id);
+    long oid = (idInd == SQL_NULL_DATA || openId == 0) ? 0 : (long)openId;
+    make_plm_link(g_plmLinks[n], 420, oid);
+    if (tmpl == 1794 && pInd > 0 && pnm[0])
+      _snwprintf(g_plmLabels[n], 320, L"%s  |  %s", (wchar_t *)pnm, nmInd > 0 ? (wchar_t *)nm : L"ТП");
+    else if (nmInd > 0)
+      lstrcpynW(g_plmLabels[n], (wchar_t *)nm, 320);
+    else
+      _snwprintf(g_plmLabels[n], 320, L"IO.%ld", oid);
     if (!g_plmLastLink[0]) lstrcpynW(g_plmLastLink, g_plmLinks[n], 420);
     if (n) wcscat(links, L"\r\n");
     if ((int)(wcslen(links) + wcslen(g_plmLinks[n]) + 8) < 1800) wcscat(links, g_plmLinks[n]);

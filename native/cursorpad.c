@@ -175,7 +175,7 @@ static wchar_t g_sqlUser[96] = L"";
 static wchar_t g_sqlPass[128] = L"";
 static wchar_t g_plmLastLink[420];
 static wchar_t g_plmLinks[20][420];
-static wchar_t g_plmLabels[20][240];
+static wchar_t g_plmLabels[20][320];
 static int g_plmCount = 0;
 static BOOL g_autostart = FALSE;
 static void show_status(const wchar_t *text);
