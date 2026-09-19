@@ -490,20 +490,14 @@ static BOOL plm_lookup(const wchar_t *query, wchar_t *out, int cap) {
   wchar_t sql[3600];
   _snwprintf(
       sql, 3600,
-      L"WITH Owners AS ("
-      L"SELECT o1.InfoObjectId AS OwnerId FROM InfoObjects AS o1 WITH(NOLOCK) "
-      L"WHERE o1.Erased=0 AND o1.TemplateId IN (432,25)) "
       L"SELECT TOP 20 o0.InfoObjectId, o0.Name FROM InfoObjects AS o0 WITH(NOLOCK) "
       L"WHERE o0.Erased=0 AND ("
-      L"o0.TemplateId IN (1767) OR o0.TemplateId IN (20,39) OR ("
-      L"o0.TemplateId IN (633) AND ("
-      L"o0.ParentId IN (SELECT DISTINCT a1.OwnerId FROM InfoObjectAttributes a1 WITH(NOLOCK) "
-      L"WHERE a1.DataType=22 AND a1.Outdated=0 AND a1.CollectionElementId IS NULL "
-      L"AND a1.NameKeyId=585 AND a1.OwnerId IN (SELECT OwnerId FROM Owners) AND a1.Link IN (515)) "
-      L"OR o0.ParentId IN (SELECT DISTINCT a1.OwnerId FROM InfoObjectAttributes a1 WITH(NOLOCK) "
-      L"WHERE a1.DataType=22 AND a1.Outdated=0 AND a1.CollectionElementId IS NULL "
-      L"AND a1.NameKeyId=585 AND a1.OwnerId IN (SELECT OwnerId FROM Owners) AND a1.Link IN (244))"
-      L"))) AND o0.Name LIKE N'%s' ESCAPE '\\' COLLATE Cyrillic_General_CI_AS "
+      L"o0.TemplateId IN (1767) OR o0.TemplateId IN (20,39) OR o0.TemplateId IN (633) "
+      L"OR (o0.TemplateId IN (1794) AND o0.InfoObjectId IN ("
+      L"SELECT a0.OwnerId FROM InfoObjectAttributes AS a0 WITH(NOLOCK) "
+      L"WHERE a0.DataType=3 AND a0.Outdated=0 AND a0.CollectionElementId IS NULL "
+      L"AND a0.NameKeyId=1739 AND a0.Indexed=1 AND a0.BoolValue=1))"
+      L") AND o0.Name LIKE N'%s' ESCAPE '\\' COLLATE Cyrillic_General_CI_AS "
       L"OPTION(MAXDOP 0)",
       pat);
 
