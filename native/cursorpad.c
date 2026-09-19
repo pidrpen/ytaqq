@@ -82,23 +82,24 @@
 #define OCR_PIN_ID 32671
 #define OCR_PERSON_ID 32672
 
-#define WND_W 300
-#define WND_H 212
-#define TITLE_H 36
-#define FOOT_H 32
+#define WND_W 312
+#define WND_H 228
+#define TITLE_H 44
+#define FOOT_H 36
 #define CLIP_H 26
-#define PAD 10
+#define PAD 12
 #define GUTTER 26
-#define SET_W 300
-#define SET_H 800
+#define SET_W 312
+#define SET_H 860
 #define ID_THEME_BASE 140
 #define THEME_COUNT 4
 
-static COLORREF COL_PAPER = RGB(236, 232, 224);
-static COLORREF COL_PAPER_DARK = RGB(226, 221, 211);
-static COLORREF COL_INK = RGB(26, 25, 22);
-static COLORREF COL_MUTED = RGB(92, 88, 82);
-static COLORREF COL_SAGE = RGB(92, 107, 98);
+static COLORREF COL_PAPER = RGB(243, 238, 228);
+static COLORREF COL_PAPER_DARK = RGB(230, 223, 211);
+static COLORREF COL_INK = RGB(26, 24, 20);
+static COLORREF COL_MUTED = RGB(106, 100, 92);
+static COLORREF COL_SAGE = RGB(90, 111, 98);
+static COLORREF COL_LINE = RGB(210, 202, 188);
 
 typedef struct {
   COLORREF paper, dark, ink, muted, sage;
@@ -106,11 +107,19 @@ typedef struct {
 } PadTheme;
 
 static const PadTheme kThemes[THEME_COUNT] = {
-    {RGB(236, 232, 224), RGB(226, 221, 211), RGB(26, 25, 22), RGB(92, 88, 82), RGB(92, 107, 98), L"Пергамент"},
-    {RGB(32, 32, 34), RGB(20, 20, 22), RGB(236, 232, 224), RGB(160, 156, 150), RGB(140, 168, 156), L"Ночь"},
-    {RGB(230, 236, 226), RGB(206, 220, 206), RGB(28, 44, 32), RGB(78, 102, 86), RGB(56, 112, 78), L"Шалфей"},
-    {RGB(222, 232, 242), RGB(200, 216, 232), RGB(20, 32, 48), RGB(70, 90, 112), RGB(48, 92, 148), L"Сталь"},
+    {RGB(243, 238, 228), RGB(230, 223, 211), RGB(26, 24, 20), RGB(106, 100, 92), RGB(90, 111, 98), L"Пергамент"},
+    {RGB(20, 19, 18), RGB(12, 11, 10), RGB(242, 239, 232), RGB(156, 151, 143), RGB(138, 163, 150), L"Ночь"},
+    {RGB(230, 237, 228), RGB(211, 224, 212), RGB(28, 42, 32), RGB(90, 110, 96), RGB(62, 122, 88), L"Шалфей"},
+    {RGB(230, 238, 244), RGB(210, 222, 232), RGB(22, 32, 44), RGB(90, 106, 122), RGB(61, 106, 150), L"Сталь"},
 };
+
+static COLORREF blend_rgb(COLORREF a, COLORREF b, int t) {
+  if (t < 0) t = 0;
+  if (t > 256) t = 256;
+  return RGB((GetRValue(a) * (256 - t) + GetRValue(b) * t) / 256,
+             (GetGValue(a) * (256 - t) + GetGValue(b) * t) / 256,
+             (GetBValue(a) * (256 - t) + GetBValue(b) * t) / 256);
+}
 
 static HWND g_hwnd;
 static HWND g_edit;
@@ -154,6 +163,7 @@ static BOOL g_ownClip = FALSE;
 static HFONT g_fontUi;
 static HFONT g_fontBody;
 static HFONT g_fontSmall;
+static HFONT g_fontDisplay;
 static HBRUSH g_paper;
 static HBRUSH g_paperDark;
 static NOTIFYICONDATAW g_nid;
@@ -418,6 +428,7 @@ static void apply_theme(void) {
   COL_INK = kThemes[g_theme].ink;
   COL_MUTED = kThemes[g_theme].muted;
   COL_SAGE = kThemes[g_theme].sage;
+  COL_LINE = blend_rgb(COL_INK, COL_PAPER, 214);
   if (g_paper) DeleteObject(g_paper);
   if (g_paperDark) DeleteObject(g_paperDark);
   g_paper = CreateSolidBrush(COL_PAPER);
@@ -661,7 +672,7 @@ static void layout_children(void) {
   int gut = MulDiv(GUTTER, dpi, 96);
   int btnH = MulDiv(24, dpi, 96);
   int closeW = MulDiv(28, dpi, 96);
-  int pinW = MulDiv(80, dpi, 96);
+  int pinW = MulDiv(88, dpi, 96);
   int gap = MulDiv(4, dpi, 96);
   RECT rc;
   GetClientRect(g_hwnd, &rc);
@@ -1195,7 +1206,70 @@ static void append_notes(const wchar_t *text) {
   g_dirty = TRUE;
 }
 
+static void draw_pad_button(const DRAWITEMSTRUCT *dis);
+static HWND mk_btn(HWND parent, const wchar_t *text, int id);
+
 #include "pad_extra.c"
+
+static void fill_round_rect(HDC hdc, RECT rc, COLORREF fill, COLORREF border, int rad) {
+  int d = rad * 2;
+  if (d < 2) d = 2;
+  HBRUSH br = CreateSolidBrush(fill);
+  HPEN pn = CreatePen(PS_SOLID, 1, border);
+  HGDIOBJ obr = SelectObject(hdc, br);
+  HGDIOBJ opn = SelectObject(hdc, pn);
+  RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, d, d);
+  SelectObject(hdc, obr);
+  SelectObject(hdc, opn);
+  DeleteObject(br);
+  DeleteObject(pn);
+}
+
+static void draw_pad_button(const DRAWITEMSTRUCT *dis) {
+  if (!dis || dis->CtlType != ODT_BUTTON) return;
+  RECT rc = dis->rcItem;
+  BOOL press = (dis->itemState & ODS_SELECTED) != 0;
+  BOOL disab = (dis->itemState & ODS_DISABLED) != 0;
+  int id = (int)dis->CtlID;
+  wchar_t t[96] = {0};
+  GetWindowTextW(dis->hwndItem, t, 96);
+  BOOL on = t[0] == 0x25CF;
+  BOOL primary = id == ID_SETTINGS || id == ID_SEARCH_GO || id == ID_UPDATE || id == ID_PIN ||
+                 id == ID_ANS_OPEN;
+  BOOL quiet = id == ID_CLOSE || id == ID_MIN;
+  COLORREF fill, fg, bd;
+  if (disab) {
+    fill = blend_rgb(COL_PAPER, COL_PAPER_DARK, 160);
+    fg = COL_MUTED;
+    bd = COL_LINE;
+  } else if (on || primary) {
+    fill = press ? blend_rgb(COL_SAGE, COL_INK, 48) : COL_SAGE;
+    fg = COL_PAPER;
+    bd = fill;
+  } else if (quiet) {
+    fill = press ? COL_PAPER : COL_PAPER_DARK;
+    fg = COL_INK;
+    bd = COL_LINE;
+  } else {
+    fill = press ? blend_rgb(COL_PAPER_DARK, COL_INK, 30) : COL_PAPER;
+    fg = COL_INK;
+    bd = COL_LINE;
+  }
+  int h = rc.bottom - rc.top;
+  int rad = quiet ? (h / 2) : (h >= 26 ? 8 : 6);
+  fill_round_rect(dis->hDC, rc, fill, bd, rad);
+  SetBkMode(dis->hDC, TRANSPARENT);
+  SetTextColor(dis->hDC, fg);
+  if (g_fontUi) SelectObject(dis->hDC, g_fontUi);
+  DrawTextW(dis->hDC, t, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+}
+
+static HWND mk_btn(HWND parent, const wchar_t *text, int id) {
+  HWND b = CreateWindowExW(0, L"BUTTON", text, WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 0, 0, 80, 26,
+                           parent, (HMENU)(INT_PTR)id, NULL, NULL);
+  if (b && g_fontUi) SendMessageW(b, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
+  return b;
+}
 
 static void run_ocr_test(void) {
   start_ocr_pick();
@@ -1259,7 +1333,7 @@ static void add_tray(HWND hwnd) {
   g_nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
   g_nid.uCallbackMessage = WM_TRAY;
   g_nid.hIcon = LoadIconW(NULL, IDI_APPLICATION);
-  _snwprintf(g_nid.szTip, 128, L"CursorPad  ·  %s закрепить", g_hotkeyName);
+  _snwprintf(g_nid.szTip, 128, L"CursorPad %s  ·  %s закрепить", APP_VERSION_STR, g_hotkeyName);
   g_trayAdded = Shell_NotifyIconW(NIM_ADD, &g_nid);
 }
 
@@ -1334,13 +1408,13 @@ static void layout_settings(void) {
   if (!g_setHwnd) return;
   RECT rc;
   GetClientRect(g_setHwnd, &rc);
-  int pad = 12, gap = 6, btnH = 26, y = 12;
+  int pad = 14, gap = 7, btnH = 28, y = 30;
   int cw = rc.right - pad;
   int half = (cw - pad - gap) / 2;
   int third = (cw - pad - gap * 2) / 3;
-  if (g_searchEdit) MoveWindow(g_searchEdit, pad, y, cw - pad - 78, btnH, TRUE);
-  if (g_searchGo) MoveWindow(g_searchGo, cw - 70, y, 70, btnH, TRUE);
-  y += btnH + gap + 4;
+  if (g_searchEdit) MoveWindow(g_searchEdit, pad, y, cw - pad - 82, btnH, TRUE);
+  if (g_searchGo) MoveWindow(g_searchGo, cw - 74, y, 74, btnH, TRUE);
+  y += btnH + gap + 6;
   if (g_btnAi) MoveWindow(g_btnAi, pad, y, cw - pad, btnH, TRUE);
   y += btnH + gap;
   if (g_btnWiki) MoveWindow(g_btnWiki, pad, y, third, btnH, TRUE);
@@ -1361,22 +1435,22 @@ static void layout_settings(void) {
   y += btnH + gap;
   if (g_plmUser) MoveWindow(g_plmUser, pad, y, half, btnH, TRUE);
   if (g_plmPass) MoveWindow(g_plmPass, pad + half + gap, y, half, btnH, TRUE);
-  y += btnH + gap + 8;
+  y += btnH + gap + 22;
   if (g_btnK2) MoveWindow(g_btnK2, pad, y, half, btnH, TRUE);
   if (g_btnK3) MoveWindow(g_btnK3, pad + half + gap, y, half, btnH, TRUE);
   y += btnH + gap;
   if (g_btnSys) MoveWindow(g_btnSys, pad, y, cw - pad, btnH, TRUE);
   y += btnH + gap;
   if (g_chkAuto) MoveWindow(g_chkAuto, pad, y, cw - pad, btnH, TRUE);
-  y += btnH + gap + 14;
+  y += btnH + gap + 22;
   if (g_tbBg) MoveWindow(g_tbBg, pad, y, cw - pad, btnH, TRUE);
-  y += btnH + 22;
+  y += btnH + 24;
   if (g_tbFg) MoveWindow(g_tbFg, pad, y, cw - pad, btnH, TRUE);
-  y += btnH + 18;
+  y += btnH + 22;
   if (g_ocr) MoveWindow(g_ocr, pad, y, cw - pad, btnH, TRUE);
   y += btnH + gap;
   if (g_btnUp) MoveWindow(g_btnUp, pad, y, cw - pad, btnH, TRUE);
-  y += btnH + gap;
+  y += btnH + gap + 18;
   {
     int tw = (cw - pad - gap * 3) / 4;
     for (int i = 0; i < THEME_COUNT; i++)
@@ -1394,24 +1468,57 @@ static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
     GetClientRect(hwnd, &rc);
     FillRect(hdc, &rc, g_paperDark);
     SetBkMode(hdc, TRANSPARENT);
-    SetTextColor(hdc, COL_MUTED);
     if (g_fontSmall) SelectObject(hdc, g_fontSmall);
+    SetTextColor(hdc, COL_MUTED);
+    {
+      RECT cap = {14, 10, rc.right - 14, 28};
+      DrawTextW(hdc, L"поиск и источники", -1, &cap, DT_LEFT | DT_SINGLELINE);
+    }
+    if (g_btnK2) {
+      RECT wr;
+      GetWindowRect(g_btnK2, &wr);
+      MapWindowPoints(HWND_DESKTOP, hwnd, (POINT *)&wr, 2);
+      RECT a = {14, wr.top - 18, rc.right - 14, wr.top - 2};
+      DrawTextW(hdc, L"курсор", -1, &a, DT_LEFT | DT_SINGLELINE);
+    }
     if (g_tbBg) {
       RECT wr;
       GetWindowRect(g_tbBg, &wr);
       MapWindowPoints(HWND_DESKTOP, hwnd, (POINT *)&wr, 2);
-      RECT a = {12, wr.top - 16, rc.right - 12, wr.top};
+      RECT a = {14, wr.top - 18, rc.right - 14, wr.top - 2};
       DrawTextW(hdc, L"прозрачность следования", -1, &a, DT_LEFT | DT_SINGLELINE);
     }
     if (g_tbFg) {
       RECT wr;
       GetWindowRect(g_tbFg, &wr);
       MapWindowPoints(HWND_DESKTOP, hwnd, (POINT *)&wr, 2);
-      RECT b = {12, wr.top - 16, rc.right - 12, wr.top};
+      RECT b = {14, wr.top - 18, rc.right - 14, wr.top - 2};
       DrawTextW(hdc, L"прозрачность закреплённого окна", -1, &b, DT_LEFT | DT_SINGLELINE);
+    }
+    if (g_btnTheme[0]) {
+      RECT wr;
+      GetWindowRect(g_btnTheme[0], &wr);
+      MapWindowPoints(HWND_DESKTOP, hwnd, (POINT *)&wr, 2);
+      RECT c = {14, wr.top - 18, rc.right - 14, wr.top - 2};
+      DrawTextW(hdc, L"тема", -1, &c, DT_LEFT | DT_SINGLELINE);
+    }
+    {
+      RECT ver = {14, rc.bottom - 28, rc.right - 14, rc.bottom - 10};
+      wchar_t vs[64];
+      _snwprintf(vs, 64, L"CursorPad  %s", APP_VERSION_STR);
+      DrawTextW(hdc, vs, -1, &ver, DT_LEFT | DT_SINGLELINE);
     }
     EndPaint(hwnd, &ps);
     return 0;
+  }
+  case WM_DRAWITEM:
+    draw_pad_button((const DRAWITEMSTRUCT *)lParam);
+    return TRUE;
+  case WM_CTLCOLORSTATIC: {
+    HDC hdc = (HDC)wParam;
+    SetBkColor(hdc, COL_PAPER_DARK);
+    SetTextColor(hdc, COL_MUTED);
+    return (LRESULT)g_paperDark;
   }
   case WM_COMMAND:
     if (LOWORD(wParam) == ID_CUR_K2) set_skin(1);
@@ -1515,27 +1622,17 @@ static void create_settings(HWND owner) {
   g_searchEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
                                  WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
                                  0, 0, 160, 26, g_setHwnd, (HMENU)(INT_PTR)ID_SEARCH_EDIT, NULL, NULL);
-  g_searchGo = CreateWindowExW(0, L"BUTTON", L"Спросить",
-                               WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
-                               0, 0, 70, 26, g_setHwnd, (HMENU)(INT_PTR)ID_SEARCH_GO, NULL, NULL);
-  g_btnAi = CreateWindowExW(0, L"BUTTON", L"Мини-ИИ (в .exe)", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                            0, 0, 200, 26, g_setHwnd, (HMENU)(INT_PTR)ID_ENG_AI, NULL, NULL);
-  g_btnWiki = CreateWindowExW(0, L"BUTTON", L"Вики", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                              0, 0, 80, 26, g_setHwnd, (HMENU)(INT_PTR)ID_ENG_WIKI, NULL, NULL);
-  g_btnDdg = CreateWindowExW(0, L"BUTTON", L"DDG", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                             0, 0, 80, 26, g_setHwnd, (HMENU)(INT_PTR)ID_ENG_DDG, NULL, NULL);
-  g_btnYa = CreateWindowExW(0, L"BUTTON", L"Яндекс", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                            0, 0, 80, 26, g_setHwnd, (HMENU)(INT_PTR)ID_ENG_YA, NULL, NULL);
-  g_btnPlm = CreateWindowExW(0, L"BUTTON", L"PLM", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                             0, 0, 80, 26, g_setHwnd, (HMENU)(INT_PTR)ID_ENG_PLM, NULL, NULL);
-  g_btnFiles = CreateWindowExW(0, L"BUTTON", L"Файлы", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                               0, 0, 80, 26, g_setHwnd, (HMENU)(INT_PTR)ID_ENG_FILES, NULL, NULL);
+  g_searchGo = mk_btn(g_setHwnd, L"Спросить", ID_SEARCH_GO);
+  g_btnAi = mk_btn(g_setHwnd, L"Мини-ИИ (в .exe)", ID_ENG_AI);
+  g_btnWiki = mk_btn(g_setHwnd, L"Вики", ID_ENG_WIKI);
+  g_btnDdg = mk_btn(g_setHwnd, L"DDG", ID_ENG_DDG);
+  g_btnYa = mk_btn(g_setHwnd, L"Яндекс", ID_ENG_YA);
+  g_btnPlm = mk_btn(g_setHwnd, L"PLM", ID_ENG_PLM);
+  g_btnFiles = mk_btn(g_setHwnd, L"Файлы", ID_ENG_FILES);
   g_filesRootEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", g_filesRoot,
                                     WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
                                     0, 0, 200, 26, g_setHwnd, (HMENU)(INT_PTR)ID_FILES_ROOT, NULL, NULL);
-  g_btnIdx = CreateWindowExW(0, L"BUTTON", L"Обновить JSON",
-                             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 200, 26, g_setHwnd,
-                             (HMENU)(INT_PTR)ID_FILES_REFRESH, NULL, NULL);
+  g_btnIdx = mk_btn(g_setHwnd, L"Обновить JSON", ID_FILES_REFRESH);
   g_filesStat = CreateWindowExW(0, L"STATIC", L"Индекс: —",
                                 WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP, 0, 0, 200, 22, g_setHwnd,
                                 (HMENU)(INT_PTR)136, NULL, NULL);
@@ -1551,27 +1648,16 @@ static void create_settings(HWND owner) {
   g_plmPass = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
                               WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_PASSWORD,
                               0, 0, 120, 26, g_setHwnd, (HMENU)(INT_PTR)ID_PLM_PASS, NULL, NULL);
-  g_btnK2 = CreateWindowExW(0, L"BUTTON", L"Мечник", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                            0, 0, 120, 28, g_setHwnd, (HMENU)(INT_PTR)ID_CUR_K2, NULL, NULL);
-  g_btnK3 = CreateWindowExW(0, L"BUTTON", L"Рукавица", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                            0, 0, 120, 28, g_setHwnd, (HMENU)(INT_PTR)ID_CUR_K3, NULL, NULL);
-  g_btnSys = CreateWindowExW(0, L"BUTTON", L"Курсор Windows", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                             0, 0, 120, 28, g_setHwnd, (HMENU)(INT_PTR)ID_SYS_CUR, NULL, NULL);
+  g_btnK2 = mk_btn(g_setHwnd, L"Мечник", ID_CUR_K2);
+  g_btnK3 = mk_btn(g_setHwnd, L"Рукавица", ID_CUR_K3);
+  g_btnSys = mk_btn(g_setHwnd, L"Курсор Windows", ID_SYS_CUR);
   g_chkAuto = CreateWindowExW(0, L"BUTTON", L"Автозапуск с Windows",
                               WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 0, 0, 200, 26,
                               g_setHwnd, (HMENU)(INT_PTR)ID_AUTOSTART, NULL, NULL);
-  g_ocr = CreateWindowExW(0, L"BUTTON", L"Выделить и прочитать (F6)",
-                          WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 200, 28, g_setHwnd,
-                          (HMENU)(INT_PTR)ID_OCR, NULL, NULL);
-  g_btnUp = CreateWindowExW(0, L"BUTTON", L"Обновить с GitHub",
-                            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 200, 28, g_setHwnd,
-                            (HMENU)(INT_PTR)ID_UPDATE, NULL, NULL);
-  for (int i = 0; i < THEME_COUNT; i++) {
-    g_btnTheme[i] = CreateWindowExW(0, L"BUTTON", kThemes[i].name,
-                                    WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 70, 26,
-                                    g_setHwnd, (HMENU)(INT_PTR)(ID_THEME_BASE + i), NULL, NULL);
-    if (g_fontSmall) SendMessageW(g_btnTheme[i], WM_SETFONT, (WPARAM)g_fontSmall, TRUE);
-  }
+  g_ocr = mk_btn(g_setHwnd, L"Выделить и прочитать (F6)", ID_OCR);
+  g_btnUp = mk_btn(g_setHwnd, L"Обновить с GitHub", ID_UPDATE);
+  for (int i = 0; i < THEME_COUNT; i++)
+    g_btnTheme[i] = mk_btn(g_setHwnd, kThemes[i].name, ID_THEME_BASE + i);
   g_tbBg = CreateWindowExW(0, TRACKBAR_CLASSW, L"", WS_CHILD | WS_VISIBLE | TBS_NOTICKS | TBS_TOOLTIPS,
                            0, 0, 120, 28, g_setHwnd, (HMENU)(INT_PTR)ID_ALPHA_BG, NULL, NULL);
   g_tbFg = CreateWindowExW(0, TRACKBAR_CLASSW, L"", WS_CHILD | WS_VISIBLE | TBS_NOTICKS | TBS_TOOLTIPS,
@@ -1624,19 +1710,15 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     apply_dpi(hwnd);
     g_paper = CreateSolidBrush(COL_PAPER);
     g_paperDark = CreateSolidBrush(COL_PAPER_DARK);
+    g_fontDisplay = make_font(L"Georgia", 12, FW_SEMIBOLD);
+    if (!g_fontDisplay) g_fontDisplay = make_font(L"Palatino Linotype", 12, FW_SEMIBOLD);
     g_fontUi = make_font(L"Segoe UI", 9, FW_SEMIBOLD);
-    g_fontBody = make_font(L"Segoe UI", 11, FW_NORMAL);
+    g_fontBody = make_font(L"Segoe UI", 10, FW_NORMAL);
     g_fontSmall = make_font(L"Segoe UI", 8, FW_NORMAL);
 
-    g_pin = CreateWindowExW(0, L"BUTTON", L"Закрепить",
-                            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                            0, 0, 96, 28, hwnd, (HMENU)(INT_PTR)ID_PIN, NULL, NULL);
-    g_close = CreateWindowExW(0, L"BUTTON", L"×",
-                              WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                              0, 0, 32, 28, hwnd, (HMENU)(INT_PTR)ID_CLOSE, NULL, NULL);
-    g_min = CreateWindowExW(0, L"BUTTON", L"–",
-                            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                            0, 0, 32, 28, hwnd, (HMENU)(INT_PTR)ID_MIN, NULL, NULL);
+    g_pin = mk_btn(hwnd, L"Закрепить", ID_PIN);
+    g_close = mk_btn(hwnd, L"×", ID_CLOSE);
+    g_min = mk_btn(hwnd, L"–", ID_MIN);
     g_edit = CreateWindowExW(0, L"EDIT", L"",
                              WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL |
                                  ES_WANTRETURN | WS_VSCROLL,
@@ -1644,9 +1726,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     g_clipEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
                                  WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
                                  0, 0, 100, 24, hwnd, (HMENU)(INT_PTR)ID_CLIP, NULL, NULL);
-    g_btnSet = CreateWindowExW(0, L"BUTTON", L"Настройки",
-                               WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                               0, 0, 120, 28, hwnd, (HMENU)(INT_PTR)ID_SETTINGS, NULL, NULL);
+    g_btnSet = mk_btn(hwnd, L"Настройки", ID_SETTINGS);
     SendMessageW(g_pin, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
     SendMessageW(g_close, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
     SendMessageW(g_min, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
@@ -1702,6 +1782,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
   case WM_SIZE:
     layout_children();
     return 0;
+  case WM_DRAWITEM:
+    draw_pad_button((const DRAWITEMSTRUCT *)lParam);
+    return TRUE;
   case WM_ERASEBKGND:
     return 1;
   case WM_PAINT: {
@@ -1723,16 +1806,33 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     FillRect(hdc, &title, g_paperDark);
     RECT foot = {0, rc.bottom - fh, rc.right, rc.bottom};
     FillRect(hdc, &foot, g_paperDark);
+    RECT rule = {0, th - 1, rc.right, th};
+    HBRUSH line = CreateSolidBrush(COL_LINE);
+    FillRect(hdc, &rule, line);
+    RECT frule = {0, rc.bottom - fh, rc.right, rc.bottom - fh + 1};
+    FillRect(hdc, &frule, line);
+    DeleteObject(line);
 
     SetBkMode(hdc, TRANSPARENT);
-    SetTextColor(hdc, COL_INK);
-    SelectObject(hdc, g_fontUi);
-    RECT ttext = {MulDiv(PAD, dpi, 96), 0, rc.right / 2, th};
-    DrawTextW(hdc, g_statusOn ? g_status : L"CursorPad", -1, &ttext,
-              DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    int padx = MulDiv(PAD, dpi, 96);
+    RECT ttext = {padx + MulDiv(6, dpi, 96), MulDiv(4, dpi, 96), rc.right / 2, th - MulDiv(14, dpi, 96)};
+    RECT vtext = {padx + MulDiv(6, dpi, 96), th - MulDiv(18, dpi, 96), rc.right / 2, th - 2};
+    if (g_statusOn) {
+      SetTextColor(hdc, COL_INK);
+      if (g_fontUi) SelectObject(hdc, g_fontUi);
+      RECT st = {padx + MulDiv(6, dpi, 96), 0, rc.right / 2, th};
+      DrawTextW(hdc, g_status, -1, &st, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    } else {
+      SetTextColor(hdc, COL_INK);
+      if (g_fontDisplay) SelectObject(hdc, g_fontDisplay);
+      DrawTextW(hdc, L"CursorPad", -1, &ttext, DT_LEFT | DT_BOTTOM | DT_SINGLELINE);
+      SetTextColor(hdc, COL_MUTED);
+      if (g_fontSmall) SelectObject(hdc, g_fontSmall);
+      DrawTextW(hdc, APP_VERSION_STR, -1, &vtext, DT_LEFT | DT_TOP | DT_SINGLELINE);
+    }
     draw_gutter_thumbs(hdc, dpi, th, fh);
 
-    RECT accent = {0, 0, MulDiv(4, dpi, 96), rc.bottom};
+    RECT accent = {0, 0, MulDiv(3, dpi, 96), rc.bottom};
     HBRUSH sage = CreateSolidBrush(COL_SAGE);
     FillRect(hdc, &accent, sage);
     DeleteObject(sage);
@@ -1906,6 +2006,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     if (g_fontUi) DeleteObject(g_fontUi);
     if (g_fontBody) DeleteObject(g_fontBody);
     if (g_fontSmall) DeleteObject(g_fontSmall);
+    if (g_fontDisplay) DeleteObject(g_fontDisplay);
     if (g_paper) DeleteObject(g_paper);
     if (g_paperDark) DeleteObject(g_paperDark);
     if (g_mutex) CloseHandle(g_mutex);

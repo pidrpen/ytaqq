@@ -828,6 +828,9 @@ static void layout_answer(void) {
 
 static LRESULT CALLBACK AnswerProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
   switch (msg) {
+  case WM_DRAWITEM:
+    draw_pad_button((const DRAWITEMSTRUCT *)lParam);
+    return TRUE;
   case WM_COMMAND:
     if (LOWORD(wParam) == ID_ANS_CLOSE) ShowWindow(hwnd, SW_HIDE);
     if (LOWORD(wParam) == ID_ANS_OPEN) open_plm_selected();
@@ -914,14 +917,10 @@ static void create_answer(HWND owner) {
     col.pszText = L"2 ТП";
     SendMessageW(g_answerList, LVM_INSERTCOLUMNW, 1, (LPARAM)&col);
   }
-  HWND open = CreateWindowExW(0, L"BUTTON", L"Открыть PLM", WS_CHILD | WS_VISIBLE,
-                              0, 0, 80, 24, g_answer, (HMENU)(INT_PTR)ID_ANS_OPEN, NULL, NULL);
-  HWND copy = CreateWindowExW(0, L"BUTTON", L"Копировать", WS_CHILD | WS_VISIBLE,
-                              0, 0, 80, 24, g_answer, (HMENU)(INT_PTR)ID_ANS_COPY, NULL, NULL);
-  HWND notes = CreateWindowExW(0, L"BUTTON", L"В блокнот", WS_CHILD | WS_VISIBLE,
-                               0, 0, 80, 24, g_answer, (HMENU)(INT_PTR)ID_ANS_NOTES, NULL, NULL);
-  HWND cls = CreateWindowExW(0, L"BUTTON", L"Закрыть", WS_CHILD | WS_VISIBLE,
-                             0, 0, 80, 24, g_answer, (HMENU)(INT_PTR)ID_ANS_CLOSE, NULL, NULL);
+  HWND open = mk_btn(g_answer, L"Открыть PLM", ID_ANS_OPEN);
+  HWND copy = mk_btn(g_answer, L"Копировать", ID_ANS_COPY);
+  HWND notes = mk_btn(g_answer, L"В блокнот", ID_ANS_NOTES);
+  HWND cls = mk_btn(g_answer, L"Закрыть", ID_ANS_CLOSE);
   if (g_fontBody) SendMessageW(g_answerEdit, WM_SETFONT, (WPARAM)g_fontBody, TRUE);
   if (g_fontBody && g_answerList) SendMessageW(g_answerList, WM_SETFONT, (WPARAM)g_fontBody, TRUE);
   if (g_fontUi) {
