@@ -68,8 +68,8 @@ export async function lookupBrief(
     return {
       source: "PLM",
       text:
-        `В Windows-exe: SQL к um-splmsrv (ваш запрос InfoObjects), ссылка вида\n${sample}\n\n` +
-        `Сейчас превью не ходит в вашу базу. В .exe выберите PLM, введите название — например «Масло индустриальное И-12А ГОСТ 20799-2022».`,
+        `В .exe: SQL-логин к UM-SQLSRV (не Windows). Ссылка pmsz-plm:um-splmsrv[логин]:4450/IO.{id}\n${sample}\n\n` +
+        `Укажите пользователя и пароль SQL в Настройках. Пример названия: «Масло индустриальное И-12А ГОСТ 20799-2022».`,
     };
   }
 

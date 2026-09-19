@@ -7,6 +7,8 @@
 #define ID_ENG_PLM 124
 #define ID_PLM_SERVER 125
 #define ID_PLM_DB 126
+#define ID_PLM_USER 128
+#define ID_PLM_PASS 129
 #define ID_ANS_OPEN 127
 #define ID_AUTOSTART 119
 #define ID_ANS_COPY 120
@@ -373,9 +375,28 @@ static void odbc_err(SQLHANDLE h, SQLSMALLINT ht, wchar_t *out, int cap) {
   _snwprintf(out, cap, L"%s %s", st, msg);
 }
 
+static void odbc_brace(const wchar_t *in, wchar_t *out, int cap) {
+  int o = 0;
+  if (o + 1 < cap) out[o++] = L'{';
+  for (; *in && o + 3 < cap; in++) {
+    if (*in == L'}') {
+      out[o++] = L'}';
+      out[o++] = L'}';
+    } else {
+      out[o++] = *in;
+    }
+  }
+  if (o + 1 < cap) out[o++] = L'}';
+  out[o] = 0;
+}
+
 static BOOL plm_connect(SQLHENV *env, SQLHDBC *dbc, wchar_t *err, int ecap) {
   *env = SQL_NULL_HENV;
   *dbc = SQL_NULL_HDBC;
+  if (!g_sqlUser[0] || !g_sqlPass[0]) {
+    lstrcpynW(err, L"Укажите пользователя и пароль SQL (не Windows-учётку).", ecap);
+    return FALSE;
+  }
   if (SQLAllocHandle(SQL_HANDLE_ENV, SQL_NULL_HANDLE, env) != SQL_SUCCESS) {
     lstrcpynW(err, L"ODBC недоступен", ecap);
     return FALSE;
@@ -391,16 +412,21 @@ static BOOL plm_connect(SQLHENV *env, SQLHDBC *dbc, wchar_t *err, int ecap) {
   const wchar_t *drivers[] = {
       L"SQL Server", L"ODBC Driver 17 for SQL Server", L"ODBC Driver 18 for SQL Server",
       NULL};
-  wchar_t conn[640], outc[640];
+  wchar_t uid[200], pwd[280], conn[900], outc[640];
+  odbc_brace(g_sqlUser, uid, 200);
+  odbc_brace(g_sqlPass, pwd, 280);
   SQLSMALLINT outn = 0;
   for (int i = 0; drivers[i]; i++) {
     if (g_plmDatabase[0])
-      _snwprintf(conn, 640,
-                 L"DRIVER={%s};SERVER=%s;DATABASE=%s;Trusted_Connection=Yes;",
-                 drivers[i], g_plmHost, g_plmDatabase);
+      _snwprintf(conn, 900,
+                 L"DRIVER={%s};SERVER=%s;DATABASE=%s;UID=%s;PWD=%s;"
+                 L"Trusted_Connection=No;Encrypt=No;TrustServerCertificate=Yes;",
+                 drivers[i], g_sqlHost, g_plmDatabase, uid, pwd);
     else
-      _snwprintf(conn, 640, L"DRIVER={%s};SERVER=%s;Trusted_Connection=Yes;",
-                 drivers[i], g_plmHost);
+      _snwprintf(conn, 900,
+                 L"DRIVER={%s};SERVER=%s;UID=%s;PWD=%s;"
+                 L"Trusted_Connection=No;Encrypt=No;TrustServerCertificate=Yes;",
+                 drivers[i], g_sqlHost, uid, pwd);
     SQLRETURN r = SQLDriverConnectW(*dbc, NULL, (SQLWCHAR *)conn, SQL_NTS,
                                     (SQLWCHAR *)outc, 640, &outn, SQL_DRIVER_NOPROMPT);
     if (SQL_SUCCEEDED(r)) return TRUE;
@@ -442,9 +468,9 @@ static BOOL plm_lookup(const wchar_t *query, wchar_t *out, int cap) {
   wchar_t err[280];
   if (!plm_connect(&env, &dbc, err, 280)) {
     _snwprintf(out, cap,
-               L"PLM\r\n\r\nНе удалось подключиться к %s.\r\n%s\r\n\r\n"
-               L"Нужен Windows-вход и ODBC SQL Server. Базу укажите в Настройках.",
-               g_plmHost, err);
+               L"PLM\r\n\r\nНе удалось подключиться к %s (логин SQL, не Windows).\r\n%s\r\n\r\n"
+               L"В Настройках: сервер UM-SQLSRV, пользователь и пароль SQL, при необходимости база.",
+               g_sqlHost, err);
     return FALSE;
   }
   SQLHSTMT st = SQL_NULL_HSTMT;
@@ -494,36 +520,114 @@ static void load_plm_pref(void) {
   _snwprintf(path, MAX_PATH, L"%s\\plm.txt", g_dataDir);
   HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
                          FILE_ATTRIBUTE_NORMAL, NULL);
+  if (h != INVALID_HANDLE_VALUE) {
+    char buf[800];
+    DWORD n = 0;
+    ReadFile(h, buf, 799, &n, NULL);
+    CloseHandle(h);
+    buf[n] = 0;
+    char *line = buf;
+    while (line && *line) {
+      char *nl = strchr(line, '\n');
+      if (nl) *nl = 0;
+      char *cr = strchr(line, '\r');
+      if (cr) *cr = 0;
+      char *sp = strchr(line, ' ');
+      if (sp) {
+        *sp = 0;
+        char *val = sp + 1;
+        while (*val == ' ') val++;
+        if (!strcmp(line, "sql") && val[0])
+          MultiByteToWideChar(CP_UTF8, 0, val, -1, g_sqlHost, 96);
+        else if (!strcmp(line, "plm") && val[0])
+          MultiByteToWideChar(CP_UTF8, 0, val, -1, g_plmHost, 96);
+        else if (!strcmp(line, "port") && val[0])
+          MultiByteToWideChar(CP_UTF8, 0, val, -1, g_plmPort, 16);
+        else if (!strcmp(line, "db") && val[0] && val[0] != '-')
+          MultiByteToWideChar(CP_UTF8, 0, val, -1, g_plmDatabase, 96);
+        else if (!strcmp(line, "user") && val[0])
+          MultiByteToWideChar(CP_UTF8, 0, val, -1, g_sqlUser, 96);
+      }
+      line = nl ? nl + 1 : NULL;
+    }
+  }
+  _snwprintf(path, MAX_PATH, L"%s\\plm.key", g_dataDir);
+  h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
+                  FILE_ATTRIBUTE_NORMAL, NULL);
   if (h == INVALID_HANDLE_VALUE) return;
-  char buf[400];
-  DWORD n = 0;
-  ReadFile(h, buf, 399, &n, NULL);
+  DWORD sz = GetFileSize(h, NULL);
+  if (sz == INVALID_FILE_SIZE || sz == 0 || sz > 4096) {
+    CloseHandle(h);
+    return;
+  }
+  BYTE *blob = (BYTE *)malloc(sz);
+  if (!blob) {
+    CloseHandle(h);
+    return;
+  }
+  DWORD r = 0;
+  ReadFile(h, blob, sz, &r, NULL);
   CloseHandle(h);
-  buf[n] = 0;
-  char host[96] = {0}, port[16] = {0}, db[96] = {0};
-  sscanf(buf, "%95s %15s %95s", host, port, db);
-  if (host[0]) MultiByteToWideChar(CP_UTF8, 0, host, -1, g_plmHost, 96);
-  if (port[0]) MultiByteToWideChar(CP_UTF8, 0, port, -1, g_plmPort, 16);
-  if (db[0] && db[0] != '-') MultiByteToWideChar(CP_UTF8, 0, db, -1, g_plmDatabase, 96);
+  DATA_BLOB in, out;
+  in.cbData = r;
+  in.pbData = blob;
+  out.cbData = 0;
+  out.pbData = NULL;
+  if (CryptUnprotectData(&in, NULL, NULL, NULL, NULL, 0, &out)) {
+    int nch = (int)(out.cbData / sizeof(wchar_t));
+    if (nch < 1) nch = 1;
+    if (nch > 127) nch = 127;
+    memcpy(g_sqlPass, out.pbData, (nch) * sizeof(wchar_t));
+    g_sqlPass[nch] = 0;
+    if (nch > 0 && g_sqlPass[nch - 1] != 0) g_sqlPass[nch] = 0;
+    LocalFree(out.pbData);
+  }
+  free(blob);
 }
 
 static void save_plm_pref(void) {
-  if (g_plmServer) GetWindowTextW(g_plmServer, g_plmHost, 96);
+  if (g_plmServer) GetWindowTextW(g_plmServer, g_sqlHost, 96);
   if (g_plmDb) GetWindowTextW(g_plmDb, g_plmDatabase, 96);
+  if (g_plmUser) GetWindowTextW(g_plmUser, g_sqlUser, 96);
+  if (g_plmPass) {
+    wchar_t p[128] = {0};
+    GetWindowTextW(g_plmPass, p, 128);
+    if (p[0] && wcscmp(p, L"********") != 0) lstrcpynW(g_sqlPass, p, 128);
+  }
   wchar_t path[MAX_PATH];
   if (!g_dataDir[0]) return;
   _snwprintf(path, MAX_PATH, L"%s\\plm.txt", g_dataDir);
-  char host[96], port[16], db[96];
-  WideCharToMultiByte(CP_UTF8, 0, g_plmHost, -1, host, 96, NULL, NULL);
+  char sql[96], plm[96], port[16], db[96], user[96];
+  WideCharToMultiByte(CP_UTF8, 0, g_sqlHost, -1, sql, 96, NULL, NULL);
+  WideCharToMultiByte(CP_UTF8, 0, g_plmHost, -1, plm, 96, NULL, NULL);
   WideCharToMultiByte(CP_UTF8, 0, g_plmPort, -1, port, 16, NULL, NULL);
   WideCharToMultiByte(CP_UTF8, 0, g_plmDatabase, -1, db, 96, NULL, NULL);
-  char buf[256];
-  snprintf(buf, sizeof(buf), "%s %s %s\n", host, port[0] ? port : "4450", db[0] ? db : "-");
+  WideCharToMultiByte(CP_UTF8, 0, g_sqlUser, -1, user, 96, NULL, NULL);
+  char buf[400];
+  snprintf(buf, sizeof(buf), "sql %s\nplm %s\nport %s\ndb %s\nuser %s\n",
+           sql[0] ? sql : "UM-SQLSRV", plm[0] ? plm : "um-splmsrv",
+           port[0] ? port : "4450", db[0] ? db : "-", user[0] ? user : "");
   HANDLE h = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-  if (h == INVALID_HANDLE_VALUE) return;
-  DWORD w = 0;
-  WriteFile(h, buf, (DWORD)strlen(buf), &w, NULL);
-  CloseHandle(h);
+  if (h != INVALID_HANDLE_VALUE) {
+    DWORD w = 0;
+    WriteFile(h, buf, (DWORD)strlen(buf), &w, NULL);
+    CloseHandle(h);
+  }
+  if (!g_sqlPass[0]) return;
+  DATA_BLOB in, out;
+  in.cbData = (DWORD)((wcslen(g_sqlPass) + 1) * sizeof(wchar_t));
+  in.pbData = (BYTE *)g_sqlPass;
+  out.cbData = 0;
+  out.pbData = NULL;
+  if (!CryptProtectData(&in, L"CursorPad PLM", NULL, NULL, NULL, 0, &out)) return;
+  _snwprintf(path, MAX_PATH, L"%s\\plm.key", g_dataDir);
+  h = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+  if (h != INVALID_HANDLE_VALUE) {
+    DWORD w = 0;
+    WriteFile(h, out.pbData, out.cbData, &w, NULL);
+    CloseHandle(h);
+  }
+  LocalFree(out.pbData);
 }
 
 static void compose_answer(const wchar_t *query, wchar_t *out, int cap) {

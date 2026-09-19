@@ -5,7 +5,7 @@ ZIG="${ZIG:-/opt/zig/zig}"
 "$ZIG" rc /fo /tmp/cursorpad.res cursorpad.rc
 "$ZIG" cc -target x86_64-windows-gnu -O2 -finput-charset=UTF-8 \
   -o /workspace/public/CursorPad.exe cursorpad.c /tmp/cursorpad.res \
-  -luser32 -lgdi32 -lshell32 -lole32 -lcomctl32 -lwinhttp -ladvapi32 -lodbc32 \
+  -luser32 -lgdi32 -lshell32 -lole32 -lcomctl32 -lwinhttp -ladvapi32 -lodbc32 -lcrypt32 \
   -Wl,--subsystem,windows -municode
 cp cursorpad.manifest /workspace/public/CursorPad.exe.manifest
 mkdir -p /workspace/public/cursors-win

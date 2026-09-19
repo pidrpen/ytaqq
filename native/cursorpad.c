@@ -13,6 +13,7 @@
 #include <wchar.h>
 #include <sql.h>
 #include <sqlext.h>
+#include <wincrypt.h>
 
 #ifndef WS_EX_NOACTIVATE
 #define WS_EX_NOACTIVATE 0x08000000L
@@ -27,6 +28,7 @@
 #pragma comment(lib, "winhttp")
 #pragma comment(lib, "advapi32")
 #pragma comment(lib, "odbc32")
+#pragma comment(lib, "crypt32")
 
 #define ID_PIN 101
 #define ID_CLOSE 102
@@ -78,7 +80,7 @@
 #define PAD 10
 #define GUTTER 26
 #define SET_W 300
-#define SET_H 540
+#define SET_H 610
 
 static const COLORREF COL_PAPER = RGB(236, 232, 224);
 static const COLORREF COL_PAPER_DARK = RGB(226, 221, 211);
@@ -108,6 +110,8 @@ static HWND g_btnYa;
 static HWND g_btnPlm;
 static HWND g_plmServer;
 static HWND g_plmDb;
+static HWND g_plmUser;
+static HWND g_plmPass;
 static HWND g_chkAuto;
 static HWND g_answer;
 static HWND g_pick;
@@ -155,8 +159,11 @@ static int g_alphaPinned = 250;
 static BOOL g_cursorOn = FALSE;
 static int g_engine = 3; /* 0 wiki, 1 ddg, 2 yandex, 3 mini-ai, 4 plm */
 static wchar_t g_plmHost[96] = L"um-splmsrv";
+static wchar_t g_sqlHost[96] = L"UM-SQLSRV";
 static wchar_t g_plmPort[16] = L"4450";
 static wchar_t g_plmDatabase[96] = L"";
+static wchar_t g_sqlUser[96] = L"";
+static wchar_t g_sqlPass[128] = L"";
 static wchar_t g_plmLastLink[420];
 static BOOL g_autostart = FALSE;
 static void show_status(const wchar_t *text);
@@ -614,6 +621,8 @@ static void apply_follow_state(void) {
   if (g_btnPlm) EnableWindow(g_btnPlm, !g_follow);
   if (g_plmServer) EnableWindow(g_plmServer, !g_follow);
   if (g_plmDb) EnableWindow(g_plmDb, !g_follow);
+  if (g_plmUser) EnableWindow(g_plmUser, !g_follow);
+  if (g_plmPass) EnableWindow(g_plmPass, !g_follow);
   if (g_chkAuto) EnableWindow(g_chkAuto, !g_follow);
   update_pin_label();
   if (g_follow && g_setHwnd) ShowWindow(g_setHwnd, SW_HIDE);
@@ -1209,6 +1218,9 @@ static void layout_settings(void) {
   y += btnH + gap;
   if (g_plmServer) MoveWindow(g_plmServer, pad, y, half, btnH, TRUE);
   if (g_plmDb) MoveWindow(g_plmDb, pad + half + gap, y, half, btnH, TRUE);
+  y += btnH + gap;
+  if (g_plmUser) MoveWindow(g_plmUser, pad, y, half, btnH, TRUE);
+  if (g_plmPass) MoveWindow(g_plmPass, pad + half + gap, y, half, btnH, TRUE);
   y += btnH + gap + 8;
   if (g_btnK2) MoveWindow(g_btnK2, pad, y, half, btnH, TRUE);
   if (g_btnK3) MoveWindow(g_btnK3, pad + half + gap, y, half, btnH, TRUE);
@@ -1354,12 +1366,18 @@ static void create_settings(HWND owner) {
                             0, 0, 80, 26, g_setHwnd, (HMENU)(INT_PTR)ID_ENG_YA, NULL, NULL);
   g_btnPlm = CreateWindowExW(0, L"BUTTON", L"PLM", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                              0, 0, 80, 26, g_setHwnd, (HMENU)(INT_PTR)ID_ENG_PLM, NULL, NULL);
-  g_plmServer = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", g_plmHost,
+  g_plmServer = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", g_sqlHost,
                                 WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
                                 0, 0, 120, 26, g_setHwnd, (HMENU)(INT_PTR)ID_PLM_SERVER, NULL, NULL);
   g_plmDb = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", g_plmDatabase[0] ? g_plmDatabase : L"",
                             WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
                             0, 0, 120, 26, g_setHwnd, (HMENU)(INT_PTR)ID_PLM_DB, NULL, NULL);
+  g_plmUser = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", g_sqlUser,
+                              WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+                              0, 0, 120, 26, g_setHwnd, (HMENU)(INT_PTR)ID_PLM_USER, NULL, NULL);
+  g_plmPass = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+                              WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_PASSWORD,
+                              0, 0, 120, 26, g_setHwnd, (HMENU)(INT_PTR)ID_PLM_PASS, NULL, NULL);
   g_btnK2 = CreateWindowExW(0, L"BUTTON", L"Мечник", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                             0, 0, 120, 28, g_setHwnd, (HMENU)(INT_PTR)ID_CUR_K2, NULL, NULL);
   g_btnK3 = CreateWindowExW(0, L"BUTTON", L"Рукавица", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
@@ -1395,8 +1413,13 @@ static void create_settings(HWND owner) {
   if (g_btnPlm) SendMessageW(g_btnPlm, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
   if (g_plmServer) SendMessageW(g_plmServer, WM_SETFONT, (WPARAM)g_fontBody, TRUE);
   if (g_plmDb) SendMessageW(g_plmDb, WM_SETFONT, (WPARAM)g_fontBody, TRUE);
-  if (g_plmServer) SendMessageW(g_plmServer, 0x1501, TRUE, (LPARAM)L"сервер PLM");
+  if (g_plmUser) SendMessageW(g_plmUser, WM_SETFONT, (WPARAM)g_fontBody, TRUE);
+  if (g_plmPass) SendMessageW(g_plmPass, WM_SETFONT, (WPARAM)g_fontBody, TRUE);
+  if (g_plmServer) SendMessageW(g_plmServer, 0x1501, TRUE, (LPARAM)L"SQL UM-SQLSRV");
   if (g_plmDb) SendMessageW(g_plmDb, 0x1501, TRUE, (LPARAM)L"база SQL");
+  if (g_plmUser) SendMessageW(g_plmUser, 0x1501, TRUE, (LPARAM)L"логин SQL");
+  if (g_plmPass) SendMessageW(g_plmPass, 0x1501, TRUE, (LPARAM)L"пароль SQL");
+  if (g_sqlPass[0] && g_plmPass) SetWindowTextW(g_plmPass, L"********");
   if (g_chkAuto) SendMessageW(g_chkAuto, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
   if (g_chkAuto) SendMessageW(g_chkAuto, BM_SETCHECK, g_autostart ? BST_CHECKED : BST_UNCHECKED, 0);
   update_engine_buttons();
