@@ -1,4 +1,8 @@
 #define WIN32_LEAN_AND_MEAN
+#ifndef UNICODE
+#define UNICODE
+#define _UNICODE
+#endif
 #include <windows.h>
 #include <windowsx.h>
 #include <shellapi.h>
@@ -175,7 +179,8 @@ static wchar_t g_sqlUser[96] = L"";
 static wchar_t g_sqlPass[128] = L"";
 static wchar_t g_plmLastLink[420];
 static wchar_t g_plmLinks[20][420];
-static wchar_t g_plmLabels[20][320];
+static wchar_t g_plmEsi[20][200];
+static wchar_t g_plmTp[20][200];
 static int g_plmCount = 0;
 static BOOL g_autostart = FALSE;
 static void show_status(const wchar_t *text);
@@ -1780,7 +1785,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
 
   INITCOMMONCONTROLSEX icc;
   icc.dwSize = sizeof(icc);
-  icc.dwICC = ICC_STANDARD_CLASSES | ICC_BAR_CLASSES;
+  icc.dwICC = ICC_STANDARD_CLASSES | ICC_BAR_CLASSES | ICC_LISTVIEW_CLASSES;
   InitCommonControlsEx(&icc);
 
   WNDCLASSEXW wc;

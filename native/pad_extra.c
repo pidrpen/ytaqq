@@ -19,7 +19,7 @@
 #define WM_SEARCH_DONE (WM_APP + 8)
 #define WM_OCR_DONE (WM_APP + 9)
 #define WM_SHOW_PAD (WM_APP + 10)
-#define ANS_W 380
+#define ANS_W 460
 #define ANS_H 340
 
 static HWND g_answerEdit;
@@ -461,18 +461,36 @@ static void open_plm_link(const wchar_t *link) {
 
 static void fill_plm_list(void) {
   if (!g_answerList) return;
-  SendMessageW(g_answerList, LB_RESETCONTENT, 0, 0);
-  for (int i = 0; i < g_plmCount; i++)
-    SendMessageW(g_answerList, LB_ADDSTRING, 0, (LPARAM)g_plmLabels[i]);
-  if (g_plmCount > 0) SendMessageW(g_answerList, LB_SETCURSEL, 0, 0);
+  SendMessageW(g_answerList, LVM_DELETEALLITEMS, 0, 0);
+  for (int i = 0; i < g_plmCount; i++) {
+    LVITEMW it;
+    memset(&it, 0, sizeof(it));
+    it.mask = LVIF_TEXT;
+    it.iItem = i;
+    it.pszText = g_plmEsi[i];
+    SendMessageW(g_answerList, LVM_INSERTITEMW, 0, (LPARAM)&it);
+    it.iSubItem = 1;
+    it.pszText = g_plmTp[i];
+    SendMessageW(g_answerList, LVM_SETITEMW, 0, (LPARAM)&it);
+  }
+  if (g_plmCount > 0) {
+    LVITEMW sel;
+    memset(&sel, 0, sizeof(sel));
+    sel.stateMask = LVIS_SELECTED | LVIS_FOCUSED;
+    sel.state = LVIS_SELECTED | LVIS_FOCUSED;
+    SendMessageW(g_answerList, LVM_SETITEMSTATE, 0, (LPARAM)&sel);
+  }
   ShowWindow(g_answerList, g_plmCount > 0 ? SW_SHOW : SW_HIDE);
   if (g_answerEdit) ShowWindow(g_answerEdit, g_plmCount > 0 ? SW_HIDE : SW_SHOW);
 }
 
+static int plm_selected_index(void) {
+  if (!g_answerList || g_plmCount <= 0) return -1;
+  return (int)SendMessageW(g_answerList, LVM_GETNEXTITEM, (WPARAM)-1, LVNI_SELECTED);
+}
+
 static void open_plm_selected(void) {
-  int i = 0;
-  if (g_answerList && g_plmCount > 0)
-    i = (int)SendMessageW(g_answerList, LB_GETCURSEL, 0, 0);
+  int i = plm_selected_index();
   if (i < 0 || i >= g_plmCount) {
     show_status(L"Выберите строку в списке");
     return;
@@ -540,12 +558,17 @@ static BOOL plm_lookup(const wchar_t *query, wchar_t *out, int cap) {
   while (SQLFetch(st) == SQL_SUCCESS && n < 20) {
     long oid = (idInd == SQL_NULL_DATA || openId == 0) ? 0 : (long)openId;
     make_plm_link(g_plmLinks[n], 420, oid);
-    if (tmpl == 1794 && pInd > 0 && pnm[0])
-      _snwprintf(g_plmLabels[n], 320, L"%s  |  %s", (wchar_t *)pnm, nmInd > 0 ? (wchar_t *)nm : L"ТП");
-    else if (nmInd > 0)
-      lstrcpynW(g_plmLabels[n], (wchar_t *)nm, 320);
-    else
-      _snwprintf(g_plmLabels[n], 320, L"IO.%ld", oid);
+    g_plmEsi[n][0] = 0;
+    g_plmTp[n][0] = 0;
+    if (tmpl == 1794) {
+      if (pInd > 0 && pnm[0]) lstrcpynW(g_plmEsi[n], (wchar_t *)pnm, 200);
+      else _snwprintf(g_plmEsi[n], 200, L"IO.%ld", oid);
+      if (nmInd > 0) lstrcpynW(g_plmTp[n], (wchar_t *)nm, 200);
+    } else if (nmInd > 0) {
+      lstrcpynW(g_plmEsi[n], (wchar_t *)nm, 200);
+    } else {
+      _snwprintf(g_plmEsi[n], 200, L"IO.%ld", oid);
+    }
     if (!g_plmLastLink[0]) lstrcpynW(g_plmLastLink, g_plmLinks[n], 420);
     if (n) wcscat(links, L"\r\n");
     if ((int)(wcslen(links) + wcslen(g_plmLinks[n]) + 8) < 1800) wcscat(links, g_plmLinks[n]);
@@ -751,8 +774,18 @@ static void layout_answer(void) {
   int by = rc.bottom - pad - btnH;
   if (g_answerEdit)
     MoveWindow(g_answerEdit, pad, pad, rc.right - pad * 2, by - pad - 4, TRUE);
-  if (g_answerList)
+  if (g_answerList) {
     MoveWindow(g_answerList, pad, pad, rc.right - pad * 2, by - pad - 4, TRUE);
+    int cw = rc.right - pad * 2 - 24;
+    if (cw < 80) cw = 80;
+    LVCOLUMNW col;
+    memset(&col, 0, sizeof(col));
+    col.mask = LVCF_WIDTH;
+    col.cx = cw / 2;
+    SendMessageW(g_answerList, LVM_SETCOLUMNW, 0, (LPARAM)&col);
+    col.cx = cw - cw / 2;
+    SendMessageW(g_answerList, LVM_SETCOLUMNW, 1, (LPARAM)&col);
+  }
   int bw = (rc.right - pad * 2 - gap * 3) / 4;
   HWND open = GetDlgItem(g_answer, ID_ANS_OPEN);
   HWND copy = GetDlgItem(g_answer, ID_ANS_COPY);
@@ -768,17 +801,12 @@ static LRESULT CALLBACK AnswerProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
   switch (msg) {
   case WM_COMMAND:
     if (LOWORD(wParam) == ID_ANS_CLOSE) ShowWindow(hwnd, SW_HIDE);
-    if (LOWORD(wParam) == ID_ANS_OPEN ||
-        (LOWORD(wParam) == ID_ANS_LIST && HIWORD(wParam) == LBN_DBLCLK)) {
-      open_plm_selected();
-    }
+    if (LOWORD(wParam) == ID_ANS_OPEN) open_plm_selected();
     if (LOWORD(wParam) == ID_ANS_COPY) {
-      if (g_plmCount > 0 && g_answerList) {
-        int i = (int)SendMessageW(g_answerList, LB_GETCURSEL, 0, 0);
-        if (i >= 0 && i < g_plmCount) {
-          clipboard_set(g_plmLinks[i]);
-          show_status(L"Ссылка скопирована");
-        }
+      int i = plm_selected_index();
+      if (i >= 0 && i < g_plmCount) {
+        clipboard_set(g_plmLinks[i]);
+        show_status(L"Ссылка скопирована");
       } else if (g_answerEdit) {
         int len = GetWindowTextLengthW(g_answerEdit);
         wchar_t *w = (wchar_t *)malloc((len + 1) * sizeof(wchar_t));
@@ -801,6 +829,15 @@ static LRESULT CALLBACK AnswerProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
       }
     }
     return 0;
+  case WM_NOTIFY: {
+    NMHDR *nm = (NMHDR *)lParam;
+    if (nm && nm->idFrom == ID_ANS_LIST &&
+        (nm->code == NM_DBLCLK || nm->code == NM_RETURN || nm->code == LVN_ITEMACTIVATE)) {
+      open_plm_selected();
+      return 0;
+    }
+    break;
+  }
   case WM_CLOSE:
     ShowWindow(hwnd, SW_HIDE);
     return 0;
@@ -830,9 +867,24 @@ static void create_answer(HWND owner) {
       WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL,
       0, 0, 100, 100, g_answer, NULL, NULL, NULL);
   g_answerList = CreateWindowExW(
-      WS_EX_CLIENTEDGE, L"LISTBOX", L"",
-      WS_CHILD | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT | WS_VSCROLL | WS_HSCROLL,
+      WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
+      WS_CHILD | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | LVS_NOSORTHEADER | WS_TABSTOP,
       0, 0, 100, 100, g_answer, (HMENU)(INT_PTR)ID_ANS_LIST, NULL, NULL);
+  if (g_answerList) {
+    SendMessageW(g_answerList, LVM_SETEXTENDEDLISTVIEWSTYLE, 0,
+                 LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES | LVS_EX_DOUBLEBUFFER);
+    LVCOLUMNW col;
+    memset(&col, 0, sizeof(col));
+    col.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
+    col.cx = 210;
+    col.iSubItem = 0;
+    col.pszText = L"1 ЭСИ";
+    SendMessageW(g_answerList, LVM_INSERTCOLUMNW, 0, (LPARAM)&col);
+    col.cx = 210;
+    col.iSubItem = 1;
+    col.pszText = L"2 ТП";
+    SendMessageW(g_answerList, LVM_INSERTCOLUMNW, 1, (LPARAM)&col);
+  }
   HWND open = CreateWindowExW(0, L"BUTTON", L"Открыть PLM", WS_CHILD | WS_VISIBLE,
                               0, 0, 80, 24, g_answer, (HMENU)(INT_PTR)ID_ANS_OPEN, NULL, NULL);
   HWND copy = CreateWindowExW(0, L"BUTTON", L"Копировать", WS_CHILD | WS_VISIBLE,
