@@ -3,7 +3,7 @@ import { Pin, MousePointer2, X, Minus, ScanText, Settings2 } from "lucide-react"
 import { cn } from "@/lib/utils";
 
 const PAD_W = 300;
-const PAD_H = 196;
+const PAD_H = 228;
 const OFFSET_X = 18;
 const OFFSET_Y = 22;
 const LERP = 0.22;
@@ -39,6 +39,8 @@ type CursorPadProps = {
   autostart: boolean;
   onAutostart: (v: boolean) => void;
   onSearch: (q: string) => void;
+  clipBuf: string;
+  onClipBuf: (v: string) => void;
 };
 
 export function CursorPad({
@@ -66,6 +68,8 @@ export function CursorPad({
   autostart,
   onAutostart,
   onSearch,
+  clipBuf,
+  onClipBuf,
 }: CursorPadProps) {
   const [settings, setSettings] = useState(false);
   const elRef = useRef<HTMLDivElement>(null);
@@ -214,6 +218,15 @@ export function CursorPad({
           </button>
         ) : null}
       </header>
+
+      <input
+        value={clipBuf}
+        onChange={(e) => onClipBuf(e.target.value)}
+        readOnly={following}
+        spellCheck={false}
+        placeholder="буфер копии · F3"
+        className="h-7 shrink-0 border-b border-paper-line bg-paper-dark px-2 font-sans text-[12px] text-ink outline-none placeholder:text-ink-muted/70"
+      />
 
       <div className="flex min-h-0 flex-1">
         <div className="flex w-7 shrink-0 flex-col gap-0.5 bg-paper-dark/60 py-1 pl-0.5">

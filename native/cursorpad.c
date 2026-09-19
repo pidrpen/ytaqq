@@ -18,6 +18,9 @@
 #ifndef WS_EX_NOACTIVATE
 #define WS_EX_NOACTIVATE 0x08000000L
 #endif
+#ifndef WM_CLIPBOARDUPDATE
+#define WM_CLIPBOARDUPDATE 0x031D
+#endif
 
 #pragma comment(lib, "user32")
 #pragma comment(lib, "gdi32")
@@ -43,6 +46,7 @@
 #define ID_SYS_CUR 111
 #define ID_SEARCH_EDIT 112
 #define ID_SEARCH_GO 113
+#define ID_CLIP 131
 #define TIMER_FOLLOW 1
 #define TIMER_SAVE 2
 #define TIMER_PASTE 3
@@ -52,6 +56,7 @@
 #define HOTKEY_CURSOR 2
 #define HOTKEY_OCR 3
 #define HOTKEY_MIN 4
+#define HOTKEY_SEARCH 5
 #define SNIP_COUNT 9
 #define CUR_FRAMES 8
 #define WM_TRAY (WM_APP + 1)
@@ -74,9 +79,10 @@
 #define OCR_PERSON_ID 32672
 
 #define WND_W 300
-#define WND_H 184
+#define WND_H 212
 #define TITLE_H 36
 #define FOOT_H 32
+#define CLIP_H 26
 #define PAD 10
 #define GUTTER 26
 #define SET_W 300
@@ -90,6 +96,7 @@ static const COLORREF COL_SAGE = RGB(92, 107, 98);
 
 static HWND g_hwnd;
 static HWND g_edit;
+static HWND g_clipEdit;
 static HWND g_pin;
 static HWND g_close;
 static HWND g_btnK2;
@@ -118,6 +125,7 @@ static HWND g_answerList;
 static HWND g_pick;
 static HANDLE g_mutex;
 static WNDPROC g_oldEdit;
+static BOOL g_ownClip = FALSE;
 static HFONT g_fontUi;
 static HFONT g_fontBody;
 static HFONT g_fontSmall;
@@ -174,6 +182,8 @@ static void show_status(const wchar_t *text);
 static void toggle_settings(void);
 static void set_skin(int skin);
 static void start_lookup(const wchar_t *q);
+static BOOL clipboard_text(wchar_t *out, int n);
+static void search_web(const wchar_t *q);
 static void start_ocr_pick(void);
 static void mark_cursor_dirty(BOOL on);
 static void restore_if_stale_lock(void);
@@ -586,7 +596,9 @@ static void layout_children(void) {
   if (g_min)
     MoveWindow(g_min, cw - pad - closeW - gap - closeW, (th - btnH) / 2, closeW, btnH, TRUE);
   MoveWindow(g_pin, cw - pad - closeW * 2 - gap * 2 - pinW, (th - btnH) / 2, pinW, btnH, TRUE);
-  MoveWindow(g_edit, gut, th, cw - gut - pad, ch - th - fh, TRUE);
+  int clipH = MulDiv(CLIP_H, dpi, 96);
+  if (g_clipEdit) MoveWindow(g_clipEdit, gut, th, cw - gut - pad, clipH, TRUE);
+  MoveWindow(g_edit, gut, th + clipH, cw - gut - pad, ch - th - clipH - fh, TRUE);
   if (g_btnSet)
     MoveWindow(g_btnSet, pad, ch - fh + (fh - btnH) / 2, cw - pad * 2, btnH, TRUE);
 }
@@ -608,6 +620,7 @@ static void apply_follow_state(void) {
   set_clickthrough(g_follow);
   apply_alpha_now();
   EnableWindow(g_edit, !g_follow);
+  if (g_clipEdit) EnableWindow(g_clipEdit, !g_follow);
   EnableWindow(g_pin, !g_follow);
   EnableWindow(g_close, !g_follow);
   EnableWindow(g_min, !g_follow);
@@ -694,6 +707,7 @@ static BOOL clipboard_set(const wchar_t *text) {
     return FALSE;
   }
   EmptyClipboard();
+  g_ownClip = TRUE;
   if (!SetClipboardData(CF_UNICODETEXT, mem)) {
     CloseClipboard();
     GlobalFree(mem);
@@ -727,6 +741,36 @@ static void url_encode_utf8(const wchar_t *src, char *out, int cap) {
     }
   }
   out[o] = 0;
+}
+
+static void flatten_clip_line(wchar_t *s) {
+  for (wchar_t *p = s; *p; p++) {
+    if (*p == L'\r' || *p == L'\n' || *p == L'\t') *p = L' ';
+  }
+}
+
+static void grab_last_copy(void) {
+  if (g_ownClip) {
+    g_ownClip = FALSE;
+    return;
+  }
+  wchar_t q[400] = {0};
+  if (!clipboard_text(q, 400)) return;
+  flatten_clip_line(q);
+  if (!q[0]) return;
+  if (g_clipEdit) SetWindowTextW(g_clipEdit, q);
+}
+
+static void search_clip_buf(void) {
+  wchar_t q[400] = {0};
+  if (g_clipEdit) GetWindowTextW(g_clipEdit, q, 400);
+  if (!q[0]) clipboard_text(q, 400);
+  flatten_clip_line(q);
+  if (!q[0]) {
+    show_status(L"Буфер пуст — скопируйте текст");
+    return;
+  }
+  search_web(q);
 }
 
 static void search_web(const wchar_t *q) {
@@ -872,6 +916,7 @@ static BOOL clipboard_set_image(int id) {
     return FALSE;
   }
   EmptyClipboard();
+  g_ownClip = TRUE;
   if (!SetClipboardData(CF_DIB, mem)) {
     CloseClipboard();
     GlobalFree(mem);
@@ -919,10 +964,11 @@ static void draw_gutter_thumbs(HDC hdc, int dpi, int th, int fh) {
   RECT rc;
   GetClientRect(g_hwnd, &rc);
   int gut = MulDiv(GUTTER, dpi, 96);
+  int clipH = MulDiv(CLIP_H, dpi, 96);
   int lineH = MulDiv(20, dpi, 96);
   int first = (int)SendMessageW(g_edit, EM_GETFIRSTVISIBLELINE, 0, 0);
   int count = (int)SendMessageW(g_edit, EM_GETLINECOUNT, 0, 0);
-  int vis = (rc.bottom - th - fh) / lineH + 1;
+  int vis = (rc.bottom - th - clipH - fh) / lineH + 1;
   for (int i = 0; i < vis; i++) {
     int ln = first + i;
     if (ln >= count) break;
@@ -942,7 +988,7 @@ static void draw_gutter_thumbs(HDC hdc, int dpi, int th, int fh) {
     GetObject(bm, sizeof(info), &info);
     HDC mem = CreateCompatibleDC(hdc);
     HGDIOBJ old = SelectObject(mem, bm);
-    int y = th + i * lineH + 2;
+    int y = th + clipH + i * lineH + 2;
     int sz = gut - 6;
     StretchBlt(hdc, 3, y, sz, sz, mem, 0, 0, info.bmWidth, info.bmHeight, SRCCOPY);
     SelectObject(mem, old);
@@ -1454,6 +1500,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                              WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL |
                                  ES_WANTRETURN | WS_VSCROLL,
                              0, 0, 100, 100, hwnd, (HMENU)(INT_PTR)ID_EDIT, NULL, NULL);
+    g_clipEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+                                 WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+                                 0, 0, 100, 24, hwnd, (HMENU)(INT_PTR)ID_CLIP, NULL, NULL);
     g_btnSet = CreateWindowExW(0, L"BUTTON", L"Настройки",
                                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                                0, 0, 120, 28, hwnd, (HMENU)(INT_PTR)ID_SETTINGS, NULL, NULL);
@@ -1461,6 +1510,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     SendMessageW(g_close, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
     SendMessageW(g_min, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
     SendMessageW(g_edit, WM_SETFONT, (WPARAM)g_fontBody, TRUE);
+    if (g_clipEdit) {
+      SendMessageW(g_clipEdit, WM_SETFONT, (WPARAM)g_fontSmall, TRUE);
+      SendMessageW(g_clipEdit, 0x1501, TRUE, (LPARAM)L"буфер копии · F3");
+    }
     SendMessageW(g_btnSet, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
     SendMessageW(g_edit, EM_SETLIMITTEXT, 200000, 0);
     g_oldEdit = (WNDPROC)SetWindowLongPtrW(g_edit, GWLP_WNDPROC, (LONG_PTR)EditProc);
@@ -1492,8 +1545,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     RegisterHotKey(hwnd, HOTKEY_CURSOR, MOD_NOREPEAT, VK_F7);
     RegisterHotKey(hwnd, HOTKEY_OCR, MOD_NOREPEAT, VK_F6);
     RegisterHotKey(hwnd, HOTKEY_MIN, MOD_NOREPEAT, VK_F9);
+    RegisterHotKey(hwnd, HOTKEY_SEARCH, MOD_NOREPEAT, VK_F3);
     register_snip_hotkeys(hwnd);
     add_tray(hwnd);
+    AddClipboardFormatListener(hwnd);
     apply_follow_state();
     if (g_skin != 0) install_scheme_cursors();
     return 0;
@@ -1540,6 +1595,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
   }
   case WM_CTLCOLOREDIT: {
     HDC hdc = (HDC)wParam;
+    if ((HWND)lParam == g_clipEdit) {
+      SetBkColor(hdc, COL_PAPER_DARK);
+      SetTextColor(hdc, COL_INK);
+      return (LRESULT)g_paperDark;
+    }
     SetBkColor(hdc, COL_PAPER);
     SetTextColor(hdc, COL_INK);
     return (LRESULT)g_paper;
@@ -1564,6 +1624,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     else if (wParam == HOTKEY_CURSOR) cycle_skin();
     else if (wParam == HOTKEY_OCR) run_ocr_test();
     else if (wParam == HOTKEY_MIN) toggle_hidden();
+    else if (wParam == HOTKEY_SEARCH) search_clip_buf();
     else if (wParam >= HOTKEY_SNIP_BASE && wParam < HOTKEY_SNIP_BASE + SNIP_COUNT)
       paste_line((int)(wParam - HOTKEY_SNIP_BASE + 1));
     return 0;
@@ -1627,6 +1688,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
   case WM_DISPLAYCHANGE:
     if (g_skin > 0) apply_scheme_slots();
     return 0;
+  case WM_CLIPBOARDUPDATE:
+    grab_last_copy();
+    return 0;
   case WM_NCHITTEST: {
     LRESULT hit = DefWindowProcW(hwnd, msg, wParam, lParam);
     if (hit != HTCLIENT) return hit;
@@ -1671,6 +1735,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     UnregisterHotKey(hwnd, HOTKEY_CURSOR);
     UnregisterHotKey(hwnd, HOTKEY_OCR);
     UnregisterHotKey(hwnd, HOTKEY_MIN);
+    UnregisterHotKey(hwnd, HOTKEY_SEARCH);
+    RemoveClipboardFormatListener(hwnd);
     unregister_snip_hotkeys(hwnd);
     if (g_trayAdded) Shell_NotifyIconW(NIM_DELETE, &g_nid);
     free_cursor_frames();

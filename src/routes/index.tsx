@@ -116,6 +116,7 @@ function Home() {
   const imagesRef = useRef(images);
   imagesRef.current = images;
   const [engine, setEngine] = useState<SearchEngine>("ai");
+  const [clipBuf, setClipBuf] = useState("");
   const [autostart, setAutostart] = useState(false);
   const [answer, setAnswer] = useState<{ title: string; body: string; x: number; y: number } | null>(null);
   const [picking, setPicking] = useState(false);
@@ -285,6 +286,11 @@ function Home() {
         setPadHidden((v) => !v);
         return;
       }
+      if (e.key === "F3" || e.code === "F3") {
+        e.preventDefault();
+        runLookup(clipBuf);
+        return;
+      }
       if (e.key === "F6" || e.code === "F6") {
         e.preventDefault();
         setPicking((v) => !v);
@@ -305,7 +311,27 @@ function Home() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [toggle, insertSnippet, runLookup, picking]);
+  }, [toggle, insertSnippet, runLookup, picking, clipBuf]);
+
+  useEffect(() => {
+    const onCopy = () => {
+      window.setTimeout(() => {
+        void navigator.clipboard.readText().then((t) => {
+          const text = t.replace(/\s+/g, " ").trim();
+          if (text) setClipBuf(text.slice(0, 400));
+        }).catch(() => {
+          const sel = window.getSelection()?.toString().replace(/\s+/g, " ").trim();
+          if (sel) setClipBuf(sel.slice(0, 400));
+        });
+      }, 40);
+    };
+    document.addEventListener("copy", onCopy);
+    document.addEventListener("cut", onCopy);
+    return () => {
+      document.removeEventListener("copy", onCopy);
+      document.removeEventListener("cut", onCopy);
+    };
+  }, []);
 
   useEffect(() => {
     const onMove = (e: PointerEvent) => {
@@ -350,7 +376,7 @@ function Home() {
             CursorPad
           </p>
           <p className="mt-1.5 max-w-xl text-sm leading-relaxed text-muted">
-            F8 закрепить · F6 рамка OCR. Мини-ИИ — в Настройках блокнота.
+            F8 закрепить · F3 поиск по буферу копии · F6 рамка OCR.
           </p>
         </div>
         <div className="hidden shrink-0 items-center gap-2 sm:flex">
@@ -477,6 +503,8 @@ function Home() {
             autostart={autostart}
             onAutostart={pickAutostart}
             onSearch={runLookup}
+            clipBuf={clipBuf}
+            onClipBuf={setClipBuf}
             onOcr={() => {
               setPicking(true);
               setPick(null);
