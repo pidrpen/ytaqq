@@ -1,4 +1,4 @@
-/* Included from pad_extra.c — GitHub self-update. */
+/* Included from pad_extra.c — GitHub self-update. No admin, no UAC. */
 #include "version.h"
 
 #define ID_UPDATE 134
@@ -25,25 +25,43 @@
 #ifndef WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY
 #define WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY 4
 #endif
+#ifndef CRYPT_STRING_BASE64
+#define CRYPT_STRING_BASE64 0x00000001
+#endif
+#ifndef SEE_MASK_NOZONECHECKS
+#define SEE_MASK_NOZONECHECKS 0x00800000
+#endif
 
 static volatile LONG g_updBusy;
 static wchar_t g_updPath[MAX_PATH];
 static wchar_t g_updRemote[40];
 static wchar_t g_updErr[240];
+static wchar_t g_updLaunch[MAX_PATH];
+static wchar_t g_updHostUsed[80];
 
 typedef struct {
   const wchar_t *host;
   const wchar_t *ver;
   const wchar_t *exe;
+  const wchar_t *hdr;
+  int api;  /* unwrap GitHub contents/blob JSON (no raw.githubusercontent.com) */
+  int bust; /* cache-bust query */
 } UpdSrc;
 
 static const UpdSrc kUpdSrc[] = {
-    {L"raw.githubusercontent.com", L"/pidrpen/ytaqq/main/public/version.txt",
-     L"/pidrpen/ytaqq/main/public/CursorPad.exe"},
-    {L"github.com", L"/pidrpen/ytaqq/raw/main/public/version.txt",
-     L"/pidrpen/ytaqq/raw/main/public/CursorPad.exe"},
+    {L"api.github.com", L"/repos/pidrpen/ytaqq/contents/public/version.txt",
+     L"/repos/pidrpen/ytaqq/contents/public/CursorPad.exe",
+     L"Accept: application/vnd.github+json\r\nX-GitHub-Api-Version: 2022-11-28", 1, 0},
     {L"cdn.jsdelivr.net", L"/gh/pidrpen/ytaqq@main/public/version.txt",
-     L"/gh/pidrpen/ytaqq@main/public/CursorPad.exe"},
+     L"/gh/pidrpen/ytaqq@main/public/CursorPad.exe", NULL, 0, 1},
+    {L"fastly.jsdelivr.net", L"/gh/pidrpen/ytaqq@main/public/version.txt",
+     L"/gh/pidrpen/ytaqq@main/public/CursorPad.exe", NULL, 0, 1},
+    {L"gcore.jsdelivr.net", L"/gh/pidrpen/ytaqq@main/public/version.txt",
+     L"/gh/pidrpen/ytaqq@main/public/CursorPad.exe", NULL, 0, 1},
+    {L"raw.githubusercontent.com", L"/pidrpen/ytaqq/main/public/version.txt",
+     L"/pidrpen/ytaqq/main/public/CursorPad.exe", NULL, 0, 0},
+    {L"github.com", L"/pidrpen/ytaqq/raw/main/public/version.txt",
+     L"/pidrpen/ytaqq/raw/main/public/CursorPad.exe", NULL, 0, 0},
 };
 
 static void upd_fail(const wchar_t *why, DWORD err) {
@@ -65,14 +83,175 @@ static void http_tune(HINTERNET ses) {
   WinHttpSetTimeouts(ses, 8000, 10000, 30000, 90000);
 }
 
-static BOOL http_get_to_file(const wchar_t *host, const wchar_t *path, const wchar_t *dest, DWORD maxn) {
+static const char *json_find_string(const char *json, const char *key) {
+  char pat[72];
+  snprintf(pat, sizeof(pat), "\"%s\"", key);
+  const char *p = json;
+  while ((p = strstr(p, pat))) {
+    p += strlen(pat);
+    while (*p == ' ' || *p == '\n' || *p == '\r' || *p == '\t') p++;
+    if (*p != ':') continue;
+    p++;
+    while (*p == ' ' || *p == '\n' || *p == '\r' || *p == '\t') p++;
+    if (*p == '"') return p + 1;
+    return NULL;
+  }
+  return NULL;
+}
+
+static int b64_clean(const char *in, char *out, int cap) {
+  int o = 0;
+  for (; *in && *in != '"'; in++) {
+    unsigned char c = (unsigned char)*in;
+    if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '+' ||
+        c == '/' || c == '=') {
+      if (o + 1 < cap) out[o++] = (char)c;
+    }
+  }
+  if (out && cap > 0) out[o] = 0;
+  return o;
+}
+
+static BOOL write_all(const wchar_t *dest, const void *p, DWORD n) {
+  HANDLE f = CreateFileW(dest, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+  if (f == INVALID_HANDLE_VALUE) return FALSE;
+  DWORD w = 0;
+  BOOL ok = WriteFile(f, p, n, &w, NULL) && w == n;
+  CloseHandle(f);
+  return ok;
+}
+
+static BOOL b64_to_file(const char *b64, int nb64, const wchar_t *dest) {
+  DWORD n = 0;
+  if (!CryptStringToBinaryA(b64, (DWORD)nb64, CRYPT_STRING_BASE64, NULL, &n, NULL, NULL) || n < 2)
+    return FALSE;
+  BYTE *raw = (BYTE *)malloc(n);
+  if (!raw) return FALSE;
+  BOOL ok = CryptStringToBinaryA(b64, (DWORD)nb64, CRYPT_STRING_BASE64, raw, &n, NULL, NULL) &&
+            write_all(dest, raw, n);
+  free(raw);
+  return ok;
+}
+
+static BOOL read_file_bytes(const wchar_t *path, char **out, DWORD *outn, DWORD maxn) {
+  *out = NULL;
+  *outn = 0;
+  HANDLE f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
+                         FILE_ATTRIBUTE_NORMAL, NULL);
+  if (f == INVALID_HANDLE_VALUE) return FALSE;
+  DWORD sz = GetFileSize(f, NULL);
+  if (sz == INVALID_FILE_SIZE || sz < 2 || sz > maxn) {
+    CloseHandle(f);
+    return FALSE;
+  }
+  char *buf = (char *)malloc(sz + 1);
+  if (!buf) {
+    CloseHandle(f);
+    return FALSE;
+  }
+  DWORD r = 0;
+  BOOL ok = ReadFile(f, buf, sz, &r, NULL);
+  CloseHandle(f);
+  if (!ok) {
+    free(buf);
+    return FALSE;
+  }
+  buf[r] = 0;
+  *out = buf;
+  *outn = r;
+  return TRUE;
+}
+
+static BOOL looks_like_html(const char *s) {
+  while (*s == ' ' || *s == '\n' || *s == '\r' || *s == '\t') s++;
+  return s[0] == '<' || (s[0] == '{' && strstr(s, "\"message\"") && strstr(s, "\"Not Found\""));
+}
+
+static BOOL http_get_to_file(const wchar_t *host, const wchar_t *path, const wchar_t *dest,
+                             DWORD maxn, const wchar_t *hdr);
+
+static BOOL github_blob_get(const char *sha, const wchar_t *dest, DWORD maxn);
+
+static BOOL unwrap_github_json(const wchar_t *dest, DWORD maxn) {
+  char *buf = NULL;
+  DWORD n = 0;
+  if (!read_file_bytes(dest, &buf, &n, maxn)) return FALSE;
+  while (n && (buf[0] == ' ' || buf[0] == '\n' || buf[0] == '\r' || buf[0] == '\t')) {
+    memmove(buf, buf + 1, n--);
+    buf[n] = 0;
+  }
+  if (n < 2 || buf[0] != '{') {
+    free(buf);
+    return TRUE; /* already raw */
+  }
+  const char *content = json_find_string(buf, "content");
+  const char *sha = json_find_string(buf, "sha");
+  char shahex[48] = {0};
+  if (sha) {
+    int i = 0;
+    while (sha[i] && ((sha[i] >= '0' && sha[i] <= '9') || (sha[i] >= 'a' && sha[i] <= 'f') ||
+                      (sha[i] >= 'A' && sha[i] <= 'F')) &&
+           i < 40) {
+      shahex[i] = sha[i];
+      i++;
+    }
+  }
+  if (content && content[0] && content[0] != '"') {
+    char *clean = (char *)malloc(n + 4);
+    if (!clean) {
+      free(buf);
+      return FALSE;
+    }
+    int nc = b64_clean(content, clean, (int)n + 2);
+    free(buf);
+    BOOL ok = nc >= 4 && b64_to_file(clean, nc, dest);
+    free(clean);
+    if (ok) return TRUE;
+    if (shahex[0]) return github_blob_get(shahex, dest, maxn);
+    return FALSE;
+  }
+  free(buf);
+  if (shahex[0]) return github_blob_get(shahex, dest, maxn);
+  upd_fail(L"GitHub API: пустой ответ", 0);
+  return FALSE;
+}
+
+static BOOL github_blob_get(const char *sha, const wchar_t *dest, DWORD maxn) {
+  wchar_t path[180], wsha[48];
+  MultiByteToWideChar(CP_UTF8, 0, sha, -1, wsha, 48);
+  _snwprintf(path, 180, L"/repos/pidrpen/ytaqq/git/blobs/%s", wsha);
+  if (!http_get_to_file(L"api.github.com", path, dest, maxn,
+                        L"Accept: application/vnd.github+json\r\nX-GitHub-Api-Version: 2022-11-28"))
+    return FALSE;
+  /* blob JSON also has base64 content — unwrap once, no further blob recursion */
+  char *buf = NULL;
+  DWORD n = 0;
+  if (!read_file_bytes(dest, &buf, &n, maxn)) return FALSE;
+  const char *content = json_find_string(buf, "content");
+  BOOL ok = FALSE;
+  if (content) {
+    char *clean = (char *)malloc(n + 4);
+    if (clean) {
+      int nc = b64_clean(content, clean, (int)n + 2);
+      ok = nc >= 4 && b64_to_file(clean, nc, dest);
+      free(clean);
+    }
+  } else if (n >= 2 && (unsigned char)buf[0] == 'M' && (unsigned char)buf[1] == 'Z') {
+    ok = TRUE; /* already raw PE */
+  }
+  free(buf);
+  return ok;
+}
+
+static BOOL http_get_to_file(const wchar_t *host, const wchar_t *path, const wchar_t *dest,
+                             DWORD maxn, const wchar_t *hdr) {
   DeleteFileW(dest);
   HANDLE f = CreateFileW(dest, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
   if (f == INVALID_HANDLE_VALUE) {
     upd_fail(L"Не удалось создать временный файл", GetLastError());
     return FALSE;
   }
-  HINTERNET ses = WinHttpOpen(L"CursorPad/" APP_VERSION_STR,
+  HINTERNET ses = WinHttpOpen(L"CursorPad/" APP_VERSION_STR L" (+https://github.com/pidrpen/ytaqq)",
                               WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME,
                               WINHTTP_NO_PROXY_BYPASS, 0);
   if (!ses)
@@ -104,19 +283,20 @@ static BOOL http_get_to_file(const wchar_t *host, const wchar_t *path, const wch
     return FALSE;
   }
   WinHttpAddRequestHeaders(req,
-                           L"Accept: text/plain,*/*\r\nAccept-Encoding: identity",
+                           L"Accept: */*\r\nAccept-Encoding: identity\r\nCache-Control: no-cache",
                            (ULONG)-1L, WINHTTP_ADDREQ_FLAG_ADD);
+  if (hdr && hdr[0])
+    WinHttpAddRequestHeaders(req, hdr, (ULONG)-1L, WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE);
 #ifdef WINHTTP_OPTION_DECOMPRESSION
   {
     DWORD decomp = WINHTTP_DECOMPRESSION_FLAG_ALL;
     WinHttpSetOption(req, WINHTTP_OPTION_DECOMPRESSION, &decomp, sizeof(decomp));
   }
 #endif
-  BOOL ok = WinHttpSendRequest(req, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
-                               WINHTTP_NO_REQUEST_DATA, 0, 0, 0);
+  BOOL ok = WinHttpSendRequest(req, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0);
   if (ok) ok = WinHttpReceiveResponse(req, NULL);
   if (!ok) {
-    upd_fail(L"TLS/сеть: GitHub не ответил", GetLastError());
+    upd_fail(L"Сеть: хост не ответил", GetLastError());
     WinHttpCloseHandle(req);
     WinHttpCloseHandle(con);
     WinHttpCloseHandle(ses);
@@ -176,8 +356,33 @@ static BOOL http_get_to_file(const wchar_t *host, const wchar_t *path, const wch
 static BOOL http_get_any(const wchar_t *kind, const wchar_t *dest, DWORD maxn) {
   int n = (int)(sizeof(kUpdSrc) / sizeof(kUpdSrc[0]));
   for (int i = 0; i < n; i++) {
-    const wchar_t *path = (kind[0] == L'e') ? kUpdSrc[i].exe : kUpdSrc[i].ver;
-    if (http_get_to_file(kUpdSrc[i].host, path, dest, maxn)) return TRUE;
+    const wchar_t *base = (kind[0] == L'e') ? kUpdSrc[i].exe : kUpdSrc[i].ver;
+    wchar_t path[420];
+    if (kUpdSrc[i].bust)
+      _snwprintf(path, 420, L"%s?t=%lu", base, GetTickCount());
+    else
+      lstrcpynW(path, base, 420);
+    if (!http_get_to_file(kUpdSrc[i].host, path, dest, maxn, kUpdSrc[i].hdr)) continue;
+    if (kUpdSrc[i].api && !unwrap_github_json(dest, maxn)) {
+      DeleteFileW(dest);
+      continue;
+    }
+    char *peek = NULL;
+    DWORD pn = 0;
+    if (read_file_bytes(dest, &peek, &pn, 4096)) {
+      BOOL bad = looks_like_html(peek) || (pn >= 2 && (unsigned char)peek[0] == 0x1F &&
+                                           (unsigned char)peek[1] == 0x8B);
+      if (!bad && kind[0] != L'e' && pn >= 12 && !strncmp(peek, "version https://git-lfs", 12))
+        bad = TRUE;
+      free(peek);
+      if (bad) {
+        DeleteFileW(dest);
+        upd_fail(L"Ответ не файл (HTML/сжатие)", 0);
+        continue;
+      }
+    }
+    lstrcpynW(g_updHostUsed, kUpdSrc[i].host, 80);
+    return TRUE;
   }
   return FALSE;
 }
@@ -230,15 +435,132 @@ static BOOL file_is_pe(const wchar_t *path) {
   return r == 2 && mz[0] == 'M' && mz[1] == 'Z';
 }
 
+static BOOL dir_is_writable(const wchar_t *file) {
+  wchar_t dir[MAX_PATH];
+  lstrcpynW(dir, file, MAX_PATH);
+  wchar_t *slash = wcsrchr(dir, L'\\');
+  if (slash) *slash = 0;
+  wchar_t probe[MAX_PATH];
+  _snwprintf(probe, MAX_PATH, L"%s\\cp-w.tmp", dir);
+  HANDLE h = CreateFileW(probe, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
+                         FILE_ATTRIBUTE_TEMPORARY | FILE_ATTRIBUTE_HIDDEN, NULL);
+  if (h == INVALID_HANDLE_VALUE) return FALSE;
+  CloseHandle(h);
+  DeleteFileW(probe);
+  return TRUE;
+}
+
+static void user_exe_path(wchar_t *out, int n) {
+  if (g_dataDir[0])
+    _snwprintf(out, n, L"%s\\CursorPad.exe", g_dataDir);
+  else {
+    wchar_t tmp[MAX_PATH];
+    GetTempPathW(MAX_PATH, tmp);
+    _snwprintf(out, n, L"%sCursorPad.exe", tmp);
+  }
+}
+
+static BOOL replace_file_no_admin(const wchar_t *src, const wchar_t *dest) {
+  wchar_t bak[MAX_PATH];
+  _snwprintf(bak, MAX_PATH, L"%s.old", dest);
+  DeleteFileW(bak);
+  DWORD attr = GetFileAttributesW(dest);
+  if (attr != INVALID_FILE_ATTRIBUTES) {
+    if (attr & FILE_ATTRIBUTE_READONLY)
+      SetFileAttributesW(dest, attr & ~FILE_ATTRIBUTE_READONLY);
+    if (!MoveFileExW(dest, bak, MOVEFILE_REPLACE_EXISTING)) {
+      /* still running image: rename almost always works; if not, try copy-over */
+      if (!CopyFileW(src, dest, FALSE)) return FALSE;
+      DeleteFileW(src);
+      return TRUE;
+    }
+  }
+  if (MoveFileExW(src, dest, MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED)) return TRUE;
+  if (CopyFileW(src, dest, FALSE)) {
+    DeleteFileW(src);
+    return TRUE;
+  }
+  MoveFileExW(bak, dest, MOVEFILE_REPLACE_EXISTING);
+  return FALSE;
+}
+
+static BOOL launch_open(const wchar_t *path) {
+  SHELLEXECUTEINFOW sei;
+  memset(&sei, 0, sizeof(sei));
+  sei.cbSize = sizeof(sei);
+  sei.fMask = SEE_MASK_NOASYNC | SEE_MASK_FLAG_NO_UI | SEE_MASK_NOZONECHECKS;
+  sei.lpVerb = L"open"; /* never runas */
+  sei.lpFile = path;
+  sei.nShow = SW_SHOWNORMAL;
+  wchar_t dir[MAX_PATH];
+  lstrcpynW(dir, path, MAX_PATH);
+  wchar_t *sl = wcsrchr(dir, L'\\');
+  if (sl) *sl = 0;
+  sei.lpDirectory = dir;
+  if (ShellExecuteExW(&sei)) return TRUE;
+  wchar_t args[MAX_PATH + 48];
+  _snwprintf(args, MAX_PATH + 48, L"/C start \"\" \"%s\"", path);
+  HINSTANCE r = ShellExecuteW(NULL, L"open", L"cmd.exe", args, dir, SW_HIDE);
+  return (INT_PTR)r > 32;
+}
+
 static void apply_update(const wchar_t *newexe) {
   wchar_t self[MAX_PATH] = {0};
   GetModuleFileNameW(NULL, self, MAX_PATH);
-  wchar_t args[1200];
-  _snwprintf(args, 1200,
-             L"/C ping 127.0.0.1 -n 3 >nul & move /Y \"%s\" \"%s\" & start \"\" \"%s\"",
-             newexe, self, self);
-  ShellExecuteW(NULL, L"open", L"cmd.exe", args, NULL, SW_HIDE);
+  wchar_t target[MAX_PATH];
+  lstrcpynW(target, self, MAX_PATH);
+  BOOL relocated = FALSE;
+  if (!dir_is_writable(self) || !replace_file_no_admin(newexe, target)) {
+    user_exe_path(target, MAX_PATH);
+    relocated = TRUE;
+    if (lstrcmpiW(target, self) == 0 || !CopyFileW(newexe, target, FALSE)) {
+      upd_fail(L"Нет прав на запись рядом с программой и в профиль", GetLastError());
+      show_status(g_updErr);
+      return;
+    }
+    DeleteFileW(newexe);
+  }
+  if (relocated && g_autostart) autostart_write(TRUE, target);
+  lstrcpynW(g_updLaunch, target, MAX_PATH);
   if (g_hwnd) PostMessageW(g_hwnd, WM_CLOSE, 0, 0);
+  else {
+    launch_open(target);
+  }
+}
+
+static void finish_update_launch(void) {
+  if (!g_updLaunch[0]) return;
+  if (g_mutex) {
+    CloseHandle(g_mutex);
+    g_mutex = NULL;
+  }
+  launch_open(g_updLaunch);
+  g_updLaunch[0] = 0;
+}
+
+static void cleanup_old_bins(void) {
+  wchar_t self[MAX_PATH], bak[MAX_PATH];
+  GetModuleFileNameW(NULL, self, MAX_PATH);
+  _snwprintf(bak, MAX_PATH, L"%s.old", self);
+  DeleteFileW(bak);
+  if (g_dataDir[0]) {
+    _snwprintf(bak, MAX_PATH, L"%s\\CursorPad.exe.old", g_dataDir);
+    DeleteFileW(bak);
+    _snwprintf(bak, MAX_PATH, L"%s\\CursorPad-next.bin", g_dataDir);
+    if (lstrcmpiW(bak, self) != 0) DeleteFileW(bak);
+  }
+}
+
+static void clear_runas_layer(void) {
+  wchar_t self[MAX_PATH];
+  GetModuleFileNameW(NULL, self, MAX_PATH);
+  HKEY k;
+  if (RegOpenKeyExW(HKEY_CURRENT_USER,
+                    L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppCompatFlags\\Layers", 0,
+                    KEY_SET_VALUE, &k) != ERROR_SUCCESS)
+    return;
+  RegDeleteValueW(k, self);
+  RegCloseKey(k);
 }
 
 static DWORD WINAPI update_thread(LPVOID param) {
@@ -246,12 +568,19 @@ static DWORD WINAPI update_thread(LPVOID param) {
   g_updRemote[0] = 0;
   g_updPath[0] = 0;
   g_updErr[0] = 0;
-  wchar_t tmpv[MAX_PATH], tmpe[MAX_PATH], tdir[MAX_PATH];
-  GetTempPathW(MAX_PATH, tdir);
-  _snwprintf(tmpv, MAX_PATH, L"%sCursorPad-version.txt", tdir);
-  _snwprintf(tmpe, MAX_PATH, L"%sCursorPad-update.exe", tdir);
+  g_updHostUsed[0] = 0;
+  wchar_t tmpv[MAX_PATH], tmpe[MAX_PATH];
+  if (g_dataDir[0]) {
+    _snwprintf(tmpv, MAX_PATH, L"%s\\version-check.txt", g_dataDir);
+    _snwprintf(tmpe, MAX_PATH, L"%s\\CursorPad-next.bin", g_dataDir);
+  } else {
+    wchar_t tdir[MAX_PATH];
+    GetTempPathW(MAX_PATH, tdir);
+    _snwprintf(tmpv, MAX_PATH, L"%sCursorPad-version.txt", tdir);
+    _snwprintf(tmpe, MAX_PATH, L"%sCursorPad-next.bin", tdir);
+  }
   int code = 0;
-  if (!http_get_any(L"v", tmpv, 4096)) {
+  if (!http_get_any(L"v", tmpv, 256 * 1024)) {
     if (!g_updErr[0]) upd_fail(L"GitHub/CDN не отдали version.txt", 0);
     code = 0;
     goto done;
@@ -299,7 +628,7 @@ static DWORD WINAPI update_thread(LPVOID param) {
     code = 1;
     goto done;
   }
-  if (!http_get_any(L"e", tmpe, 12 * 1024 * 1024) || !file_is_pe(tmpe)) {
+  if (!http_get_any(L"e", tmpe, 16 * 1024 * 1024) || !file_is_pe(tmpe)) {
     DeleteFileW(tmpe);
     if (!g_updErr[0]) upd_fail(L"Не скачался CursorPad.exe", 0);
     code = 0;
@@ -338,9 +667,11 @@ static void on_update_done(int code) {
     show_status(g_updErr[0] ? g_updErr : L"GitHub недоступен");
     return;
   }
-  wchar_t msg[280];
-  _snwprintf(msg, 280,
-             L"На GitHub версия %s (сейчас %s).\r\nСкачать, заменить .exe и перезапустить?",
+  wchar_t msg[360];
+  _snwprintf(msg, 360,
+             L"На GitHub версия %s (сейчас %s).\r\n"
+             L"Скачать, заменить файл и перезапустить?\r\n"
+             L"Права администратора не нужны.",
              g_updRemote, APP_VERSION_STR);
   int r = MessageBoxW(g_hwnd, msg, L"CursorPad — обновление", MB_YESNO | MB_ICONQUESTION);
   if (r == IDYES) apply_update(g_updPath);

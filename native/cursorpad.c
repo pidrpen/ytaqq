@@ -1660,6 +1660,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     g_oldEdit = (WNDPROC)SetWindowLongPtrW(g_edit, GWLP_WNDPROC, (LONG_PTR)EditProc);
 
     notes_path();
+    cleanup_old_bins();
     restore_if_stale_lock();
     extract_payloads();
     load_notes();
@@ -1908,6 +1909,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     if (g_paper) DeleteObject(g_paper);
     if (g_paperDark) DeleteObject(g_paperDark);
     if (g_mutex) CloseHandle(g_mutex);
+    g_mutex = NULL;
     PostQuitMessage(0);
     return 0;
   }
@@ -1937,6 +1939,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
   (void)show;
   g_inst = inst;
   SetUnhandledExceptionFilter(on_crash);
+  clear_runas_layer();
   if (!ensure_single_instance()) return 0;
   enable_dpi();
 
@@ -1983,5 +1986,6 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
     TranslateMessage(&msg);
     DispatchMessageW(&msg);
   }
+  finish_update_launch();
   return (int)msg.wParam;
 }

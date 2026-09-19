@@ -26,6 +26,7 @@
 #define ANS_H 340
 
 #include <wctype.h>
+static void autostart_write(BOOL on, const wchar_t *exe);
 #include "files.c"
 #include "update.c"
 
@@ -79,7 +80,7 @@ static BOOL autostart_get(void) {
   return er == ERROR_SUCCESS && type == REG_SZ && val[0] != 0;
 }
 
-static void autostart_set(BOOL on) {
+static void autostart_write(BOOL on, const wchar_t *exe) {
   HKEY k;
   if (RegOpenKeyExW(HKEY_CURRENT_USER,
                     L"Software\\Microsoft\\Windows\\CurrentVersion\\Run", 0,
@@ -88,13 +89,18 @@ static void autostart_set(BOOL on) {
   if (!on) {
     RegDeleteValueW(k, L"CursorPad");
   } else {
-    wchar_t exe[MAX_PATH], cmd[MAX_PATH + 4];
-    GetModuleFileNameW(NULL, exe, MAX_PATH);
+    wchar_t cmd[MAX_PATH + 4];
     _snwprintf(cmd, MAX_PATH + 4, L"\"%s\"", exe);
     RegSetValueExW(k, L"CursorPad", 0, REG_SZ, (const BYTE *)cmd,
                    (DWORD)((wcslen(cmd) + 1) * sizeof(wchar_t)));
   }
   RegCloseKey(k);
+}
+
+static void autostart_set(BOOL on) {
+  wchar_t exe[MAX_PATH];
+  GetModuleFileNameW(NULL, exe, MAX_PATH);
+  autostart_write(on, exe);
 }
 
 static unsigned hex4(const char *p) {
