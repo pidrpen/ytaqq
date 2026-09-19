@@ -51,8 +51,8 @@ PLM
 Файлы (сетевой диск Linux)
 --------------------------
 Кнопка «Файлы» в Настройках. Поле папки запоминается (%LOCALAPPDATA%\CursorPad\files.txt).
-Раз в час: обход → files.json (Path + Data[{Path, Filename, FilenameWithoutExt}]) и копии в filecache.
-F3 ищет только по JSON-кешу.
+Раз в час и по кнопке «Обновить JSON»: обход папки → files.json (без копирования файлов).
+Смена пути пересобирает JSON. F3 ищет в JSON, открытие = Path + Filename.
 Обновление
 ----------
 Настройки → «Обновить с GitHub» (или пункт в трее). Сверяет public/version.txt,

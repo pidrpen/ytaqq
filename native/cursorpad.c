@@ -90,7 +90,7 @@
 #define PAD 10
 #define GUTTER 26
 #define SET_W 300
-#define SET_H 742
+#define SET_H 800
 #define ID_THEME_BASE 140
 #define THEME_COUNT 4
 
@@ -142,6 +142,8 @@ static HWND g_plmUser;
 static HWND g_plmPass;
 static HWND g_btnFiles;
 static HWND g_filesRootEdit;
+static HWND g_btnIdx;
+static HWND g_filesStat;
 static HWND g_chkAuto;
 static HWND g_answer;
 static HWND g_answerList;
@@ -714,6 +716,7 @@ static void apply_follow_state(void) {
   if (g_btnPlm) EnableWindow(g_btnPlm, !g_follow);
   if (g_btnFiles) EnableWindow(g_btnFiles, !g_follow);
   if (g_filesRootEdit) EnableWindow(g_filesRootEdit, !g_follow);
+  if (g_btnIdx) EnableWindow(g_btnIdx, !g_follow);
   if (g_plmServer) EnableWindow(g_plmServer, !g_follow);
   if (g_plmDb) EnableWindow(g_plmDb, !g_follow);
   if (g_plmUser) EnableWindow(g_plmUser, !g_follow);
@@ -1349,6 +1352,10 @@ static void layout_settings(void) {
   y += btnH + gap;
   if (g_filesRootEdit) MoveWindow(g_filesRootEdit, pad, y, cw - pad, btnH, TRUE);
   y += btnH + gap;
+  if (g_btnIdx) MoveWindow(g_btnIdx, pad, y, cw - pad, btnH, TRUE);
+  y += btnH + gap;
+  if (g_filesStat) MoveWindow(g_filesStat, pad, y, cw - pad, btnH, TRUE);
+  y += btnH + gap;
   if (g_plmServer) MoveWindow(g_plmServer, pad, y, half, btnH, TRUE);
   if (g_plmDb) MoveWindow(g_plmDb, pad + half + gap, y, half, btnH, TRUE);
   y += btnH + gap;
@@ -1447,17 +1454,17 @@ static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
     if (LOWORD(wParam) == ID_ENG_FILES) {
       g_engine = 5;
       save_cursor_pref();
-      save_files_pref();
+      files_apply_root(FALSE);
       update_engine_buttons();
-      files_start_index(FALSE);
     }
+    if (LOWORD(wParam) == ID_FILES_REFRESH) files_apply_root(TRUE);
     if (LOWORD(wParam) == ID_AUTOSTART) {
       g_autostart = (SendMessageW(g_chkAuto, BM_GETCHECK, 0, 0) == BST_CHECKED);
       autostart_set(g_autostart);
       save_cursor_pref();
     }
     if (LOWORD(wParam) == ID_FILES_ROOT && HIWORD(wParam) == EN_KILLFOCUS)
-      save_files_pref();
+      files_apply_root(FALSE);
     if (LOWORD(wParam) == ID_SEARCH_EDIT && HIWORD(wParam) == EN_CHANGE) { /* live */ }
     return 0;
   case WM_HSCROLL:
@@ -1526,6 +1533,12 @@ static void create_settings(HWND owner) {
   g_filesRootEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", g_filesRoot,
                                     WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
                                     0, 0, 200, 26, g_setHwnd, (HMENU)(INT_PTR)ID_FILES_ROOT, NULL, NULL);
+  g_btnIdx = CreateWindowExW(0, L"BUTTON", L"Обновить JSON",
+                             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 200, 26, g_setHwnd,
+                             (HMENU)(INT_PTR)ID_FILES_REFRESH, NULL, NULL);
+  g_filesStat = CreateWindowExW(0, L"STATIC", L"Индекс: —",
+                                WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP, 0, 0, 200, 22, g_setHwnd,
+                                (HMENU)(INT_PTR)136, NULL, NULL);
   g_plmServer = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", g_sqlHost,
                                 WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
                                 0, 0, 120, 26, g_setHwnd, (HMENU)(INT_PTR)ID_PLM_SERVER, NULL, NULL);
@@ -1586,6 +1599,9 @@ static void create_settings(HWND owner) {
     SendMessageW(g_filesRootEdit, WM_SETFONT, (WPARAM)g_fontBody, TRUE);
     SendMessageW(g_filesRootEdit, 0x1501, TRUE, (LPARAM)L"папка сети \\\\server\\share");
   }
+  if (g_btnIdx) SendMessageW(g_btnIdx, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
+  if (g_filesStat) SendMessageW(g_filesStat, WM_SETFONT, (WPARAM)g_fontSmall, TRUE);
+  files_refresh_status();
   if (g_plmServer) SendMessageW(g_plmServer, WM_SETFONT, (WPARAM)g_fontBody, TRUE);
   if (g_plmDb) SendMessageW(g_plmDb, WM_SETFONT, (WPARAM)g_fontBody, TRUE);
   if (g_plmUser) SendMessageW(g_plmUser, WM_SETFONT, (WPARAM)g_fontBody, TRUE);
@@ -1798,12 +1814,16 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     }
     return 0;
   }
-  case WM_FILES_DONE:
+  case WM_FILES_DONE: {
+    files_refresh_status();
+    wchar_t m[160];
     if (wParam)
-      show_status(L"Индекс файлов обновлён");
+      _snwprintf(m, 160, L"JSON обновлён: %d файлов", (int)wParam);
     else
-      show_status(L"Папка сети недоступна или пуста");
+      lstrcpynW(m, L"JSON пуст — папка недоступна?", 160);
+    show_status(m);
     return 0;
+  }
   case WM_UPDATE_DONE:
     on_update_done((int)wParam);
     return 0;

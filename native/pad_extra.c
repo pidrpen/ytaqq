@@ -7,6 +7,7 @@
 #define ID_ENG_PLM 124
 #define ID_ENG_FILES 132
 #define ID_FILES_ROOT 133
+#define ID_FILES_REFRESH 135
 #define ID_PLM_SERVER 125
 #define ID_PLM_DB 126
 #define ID_PLM_USER 128
@@ -466,16 +467,7 @@ static void open_plm_link(const wchar_t *link) {
       ShellExecuteW(NULL, L"open", link, NULL, NULL, SW_SHOWNORMAL);
     return;
   }
-  if (GetFileAttributesW(link) != INVALID_FILE_ATTRIBUTES) {
-    ShellExecuteW(NULL, L"open", link, NULL, NULL, SW_SHOWNORMAL);
-    return;
-  }
-  const wchar_t *name = files_name(link);
-  wchar_t dir[MAX_PATH], dest[MAX_PATH];
-  files_cache_dir(dir, MAX_PATH);
-  _snwprintf(dest, MAX_PATH, L"%s\\%s", dir, name);
-  if (GetFileAttributesW(dest) != INVALID_FILE_ATTRIBUTES)
-    ShellExecuteW(NULL, L"open", dest, NULL, NULL, SW_SHOWNORMAL);
+  ShellExecuteW(NULL, L"open", link, NULL, NULL, SW_SHOWNORMAL);
 }
 
 static void fill_plm_list(void) {

@@ -14,9 +14,12 @@ typedef struct {
 static FileEnt *g_files;
 static int g_filesN;
 static volatile LONG g_filesBusy;
+static volatile LONG g_filesAgain;
 static ULONGLONG g_filesAt;
-static void files_mirror_rel(const wchar_t *rel);
+static SYSTEMTIME g_filesWhen;
+static BOOL g_filesWhenOk;
 static void save_files_pref(void);
+static void files_refresh_status(void);
 
 static void files_clear(void) {
   if (!g_files) {
@@ -68,21 +71,39 @@ static void files_idx_path(wchar_t *out, int n) {
   _snwprintf(out, n, L"%s\\files.json", g_dataDir);
 }
 
-static void files_cache_dir(wchar_t *out, int n) {
-  _snwprintf(out, n, L"%s\\filecache", g_dataDir);
+static void files_stamp_now(void) {
+  GetLocalTime(&g_filesWhen);
+  g_filesWhenOk = TRUE;
+  g_filesAt = GetTickCount64();
 }
 
-static void files_rel_of(const wchar_t *dir, const wchar_t *name, wchar_t *rel, int n) {
-  size_t rootn = wcslen(g_filesRoot);
-  const wchar_t *d = dir;
-  if (rootn && _wcsnicmp(dir, g_filesRoot, rootn) == 0) {
-    d = dir + rootn;
-    while (*d == L'\\' || *d == L'/') d++;
-  }
-  if (*d)
-    _snwprintf(rel, n, L"%s\\%s", d, name);
+static void files_stamp_from_file(void) {
+  wchar_t path[MAX_PATH];
+  files_idx_path(path, MAX_PATH);
+  WIN32_FILE_ATTRIBUTE_DATA ad;
+  FILETIME local;
+  g_filesWhenOk = FALSE;
+  if (!GetFileAttributesExW(path, GetFileExInfoStandard, &ad)) return;
+  if (!FileTimeToLocalFileTime(&ad.ftLastWriteTime, &local)) return;
+  if (!FileTimeToSystemTime(&local, &g_filesWhen)) return;
+  g_filesWhenOk = TRUE;
+}
+
+static void files_refresh_status(void) {
+  wchar_t t[200];
+  if (InterlockedCompareExchange(&g_filesBusy, 0, 0))
+    lstrcpynW(t, L"Индекс: обновляется…", 200);
+  else if (!g_filesRoot[0])
+    lstrcpynW(t, L"Индекс: укажите папку", 200);
+  else if (g_filesN <= 0)
+    lstrcpynW(t, L"JSON пуст — «Обновить JSON»", 200);
+  else if (g_filesWhenOk)
+    _snwprintf(t, 200, L"JSON: %d файлов · %02u.%02u %02u:%02u", g_filesN,
+               (unsigned)g_filesWhen.wDay, (unsigned)g_filesWhen.wMonth,
+               (unsigned)g_filesWhen.wHour, (unsigned)g_filesWhen.wMinute);
   else
-    lstrcpynW(rel, name, n);
+    _snwprintf(t, 200, L"JSON: %d файлов", g_filesN);
+  if (g_filesStat) SetWindowTextW(g_filesStat, t);
 }
 
 static void json_put(HANDLE h, const char *s) {
@@ -144,6 +165,7 @@ static void files_save_idx(void) {
   }
   json_put(h, "  ]\r\n}\r\n");
   CloseHandle(h);
+  files_stamp_now();
 }
 
 static const char *json_skip(const char *p) {
@@ -295,6 +317,7 @@ static BOOL files_load_idx(void) {
     return FALSE;
   }
   if (idxRoot[0] && !g_filesRoot[0]) lstrcpynW(g_filesRoot, idxRoot, MAX_PATH);
+  files_stamp_from_file();
   return g_filesN > 0;
 }
 
@@ -333,9 +356,6 @@ static void files_walk(const wchar_t *dir, int depth) {
       files_walk(full, depth + 1);
     } else {
       files_add(dir, fd.cFileName);
-      wchar_t rel[MAX_PATH];
-      files_rel_of(dir, fd.cFileName, rel, MAX_PATH);
-      files_mirror_rel(rel);
     }
   } while (FindNextFileW(h, &fd) && g_filesN < FILES_MAX);
   FindClose(h);
@@ -343,26 +363,52 @@ static void files_walk(const wchar_t *dir, int depth) {
 
 static DWORD WINAPI files_index_thread(LPVOID param) {
   (void)param;
-  wchar_t dir[MAX_PATH];
-  files_cache_dir(dir, MAX_PATH);
-  CreateDirectoryW(dir, NULL);
+again:
   files_clear();
   if (g_filesRoot[0]) files_walk(g_filesRoot, 0);
   files_save_idx();
-  g_filesAt = GetTickCount64();
+  if (InterlockedExchange(&g_filesAgain, 0)) goto again;
   InterlockedExchange(&g_filesBusy, 0);
   if (g_hwnd) PostMessageW(g_hwnd, WM_FILES_DONE, (WPARAM)g_filesN, 0);
   return 0;
 }
 
 static void files_start_index(BOOL force) {
-  if (!g_filesRoot[0]) return;
+  if (!g_filesRoot[0]) {
+    files_refresh_status();
+    return;
+  }
   if (!force && g_filesN > 0 && g_filesAt && GetTickCount64() - g_filesAt < 3600000ULL)
     return;
-  if (InterlockedCompareExchange(&g_filesBusy, 1, 0) != 0) return;
+  if (InterlockedCompareExchange(&g_filesBusy, 1, 0) != 0) {
+    InterlockedExchange(&g_filesAgain, 1);
+    files_refresh_status();
+    return;
+  }
+  files_refresh_status();
   HANDLE th = CreateThread(NULL, 0, files_index_thread, NULL, 0, NULL);
   if (th) CloseHandle(th);
-  else InterlockedExchange(&g_filesBusy, 0);
+  else {
+    InterlockedExchange(&g_filesBusy, 0);
+    files_refresh_status();
+  }
+}
+
+static void files_apply_root(BOOL force) {
+  wchar_t old[MAX_PATH];
+  lstrcpynW(old, g_filesRoot, MAX_PATH);
+  save_files_pref();
+  BOOL changed = _wcsicmp(old, g_filesRoot) != 0;
+  if (changed) {
+    files_clear();
+    wchar_t jp[MAX_PATH];
+    files_idx_path(jp, MAX_PATH);
+    DeleteFileW(jp);
+    g_filesWhenOk = FALSE;
+    g_filesAt = 0;
+  }
+  if ((force || changed) && g_filesRoot[0]) files_start_index(TRUE);
+  files_refresh_status();
 }
 
 static BOOL wcs_istr(const wchar_t *hay, const wchar_t *needle) {
@@ -386,57 +432,18 @@ static const wchar_t *files_name(const wchar_t *rel) {
   return last;
 }
 
-static void files_mkdirs(const wchar_t *file) {
-  wchar_t tmp[MAX_PATH];
-  lstrcpynW(tmp, file, MAX_PATH);
-  for (wchar_t *p = tmp + 1; *p; p++) {
-    if (*p == L'\\' || *p == L'/') {
-      wchar_t c = *p;
-      *p = 0;
-      CreateDirectoryW(tmp, NULL);
-      *p = c;
-    }
-  }
-}
-
-static void files_local_path(const wchar_t *rel, wchar_t *out, int n) {
-  wchar_t dir[MAX_PATH];
-  files_cache_dir(dir, MAX_PATH);
-  if (!rel || !rel[0]) {
-    lstrcpynW(out, dir, n);
-    return;
-  }
-  _snwprintf(out, n, L"%s\\%s", dir, rel);
-}
-
-static BOOL files_newer(const wchar_t *src, const wchar_t *dst) {
-  WIN32_FILE_ATTRIBUTE_DATA a, b;
-  if (!GetFileAttributesExW(src, GetFileExInfoStandard, &a)) return FALSE;
-  if (!GetFileAttributesExW(dst, GetFileExInfoStandard, &b)) return TRUE;
-  return CompareFileTime(&a.ftLastWriteTime, &b.ftLastWriteTime) > 0;
-}
-
-static void files_mirror_rel(const wchar_t *rel) {
-  wchar_t src[MAX_PATH], dst[MAX_PATH];
-  _snwprintf(src, MAX_PATH, L"%s\\%s", g_filesRoot, rel);
-  files_local_path(rel, dst, MAX_PATH);
-  files_mkdirs(dst);
-  if (files_newer(src, dst)) CopyFileW(src, dst, FALSE);
-}
-
 static BOOL files_search(const wchar_t *query, wchar_t *out, int cap) {
   g_plmCount = 0;
   g_resultFiles = TRUE;
   save_files_pref();
   if (!g_filesRoot[0]) {
-    lstrcpynW(out, L"Файлы\r\n\r\nУкажите папку сети в Настройках (\\\\сервер\\шара или диск).", cap);
+    lstrcpynW(out, L"Файлы\r\n\r\nУкажите папку в Настройках.", cap);
     return FALSE;
   }
   if (g_filesN == 0) files_load_idx();
   if (g_filesN == 0) {
     _snwprintf(out, cap,
-               L"Файлы\r\n\r\nЛокальный кеш пуст для «%.80s».\r\n"
-               L"Обход раз в час пишет files.json. Поиск только по JSON-кешу.",
+               L"Файлы\r\n\r\nJSON пуст для «%.80s».\r\nНажмите «Обновить JSON».",
                g_filesRoot);
     return FALSE;
   }
@@ -449,27 +456,22 @@ static BOOL files_search(const wchar_t *query, wchar_t *out, int cap) {
     if (!wcs_istr(g_files[i].name, q) && !wcs_istr(g_files[i].stem, q) &&
         !wcs_istr(g_files[i].dir, q))
       continue;
-    wchar_t rel[MAX_PATH], local[MAX_PATH];
-    files_rel_of(g_files[i].dir, g_files[i].name, rel, MAX_PATH);
-    files_local_path(rel, local, MAX_PATH);
-    if (GetFileAttributesW(local) == INVALID_FILE_ATTRIBUTES) {
-      _snwprintf(local, MAX_PATH, L"%s\\%s", g_files[i].dir, g_files[i].name);
-      if (GetFileAttributesW(local) == INVALID_FILE_ATTRIBUTES) continue;
-    }
+    wchar_t full[420];
+    _snwprintf(full, 420, L"%s\\%s", g_files[i].dir, g_files[i].name);
     lstrcpynW(g_plmEsi[n], g_files[i].name, 200);
     lstrcpynW(g_plmTp[n], g_files[i].dir, 200);
-    lstrcpynW(g_plmLinks[n], local, 420);
-    if (!g_plmLastLink[0]) lstrcpynW(g_plmLastLink, g_plmLinks[n], 420);
+    lstrcpynW(g_plmLinks[n], full, 420);
+    if (!g_plmLastLink[0]) lstrcpynW(g_plmLastLink, full, 420);
     if (n) wcscat(links, L"\r\n");
-    if ((int)(wcslen(links) + wcslen(g_plmLinks[n]) + 8) < 1800) wcscat(links, g_plmLinks[n]);
+    if ((int)(wcslen(links) + wcslen(full) + 8) < 1800) wcscat(links, full);
     n++;
   }
   g_plmCount = n;
   if (n == 0) {
-    _snwprintf(out, cap, L"Файлы\r\n\r\nВ files.json нет «%.80s» (%d записей).", q, g_filesN);
+    _snwprintf(out, cap, L"Файлы\r\n\r\nВ JSON нет «%.80s» (%d записей).", q, g_filesN);
     return FALSE;
   }
-  _snwprintf(out, cap, L"Файлы · %d из JSON-кеша\r\n\r\n%s", n, links);
+  _snwprintf(out, cap, L"Файлы · %d из JSON\r\n\r\n%s", n, links);
   return TRUE;
 }
 
@@ -492,6 +494,7 @@ static void load_files_pref(void) {
     if (buf[0]) MultiByteToWideChar(CP_UTF8, 0, buf, -1, g_filesRoot, MAX_PATH);
   }
   files_load_idx();
+  files_refresh_status();
 }
 
 static void save_files_pref(void) {
