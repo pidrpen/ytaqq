@@ -3,10 +3,14 @@ import { Pin, MousePointer2, X, Minus, ScanText, Settings2 } from "lucide-react"
 import { cn } from "@/lib/utils";
 
 const THEMES = [
-  { id: 0, name: "Пергамент", paper: "#ece8e0", dark: "#e2ddd3", ink: "#1a1916", muted: "#5c5852", sage: "#5c6b62" },
-  { id: 1, name: "Ночь", paper: "#202022", dark: "#141416", ink: "#ece8e0", muted: "#a09c96", sage: "#8ca89c" },
-  { id: 2, name: "Шалфей", paper: "#e6ece2", dark: "#cedccd", ink: "#1c2c20", muted: "#4e6656", sage: "#38704e" },
-  { id: 3, name: "Сталь", paper: "#dee8f2", dark: "#c8d8e8", ink: "#142030", muted: "#465a70", sage: "#305c94" },
+  { id: 0, name: "Пергамент", paper: "#f3eee4", dark: "#e6dfd3", ink: "#1a1814", muted: "#6a645c", sage: "#5a6f62" },
+  { id: 1, name: "Ночь", paper: "#141312", dark: "#0c0b0a", ink: "#f2efe8", muted: "#9c978f", sage: "#8aa396" },
+  { id: 2, name: "Шалфей", paper: "#e6ede4", dark: "#d3e0d4", ink: "#1c2a20", muted: "#5a6e60", sage: "#3e7a58" },
+  { id: 3, name: "Сталь", paper: "#e6eef4", dark: "#d2dee8", ink: "#16202c", muted: "#5a6a7a", sage: "#3d6a96" },
+  { id: 4, name: "Уголь", paper: "#16181a", dark: "#0e0f10", ink: "#e8eaec", muted: "#94989c", sage: "#788c94" },
+  { id: 5, name: "Лён", paper: "#ece9de", dark: "#dedacb", ink: "#282620", muted: "#6c685c", sage: "#787058" },
+  { id: 6, name: "Чернила", paper: "#121a26", dark: "#0c121c", ink: "#ece8dc", muted: "#969eaa", sage: "#587a9e" },
+  { id: 7, name: "Мел", paper: "#1c2420", dark: "#121814", ink: "#e8e6dc", muted: "#969e94", sage: "#a0a88c" },
 ] as const;
 const PAD_W = 300;
 const PAD_H = 228;

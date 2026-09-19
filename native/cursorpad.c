@@ -90,9 +90,9 @@
 #define PAD 12
 #define GUTTER 26
 #define SET_W 312
-#define SET_H 860
+#define SET_H 910
 #define ID_THEME_BASE 140
-#define THEME_COUNT 4
+#define THEME_COUNT 8
 
 static COLORREF COL_PAPER = RGB(243, 238, 228);
 static COLORREF COL_PAPER_DARK = RGB(230, 223, 211);
@@ -111,6 +111,10 @@ static const PadTheme kThemes[THEME_COUNT] = {
     {RGB(20, 19, 18), RGB(12, 11, 10), RGB(242, 239, 232), RGB(156, 151, 143), RGB(138, 163, 150), L"Ночь"},
     {RGB(230, 237, 228), RGB(211, 224, 212), RGB(28, 42, 32), RGB(90, 110, 96), RGB(62, 122, 88), L"Шалфей"},
     {RGB(230, 238, 244), RGB(210, 222, 232), RGB(22, 32, 44), RGB(90, 106, 122), RGB(61, 106, 150), L"Сталь"},
+    {RGB(22, 24, 26), RGB(14, 15, 16), RGB(232, 234, 236), RGB(148, 152, 156), RGB(120, 140, 148), L"Уголь"},
+    {RGB(236, 233, 222), RGB(222, 218, 204), RGB(40, 38, 32), RGB(108, 104, 92), RGB(120, 112, 88), L"Лён"},
+    {RGB(18, 26, 38), RGB(12, 18, 28), RGB(236, 232, 220), RGB(150, 158, 170), RGB(88, 122, 158), L"Чернила"},
+    {RGB(28, 36, 32), RGB(18, 24, 20), RGB(232, 230, 220), RGB(150, 158, 148), RGB(160, 168, 140), L"Мел"},
 };
 
 static COLORREF blend_rgb(COLORREF a, COLORREF b, int t) {
@@ -131,7 +135,7 @@ static HWND g_btnK3;
 static HWND g_min;
 static HWND g_ocr;
 static HWND g_btnUp;
-static HWND g_btnTheme[4];
+static HWND g_btnTheme[THEME_COUNT];
 static int g_theme = 0;
 static HWND g_tbBg;
 static HWND g_tbFg;
@@ -1233,12 +1237,30 @@ static void draw_pad_button(const DRAWITEMSTRUCT *dis) {
   int id = (int)dis->CtlID;
   wchar_t t[96] = {0};
   GetWindowTextW(dis->hwndItem, t, 96);
-  BOOL on = t[0] == 0x25CF;
+  BOOL themeBtn = id >= ID_THEME_BASE && id < ID_THEME_BASE + THEME_COUNT;
+  int ti = themeBtn ? id - ID_THEME_BASE : -1;
+  BOOL on = t[0] == 0x25CF || (themeBtn && g_theme == ti);
   BOOL primary = id == ID_SETTINGS || id == ID_SEARCH_GO || id == ID_UPDATE || id == ID_PIN ||
                  id == ID_ANS_OPEN;
   BOOL quiet = id == ID_CLOSE || id == ID_MIN;
   COLORREF fill, fg, bd;
-  if (disab) {
+  if (themeBtn && ti >= 0) {
+    const PadTheme *th = &kThemes[ti];
+    if (on) {
+      fill = th->sage;
+      fg = th->paper;
+      bd = th->ink;
+    } else {
+      fill = th->paper;
+      fg = th->ink;
+      bd = th->sage;
+    }
+    if (press) fill = blend_rgb(fill, th->ink, 36);
+    if (disab) {
+      fill = blend_rgb(fill, COL_PAPER_DARK, 80);
+      fg = th->muted;
+    }
+  } else if (disab) {
     fill = blend_rgb(COL_PAPER, COL_PAPER_DARK, 160);
     fg = COL_MUTED;
     bd = COL_LINE;
@@ -1261,7 +1283,10 @@ static void draw_pad_button(const DRAWITEMSTRUCT *dis) {
   SetBkMode(dis->hDC, TRANSPARENT);
   SetTextColor(dis->hDC, fg);
   if (g_fontUi) SelectObject(dis->hDC, g_fontUi);
-  DrawTextW(dis->hDC, t, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+  const wchar_t *label = t;
+  if (themeBtn) label = kThemes[ti].name;
+  else if (t[0] == 0x25CF && t[1] == L' ') label = t + 2;
+  DrawTextW(dis->hDC, label, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 }
 
 static HWND mk_btn(HWND parent, const wchar_t *text, int id) {
@@ -1452,10 +1477,14 @@ static void layout_settings(void) {
   if (g_btnUp) MoveWindow(g_btnUp, pad, y, cw - pad, btnH, TRUE);
   y += btnH + gap + 18;
   {
-    int tw = (cw - pad - gap * 3) / 4;
-    for (int i = 0; i < THEME_COUNT; i++)
-      if (g_btnTheme[i])
-        MoveWindow(g_btnTheme[i], pad + i * (tw + gap), y, tw, btnH, TRUE);
+    int cols = 4;
+    int tw = (cw - pad - gap * (cols - 1)) / cols;
+    for (int i = 0; i < THEME_COUNT; i++) {
+      if (!g_btnTheme[i]) continue;
+      int row = i / cols;
+      int col = i % cols;
+      MoveWindow(g_btnTheme[i], pad + col * (tw + gap), y + row * (btnH + gap), tw, btnH, TRUE);
+    }
   }
 }
 
