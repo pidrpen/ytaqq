@@ -1,6 +1,6 @@
 import { miniAiAsk } from "@/lib/mini-ai";
 
-export type SearchEngine = "wiki" | "ddg" | "yandex" | "ai" | "plm";
+export type SearchEngine = "wiki" | "ddg" | "yandex" | "ai" | "plm" | "files";
 
 async function wikiExtract(lang: "ru" | "en", query: string): Promise<string | null> {
   const q = query.trim();
@@ -61,6 +61,14 @@ export async function lookupBrief(
 
   let text: string | null = null;
   let source = "";
+
+  if (engine === "files") {
+    return {
+      source: "Файлы",
+      text:
+        "В .exe: укажите папку сети (\\\\сервер\\шара с Linux). Индекс кешируется локально и обновляется каждый час. F3 ищет по имени, совпадения копируются в %LOCALAPPDATA%\\CursorPad\\filecache.",
+    };
+  }
 
   if (engine === "plm") {
     const sample = "pmsz-plm:um-splmsrv:4450/IO.6089001";

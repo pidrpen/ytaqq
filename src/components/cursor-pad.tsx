@@ -34,8 +34,8 @@ type CursorPadProps = {
   onOcr: () => void;
   images: Record<string, string>;
   onImages: (next: Record<string, string>) => void;
-  engine: "wiki" | "ddg" | "yandex" | "ai" | "plm";
-  onEngine: (e: "wiki" | "ddg" | "yandex" | "ai" | "plm") => void;
+  engine: "wiki" | "ddg" | "yandex" | "ai" | "plm" | "files";
+  onEngine: (e: "wiki" | "ddg" | "yandex" | "ai" | "plm" | "files") => void;
   autostart: boolean;
   onAutostart: (v: boolean) => void;
   onSearch: (q: string) => void;
@@ -298,7 +298,13 @@ export function CursorPad({
           >
             <input
               name="q"
-              placeholder={engine === "plm" ? "масло И-12А ГОСТ 20799-2022" : "рецепт пельменей"}
+              placeholder={
+                engine === "plm"
+                  ? "масло И-12А ГОСТ 20799-2022"
+                  : engine === "files"
+                    ? "имя файла"
+                    : "рецепт пельменей"
+              }
               className="h-8 min-w-0 flex-1 rounded-md bg-paper-dark px-2 text-xs text-ink outline-none ring-1 ring-paper-line"
             />
             <button type="submit" className="h-8 rounded-md bg-ink px-2 text-xs text-paper">
@@ -322,6 +328,7 @@ export function CursorPad({
                 ["ddg", "DDG"],
                 ["yandex", "Яндекс"],
                 ["plm", "PLM"],
+                ["files", "Файлы"],
               ] as const
             ).map(([id, label]) => (
               <button
@@ -337,6 +344,11 @@ export function CursorPad({
               </button>
             ))}
           </div>
+          {engine === "files" ? (
+            <p className="text-[11px] text-ink-muted">
+              Папка сети задаётся в .exe (Настройки). Индекс раз в час, найденное в локальном кеше.
+            </p>
+          ) : null}
           <div className="grid grid-cols-2 gap-1.5">
             {choices.map((c) => {
               const on = c.id === mainId;

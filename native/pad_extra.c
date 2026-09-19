@@ -5,6 +5,8 @@
 #define ID_ENG_YA 118
 #define ID_ENG_AI 123
 #define ID_ENG_PLM 124
+#define ID_ENG_FILES 132
+#define ID_FILES_ROOT 133
 #define ID_PLM_SERVER 125
 #define ID_PLM_DB 126
 #define ID_PLM_USER 128
@@ -21,6 +23,9 @@
 #define WM_SHOW_PAD (WM_APP + 10)
 #define ANS_W 460
 #define ANS_H 340
+
+#include <wctype.h>
+#include "files.c"
 
 static HWND g_answerEdit;
 static BOOL g_picking = FALSE;
@@ -447,20 +452,40 @@ static void make_plm_link(wchar_t *out, int n, long id) {
 }
 
 static void open_plm_link(const wchar_t *link) {
-  if (!link || wcsncmp(link, L"pmsz-plm:", 9) != 0) return;
-  SHELLEXECUTEINFOW sei;
-  memset(&sei, 0, sizeof(sei));
-  sei.cbSize = sizeof(sei);
-  sei.fMask = SEE_MASK_FLAG_NO_UI;
-  sei.lpVerb = L"open";
-  sei.lpFile = link;
-  sei.nShow = SW_SHOWNORMAL;
-  if (!ShellExecuteExW(&sei))
+  if (!link || !link[0]) return;
+  if (wcsncmp(link, L"pmsz-plm:", 9) == 0) {
+    SHELLEXECUTEINFOW sei;
+    memset(&sei, 0, sizeof(sei));
+    sei.cbSize = sizeof(sei);
+    sei.fMask = SEE_MASK_FLAG_NO_UI;
+    sei.lpVerb = L"open";
+    sei.lpFile = link;
+    sei.nShow = SW_SHOWNORMAL;
+    if (!ShellExecuteExW(&sei))
+      ShellExecuteW(NULL, L"open", link, NULL, NULL, SW_SHOWNORMAL);
+    return;
+  }
+  if (GetFileAttributesW(link) != INVALID_FILE_ATTRIBUTES) {
     ShellExecuteW(NULL, L"open", link, NULL, NULL, SW_SHOWNORMAL);
+    return;
+  }
+  const wchar_t *name = files_name(link);
+  wchar_t dir[MAX_PATH], dest[MAX_PATH];
+  files_cache_dir(dir, MAX_PATH);
+  _snwprintf(dest, MAX_PATH, L"%s\\%s", dir, name);
+  if (GetFileAttributesW(dest) != INVALID_FILE_ATTRIBUTES)
+    ShellExecuteW(NULL, L"open", dest, NULL, NULL, SW_SHOWNORMAL);
 }
 
 static void fill_plm_list(void) {
   if (!g_answerList) return;
+  LVCOLUMNW col;
+  memset(&col, 0, sizeof(col));
+  col.mask = LVCF_TEXT;
+  col.pszText = g_resultFiles ? L"1 файл" : L"1 ЭСИ";
+  SendMessageW(g_answerList, LVM_SETCOLUMNW, 0, (LPARAM)&col);
+  col.pszText = g_resultFiles ? L"2 папка" : L"2 ТП";
+  SendMessageW(g_answerList, LVM_SETCOLUMNW, 1, (LPARAM)&col);
   SendMessageW(g_answerList, LVM_DELETEALLITEMS, 0, 0);
   for (int i = 0; i < g_plmCount; i++) {
     LVITEMW it;
@@ -707,7 +732,12 @@ static void save_plm_pref(void) {
 static void compose_answer(const wchar_t *query, wchar_t *out, int cap) {
   wchar_t a[1200] = {0};
   const wchar_t *src = L"";
-  if (g_engine != 4) g_plmCount = 0;
+  if (g_engine != 4 && g_engine != 5) g_plmCount = 0;
+  g_resultFiles = FALSE;
+  if (g_engine == 5) {
+    files_search(query, out, cap);
+    return;
+  }
   if (g_engine == 4) {
     plm_lookup(query, out, cap);
     return;
@@ -929,7 +959,9 @@ static void start_lookup(const wchar_t *q) {
     return;
   }
   wchar_t wait[440];
-  _snwprintf(wait, 440, g_engine == 4 ? L"Ищу в PLM «%.80s»…" : L"Ищу в интернете «%.80s»…", q);
+  _snwprintf(wait, 440,
+             g_engine == 4 ? L"Ищу в PLM «%.80s»…" :
+             (g_engine == 5 ? L"Ищу файлы «%.80s»…" : L"Ищу в интернете «%.80s»…"), q);
   show_answer_text(wait);
   if (InterlockedCompareExchange(&g_netBusy, 1, 0) != 0) {
     show_status(L"Поиск уже идёт");
@@ -1220,6 +1252,7 @@ static void update_engine_buttons(void) {
   if (g_btnDdg) SetWindowTextW(g_btnDdg, g_engine == 1 ? L"● DDG" : L"DDG");
   if (g_btnYa) SetWindowTextW(g_btnYa, g_engine == 2 ? L"● Яндекс" : L"Яндекс");
   if (g_btnPlm) SetWindowTextW(g_btnPlm, g_engine == 4 ? L"● PLM" : L"PLM");
+  if (g_btnFiles) SetWindowTextW(g_btnFiles, g_engine == 5 ? L"● Файлы" : L"Файлы");
 }
 
 static BOOL ensure_single_instance(void) {

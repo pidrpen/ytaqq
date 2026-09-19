@@ -130,7 +130,7 @@ function Home() {
     const stored = readStore(CURSOR_KEY, "k2");
     if (MAINS.some((s) => s.id === stored)) setPicked(stored as MainId);
     const eng = readStore(ENGINE_KEY, "ai");
-    if (eng === "ddg" || eng === "yandex" || eng === "wiki" || eng === "ai") setEngine(eng);
+    if (eng === "ddg" || eng === "yandex" || eng === "wiki" || eng === "ai" || eng === "plm" || eng === "files") setEngine(eng);
     setAutostart(readStore(AUTO_KEY, "0") === "1");
     const mq = window.matchMedia("(pointer: coarse)");
     setCoarse(mq.matches);

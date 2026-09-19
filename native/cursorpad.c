@@ -90,7 +90,7 @@
 #define PAD 10
 #define GUTTER 26
 #define SET_W 300
-#define SET_H 610
+#define SET_H 670
 
 static const COLORREF COL_PAPER = RGB(236, 232, 224);
 static const COLORREF COL_PAPER_DARK = RGB(226, 221, 211);
@@ -123,6 +123,8 @@ static HWND g_plmServer;
 static HWND g_plmDb;
 static HWND g_plmUser;
 static HWND g_plmPass;
+static HWND g_btnFiles;
+static HWND g_filesRootEdit;
 static HWND g_chkAuto;
 static HWND g_answer;
 static HWND g_answerList;
@@ -170,7 +172,9 @@ static HCURSOR g_personCur[2];
 static int g_alphaFollow = 180;
 static int g_alphaPinned = 250;
 static BOOL g_cursorOn = FALSE;
-static int g_engine = 3; /* 0 wiki, 1 ddg, 2 yandex, 3 mini-ai, 4 plm */
+static int g_engine = 3; /* 0 wiki, 1 ddg, 2 yandex, 3 mini-ai, 4 plm, 5 files */
+static wchar_t g_filesRoot[MAX_PATH];
+static BOOL g_resultFiles = FALSE;
 static wchar_t g_plmHost[96] = L"um-splmsrv";
 static wchar_t g_sqlHost[96] = L"UM-SQLSRV";
 static wchar_t g_plmPort[16] = L"4450";
@@ -408,13 +412,14 @@ static void load_cursor_pref(void) {
   else if (eng[0] == 'w') g_engine = 0;
   else if (eng[0] == 'a') g_engine = 3;
   else if (eng[0] == 'p') g_engine = 4;
+  else if (eng[0] == 'f') g_engine = 5;
   if (autoOn == 0 || autoOn == 1) g_autostart = autoOn ? TRUE : FALSE;
   else g_autostart = autostart_get();
 }
 
 static void save_cursor_pref(void) {
   const char *v = g_skin == 2 ? "k3" : (g_skin == 0 ? "system" : "k2");
-  const char *e = g_engine == 1 ? "ddg" : (g_engine == 2 ? "yandex" : (g_engine == 3 ? "ai" : (g_engine == 4 ? "plm" : "wiki")));
+  const char *e = g_engine == 1 ? "ddg" : (g_engine == 2 ? "yandex" : (g_engine == 3 ? "ai" : (g_engine == 4 ? "plm" : (g_engine == 5 ? "files" : "wiki"))));
   char buf[96];
   snprintf(buf, sizeof(buf), "%s %d %d %s %d\n", v, g_alphaFollow, g_alphaPinned, e,
            g_autostart ? 1 : 0);
@@ -641,6 +646,8 @@ static void apply_follow_state(void) {
   if (g_btnDdg) EnableWindow(g_btnDdg, !g_follow);
   if (g_btnYa) EnableWindow(g_btnYa, !g_follow);
   if (g_btnPlm) EnableWindow(g_btnPlm, !g_follow);
+  if (g_btnFiles) EnableWindow(g_btnFiles, !g_follow);
+  if (g_filesRootEdit) EnableWindow(g_filesRootEdit, !g_follow);
   if (g_plmServer) EnableWindow(g_plmServer, !g_follow);
   if (g_plmDb) EnableWindow(g_plmDb, !g_follow);
   if (g_plmUser) EnableWindow(g_plmUser, !g_follow);
@@ -1269,7 +1276,10 @@ static void layout_settings(void) {
   if (g_btnDdg) MoveWindow(g_btnDdg, pad + third + gap, y, third, btnH, TRUE);
   if (g_btnYa) MoveWindow(g_btnYa, pad + (third + gap) * 2, y, third, btnH, TRUE);
   y += btnH + gap;
-  if (g_btnPlm) MoveWindow(g_btnPlm, pad, y, cw - pad, btnH, TRUE);
+  if (g_btnPlm) MoveWindow(g_btnPlm, pad, y, half, btnH, TRUE);
+  if (g_btnFiles) MoveWindow(g_btnFiles, pad + half + gap, y, half, btnH, TRUE);
+  y += btnH + gap;
+  if (g_filesRootEdit) MoveWindow(g_filesRootEdit, pad, y, cw - pad, btnH, TRUE);
   y += btnH + gap;
   if (g_plmServer) MoveWindow(g_plmServer, pad, y, half, btnH, TRUE);
   if (g_plmDb) MoveWindow(g_plmDb, pad + half + gap, y, half, btnH, TRUE);
@@ -1326,6 +1336,7 @@ static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
     if (LOWORD(wParam) == ID_OCR) run_ocr_test();
     if (LOWORD(wParam) == ID_SEARCH_GO) {
       save_plm_pref();
+      save_files_pref();
       search_clipboard_or_edit();
     }
     if (LOWORD(wParam) == ID_ENG_AI) {
@@ -1352,6 +1363,13 @@ static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
       g_engine = 4;
       save_cursor_pref();
       update_engine_buttons();
+    }
+    if (LOWORD(wParam) == ID_ENG_FILES) {
+      g_engine = 5;
+      save_cursor_pref();
+      save_files_pref();
+      update_engine_buttons();
+      files_start_index(FALSE);
     }
     if (LOWORD(wParam) == ID_AUTOSTART) {
       g_autostart = (SendMessageW(g_chkAuto, BM_GETCHECK, 0, 0) == BST_CHECKED);
@@ -1421,6 +1439,11 @@ static void create_settings(HWND owner) {
                             0, 0, 80, 26, g_setHwnd, (HMENU)(INT_PTR)ID_ENG_YA, NULL, NULL);
   g_btnPlm = CreateWindowExW(0, L"BUTTON", L"PLM", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                              0, 0, 80, 26, g_setHwnd, (HMENU)(INT_PTR)ID_ENG_PLM, NULL, NULL);
+  g_btnFiles = CreateWindowExW(0, L"BUTTON", L"Файлы", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                               0, 0, 80, 26, g_setHwnd, (HMENU)(INT_PTR)ID_ENG_FILES, NULL, NULL);
+  g_filesRootEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", g_filesRoot,
+                                    WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+                                    0, 0, 200, 26, g_setHwnd, (HMENU)(INT_PTR)ID_FILES_ROOT, NULL, NULL);
   g_plmServer = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", g_sqlHost,
                                 WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
                                 0, 0, 120, 26, g_setHwnd, (HMENU)(INT_PTR)ID_PLM_SERVER, NULL, NULL);
@@ -1466,6 +1489,11 @@ static void create_settings(HWND owner) {
   if (g_btnDdg) SendMessageW(g_btnDdg, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
   if (g_btnYa) SendMessageW(g_btnYa, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
   if (g_btnPlm) SendMessageW(g_btnPlm, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
+  if (g_btnFiles) SendMessageW(g_btnFiles, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
+  if (g_filesRootEdit) {
+    SendMessageW(g_filesRootEdit, WM_SETFONT, (WPARAM)g_fontBody, TRUE);
+    SendMessageW(g_filesRootEdit, 0x1501, TRUE, (LPARAM)L"папка сети \\\\server\\share");
+  }
   if (g_plmServer) SendMessageW(g_plmServer, WM_SETFONT, (WPARAM)g_fontBody, TRUE);
   if (g_plmDb) SendMessageW(g_plmDb, WM_SETFONT, (WPARAM)g_fontBody, TRUE);
   if (g_plmUser) SendMessageW(g_plmUser, WM_SETFONT, (WPARAM)g_fontBody, TRUE);
@@ -1529,6 +1557,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     load_notes();
     load_cursor_pref();
     load_plm_pref();
+    load_files_pref();
     if (g_autostart) autostart_set(TRUE);
     create_settings(hwnd);
     create_answer(hwnd);
@@ -1541,6 +1570,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     SetTimer(hwnd, TIMER_FOLLOW, 10, NULL);
     SetTimer(hwnd, TIMER_SAVE, 2000, NULL);
     SetTimer(hwnd, TIMER_CURSOR_KEEP, 4000, NULL);
+    SetTimer(hwnd, TIMER_FILES, 3600000, NULL);
+    if (g_filesRoot[0]) files_start_index(FALSE);
     if (!register_toggle_hotkey(hwnd)) {
       MessageBoxW(hwnd,
                   L"Не удалось зарегистрировать горячую клавишу. "
@@ -1664,6 +1695,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
       send_paste();
     }
     if (wParam == TIMER_CURSOR_KEEP && g_skin > 0) apply_scheme_slots();
+    if (wParam == TIMER_FILES) files_start_index(TRUE);
     return 0;
   case WM_SEARCH_DONE: {
     wchar_t *text = (wchar_t *)lParam;
@@ -1673,6 +1705,12 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     }
     return 0;
   }
+  case WM_FILES_DONE:
+    if (wParam)
+      show_status(L"Индекс файлов обновлён");
+    else
+      show_status(L"Папка сети недоступна или пуста");
+    return 0;
   case WM_OCR_DONE: {
     wchar_t *text = (wchar_t *)lParam;
     if (text && text[0]) {
@@ -1736,6 +1774,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     KillTimer(hwnd, TIMER_FOLLOW);
     KillTimer(hwnd, TIMER_SAVE);
     KillTimer(hwnd, TIMER_CURSOR_KEEP);
+    KillTimer(hwnd, TIMER_FILES);
+    save_files_pref();
+    files_clear();
     UnregisterHotKey(hwnd, HOTKEY_TOGGLE);
     UnregisterHotKey(hwnd, HOTKEY_CURSOR);
     UnregisterHotKey(hwnd, HOTKEY_OCR);
