@@ -103,7 +103,15 @@ static BOOL http_get_to_file(const wchar_t *host, const wchar_t *path, const wch
     DeleteFileW(dest);
     return FALSE;
   }
-  WinHttpAddRequestHeaders(req, L"Accept: */*", (ULONG)-1L, WINHTTP_ADDREQ_FLAG_ADD);
+  WinHttpAddRequestHeaders(req,
+                           L"Accept: text/plain,*/*\r\nAccept-Encoding: identity",
+                           (ULONG)-1L, WINHTTP_ADDREQ_FLAG_ADD);
+#ifdef WINHTTP_OPTION_DECOMPRESSION
+  {
+    DWORD decomp = WINHTTP_DECOMPRESSION_FLAG_ALL;
+    WinHttpSetOption(req, WINHTTP_OPTION_DECOMPRESSION, &decomp, sizeof(decomp));
+  }
+#endif
   BOOL ok = WinHttpSendRequest(req, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
                                WINHTTP_NO_REQUEST_DATA, 0, 0, 0);
   if (ok) ok = WinHttpReceiveResponse(req, NULL);
@@ -175,15 +183,40 @@ static BOOL http_get_any(const wchar_t *kind, const wchar_t *dest, DWORD maxn) {
 }
 
 static long parse_ver_file(const char *s) {
-  while (*s == ' ' || *s == '\t' || *s == '\r' || *s == '\n') s++;
-  if ((unsigned char)s[0] == 0xEF && (unsigned char)s[1] == 0xBB && (unsigned char)s[2] == 0xBF)
-    s += 3;
+  if (!s || !s[0]) return 0;
+  char tmp[96];
+  int n = 0;
+  const unsigned char *u = (const unsigned char *)s;
+  if (u[0] == 0xEF && u[1] == 0xBB && u[2] == 0xBF) s += 3, u += 3;
+  if (u[0] == 0x1F && u[1] == 0x8B) return 0; /* gzip */
+  if (u[0] == 0xFF && u[1] == 0xFE) {
+    const unsigned char *p = u + 2;
+    while ((p[0] || p[1]) && n < 90) {
+      if (p[1] == 0 && p[0] >= 32 && p[0] < 127) tmp[n++] = (char)p[0];
+      p += 2;
+    }
+    tmp[n] = 0;
+    s = tmp;
+  }
+  while (*s && (*s < '0' || *s > '9')) s++;
+  if (!*s) return 0;
+  const char *line = s;
+  int dots = 0;
+  for (const char *q = s; *q && *q != '\n' && *q != '\r'; q++)
+    if (*q == '.') dots++;
+  if (dots >= 2) {
+    int y = 0, m = 0, d = 0, p = 0;
+    if (sscanf(line, "%d.%d.%d.%d", &y, &m, &d, &p) >= 3 && y >= 2020 && y <= 2099)
+      return (long)y * 1000000L + (long)m * 10000L + (long)d * 100L + (long)p;
+  }
   long v = 0;
-  while (*s >= '0' && *s <= '9') {
+  int digits = 0;
+  while (*s >= '0' && *s <= '9' && digits < 10) {
     v = v * 10 + (*s - '0');
+    digits++;
     s++;
   }
-  return v;
+  return digits >= 8 ? v : 0;
 }
 
 static BOOL file_is_pe(const wchar_t *path) {
@@ -247,7 +280,18 @@ static DWORD WINAPI update_thread(LPVOID param) {
   }
   if (!g_updRemote[0]) _snwprintf(g_updRemote, 40, L"%ld", remote);
   if (remote <= 0) {
-    upd_fail(L"Непонятный version.txt", 0);
+    wchar_t snip[48] = {0};
+    int i = 0, j = 0;
+    for (; buf[i] && j < 40; i++) {
+      unsigned char c = (unsigned char)buf[i];
+      if (c >= 32 && c < 127)
+        snip[j++] = (wchar_t)c;
+      else if (c == '\n' || c == '\r')
+        snip[j++] = L' ';
+      else
+        snip[j++] = L'.';
+    }
+    _snwprintf(g_updErr, 240, L"Непонятный version.txt: «%s»", snip[0] ? snip : L"пусто");
     code = 0;
     goto done;
   }
