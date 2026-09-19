@@ -741,39 +741,12 @@ static void compose_answer(const wchar_t *query, wchar_t *out, int cap) {
     plm_lookup(query, out, cap);
     return;
   }
-  if (g_engine == 3) {
-    if (internet_ask(query, a, 1200) && a[0]) {
-      _snwprintf(out, cap, L"Интернет\r\n\r\n%s", a);
-      return;
-    }
-    src = mini_ai_ask(query, a, 1200);
-    _snwprintf(out, cap, L"%s (офлайн)\r\n\r\n%s", src, a);
+  if (internet_ask(query, a, 1200) && a[0]) {
+    _snwprintf(out, cap, L"Мини-ИИ\r\n\r\n%s", a);
     return;
   }
-  if (g_engine == 1) {
-    if (ddg_summary(query, a, 900)) src = L"DuckDuckGo";
-    if (!a[0]) {
-      if (wiki_summary(L"en.wikipedia.org", query, a, 900) ||
-          wiki_summary(L"ru.wikipedia.org", query, a, 900))
-        src = L"Википедия";
-    }
-  } else if (g_engine == 2) {
-    if (wiki_summary(L"ru.wikipedia.org", query, a, 900)) src = L"Википедия";
-    if (!a[0] && ddg_summary(query, a, 900)) src = L"DuckDuckGo";
-    if (!a[0] && wiki_summary(L"en.wikipedia.org", query, a, 900)) src = L"Википедия";
-  } else {
-    if (wiki_summary(L"ru.wikipedia.org", query, a, 900) ||
-        wiki_summary(L"en.wikipedia.org", query, a, 900))
-      src = L"Википедия";
-    if (!a[0] && ddg_summary(query, a, 900)) src = L"DuckDuckGo";
-  }
-  if (!a[0]) {
-    src = mini_ai_ask(query, a, 1200);
-    _snwprintf(out, cap, L"%s\r\n\r\n%s", src, a);
-    return;
-  }
-  trim_extract(a, 720);
-  _snwprintf(out, cap, L"%s\r\n\r\n%s", src, a);
+  src = mini_ai_ask(query, a, 1200);
+  _snwprintf(out, cap, L"%s (офлайн)\r\n\r\n%s", src, a);
 }
 
 typedef struct {
@@ -959,7 +932,7 @@ static void start_lookup(const wchar_t *q) {
   wchar_t wait[440];
   _snwprintf(wait, 440,
              g_engine == 4 ? L"Ищу в PLM «%.80s»…" :
-             (g_engine == 5 ? L"Ищу файлы «%.80s»…" : L"Ищу в интернете «%.80s»…"), q);
+             (g_engine == 5 ? L"Ищу файлы «%.80s»…" : L"Мини-ИИ «%.80s»…"), q);
   show_answer_text(wait);
   if (InterlockedCompareExchange(&g_netBusy, 1, 0) != 0) {
     show_status(L"Поиск уже идёт");
@@ -1245,10 +1218,7 @@ static void start_ocr_pick(void) {
 }
 
 static void update_engine_buttons(void) {
-  if (g_btnAi) SetWindowTextW(g_btnAi, g_engine == 3 ? L"● Мини-ИИ (в .exe)" : L"Мини-ИИ (в .exe)");
-  if (g_btnWiki) SetWindowTextW(g_btnWiki, g_engine == 0 ? L"● Вики" : L"Вики");
-  if (g_btnDdg) SetWindowTextW(g_btnDdg, g_engine == 1 ? L"● DDG" : L"DDG");
-  if (g_btnYa) SetWindowTextW(g_btnYa, g_engine == 2 ? L"● Яндекс" : L"Яндекс");
+  if (g_btnAi) SetWindowTextW(g_btnAi, g_engine == 3 ? L"● Мини-ИИ" : L"Мини-ИИ");
   if (g_btnPlm) SetWindowTextW(g_btnPlm, g_engine == 4 ? L"● PLM" : L"PLM");
   if (g_btnFiles) SetWindowTextW(g_btnFiles, g_engine == 5 ? L"● Файлы" : L"Файлы");
 }

@@ -86,6 +86,7 @@ export function CursorPad({
   onTheme,
 }: CursorPadProps) {
   const [settings, setSettings] = useState(false);
+  const [askOpen, setAskOpen] = useState(false);
   const elRef = useRef<HTMLDivElement>(null);
   const pos = useRef({ x: 48, y: 96 });
   const placed = useRef(false);
@@ -175,7 +176,7 @@ export function CursorPad({
       className={cn(
         "absolute top-0 left-0 z-30 flex flex-col bg-paper text-ink",
         "w-[300px] max-w-[calc(100%-24px)] h-[196px] rounded-2xl shadow-pad",
-        settings && !following ? "overflow-visible" : "overflow-hidden",
+        settings || askOpen ? "overflow-visible" : "overflow-hidden",
         following
           ? "pointer-events-none"
           : "pointer-events-auto shadow-pad-pinned",
@@ -294,21 +295,8 @@ export function CursorPad({
         />
       </div>
 
-      <footer className="flex shrink-0 items-center gap-2 bg-paper-dark px-2 py-1.5">
-        <button
-          type="button"
-          disabled={following}
-          onClick={() => setSettings((v) => !v)}
-          className="inline-flex h-8 flex-1 items-center justify-center gap-1.5 rounded-md bg-paper text-xs font-medium text-ink ring-1 ring-paper-line enabled:active:scale-[0.98] disabled:opacity-40"
-        >
-          <Settings2 className="size-3.5" strokeWidth={1.75} />
-          Настройки
-        </button>
-        <span className="text-[10px] tracking-wide text-ink-muted">F9</span>
-      </footer>
-
-      {settings && !following ? (
-        <div className="absolute inset-x-0 top-full z-20 mt-1 flex flex-col gap-2 rounded-md bg-paper p-3 shadow-pad ring-1 ring-paper-line">
+      {askOpen && !following ? (
+        <div className="absolute right-full top-0 z-20 mr-1 flex w-[min(19rem,calc(100vw-2rem))] flex-col gap-2 rounded-md bg-paper p-3 shadow-pad ring-1 ring-paper-line">
           <form
             className="flex gap-1.5"
             onSubmit={(e) => {
@@ -320,34 +308,28 @@ export function CursorPad({
             <input
               name="q"
               placeholder={
-                engine === "plm"
-                  ? "масло И-12А ГОСТ 20799-2022"
-                  : engine === "files"
-                    ? "имя файла"
-                    : "рецепт пельменей"
+                engine === "plm" ? "найти в PLM" : engine === "files" ? "имя файла" : "спросить мини-ИИ"
               }
               className="h-8 min-w-0 flex-1 rounded-md bg-paper-dark px-2 text-xs text-ink outline-none ring-1 ring-paper-line"
             />
-            <button type="submit" className="h-8 rounded-md bg-ink px-2 text-xs text-paper">
+            <button type="submit" className="h-8 rounded-md bg-ink px-2.5 text-xs text-paper">
               Спросить
             </button>
           </form>
+          <p className="text-[10px] tracking-wide text-ink-muted">где искать</p>
           <button
             type="button"
             onClick={() => onEngine("ai")}
             className={cn(
               "h-8 rounded-md text-xs font-medium",
-              engine === "ai" ? "bg-ink text-paper" : "bg-paper-dark text-ink",
+              engine === "ai" ? "bg-sage text-paper" : "bg-paper-dark text-ink",
             )}
           >
-            {engine === "ai" ? "● Мини-ИИ в программе" : "Мини-ИИ в программе"}
+            {engine === "ai" ? "● Мини-ИИ" : "Мини-ИИ"}
           </button>
           <div className="grid grid-cols-2 gap-1.5">
             {(
               [
-                ["wiki", "Вики"],
-                ["ddg", "DDG"],
-                ["yandex", "Яндекс"],
                 ["plm", "PLM"],
                 ["files", "Файлы"],
               ] as const
@@ -358,13 +340,41 @@ export function CursorPad({
                 onClick={() => onEngine(id)}
                 className={cn(
                   "h-8 rounded-md px-1 text-xs font-medium",
-                  engine === id ? "bg-ink text-paper" : "bg-paper-dark text-ink",
+                  engine === id ? "bg-sage text-paper" : "bg-paper-dark text-ink",
                 )}
               >
                 {engine === id ? `● ${label}` : label}
               </button>
             ))}
           </div>
+        </div>
+      ) : null}
+
+      <footer className="flex shrink-0 items-center gap-1.5 bg-paper-dark px-2 py-1.5">
+        <button
+          type="button"
+          disabled={following}
+          onClick={() => setAskOpen((v) => !v)}
+          className={cn(
+            "inline-flex h-8 flex-1 items-center justify-center rounded-md text-xs font-medium enabled:active:scale-[0.98] disabled:opacity-40",
+            askOpen ? "bg-sage text-paper" : "bg-paper text-ink ring-1 ring-paper-line",
+          )}
+        >
+          {askOpen ? "● Поиск" : "Поиск"}
+        </button>
+        <button
+          type="button"
+          disabled={following}
+          onClick={() => setSettings((v) => !v)}
+          className="inline-flex h-8 flex-1 items-center justify-center gap-1.5 rounded-md bg-paper text-xs font-medium text-ink ring-1 ring-paper-line enabled:active:scale-[0.98] disabled:opacity-40"
+        >
+          <Settings2 className="size-3.5" strokeWidth={1.75} />
+          Настройки
+        </button>
+      </footer>
+
+      {settings && !following ? (
+        <div className="absolute inset-x-0 top-full z-20 mt-1 flex max-h-[min(70vh,28rem)] flex-col gap-2 overflow-auto rounded-md bg-paper p-3 shadow-pad ring-1 ring-paper-line">
           {engine === "files" ? (
             <p className="text-[11px] text-ink-muted">
               Папка сети задаётся в .exe (Настройки). Индекс раз в час, найденное в локальном кеше.
