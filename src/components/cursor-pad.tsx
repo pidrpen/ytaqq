@@ -34,8 +34,8 @@ type CursorPadProps = {
   onOcr: () => void;
   images: Record<string, string>;
   onImages: (next: Record<string, string>) => void;
-  engine: "wiki" | "ddg" | "yandex" | "ai";
-  onEngine: (e: "wiki" | "ddg" | "yandex" | "ai") => void;
+  engine: "wiki" | "ddg" | "yandex" | "ai" | "plm";
+  onEngine: (e: "wiki" | "ddg" | "yandex" | "ai" | "plm") => void;
   autostart: boolean;
   onAutostart: (v: boolean) => void;
   onSearch: (q: string) => void;
@@ -285,7 +285,7 @@ export function CursorPad({
           >
             <input
               name="q"
-              placeholder="рецепт пельменей"
+              placeholder={engine === "plm" ? "масло И-12А ГОСТ 20799-2022" : "рецепт пельменей"}
               className="h-8 min-w-0 flex-1 rounded-md bg-paper-dark px-2 text-xs text-ink outline-none ring-1 ring-paper-line"
             />
             <button type="submit" className="h-8 rounded-md bg-ink px-2 text-xs text-paper">
@@ -302,12 +302,13 @@ export function CursorPad({
           >
             {engine === "ai" ? "● Мини-ИИ в программе" : "Мини-ИИ в программе"}
           </button>
-          <div className="grid grid-cols-3 gap-1.5">
+          <div className="grid grid-cols-2 gap-1.5">
             {(
               [
                 ["wiki", "Вики"],
                 ["ddg", "DDG"],
                 ["yandex", "Яндекс"],
+                ["plm", "PLM"],
               ] as const
             ).map(([id, label]) => (
               <button

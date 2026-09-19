@@ -1,6 +1,6 @@
 import { miniAiAsk } from "@/lib/mini-ai";
 
-export type SearchEngine = "wiki" | "ddg" | "yandex" | "ai";
+export type SearchEngine = "wiki" | "ddg" | "yandex" | "ai" | "plm";
 
 async function wikiExtract(lang: "ru" | "en", query: string): Promise<string | null> {
   const q = query.trim();
@@ -61,6 +61,17 @@ export async function lookupBrief(
 
   let text: string | null = null;
   let source = "";
+
+  if (engine === "plm") {
+    const sample =
+      "pmsz-plm:um-splmsrv[a4484722]:4450/IO.6089001";
+    return {
+      source: "PLM",
+      text:
+        `В Windows-exe: SQL к um-splmsrv (ваш запрос InfoObjects), ссылка вида\n${sample}\n\n` +
+        `Сейчас превью не ходит в вашу базу. В .exe выберите PLM, введите название — например «Масло индустриальное И-12А ГОСТ 20799-2022».`,
+    };
+  }
 
   if (engine === "ai") {
     try {

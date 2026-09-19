@@ -4,6 +4,10 @@
 #define ID_ENG_DDG 117
 #define ID_ENG_YA 118
 #define ID_ENG_AI 123
+#define ID_ENG_PLM 124
+#define ID_PLM_SERVER 125
+#define ID_PLM_DB 126
+#define ID_ANS_OPEN 127
 #define ID_AUTOSTART 119
 #define ID_ANS_COPY 120
 #define ID_ANS_NOTES 121
@@ -339,10 +343,197 @@ static BOOL ddg_summary(const wchar_t *query, wchar_t *out, int cap) {
   return ok && out[0];
 }
 
+static void like_escape(const wchar_t *in, wchar_t *out, int cap) {
+  int o = 0;
+  if (o + 1 < cap) out[o++] = L'%';
+  for (; *in && o + 4 < cap - 1; in++) {
+    wchar_t c = *in;
+    if (c == L'\\' || c == L'%' || c == L'_' || c == L'[') {
+      out[o++] = L'\\';
+    }
+    if (c == L'\'') {
+      out[o++] = L'\'';
+      out[o++] = L'\'';
+    } else {
+      out[o++] = c;
+    }
+  }
+  if (o + 1 < cap) out[o++] = L'%';
+  out[o] = 0;
+}
+
+static void odbc_err(SQLHANDLE h, SQLSMALLINT ht, wchar_t *out, int cap) {
+  SQLWCHAR st[8] = {0}, msg[256] = {0};
+  SQLINTEGER native = 0;
+  SQLSMALLINT n = 0;
+  if (SQLGetDiagRecW(ht, h, 1, st, &native, msg, 255, &n) != SQL_SUCCESS) {
+    lstrcpynW(out, L"ошибка ODBC", cap);
+    return;
+  }
+  _snwprintf(out, cap, L"%s %s", st, msg);
+}
+
+static BOOL plm_connect(SQLHENV *env, SQLHDBC *dbc, wchar_t *err, int ecap) {
+  *env = SQL_NULL_HENV;
+  *dbc = SQL_NULL_HDBC;
+  if (SQLAllocHandle(SQL_HANDLE_ENV, SQL_NULL_HANDLE, env) != SQL_SUCCESS) {
+    lstrcpynW(err, L"ODBC недоступен", ecap);
+    return FALSE;
+  }
+  SQLSetEnvAttr(*env, SQL_ATTR_ODBC_VERSION, (SQLPOINTER)SQL_OV_ODBC3, 0);
+  if (SQLAllocHandle(SQL_HANDLE_DBC, *env, dbc) != SQL_SUCCESS) {
+    lstrcpynW(err, L"нет соединения ODBC", ecap);
+    SQLFreeHandle(SQL_HANDLE_ENV, *env);
+    *env = SQL_NULL_HENV;
+    return FALSE;
+  }
+  SQLSetConnectAttr(*dbc, SQL_LOGIN_TIMEOUT, (SQLPOINTER)8, 0);
+  const wchar_t *drivers[] = {
+      L"SQL Server", L"ODBC Driver 17 for SQL Server", L"ODBC Driver 18 for SQL Server",
+      NULL};
+  wchar_t conn[640], outc[640];
+  SQLSMALLINT outn = 0;
+  for (int i = 0; drivers[i]; i++) {
+    if (g_plmDatabase[0])
+      _snwprintf(conn, 640,
+                 L"DRIVER={%s};SERVER=%s;DATABASE=%s;Trusted_Connection=Yes;",
+                 drivers[i], g_plmHost, g_plmDatabase);
+    else
+      _snwprintf(conn, 640, L"DRIVER={%s};SERVER=%s;Trusted_Connection=Yes;",
+                 drivers[i], g_plmHost);
+    SQLRETURN r = SQLDriverConnectW(*dbc, NULL, (SQLWCHAR *)conn, SQL_NTS,
+                                    (SQLWCHAR *)outc, 640, &outn, SQL_DRIVER_NOPROMPT);
+    if (SQL_SUCCEEDED(r)) return TRUE;
+  }
+  odbc_err(*dbc, SQL_HANDLE_DBC, err, ecap);
+  SQLFreeHandle(SQL_HANDLE_DBC, *dbc);
+  SQLFreeHandle(SQL_HANDLE_ENV, *env);
+  *dbc = SQL_NULL_HDBC;
+  *env = SQL_NULL_HENV;
+  return FALSE;
+}
+
+static BOOL plm_lookup(const wchar_t *query, wchar_t *out, int cap) {
+  g_plmLastLink[0] = 0;
+  wchar_t pat[420];
+  like_escape(query, pat, 420);
+  wchar_t sql[3500];
+  _snwprintf(
+      sql, 3500,
+      L"WITH Owners AS ("
+      L"SELECT o1.InfoObjectId AS OwnerId FROM InfoObjects AS o1 WITH(NOLOCK) "
+      L"WHERE o1.Erased=0 AND o1.TemplateId IN (432,25)) "
+      L"SELECT TOP 20 o0.InfoObjectId FROM InfoObjects AS o0 WITH(NOLOCK) "
+      L"WHERE o0.Erased=0 AND ("
+      L"o0.TemplateId IN (1767) OR o0.TemplateId IN (20,39) OR ("
+      L"o0.TemplateId IN (633) AND ("
+      L"o0.ParentId IN (SELECT DISTINCT a1.OwnerId FROM InfoObjectAttributes a1 WITH(NOLOCK) "
+      L"WHERE a1.DataType=22 AND a1.Outdated=0 AND a1.CollectionElementId IS NULL "
+      L"AND a1.NameKeyId=585 AND a1.OwnerId IN (SELECT OwnerId FROM Owners) AND a1.Link IN (515)) "
+      L"OR o0.ParentId IN (SELECT DISTINCT a1.OwnerId FROM InfoObjectAttributes a1 WITH(NOLOCK) "
+      L"WHERE a1.DataType=22 AND a1.Outdated=0 AND a1.CollectionElementId IS NULL "
+      L"AND a1.NameKeyId=585 AND a1.OwnerId IN (SELECT OwnerId FROM Owners) AND a1.Link IN (244))"
+      L"))) AND o0.Name LIKE N'%s' ESCAPE '\\' COLLATE Cyrillic_General_CI_AS "
+      L"OPTION(MAXDOP 0)",
+      pat);
+
+  SQLHENV env = SQL_NULL_HENV;
+  SQLHDBC dbc = SQL_NULL_HDBC;
+  wchar_t err[280];
+  if (!plm_connect(&env, &dbc, err, 280)) {
+    _snwprintf(out, cap,
+               L"PLM\r\n\r\nНе удалось подключиться к %s.\r\n%s\r\n\r\n"
+               L"Нужен Windows-вход и ODBC SQL Server. Базу укажите в Настройках.",
+               g_plmHost, err);
+    return FALSE;
+  }
+  SQLHSTMT st = SQL_NULL_HSTMT;
+  SQLAllocHandle(SQL_HANDLE_STMT, dbc, &st);
+  SQLRETURN r = SQLExecDirectW(st, (SQLWCHAR *)sql, SQL_NTS);
+  if (!SQL_SUCCEEDED(r)) {
+    odbc_err(st, SQL_HANDLE_STMT, err, 280);
+    _snwprintf(out, cap, L"PLM\r\n\r\nЗапрос не выполнился.\r\n%s", err);
+    SQLFreeHandle(SQL_HANDLE_STMT, st);
+    SQLDisconnect(dbc);
+    SQLFreeHandle(SQL_HANDLE_DBC, dbc);
+    SQLFreeHandle(SQL_HANDLE_ENV, env);
+    return FALSE;
+  }
+  SQLINTEGER id = 0;
+  SQLLEN ind = 0;
+  SQLBindCol(st, 1, SQL_C_SLONG, &id, sizeof(id), &ind);
+  wchar_t user[64] = {0};
+  DWORD un = 63;
+  if (!GetUserNameW(user, &un) || !user[0]) lstrcpynW(user, L"user", 64);
+  int n = 0;
+  wchar_t links[1800] = {0};
+  while (SQLFetch(st) == SQL_SUCCESS && n < 20) {
+    wchar_t one[220];
+    _snwprintf(one, 220, L"pmsz-plm:%s[%s]:%s/IO.%ld", g_plmHost, user, g_plmPort, (long)id);
+    if (!g_plmLastLink[0]) lstrcpynW(g_plmLastLink, one, 420);
+    if (n) wcscat(links, L"\r\n");
+    if ((int)(wcslen(links) + wcslen(one) + 8) < 1800) wcscat(links, one);
+    n++;
+  }
+  SQLFreeHandle(SQL_HANDLE_STMT, st);
+  SQLDisconnect(dbc);
+  SQLFreeHandle(SQL_HANDLE_DBC, dbc);
+  SQLFreeHandle(SQL_HANDLE_ENV, env);
+  if (n == 0) {
+    _snwprintf(out, cap, L"PLM\r\n\r\nНичего не найдено по «%.120s».", query);
+    return FALSE;
+  }
+  _snwprintf(out, cap, L"PLM · %d\r\n\r\n%s", n, links);
+  if (g_plmLastLink[0]) ShellExecuteW(NULL, L"open", g_plmLastLink, NULL, NULL, SW_SHOWNORMAL);
+  return TRUE;
+}
+
+static void load_plm_pref(void) {
+  wchar_t path[MAX_PATH];
+  if (!g_dataDir[0]) return;
+  _snwprintf(path, MAX_PATH, L"%s\\plm.txt", g_dataDir);
+  HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
+                         FILE_ATTRIBUTE_NORMAL, NULL);
+  if (h == INVALID_HANDLE_VALUE) return;
+  char buf[400];
+  DWORD n = 0;
+  ReadFile(h, buf, 399, &n, NULL);
+  CloseHandle(h);
+  buf[n] = 0;
+  char host[96] = {0}, port[16] = {0}, db[96] = {0};
+  sscanf(buf, "%95s %15s %95s", host, port, db);
+  if (host[0]) MultiByteToWideChar(CP_UTF8, 0, host, -1, g_plmHost, 96);
+  if (port[0]) MultiByteToWideChar(CP_UTF8, 0, port, -1, g_plmPort, 16);
+  if (db[0] && db[0] != '-') MultiByteToWideChar(CP_UTF8, 0, db, -1, g_plmDatabase, 96);
+}
+
+static void save_plm_pref(void) {
+  if (g_plmServer) GetWindowTextW(g_plmServer, g_plmHost, 96);
+  if (g_plmDb) GetWindowTextW(g_plmDb, g_plmDatabase, 96);
+  wchar_t path[MAX_PATH];
+  if (!g_dataDir[0]) return;
+  _snwprintf(path, MAX_PATH, L"%s\\plm.txt", g_dataDir);
+  char host[96], port[16], db[96];
+  WideCharToMultiByte(CP_UTF8, 0, g_plmHost, -1, host, 96, NULL, NULL);
+  WideCharToMultiByte(CP_UTF8, 0, g_plmPort, -1, port, 16, NULL, NULL);
+  WideCharToMultiByte(CP_UTF8, 0, g_plmDatabase, -1, db, 96, NULL, NULL);
+  char buf[256];
+  snprintf(buf, sizeof(buf), "%s %s %s\n", host, port[0] ? port : "4450", db[0] ? db : "-");
+  HANDLE h = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+  if (h == INVALID_HANDLE_VALUE) return;
+  DWORD w = 0;
+  WriteFile(h, buf, (DWORD)strlen(buf), &w, NULL);
+  CloseHandle(h);
+}
+
 static void compose_answer(const wchar_t *query, wchar_t *out, int cap) {
   wchar_t a[1200] = {0};
   const wchar_t *src = L"";
-  if (g_engine == 3 || g_engine < 0 || g_engine > 2) {
+  if (g_engine == 4) {
+    plm_lookup(query, out, cap);
+    return;
+  }
+  if (g_engine == 3) {
     if (internet_ask(query, a, 1200) && a[0]) {
       _snwprintf(out, cap, L"Интернет\r\n\r\n%s", a);
       return;
@@ -404,19 +595,46 @@ static void layout_answer(void) {
   int by = rc.bottom - pad - btnH;
   if (g_answerEdit)
     MoveWindow(g_answerEdit, pad, pad, rc.right - pad * 2, by - pad - 4, TRUE);
-  int bw = (rc.right - pad * 2 - gap * 2) / 3;
+  int bw = (rc.right - pad * 2 - gap * 3) / 4;
+  HWND open = GetDlgItem(g_answer, ID_ANS_OPEN);
   HWND copy = GetDlgItem(g_answer, ID_ANS_COPY);
   HWND notes = GetDlgItem(g_answer, ID_ANS_NOTES);
   HWND cls = GetDlgItem(g_answer, ID_ANS_CLOSE);
-  if (copy) MoveWindow(copy, pad, by, bw, btnH, TRUE);
-  if (notes) MoveWindow(notes, pad + bw + gap, by, bw, btnH, TRUE);
-  if (cls) MoveWindow(cls, pad + (bw + gap) * 2, by, bw, btnH, TRUE);
+  if (open) MoveWindow(open, pad, by, bw, btnH, TRUE);
+  if (copy) MoveWindow(copy, pad + bw + gap, by, bw, btnH, TRUE);
+  if (notes) MoveWindow(notes, pad + (bw + gap) * 2, by, bw, btnH, TRUE);
+  if (cls) MoveWindow(cls, pad + (bw + gap) * 3, by, bw, btnH, TRUE);
 }
 
 static LRESULT CALLBACK AnswerProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
   switch (msg) {
   case WM_COMMAND:
     if (LOWORD(wParam) == ID_ANS_CLOSE) ShowWindow(hwnd, SW_HIDE);
+    if (LOWORD(wParam) == ID_ANS_OPEN) {
+      wchar_t link[420] = {0};
+      if (g_plmLastLink[0]) lstrcpynW(link, g_plmLastLink, 420);
+      else if (g_answerEdit) {
+        int len = GetWindowTextLengthW(g_answerEdit);
+        wchar_t *w = (wchar_t *)malloc((len + 1) * sizeof(wchar_t));
+        if (w) {
+          GetWindowTextW(g_answerEdit, w, len + 1);
+          wchar_t *p = wcsstr(w, L"pmsz-plm:");
+          if (p) {
+            wchar_t *e = p;
+            while (*e && *e != L'\r' && *e != L'\n' && *e != L' ') e++;
+            *e = 0;
+            lstrcpynW(link, p, 420);
+          }
+          free(w);
+        }
+      }
+      if (link[0]) {
+        ShellExecuteW(NULL, L"open", link, NULL, NULL, SW_SHOWNORMAL);
+        show_status(L"Открываю PLM");
+      } else {
+        show_status(L"Нет ссылки PLM");
+      }
+    }
     if (LOWORD(wParam) == ID_ANS_COPY && g_answerEdit) {
       int len = GetWindowTextLengthW(g_answerEdit);
       wchar_t *w = (wchar_t *)malloc((len + 1) * sizeof(wchar_t));
@@ -466,6 +684,8 @@ static void create_answer(HWND owner) {
       0, L"EDIT", L"",
       WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL,
       0, 0, 100, 100, g_answer, NULL, NULL, NULL);
+  HWND open = CreateWindowExW(0, L"BUTTON", L"Открыть PLM", WS_CHILD | WS_VISIBLE,
+                              0, 0, 80, 24, g_answer, (HMENU)(INT_PTR)ID_ANS_OPEN, NULL, NULL);
   HWND copy = CreateWindowExW(0, L"BUTTON", L"Копировать", WS_CHILD | WS_VISIBLE,
                               0, 0, 80, 24, g_answer, (HMENU)(INT_PTR)ID_ANS_COPY, NULL, NULL);
   HWND notes = CreateWindowExW(0, L"BUTTON", L"В блокнот", WS_CHILD | WS_VISIBLE,
@@ -474,6 +694,7 @@ static void create_answer(HWND owner) {
                              0, 0, 80, 24, g_answer, (HMENU)(INT_PTR)ID_ANS_CLOSE, NULL, NULL);
   if (g_fontBody) SendMessageW(g_answerEdit, WM_SETFONT, (WPARAM)g_fontBody, TRUE);
   if (g_fontUi) {
+    SendMessageW(open, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
     SendMessageW(copy, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
     SendMessageW(notes, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
     SendMessageW(cls, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
@@ -505,7 +726,7 @@ static void start_lookup(const wchar_t *q) {
     return;
   }
   wchar_t wait[440];
-  _snwprintf(wait, 440, L"Ищу в интернете «%.80s»…", q);
+  _snwprintf(wait, 440, g_engine == 4 ? L"Ищу в PLM «%.80s»…" : L"Ищу в интернете «%.80s»…", q);
   show_answer_text(wait);
   if (InterlockedCompareExchange(&g_netBusy, 1, 0) != 0) {
     show_status(L"Поиск уже идёт");
@@ -795,6 +1016,7 @@ static void update_engine_buttons(void) {
   if (g_btnWiki) SetWindowTextW(g_btnWiki, g_engine == 0 ? L"● Вики" : L"Вики");
   if (g_btnDdg) SetWindowTextW(g_btnDdg, g_engine == 1 ? L"● DDG" : L"DDG");
   if (g_btnYa) SetWindowTextW(g_btnYa, g_engine == 2 ? L"● Яндекс" : L"Яндекс");
+  if (g_btnPlm) SetWindowTextW(g_btnPlm, g_engine == 4 ? L"● PLM" : L"PLM");
 }
 
 static BOOL ensure_single_instance(void) {

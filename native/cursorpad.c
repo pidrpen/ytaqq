@@ -11,6 +11,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <wchar.h>
+#include <sql.h>
+#include <sqlext.h>
 
 #ifndef WS_EX_NOACTIVATE
 #define WS_EX_NOACTIVATE 0x08000000L
@@ -24,6 +26,7 @@
 #pragma comment(lib, "dwmapi")
 #pragma comment(lib, "winhttp")
 #pragma comment(lib, "advapi32")
+#pragma comment(lib, "odbc32")
 
 #define ID_PIN 101
 #define ID_CLOSE 102
@@ -75,7 +78,7 @@
 #define PAD 10
 #define GUTTER 26
 #define SET_W 300
-#define SET_H 478
+#define SET_H 540
 
 static const COLORREF COL_PAPER = RGB(236, 232, 224);
 static const COLORREF COL_PAPER_DARK = RGB(226, 221, 211);
@@ -102,6 +105,9 @@ static HWND g_btnAi;
 static HWND g_btnWiki;
 static HWND g_btnDdg;
 static HWND g_btnYa;
+static HWND g_btnPlm;
+static HWND g_plmServer;
+static HWND g_plmDb;
 static HWND g_chkAuto;
 static HWND g_answer;
 static HWND g_pick;
@@ -147,7 +153,11 @@ static HCURSOR g_personCur[2];
 static int g_alphaFollow = 180;
 static int g_alphaPinned = 250;
 static BOOL g_cursorOn = FALSE;
-static int g_engine = 3; /* 0 wiki, 1 ddg, 2 yandex, 3 mini-ai in exe */
+static int g_engine = 3; /* 0 wiki, 1 ddg, 2 yandex, 3 mini-ai, 4 plm */
+static wchar_t g_plmHost[96] = L"um-splmsrv";
+static wchar_t g_plmPort[16] = L"4450";
+static wchar_t g_plmDatabase[96] = L"";
+static wchar_t g_plmLastLink[420];
 static BOOL g_autostart = FALSE;
 static void show_status(const wchar_t *text);
 static void toggle_settings(void);
@@ -371,13 +381,14 @@ static void load_cursor_pref(void) {
   else if (eng[0] == 'y') g_engine = 2;
   else if (eng[0] == 'w') g_engine = 0;
   else if (eng[0] == 'a') g_engine = 3;
+  else if (eng[0] == 'p') g_engine = 4;
   if (autoOn == 0 || autoOn == 1) g_autostart = autoOn ? TRUE : FALSE;
   else g_autostart = autostart_get();
 }
 
 static void save_cursor_pref(void) {
   const char *v = g_skin == 2 ? "k3" : (g_skin == 0 ? "system" : "k2");
-  const char *e = g_engine == 1 ? "ddg" : (g_engine == 2 ? "yandex" : (g_engine == 3 ? "ai" : "wiki"));
+  const char *e = g_engine == 1 ? "ddg" : (g_engine == 2 ? "yandex" : (g_engine == 3 ? "ai" : (g_engine == 4 ? "plm" : "wiki")));
   char buf[96];
   snprintf(buf, sizeof(buf), "%s %d %d %s %d\n", v, g_alphaFollow, g_alphaPinned, e,
            g_autostart ? 1 : 0);
@@ -600,6 +611,9 @@ static void apply_follow_state(void) {
   if (g_btnWiki) EnableWindow(g_btnWiki, !g_follow);
   if (g_btnDdg) EnableWindow(g_btnDdg, !g_follow);
   if (g_btnYa) EnableWindow(g_btnYa, !g_follow);
+  if (g_btnPlm) EnableWindow(g_btnPlm, !g_follow);
+  if (g_plmServer) EnableWindow(g_plmServer, !g_follow);
+  if (g_plmDb) EnableWindow(g_plmDb, !g_follow);
   if (g_chkAuto) EnableWindow(g_chkAuto, !g_follow);
   update_pin_label();
   if (g_follow && g_setHwnd) ShowWindow(g_setHwnd, SW_HIDE);
@@ -1190,6 +1204,11 @@ static void layout_settings(void) {
   if (g_btnWiki) MoveWindow(g_btnWiki, pad, y, third, btnH, TRUE);
   if (g_btnDdg) MoveWindow(g_btnDdg, pad + third + gap, y, third, btnH, TRUE);
   if (g_btnYa) MoveWindow(g_btnYa, pad + (third + gap) * 2, y, third, btnH, TRUE);
+  y += btnH + gap;
+  if (g_btnPlm) MoveWindow(g_btnPlm, pad, y, cw - pad, btnH, TRUE);
+  y += btnH + gap;
+  if (g_plmServer) MoveWindow(g_plmServer, pad, y, half, btnH, TRUE);
+  if (g_plmDb) MoveWindow(g_plmDb, pad + half + gap, y, half, btnH, TRUE);
   y += btnH + gap + 8;
   if (g_btnK2) MoveWindow(g_btnK2, pad, y, half, btnH, TRUE);
   if (g_btnK3) MoveWindow(g_btnK3, pad + half + gap, y, half, btnH, TRUE);
@@ -1238,7 +1257,10 @@ static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
     if (LOWORD(wParam) == ID_CUR_K3) set_skin(2);
     if (LOWORD(wParam) == ID_SYS_CUR) set_skin(0);
     if (LOWORD(wParam) == ID_OCR) run_ocr_test();
-    if (LOWORD(wParam) == ID_SEARCH_GO) search_clipboard_or_edit();
+    if (LOWORD(wParam) == ID_SEARCH_GO) {
+      save_plm_pref();
+      search_clipboard_or_edit();
+    }
     if (LOWORD(wParam) == ID_ENG_AI) {
       g_engine = 3;
       save_cursor_pref();
@@ -1256,6 +1278,11 @@ static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
     }
     if (LOWORD(wParam) == ID_ENG_YA) {
       g_engine = 2;
+      save_cursor_pref();
+      update_engine_buttons();
+    }
+    if (LOWORD(wParam) == ID_ENG_PLM) {
+      g_engine = 4;
       save_cursor_pref();
       update_engine_buttons();
     }
@@ -1325,6 +1352,14 @@ static void create_settings(HWND owner) {
                              0, 0, 80, 26, g_setHwnd, (HMENU)(INT_PTR)ID_ENG_DDG, NULL, NULL);
   g_btnYa = CreateWindowExW(0, L"BUTTON", L"Яндекс", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                             0, 0, 80, 26, g_setHwnd, (HMENU)(INT_PTR)ID_ENG_YA, NULL, NULL);
+  g_btnPlm = CreateWindowExW(0, L"BUTTON", L"PLM", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                             0, 0, 80, 26, g_setHwnd, (HMENU)(INT_PTR)ID_ENG_PLM, NULL, NULL);
+  g_plmServer = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", g_plmHost,
+                                WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+                                0, 0, 120, 26, g_setHwnd, (HMENU)(INT_PTR)ID_PLM_SERVER, NULL, NULL);
+  g_plmDb = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", g_plmDatabase[0] ? g_plmDatabase : L"",
+                            WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+                            0, 0, 120, 26, g_setHwnd, (HMENU)(INT_PTR)ID_PLM_DB, NULL, NULL);
   g_btnK2 = CreateWindowExW(0, L"BUTTON", L"Мечник", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                             0, 0, 120, 28, g_setHwnd, (HMENU)(INT_PTR)ID_CUR_K2, NULL, NULL);
   g_btnK3 = CreateWindowExW(0, L"BUTTON", L"Рукавица", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
@@ -1357,6 +1392,11 @@ static void create_settings(HWND owner) {
   if (g_btnWiki) SendMessageW(g_btnWiki, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
   if (g_btnDdg) SendMessageW(g_btnDdg, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
   if (g_btnYa) SendMessageW(g_btnYa, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
+  if (g_btnPlm) SendMessageW(g_btnPlm, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
+  if (g_plmServer) SendMessageW(g_plmServer, WM_SETFONT, (WPARAM)g_fontBody, TRUE);
+  if (g_plmDb) SendMessageW(g_plmDb, WM_SETFONT, (WPARAM)g_fontBody, TRUE);
+  if (g_plmServer) SendMessageW(g_plmServer, 0x1501, TRUE, (LPARAM)L"сервер PLM");
+  if (g_plmDb) SendMessageW(g_plmDb, 0x1501, TRUE, (LPARAM)L"база SQL");
   if (g_chkAuto) SendMessageW(g_chkAuto, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
   if (g_chkAuto) SendMessageW(g_chkAuto, BM_SETCHECK, g_autostart ? BST_CHECKED : BST_UNCHECKED, 0);
   update_engine_buttons();
@@ -1403,6 +1443,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     extract_payloads();
     load_notes();
     load_cursor_pref();
+    load_plm_pref();
     if (g_autostart) autostart_set(TRUE);
     create_settings(hwnd);
     create_answer(hwnd);
