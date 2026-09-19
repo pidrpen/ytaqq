@@ -115,7 +115,6 @@ function Home() {
   const [images, setImages] = useState<Record<string, string>>({});
   const imagesRef = useRef(images);
   imagesRef.current = images;
-  const [copyChip, setCopyChip] = useState<{ text: string; x: number; y: number } | null>(null);
   const [engine, setEngine] = useState<SearchEngine>("ai");
   const [autostart, setAutostart] = useState(false);
   const [answer, setAnswer] = useState<{ title: string; body: string; x: number; y: number } | null>(null);
@@ -213,7 +212,6 @@ function Home() {
         return;
       }
       if (/^\d{4,8}$/.test(q)) return;
-      setCopyChip(null);
       const x = cursorPos.current.x;
       const y = cursorPos.current.y;
       setAnswer({ title: engine === "ai" ? "Ищу в интернете…" : "Ищу…", body: q, x, y });
@@ -287,12 +285,6 @@ function Home() {
         setPadHidden((v) => !v);
         return;
       }
-      if (e.key === "F3" || e.code === "F3") {
-        e.preventDefault();
-        const q = (copyChip?.text || window.getSelection()?.toString() || "").trim();
-        runLookup(q);
-        return;
-      }
       if (e.key === "F6" || e.code === "F6") {
         e.preventDefault();
         setPicking((v) => !v);
@@ -313,35 +305,7 @@ function Home() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [toggle, insertSnippet, copyChip, runLookup, picking]);
-
-  useEffect(() => {
-    const onCopy = () => {
-      window.setTimeout(() => {
-        void navigator.clipboard.readText().then((t) => {
-          const text = t.trim();
-          if (!text || /^\d{4,8}$/.test(text)) return;
-          setCopyChip({
-            text: text.slice(0, 180),
-            x: cursorPos.current.x,
-            y: cursorPos.current.y,
-          });
-        }).catch(() => {
-          const sel = window.getSelection()?.toString().trim();
-          if (!sel) return;
-          setCopyChip({ text: sel.slice(0, 180), x: cursorPos.current.x, y: cursorPos.current.y });
-        });
-      }, 40);
-    };
-    document.addEventListener("copy", onCopy);
-    return () => document.removeEventListener("copy", onCopy);
-  }, []);
-
-  useEffect(() => {
-    if (!copyChip) return;
-    const id = window.setTimeout(() => setCopyChip(null), 6000);
-    return () => window.clearTimeout(id);
-  }, [copyChip]);
+  }, [toggle, insertSnippet, runLookup, picking]);
 
   useEffect(() => {
     const onMove = (e: PointerEvent) => {
@@ -386,7 +350,7 @@ function Home() {
             CursorPad
           </p>
           <p className="mt-1.5 max-w-xl text-sm leading-relaxed text-muted">
-            F8 закрепить · F3 мини-ИИ в блокноте (рецепт пельменей и т.п.) · F6 рамка OCR.
+            F8 закрепить · F6 рамка OCR. Мини-ИИ — в Настройках блокнота.
           </p>
         </div>
         <div className="hidden shrink-0 items-center gap-2 sm:flex">
@@ -479,7 +443,7 @@ function Home() {
             <Fact
               icon={Keyboard}
               title="Ctrl+1…9 вставляют строку"
-              body="Непустая строка N из блокнота вставляется в активное окно. F3 — мини-ИИ внутри программы. F6 — выделить фрагмент экрана."
+              body="Непустая строка N из блокнота вставляется в активное окно. F6 — выделить фрагмент экрана."
             />
             <Fact
               icon={Shield}
@@ -528,25 +492,6 @@ function Home() {
           >
             Показать CursorPad
           </button>
-        ) : null}
-
-        {copyChip && !coarse ? (
-          <div
-            className="fixed z-50 flex items-center gap-2 rounded-md bg-paper px-2 py-1.5 shadow-pad ring-1 ring-paper-line"
-            style={{ left: copyChip.x + 16, top: copyChip.y + 18 }}
-          >
-            <p className="max-w-[9rem] truncate text-[11px] text-ink">{copyChip.text}</p>
-            <button
-              type="button"
-              className="inline-flex h-8 shrink-0 items-center rounded-md bg-ink px-2.5 text-xs font-medium text-paper"
-              onClick={() => runLookup(copyChip.text)}
-            >
-              Спросить · F3
-            </button>
-            <button type="button" className="size-8 text-ink-muted" onClick={() => setCopyChip(null)} aria-label="Закрыть">
-              ×
-            </button>
-          </div>
         ) : null}
 
         {answer && !coarse ? (

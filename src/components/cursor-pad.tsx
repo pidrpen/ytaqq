@@ -285,7 +285,7 @@ export function CursorPad({
           >
             <input
               name="q"
-              placeholder="рецепт пельменей · F3"
+              placeholder="рецепт пельменей"
               className="h-8 min-w-0 flex-1 rounded-md bg-paper-dark px-2 text-xs text-ink outline-none ring-1 ring-paper-line"
             />
             <button type="submit" className="h-8 rounded-md bg-ink px-2 text-xs text-paper">

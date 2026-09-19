@@ -504,7 +504,6 @@ static void start_lookup(const wchar_t *q) {
     show_status(L"Нечего искать — скопируйте текст");
     return;
   }
-  hide_chip();
   wchar_t wait[440];
   _snwprintf(wait, 440, L"Ищу в интернете «%.80s»…", q);
   show_answer_text(wait);
@@ -524,22 +523,6 @@ static void start_lookup(const wchar_t *q) {
     free(job);
     InterlockedExchange(&g_netBusy, 0);
   }
-}
-
-static BOOL looks_like_secret(const wchar_t *q) {
-  int n = (int)wcslen(q);
-  if (n < 2) return TRUE;
-  if (n >= 4 && n <= 8) {
-    BOOL digits = TRUE;
-    for (int i = 0; i < n; i++) {
-      if (q[i] < L'0' || q[i] > L'9') {
-        digits = FALSE;
-        break;
-      }
-    }
-    if (digits) return TRUE;
-  }
-  return FALSE;
 }
 
 static BOOL save_rect_bmp(int x, int y, int bw, int bh, const wchar_t *path) {

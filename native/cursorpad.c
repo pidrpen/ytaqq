@@ -15,9 +15,6 @@
 #ifndef WS_EX_NOACTIVATE
 #define WS_EX_NOACTIVATE 0x08000000L
 #endif
-#ifndef WM_CLIPBOARDUPDATE
-#define WM_CLIPBOARDUPDATE 0x031D
-#endif
 
 #pragma comment(lib, "user32")
 #pragma comment(lib, "gdi32")
@@ -41,19 +38,15 @@
 #define ID_SYS_CUR 111
 #define ID_SEARCH_EDIT 112
 #define ID_SEARCH_GO 113
-#define ID_CHIP_GO 114
-#define ID_CHIP_CLOSE 115
 #define TIMER_FOLLOW 1
 #define TIMER_SAVE 2
 #define TIMER_PASTE 3
 #define TIMER_STATUS 4
-#define TIMER_CHIP 7
 #define HOTKEY_TOGGLE 1
 #define HOTKEY_SNIP_BASE 10
 #define HOTKEY_CURSOR 2
 #define HOTKEY_OCR 3
 #define HOTKEY_MIN 4
-#define HOTKEY_SEARCH 5
 #define SNIP_COUNT 9
 #define CUR_FRAMES 8
 #define WM_TRAY (WM_APP + 1)
@@ -83,8 +76,6 @@
 #define GUTTER 26
 #define SET_W 300
 #define SET_H 478
-#define CHIP_W 268
-#define CHIP_H 56
 
 static const COLORREF COL_PAPER = RGB(236, 232, 224);
 static const COLORREF COL_PAPER_DARK = RGB(226, 221, 211);
@@ -107,8 +98,6 @@ static HWND g_setHwnd;
 static HWND g_btnSys;
 static HWND g_searchEdit;
 static HWND g_searchGo;
-static HWND g_chip;
-static HWND g_chipGo;
 static HWND g_btnAi;
 static HWND g_btnWiki;
 static HWND g_btnDdg;
@@ -118,8 +107,6 @@ static HWND g_answer;
 static HWND g_pick;
 static HANDLE g_mutex;
 static WNDPROC g_oldEdit;
-static BOOL g_ownClip = FALSE;
-static wchar_t g_clipQuery[400];
 static HFONT g_fontUi;
 static HFONT g_fontBody;
 static HFONT g_fontSmall;
@@ -175,7 +162,6 @@ static BOOL ensure_single_instance(void);
 static LONG WINAPI on_crash(EXCEPTION_POINTERS *ex);
 static BOOL autostart_get(void);
 static void autostart_set(BOOL on);
-static BOOL looks_like_secret(const wchar_t *q);
 static void create_answer(HWND owner);
 static void show_answer_text(const wchar_t *text);
 
@@ -681,7 +667,6 @@ static BOOL clipboard_set(const wchar_t *text) {
     return FALSE;
   }
   EmptyClipboard();
-  g_ownClip = TRUE;
   if (!SetClipboardData(CF_UNICODETEXT, mem)) {
     CloseClipboard();
     GlobalFree(mem);
@@ -721,27 +706,6 @@ static void search_web(const wchar_t *q) {
   start_lookup(q);
 }
 
-static void hide_chip(void) {
-  if (g_chip) ShowWindow(g_chip, SW_HIDE);
-  if (g_hwnd) KillTimer(g_hwnd, TIMER_CHIP);
-}
-
-static void show_copy_chip(const wchar_t *text) {
-  if (!g_chip || !text || !text[0]) return;
-  lstrcpynW(g_clipQuery, text, 400);
-  wchar_t preview[80];
-  lstrcpynW(preview, text, 72);
-  for (wchar_t *p = preview; *p; p++) {
-    if (*p == L'\r' || *p == L'\n') *p = L' ';
-  }
-  SetWindowTextW(g_chip, preview);
-  POINT pt;
-  GetCursorPos(&pt);
-  SetWindowPos(g_chip, HWND_TOPMOST, pt.x + 18, pt.y + 22, CHIP_W, CHIP_H,
-               SWP_SHOWWINDOW | SWP_NOACTIVATE);
-  SetTimer(g_hwnd, TIMER_CHIP, 6000, NULL);
-}
-
 static BOOL clipboard_text(wchar_t *out, int n) {
   if (!OpenClipboard(g_hwnd)) return FALSE;
   HANDLE h = GetClipboardData(CF_UNICODETEXT);
@@ -763,7 +727,6 @@ static void search_clipboard_or_edit(void) {
   if (g_searchEdit) {
     GetWindowTextW(g_searchEdit, q, 400);
   }
-  if (!q[0] && g_clipQuery[0]) lstrcpynW(q, g_clipQuery, 400);
   if (!q[0]) clipboard_text(q, 400);
   if (!q[0] && g_edit) {
     DWORD s = 0, e = 0;
@@ -786,59 +749,6 @@ static void search_clipboard_or_edit(void) {
     return;
   }
   search_web(q);
-  hide_chip();
-}
-
-static LRESULT CALLBACK ChipProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-  switch (msg) {
-  case WM_COMMAND:
-    if (LOWORD(wParam) == ID_CHIP_GO) {
-      search_web(g_clipQuery);
-      hide_chip();
-    }
-    if (LOWORD(wParam) == ID_CHIP_CLOSE) hide_chip();
-    return 0;
-  case WM_CLOSE:
-    hide_chip();
-    return 0;
-  }
-  return DefWindowProcW(hwnd, msg, wParam, lParam);
-}
-
-static void create_chip(HWND owner) {
-  WNDCLASSEXW wc;
-  memset(&wc, 0, sizeof(wc));
-  wc.cbSize = sizeof(wc);
-  wc.lpfnWndProc = ChipProc;
-  wc.hInstance = g_inst;
-  wc.hCursor = LoadCursorW(NULL, IDC_ARROW);
-  wc.hbrBackground = g_paperDark;
-  wc.lpszClassName = L"CursorPadChip";
-  RegisterClassExW(&wc);
-  g_chip = CreateWindowExW(
-      WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, L"CursorPadChip",
-      L"", WS_POPUP | WS_CLIPCHILDREN, 0, 0, CHIP_W, CHIP_H, owner, NULL, g_inst, NULL);
-  g_chipGo = CreateWindowExW(0, L"BUTTON", L"Спросить · F3",
-                             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 8, 12, 168, 32,
-                             g_chip, (HMENU)(INT_PTR)ID_CHIP_GO, NULL, NULL);
-  HWND x = CreateWindowExW(0, L"BUTTON", L"×", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                           CHIP_W - 40, 12, 28, 32, g_chip, (HMENU)(INT_PTR)ID_CHIP_CLOSE,
-                           NULL, NULL);
-  if (g_fontUi) {
-    SendMessageW(g_chipGo, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
-    SendMessageW(x, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
-  }
-}
-
-static void on_clipboard_copy(void) {
-  if (g_ownClip) {
-    g_ownClip = FALSE;
-    return;
-  }
-  wchar_t q[400] = {0};
-  if (!clipboard_text(q, 400)) return;
-  if (looks_like_secret(q)) return;
-  show_copy_chip(q);
 }
 
 static int parse_img_id(const wchar_t *line) {
@@ -935,7 +845,6 @@ static BOOL clipboard_set_image(int id) {
     return FALSE;
   }
   EmptyClipboard();
-  g_ownClip = TRUE;
   if (!SetClipboardData(CF_DIB, mem)) {
     CloseClipboard();
     GlobalFree(mem);
@@ -1048,7 +957,6 @@ static void show_status(const wchar_t *text) {
 static void hide_to_tray(void) {
   g_hidden = TRUE;
   if (g_setHwnd) ShowWindow(g_setHwnd, SW_HIDE);
-  hide_chip();
   ShowWindow(g_hwnd, SW_HIDE);
   show_status(L"Свёрнуто · F9");
 }
@@ -1497,7 +1405,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     load_cursor_pref();
     if (g_autostart) autostart_set(TRUE);
     create_settings(hwnd);
-    create_chip(hwnd);
     create_answer(hwnd);
     SendMessageW(g_tbBg, TBM_SETPOS, TRUE, g_alphaFollow);
     SendMessageW(g_tbFg, TBM_SETPOS, TRUE, g_alphaPinned);
@@ -1517,10 +1424,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     RegisterHotKey(hwnd, HOTKEY_CURSOR, MOD_NOREPEAT, VK_F7);
     RegisterHotKey(hwnd, HOTKEY_OCR, MOD_NOREPEAT, VK_F6);
     RegisterHotKey(hwnd, HOTKEY_MIN, MOD_NOREPEAT, VK_F9);
-    RegisterHotKey(hwnd, HOTKEY_SEARCH, MOD_NOREPEAT, VK_F3);
     register_snip_hotkeys(hwnd);
     add_tray(hwnd);
-    AddClipboardFormatListener(hwnd);
     apply_follow_state();
     if (g_skin != 0) install_scheme_cursors();
     return 0;
@@ -1591,7 +1496,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     else if (wParam == HOTKEY_CURSOR) cycle_skin();
     else if (wParam == HOTKEY_OCR) run_ocr_test();
     else if (wParam == HOTKEY_MIN) toggle_hidden();
-    else if (wParam == HOTKEY_SEARCH) search_clipboard_or_edit();
     else if (wParam >= HOTKEY_SNIP_BASE && wParam < HOTKEY_SNIP_BASE + SNIP_COUNT)
       paste_line((int)(wParam - HOTKEY_SNIP_BASE + 1));
     return 0;
@@ -1625,7 +1529,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
       KillTimer(hwnd, TIMER_PASTE);
       send_paste();
     }
-    if (wParam == TIMER_CHIP) hide_chip();
     if (wParam == TIMER_CURSOR_KEEP && g_skin > 0) apply_scheme_slots();
     return 0;
   case WM_SEARCH_DONE: {
@@ -1655,9 +1558,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
   case WM_SETTINGCHANGE:
   case WM_DISPLAYCHANGE:
     if (g_skin > 0) apply_scheme_slots();
-    return 0;
-  case WM_CLIPBOARDUPDATE:
-    on_clipboard_copy();
     return 0;
   case WM_NCHITTEST: {
     LRESULT hit = DefWindowProcW(hwnd, msg, wParam, lParam);
@@ -1703,9 +1603,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     UnregisterHotKey(hwnd, HOTKEY_CURSOR);
     UnregisterHotKey(hwnd, HOTKEY_OCR);
     UnregisterHotKey(hwnd, HOTKEY_MIN);
-    UnregisterHotKey(hwnd, HOTKEY_SEARCH);
-    RemoveClipboardFormatListener(hwnd);
-    if (g_chip) DestroyWindow(g_chip);
     unregister_snip_hotkeys(hwnd);
     if (g_trayAdded) Shell_NotifyIconW(NIM_DELETE, &g_nid);
     free_cursor_frames();
