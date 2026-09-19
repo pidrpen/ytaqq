@@ -26,6 +26,7 @@
 
 #include <wctype.h>
 #include "files.c"
+#include "update.c"
 
 static HWND g_answerEdit;
 static BOOL g_picking = FALSE;

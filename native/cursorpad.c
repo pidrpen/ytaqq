@@ -90,7 +90,7 @@
 #define PAD 10
 #define GUTTER 26
 #define SET_W 300
-#define SET_H 670
+#define SET_H 708
 
 static const COLORREF COL_PAPER = RGB(236, 232, 224);
 static const COLORREF COL_PAPER_DARK = RGB(226, 221, 211);
@@ -107,6 +107,7 @@ static HWND g_btnK2;
 static HWND g_btnK3;
 static HWND g_min;
 static HWND g_ocr;
+static HWND g_btnUp;
 static HWND g_tbBg;
 static HWND g_tbFg;
 static HWND g_btnSet;
@@ -636,6 +637,7 @@ static void apply_follow_state(void) {
   EnableWindow(g_min, !g_follow);
   EnableWindow(g_btnSet, !g_follow);
   if (g_ocr) EnableWindow(g_ocr, !g_follow);
+  if (g_btnUp) EnableWindow(g_btnUp, !g_follow);
   if (g_btnK2) EnableWindow(g_btnK2, !g_follow);
   if (g_btnK3) EnableWindow(g_btnK3, !g_follow);
   if (g_tbBg) EnableWindow(g_tbBg, !g_follow);
@@ -1202,6 +1204,7 @@ static void tray_menu(HWND hwnd) {
   AppendMenuW(menu, MF_STRING, 14, g_hidden ? L"Показать окно (F9)" : L"Свернуть (F9)");
   AppendMenuW(menu, MF_STRING, 16, L"Настройки");
   AppendMenuW(menu, MF_STRING, 15, L"Выделить и прочитать (F6)");
+  AppendMenuW(menu, MF_STRING, 17, L"Обновить с GitHub");
   AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
   AppendMenuW(menu, MF_STRING | (g_skin == 1 ? MF_CHECKED : 0), 10, L"Курсор: Мечник");
   AppendMenuW(menu, MF_STRING | (g_skin == 2 ? MF_CHECKED : 0), 11, L"Курсор: Рукавица");
@@ -1228,6 +1231,7 @@ static void tray_menu(HWND hwnd) {
     if (g_hidden) restore_from_tray();
     else hide_to_tray();
   } else if (cmd == 15) run_ocr_test();
+  else if (cmd == 17) start_update();
   else if (cmd == 16) {
     if (g_follow) toggle_follow();
     toggle_settings();
@@ -1299,6 +1303,8 @@ static void layout_settings(void) {
   if (g_tbFg) MoveWindow(g_tbFg, pad, y, cw - pad, btnH, TRUE);
   y += btnH + 18;
   if (g_ocr) MoveWindow(g_ocr, pad, y, cw - pad, btnH, TRUE);
+  y += btnH + gap;
+  if (g_btnUp) MoveWindow(g_btnUp, pad, y, cw - pad, btnH, TRUE);
 }
 
 static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -1334,6 +1340,7 @@ static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
     if (LOWORD(wParam) == ID_CUR_K3) set_skin(2);
     if (LOWORD(wParam) == ID_SYS_CUR) set_skin(0);
     if (LOWORD(wParam) == ID_OCR) run_ocr_test();
+    if (LOWORD(wParam) == ID_UPDATE) start_update();
     if (LOWORD(wParam) == ID_SEARCH_GO) {
       save_plm_pref();
       save_files_pref();
@@ -1470,6 +1477,9 @@ static void create_settings(HWND owner) {
   g_ocr = CreateWindowExW(0, L"BUTTON", L"Выделить и прочитать (F6)",
                           WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 200, 28, g_setHwnd,
                           (HMENU)(INT_PTR)ID_OCR, NULL, NULL);
+  g_btnUp = CreateWindowExW(0, L"BUTTON", L"Обновить с GitHub",
+                            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 200, 28, g_setHwnd,
+                            (HMENU)(INT_PTR)ID_UPDATE, NULL, NULL);
   g_tbBg = CreateWindowExW(0, TRACKBAR_CLASSW, L"", WS_CHILD | WS_VISIBLE | TBS_NOTICKS | TBS_TOOLTIPS,
                            0, 0, 120, 28, g_setHwnd, (HMENU)(INT_PTR)ID_ALPHA_BG, NULL, NULL);
   g_tbFg = CreateWindowExW(0, TRACKBAR_CLASSW, L"", WS_CHILD | WS_VISIBLE | TBS_NOTICKS | TBS_TOOLTIPS,
@@ -1484,6 +1494,7 @@ static void create_settings(HWND owner) {
   SendMessageW(g_btnK3, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
   SendMessageW(g_btnSys, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
   SendMessageW(g_ocr, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
+  if (g_btnUp) SendMessageW(g_btnUp, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
   SendMessageW(g_searchEdit, WM_SETFONT, (WPARAM)g_fontBody, TRUE);
   SendMessageW(g_searchGo, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
   if (g_btnAi) SendMessageW(g_btnAi, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
@@ -1712,6 +1723,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
       show_status(L"Индекс файлов обновлён");
     else
       show_status(L"Папка сети недоступна или пуста");
+    return 0;
+  case WM_UPDATE_DONE:
+    on_update_done((int)wParam);
     return 0;
   case WM_OCR_DONE: {
     wchar_t *text = (wchar_t *)lParam;

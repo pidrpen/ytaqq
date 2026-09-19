@@ -25,6 +25,7 @@ with zipfile.ZipFile(root / "CursorPad.zip", "w", zipfile.ZIP_DEFLATED) as z:
         z.write(p, f"cursors/{p.name}")
 print("wrote", root / "CursorPad.zip")
 PY
+cp -f version.txt /workspace/public/version.txt
 cp -f /workspace/public/CursorPad.exe /workspace/artifacts/CursorPad.exe
 cp -f /workspace/public/CursorPad.zip /workspace/artifacts/CursorPad.zip
 ls -lh /workspace/public/CursorPad.exe /workspace/public/CursorPad.zip
