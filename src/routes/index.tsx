@@ -20,6 +20,7 @@ const HINT_KEY = "cursorpad.hintDismissed";
 const CURSOR_KEY = "cursorpad.main";
 const ENGINE_KEY = "cursorpad.engine.v2";
 const AUTO_KEY = "cursorpad.autostart";
+const THEME_KEY = "cursorpad.theme";
 const HOTKEY = "F8";
 
 const DEFAULT_NOTES =
@@ -118,6 +119,7 @@ function Home() {
   const [engine, setEngine] = useState<SearchEngine>("ai");
   const [clipBuf, setClipBuf] = useState("");
   const [autostart, setAutostart] = useState(false);
+  const [theme, setTheme] = useState(0);
   const [answer, setAnswer] = useState<{ title: string; body: string; x: number; y: number } | null>(null);
   const [picking, setPicking] = useState(false);
   const [pick, setPick] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
@@ -132,6 +134,8 @@ function Home() {
     const eng = readStore(ENGINE_KEY, "ai");
     if (eng === "ddg" || eng === "yandex" || eng === "wiki" || eng === "ai" || eng === "plm" || eng === "files") setEngine(eng);
     setAutostart(readStore(AUTO_KEY, "0") === "1");
+    const th = Number(readStore(THEME_KEY, "0"));
+    if (th >= 0 && th <= 3) setTheme(th);
     const mq = window.matchMedia("(pointer: coarse)");
     setCoarse(mq.matches);
     if (mq.matches) setFollowing(false);
@@ -505,6 +509,15 @@ function Home() {
             onSearch={runLookup}
             clipBuf={clipBuf}
             onClipBuf={setClipBuf}
+            theme={theme}
+            onTheme={(n) => {
+              setTheme(n);
+              try {
+                localStorage.setItem(THEME_KEY, String(n));
+              } catch {
+                /* ignore */
+              }
+            }}
             onOcr={() => {
               setPicking(true);
               setPick(null);

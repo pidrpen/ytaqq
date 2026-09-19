@@ -90,13 +90,27 @@
 #define PAD 10
 #define GUTTER 26
 #define SET_W 300
-#define SET_H 708
+#define SET_H 742
+#define ID_THEME_BASE 140
+#define THEME_COUNT 4
 
-static const COLORREF COL_PAPER = RGB(236, 232, 224);
-static const COLORREF COL_PAPER_DARK = RGB(226, 221, 211);
-static const COLORREF COL_INK = RGB(26, 25, 22);
-static const COLORREF COL_MUTED = RGB(92, 88, 82);
-static const COLORREF COL_SAGE = RGB(92, 107, 98);
+static COLORREF COL_PAPER = RGB(236, 232, 224);
+static COLORREF COL_PAPER_DARK = RGB(226, 221, 211);
+static COLORREF COL_INK = RGB(26, 25, 22);
+static COLORREF COL_MUTED = RGB(92, 88, 82);
+static COLORREF COL_SAGE = RGB(92, 107, 98);
+
+typedef struct {
+  COLORREF paper, dark, ink, muted, sage;
+  const wchar_t *name;
+} PadTheme;
+
+static const PadTheme kThemes[THEME_COUNT] = {
+    {RGB(236, 232, 224), RGB(226, 221, 211), RGB(26, 25, 22), RGB(92, 88, 82), RGB(92, 107, 98), L"Пергамент"},
+    {RGB(32, 32, 34), RGB(20, 20, 22), RGB(236, 232, 224), RGB(160, 156, 150), RGB(140, 168, 156), L"Ночь"},
+    {RGB(230, 236, 226), RGB(206, 220, 206), RGB(28, 44, 32), RGB(78, 102, 86), RGB(56, 112, 78), L"Шалфей"},
+    {RGB(222, 232, 242), RGB(200, 216, 232), RGB(20, 32, 48), RGB(70, 90, 112), RGB(48, 92, 148), L"Сталь"},
+};
 
 static HWND g_hwnd;
 static HWND g_edit;
@@ -108,6 +122,8 @@ static HWND g_btnK3;
 static HWND g_min;
 static HWND g_ocr;
 static HWND g_btnUp;
+static HWND g_btnTheme[4];
+static int g_theme = 0;
 static HWND g_tbBg;
 static HWND g_tbFg;
 static HWND g_btnSet;
@@ -190,6 +206,7 @@ static int g_plmCount = 0;
 static BOOL g_autostart = FALSE;
 static void show_status(const wchar_t *text);
 static void toggle_settings(void);
+static void save_cursor_pref(void);
 static void set_skin(int skin);
 static void start_lookup(const wchar_t *q);
 static BOOL clipboard_text(wchar_t *out, int n);
@@ -383,6 +400,50 @@ static void install_scheme_cursors(void) {
   apply_scheme_slots();
 }
 
+static void update_theme_buttons(void) {
+  for (int i = 0; i < THEME_COUNT; i++) {
+    if (!g_btnTheme[i]) continue;
+    wchar_t t[40];
+    _snwprintf(t, 40, L"%s%s", g_theme == i ? L"● " : L"", kThemes[i].name);
+    SetWindowTextW(g_btnTheme[i], t);
+  }
+}
+
+static void apply_theme(void) {
+  if (g_theme < 0 || g_theme >= THEME_COUNT) g_theme = 0;
+  COL_PAPER = kThemes[g_theme].paper;
+  COL_PAPER_DARK = kThemes[g_theme].dark;
+  COL_INK = kThemes[g_theme].ink;
+  COL_MUTED = kThemes[g_theme].muted;
+  COL_SAGE = kThemes[g_theme].sage;
+  if (g_paper) DeleteObject(g_paper);
+  if (g_paperDark) DeleteObject(g_paperDark);
+  g_paper = CreateSolidBrush(COL_PAPER);
+  g_paperDark = CreateSolidBrush(COL_PAPER_DARK);
+  if (g_hwnd) {
+    SetClassLongPtrW(g_hwnd, GCLP_HBRBACKGROUND, (LONG_PTR)g_paper);
+    InvalidateRect(g_hwnd, NULL, TRUE);
+  }
+  if (g_setHwnd) {
+    SetClassLongPtrW(g_setHwnd, GCLP_HBRBACKGROUND, (LONG_PTR)g_paperDark);
+    InvalidateRect(g_setHwnd, NULL, TRUE);
+  }
+  if (g_answer) {
+    SetClassLongPtrW(g_answer, GCLP_HBRBACKGROUND, (LONG_PTR)g_paper);
+    InvalidateRect(g_answer, NULL, TRUE);
+  }
+  if (g_edit) InvalidateRect(g_edit, NULL, TRUE);
+  if (g_clipEdit) InvalidateRect(g_clipEdit, NULL, TRUE);
+  update_theme_buttons();
+}
+
+static void set_theme(int t) {
+  if (t < 0 || t >= THEME_COUNT) return;
+  g_theme = t;
+  apply_theme();
+  save_cursor_pref();
+}
+
 static void apply_alpha_now(void) {
   int a = g_follow ? g_alphaFollow : g_alphaPinned;
   if (a < 40) a = 40;
@@ -401,8 +462,8 @@ static void load_cursor_pref(void) {
   buf[n] = 0;
   char skin[16] = {0};
   char eng[16] = {0};
-  int bg = g_alphaFollow, fg = g_alphaPinned, autoOn = -1;
-  sscanf(buf, "%15s %d %d %15s %d", skin, &bg, &fg, eng, &autoOn);
+  int bg = g_alphaFollow, fg = g_alphaPinned, autoOn = -1, theme = 0;
+  sscanf(buf, "%15s %d %d %15s %d %d", skin, &bg, &fg, eng, &autoOn, &theme);
   if (skin[0] == 'k' && skin[1] == '3') g_skin = 2;
   else if (skin[0] == 's') g_skin = 0;
   else g_skin = 1;
@@ -416,14 +477,15 @@ static void load_cursor_pref(void) {
   else if (eng[0] == 'f') g_engine = 5;
   if (autoOn == 0 || autoOn == 1) g_autostart = autoOn ? TRUE : FALSE;
   else g_autostart = autostart_get();
+  if (theme >= 0 && theme < THEME_COUNT) g_theme = theme;
 }
 
 static void save_cursor_pref(void) {
   const char *v = g_skin == 2 ? "k3" : (g_skin == 0 ? "system" : "k2");
   const char *e = g_engine == 1 ? "ddg" : (g_engine == 2 ? "yandex" : (g_engine == 3 ? "ai" : (g_engine == 4 ? "plm" : (g_engine == 5 ? "files" : "wiki"))));
   char buf[96];
-  snprintf(buf, sizeof(buf), "%s %d %d %s %d\n", v, g_alphaFollow, g_alphaPinned, e,
-           g_autostart ? 1 : 0);
+  snprintf(buf, sizeof(buf), "%s %d %d %s %d %d\n", v, g_alphaFollow, g_alphaPinned, e,
+           g_autostart ? 1 : 0, g_theme);
   HANDLE h = CreateFileW(g_prefPath, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
                          FILE_ATTRIBUTE_NORMAL, NULL);
   if (h == INVALID_HANDLE_VALUE) return;
@@ -638,6 +700,8 @@ static void apply_follow_state(void) {
   EnableWindow(g_btnSet, !g_follow);
   if (g_ocr) EnableWindow(g_ocr, !g_follow);
   if (g_btnUp) EnableWindow(g_btnUp, !g_follow);
+  for (int i = 0; i < THEME_COUNT; i++)
+    if (g_btnTheme[i]) EnableWindow(g_btnTheme[i], !g_follow);
   if (g_btnK2) EnableWindow(g_btnK2, !g_follow);
   if (g_btnK3) EnableWindow(g_btnK3, !g_follow);
   if (g_tbBg) EnableWindow(g_tbBg, !g_follow);
@@ -1305,6 +1369,13 @@ static void layout_settings(void) {
   if (g_ocr) MoveWindow(g_ocr, pad, y, cw - pad, btnH, TRUE);
   y += btnH + gap;
   if (g_btnUp) MoveWindow(g_btnUp, pad, y, cw - pad, btnH, TRUE);
+  y += btnH + gap;
+  {
+    int tw = (cw - pad - gap * 3) / 4;
+    for (int i = 0; i < THEME_COUNT; i++)
+      if (g_btnTheme[i])
+        MoveWindow(g_btnTheme[i], pad + i * (tw + gap), y, tw, btnH, TRUE);
+  }
 }
 
 static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -1341,6 +1412,8 @@ static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
     if (LOWORD(wParam) == ID_SYS_CUR) set_skin(0);
     if (LOWORD(wParam) == ID_OCR) run_ocr_test();
     if (LOWORD(wParam) == ID_UPDATE) start_update();
+    if (LOWORD(wParam) >= ID_THEME_BASE && LOWORD(wParam) < ID_THEME_BASE + THEME_COUNT)
+      set_theme(LOWORD(wParam) - ID_THEME_BASE);
     if (LOWORD(wParam) == ID_SEARCH_GO) {
       save_plm_pref();
       save_files_pref();
@@ -1480,6 +1553,12 @@ static void create_settings(HWND owner) {
   g_btnUp = CreateWindowExW(0, L"BUTTON", L"Обновить с GitHub",
                             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 200, 28, g_setHwnd,
                             (HMENU)(INT_PTR)ID_UPDATE, NULL, NULL);
+  for (int i = 0; i < THEME_COUNT; i++) {
+    g_btnTheme[i] = CreateWindowExW(0, L"BUTTON", kThemes[i].name,
+                                    WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 70, 26,
+                                    g_setHwnd, (HMENU)(INT_PTR)(ID_THEME_BASE + i), NULL, NULL);
+    if (g_fontSmall) SendMessageW(g_btnTheme[i], WM_SETFONT, (WPARAM)g_fontSmall, TRUE);
+  }
   g_tbBg = CreateWindowExW(0, TRACKBAR_CLASSW, L"", WS_CHILD | WS_VISIBLE | TBS_NOTICKS | TBS_TOOLTIPS,
                            0, 0, 120, 28, g_setHwnd, (HMENU)(INT_PTR)ID_ALPHA_BG, NULL, NULL);
   g_tbFg = CreateWindowExW(0, TRACKBAR_CLASSW, L"", WS_CHILD | WS_VISIBLE | TBS_NOTICKS | TBS_TOOLTIPS,
@@ -1574,6 +1653,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     if (g_autostart) autostart_set(TRUE);
     create_settings(hwnd);
     create_answer(hwnd);
+    apply_theme();
     SendMessageW(g_tbBg, TBM_SETPOS, TRUE, g_alphaFollow);
     SendMessageW(g_tbFg, TBM_SETPOS, TRUE, g_alphaPinned);
     load_cursor_frames(g_inst);

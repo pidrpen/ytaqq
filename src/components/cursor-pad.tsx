@@ -2,6 +2,12 @@ import { useEffect, useRef, useState, type MutableRefObject } from "react";
 import { Pin, MousePointer2, X, Minus, ScanText, Settings2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
+const THEMES = [
+  { id: 0, name: "Пергамент", paper: "#ece8e0", dark: "#e2ddd3", ink: "#1a1916", muted: "#5c5852", sage: "#5c6b62" },
+  { id: 1, name: "Ночь", paper: "#202022", dark: "#141416", ink: "#ece8e0", muted: "#a09c96", sage: "#8ca89c" },
+  { id: 2, name: "Шалфей", paper: "#e6ece2", dark: "#cedccd", ink: "#1c2c20", muted: "#4e6656", sage: "#38704e" },
+  { id: 3, name: "Сталь", paper: "#dee8f2", dark: "#c8d8e8", ink: "#142030", muted: "#465a70", sage: "#305c94" },
+] as const;
 const PAD_W = 300;
 const PAD_H = 228;
 const OFFSET_X = 18;
@@ -41,6 +47,8 @@ type CursorPadProps = {
   onSearch: (q: string) => void;
   clipBuf: string;
   onClipBuf: (v: string) => void;
+  theme: number;
+  onTheme: (n: number) => void;
 };
 
 export function CursorPad({
@@ -70,6 +78,8 @@ export function CursorPad({
   onSearch,
   clipBuf,
   onClipBuf,
+  theme,
+  onTheme,
 }: CursorPadProps) {
   const [settings, setSettings] = useState(false);
   const elRef = useRef<HTMLDivElement>(null);
@@ -153,6 +163,8 @@ export function CursorPad({
     }
   };
 
+  const pal = THEMES[theme] ?? THEMES[0];
+
   return (
     <div
       ref={elRef}
@@ -167,6 +179,11 @@ export function CursorPad({
       style={{
         opacity: (following ? alphaFollow : alphaPinned) / 255,
         transition: "opacity 180ms cubic-bezier(0.22, 1, 0.36, 1)",
+        ["--color-paper" as string]: pal.paper,
+        ["--color-paper-dark" as string]: pal.dark,
+        ["--color-ink" as string]: pal.ink,
+        ["--color-ink-muted" as string]: pal.muted,
+        ["--color-sage" as string]: pal.sage,
       }}
       aria-label="CursorPad"
     >
@@ -395,6 +412,21 @@ export function CursorPad({
           >
             Обновить с GitHub
           </a>
+          <div className="grid grid-cols-4 gap-1">
+            {THEMES.map((t) => (
+              <button
+                key={t.id}
+                type="button"
+                onClick={() => onTheme(t.id)}
+                className={cn(
+                  "h-7 rounded-md text-[10px] font-medium",
+                  theme === t.id ? "bg-ink text-paper" : "bg-paper-dark text-ink",
+                )}
+              >
+                {theme === t.id ? `● ${t.name}` : t.name}
+              </button>
+            ))}
+          </div>
         </div>
       ) : null}
     </div>
