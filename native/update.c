@@ -49,9 +49,6 @@ typedef struct {
 } UpdSrc;
 
 static const UpdSrc kUpdSrc[] = {
-    {L"api.github.com", L"/repos/pidrpen/ytaqq/contents/public/version.txt",
-     L"/repos/pidrpen/ytaqq/contents/public/CursorPad.exe",
-     L"Accept: application/vnd.github+json\r\nX-GitHub-Api-Version: 2022-11-28", 1, 0},
     {L"cdn.jsdelivr.net", L"/gh/pidrpen/ytaqq@main/public/version.txt",
      L"/gh/pidrpen/ytaqq@main/public/CursorPad.exe", NULL, 0, 1},
     {L"fastly.jsdelivr.net", L"/gh/pidrpen/ytaqq@main/public/version.txt",
@@ -62,6 +59,9 @@ static const UpdSrc kUpdSrc[] = {
      L"/pidrpen/ytaqq/main/public/CursorPad.exe", NULL, 0, 0},
     {L"github.com", L"/pidrpen/ytaqq/raw/main/public/version.txt",
      L"/pidrpen/ytaqq/raw/main/public/CursorPad.exe", NULL, 0, 0},
+    {L"api.github.com", L"/repos/pidrpen/ytaqq/contents/public/version.txt",
+     L"/repos/pidrpen/ytaqq/contents/public/CursorPad.exe",
+     L"Accept: application/vnd.github+json\r\nX-GitHub-Api-Version: 2022-11-28", 1, 0},
 };
 
 static void upd_fail(const wchar_t *why, DWORD err) {
@@ -100,9 +100,26 @@ static const char *json_find_string(const char *json, const char *key) {
 }
 
 static int b64_clean(const char *in, char *out, int cap) {
+  /* GitHub wraps base64 with JSON "\n" — the letter n is valid base64, so
+     we must unescape instead of copying every alphabet character. */
   int o = 0;
-  for (; *in && *in != '"'; in++) {
-    unsigned char c = (unsigned char)*in;
+  while (*in && *in != '"') {
+    unsigned char c;
+    if (*in == '\\' && in[1]) {
+      in++;
+      if (*in == 'n' || *in == 'r' || *in == 't') {
+        in++;
+        continue;
+      }
+      if (*in == 'u') {
+        in++;
+        for (int i = 0; i < 4 && *in; i++) in++;
+        continue;
+      }
+      c = (unsigned char)*in++;
+    } else {
+      c = (unsigned char)*in++;
+    }
     if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '+' ||
         c == '/' || c == '=') {
       if (o + 1 < cap) out[o++] = (char)c;
@@ -110,6 +127,24 @@ static int b64_clean(const char *in, char *out, int cap) {
   }
   if (out && cap > 0) out[o] = 0;
   return o;
+}
+
+static long json_find_int(const char *json, const char *key) {
+  char pat[72];
+  snprintf(pat, sizeof(pat), "\"%s\"", key);
+  const char *p = json;
+  while ((p = strstr(p, pat))) {
+    p += strlen(pat);
+    while (*p == ' ' || *p == '\n' || *p == '\r' || *p == '\t') p++;
+    if (*p != ':') continue;
+    p++;
+    while (*p == ' ' || *p == '\n' || *p == '\r' || *p == '\t') p++;
+    if (*p < '0' || *p > '9') return -1;
+    long v = 0;
+    while (*p >= '0' && *p <= '9') v = v * 10 + (*p++ - '0');
+    return v;
+  }
+  return -1;
 }
 
 static BOOL write_all(const wchar_t *dest, const void *p, DWORD n) {
@@ -197,6 +232,7 @@ static BOOL unwrap_github_json(const wchar_t *dest, DWORD maxn) {
     }
   }
   if (content && content[0] && content[0] != '"') {
+    long expect = json_find_int(buf, "size");
     char *clean = (char *)malloc(n + 4);
     if (!clean) {
       free(buf);
@@ -206,6 +242,17 @@ static BOOL unwrap_github_json(const wchar_t *dest, DWORD maxn) {
     free(buf);
     BOOL ok = nc >= 4 && b64_to_file(clean, nc, dest);
     free(clean);
+    if (ok && expect > 0) {
+      HANDLE hf = CreateFileW(dest, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
+                              FILE_ATTRIBUTE_NORMAL, NULL);
+      DWORD got = (hf == INVALID_HANDLE_VALUE) ? 0 : GetFileSize(hf, NULL);
+      if (hf != INVALID_HANDLE_VALUE) CloseHandle(hf);
+      if ((long)got != expect) {
+        DeleteFileW(dest);
+        upd_fail(L"GitHub API: размер файла не совпал", 0);
+        ok = FALSE;
+      }
+    }
     if (ok) return TRUE;
     if (shahex[0]) return github_blob_get(shahex, dest, maxn);
     return FALSE;
@@ -428,11 +475,31 @@ static BOOL file_is_pe(const wchar_t *path) {
   HANDLE f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
                          FILE_ATTRIBUTE_NORMAL, NULL);
   if (f == INVALID_HANDLE_VALUE) return FALSE;
-  unsigned char mz[2] = {0};
+  unsigned char buf[4096];
   DWORD r = 0;
-  ReadFile(f, mz, 2, &r, NULL);
+  ReadFile(f, buf, sizeof(buf), &r, NULL);
+  if (r < 64 || buf[0] != 'M' || buf[1] != 'Z') {
+    CloseHandle(f);
+    return FALSE;
+  }
+  DWORD peoff = (DWORD)buf[0x3C] | ((DWORD)buf[0x3D] << 8) | ((DWORD)buf[0x3E] << 16) |
+                ((DWORD)buf[0x3F] << 24);
+  unsigned char pe[26];
+  if (peoff + 26 <= r) {
+    memcpy(pe, buf + peoff, 26);
+  } else {
+    SetFilePointer(f, (LONG)peoff, NULL, FILE_BEGIN);
+    DWORD n2 = 0;
+    if (!ReadFile(f, pe, 26, &n2, NULL) || n2 < 26) {
+      CloseHandle(f);
+      return FALSE;
+    }
+  }
   CloseHandle(f);
-  return r == 2 && mz[0] == 'M' && mz[1] == 'Z';
+  if (pe[0] != 'P' || pe[1] != 'E' || pe[2] != 0 || pe[3] != 0) return FALSE;
+  WORD machine = (WORD)(pe[4] | (pe[5] << 8));
+  WORD magic = (WORD)(pe[24] | (pe[25] << 8));
+  return machine == 0x8664 && magic == 0x020B; /* AMD64 PE32+ */
 }
 
 static BOOL dir_is_writable(const wchar_t *file) {
