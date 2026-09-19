@@ -63,13 +63,12 @@ export async function lookupBrief(
   let source = "";
 
   if (engine === "plm") {
-    const sample =
-      "pmsz-plm:um-splmsrv[a4484722]:4450/IO.6089001";
+    const sample = "pmsz-plm:um-splmsrv:4450/IO.6089001";
     return {
       source: "PLM",
       text:
-        `В .exe: SQL-логин к UM-SQLSRV (не Windows). Ссылка pmsz-plm:um-splmsrv[логин]:4450/IO.{id}\n${sample}\n\n` +
-        `Укажите пользователя и пароль SQL в Настройках. Пример названия: «Масло индустриальное И-12А ГОСТ 20799-2022».`,
+        `В .exe: SQL к UM-SQLSRV. Ссылка без [Windows-логина], чтобы открыть в уже запущенном клиенте:\n${sample}\n\n` +
+        `Список находок — выбрать строку и «Открыть PLM» (или двойной клик).`,
     };
   }
 

@@ -10,6 +10,7 @@
 #define ID_PLM_USER 128
 #define ID_PLM_PASS 129
 #define ID_ANS_OPEN 127
+#define ID_ANS_LIST 130
 #define ID_AUTOSTART 119
 #define ID_ANS_COPY 120
 #define ID_ANS_NOTES 121
@@ -18,8 +19,8 @@
 #define WM_SEARCH_DONE (WM_APP + 8)
 #define WM_OCR_DONE (WM_APP + 9)
 #define WM_SHOW_PAD (WM_APP + 10)
-#define ANS_W 360
-#define ANS_H 280
+#define ANS_W 380
+#define ANS_H 340
 
 static HWND g_answerEdit;
 static BOOL g_picking = FALSE;
@@ -439,17 +440,60 @@ static BOOL plm_connect(SQLHENV *env, SQLHDBC *dbc, wchar_t *err, int ecap) {
   return FALSE;
 }
 
+static void make_plm_link(wchar_t *out, int n, long id) {
+  /* No [WindowsUser] — that broke the running client (TertsovDA).
+     Without brackets the already-open PLM session takes the object. */
+  _snwprintf(out, n, L"pmsz-plm:%s:%s/IO.%ld", g_plmHost, g_plmPort, id);
+}
+
+static void open_plm_link(const wchar_t *link) {
+  if (!link || wcsncmp(link, L"pmsz-plm:", 9) != 0) return;
+  SHELLEXECUTEINFOW sei;
+  memset(&sei, 0, sizeof(sei));
+  sei.cbSize = sizeof(sei);
+  sei.fMask = SEE_MASK_FLAG_NO_UI;
+  sei.lpVerb = L"open";
+  sei.lpFile = link;
+  sei.nShow = SW_SHOWNORMAL;
+  if (!ShellExecuteExW(&sei))
+    ShellExecuteW(NULL, L"open", link, NULL, NULL, SW_SHOWNORMAL);
+}
+
+static void fill_plm_list(void) {
+  if (!g_answerList) return;
+  SendMessageW(g_answerList, LB_RESETCONTENT, 0, 0);
+  for (int i = 0; i < g_plmCount; i++)
+    SendMessageW(g_answerList, LB_ADDSTRING, 0, (LPARAM)g_plmLabels[i]);
+  if (g_plmCount > 0) SendMessageW(g_answerList, LB_SETCURSEL, 0, 0);
+  ShowWindow(g_answerList, g_plmCount > 0 ? SW_SHOW : SW_HIDE);
+  if (g_answerEdit) ShowWindow(g_answerEdit, g_plmCount > 0 ? SW_HIDE : SW_SHOW);
+}
+
+static void open_plm_selected(void) {
+  int i = 0;
+  if (g_answerList && g_plmCount > 0)
+    i = (int)SendMessageW(g_answerList, LB_GETCURSEL, 0, 0);
+  if (i < 0 || i >= g_plmCount) {
+    show_status(L"Выберите строку в списке");
+    return;
+  }
+  lstrcpynW(g_plmLastLink, g_plmLinks[i], 420);
+  open_plm_link(g_plmLinks[i]);
+  show_status(L"В текущий клиент PLM");
+}
+
 static BOOL plm_lookup(const wchar_t *query, wchar_t *out, int cap) {
   g_plmLastLink[0] = 0;
+  g_plmCount = 0;
   wchar_t pat[420];
   like_escape(query, pat, 420);
-  wchar_t sql[3500];
+  wchar_t sql[3600];
   _snwprintf(
-      sql, 3500,
+      sql, 3600,
       L"WITH Owners AS ("
       L"SELECT o1.InfoObjectId AS OwnerId FROM InfoObjects AS o1 WITH(NOLOCK) "
       L"WHERE o1.Erased=0 AND o1.TemplateId IN (432,25)) "
-      L"SELECT TOP 20 o0.InfoObjectId FROM InfoObjects AS o0 WITH(NOLOCK) "
+      L"SELECT TOP 20 o0.InfoObjectId, o0.Name FROM InfoObjects AS o0 WITH(NOLOCK) "
       L"WHERE o0.Erased=0 AND ("
       L"o0.TemplateId IN (1767) OR o0.TemplateId IN (20,39) OR ("
       L"o0.TemplateId IN (633) AND ("
@@ -486,21 +530,22 @@ static BOOL plm_lookup(const wchar_t *query, wchar_t *out, int cap) {
     return FALSE;
   }
   SQLINTEGER id = 0;
-  SQLLEN ind = 0;
-  SQLBindCol(st, 1, SQL_C_SLONG, &id, sizeof(id), &ind);
-  wchar_t user[64] = {0};
-  DWORD un = 63;
-  if (!GetUserNameW(user, &un) || !user[0]) lstrcpynW(user, L"user", 64);
+  SQLWCHAR nm[200];
+  SQLLEN idInd = 0, nmInd = 0;
+  SQLBindCol(st, 1, SQL_C_SLONG, &id, sizeof(id), &idInd);
+  SQLBindCol(st, 2, SQL_C_WCHAR, nm, sizeof(nm), &nmInd);
   int n = 0;
   wchar_t links[1800] = {0};
   while (SQLFetch(st) == SQL_SUCCESS && n < 20) {
-    wchar_t one[220];
-    _snwprintf(one, 220, L"pmsz-plm:%s[%s]:%s/IO.%ld", g_plmHost, user, g_plmPort, (long)id);
-    if (!g_plmLastLink[0]) lstrcpynW(g_plmLastLink, one, 420);
+    make_plm_link(g_plmLinks[n], 420, (long)id);
+    if (nmInd > 0) lstrcpynW(g_plmLabels[n], (wchar_t *)nm, 240);
+    else _snwprintf(g_plmLabels[n], 240, L"IO.%ld", (long)id);
+    if (!g_plmLastLink[0]) lstrcpynW(g_plmLastLink, g_plmLinks[n], 420);
     if (n) wcscat(links, L"\r\n");
-    if ((int)(wcslen(links) + wcslen(one) + 8) < 1800) wcscat(links, one);
+    if ((int)(wcslen(links) + wcslen(g_plmLinks[n]) + 8) < 1800) wcscat(links, g_plmLinks[n]);
     n++;
   }
+  g_plmCount = n;
   SQLFreeHandle(SQL_HANDLE_STMT, st);
   SQLDisconnect(dbc);
   SQLFreeHandle(SQL_HANDLE_DBC, dbc);
@@ -509,8 +554,8 @@ static BOOL plm_lookup(const wchar_t *query, wchar_t *out, int cap) {
     _snwprintf(out, cap, L"PLM\r\n\r\nНичего не найдено по «%.120s».", query);
     return FALSE;
   }
-  _snwprintf(out, cap, L"PLM · %d\r\n\r\n%s", n, links);
-  if (g_plmLastLink[0]) ShellExecuteW(NULL, L"open", g_plmLastLink, NULL, NULL, SW_SHOWNORMAL);
+  _snwprintf(out, cap,
+             L"PLM · %d  (двойной клик — в уже открытый клиент)\r\n\r\n%s", n, links);
   return TRUE;
 }
 
@@ -633,6 +678,7 @@ static void save_plm_pref(void) {
 static void compose_answer(const wchar_t *query, wchar_t *out, int cap) {
   wchar_t a[1200] = {0};
   const wchar_t *src = L"";
+  if (g_engine != 4) g_plmCount = 0;
   if (g_engine == 4) {
     plm_lookup(query, out, cap);
     return;
@@ -699,6 +745,8 @@ static void layout_answer(void) {
   int by = rc.bottom - pad - btnH;
   if (g_answerEdit)
     MoveWindow(g_answerEdit, pad, pad, rc.right - pad * 2, by - pad - 4, TRUE);
+  if (g_answerList)
+    MoveWindow(g_answerList, pad, pad, rc.right - pad * 2, by - pad - 4, TRUE);
   int bw = (rc.right - pad * 2 - gap * 3) / 4;
   HWND open = GetDlgItem(g_answer, ID_ANS_OPEN);
   HWND copy = GetDlgItem(g_answer, ID_ANS_COPY);
@@ -714,39 +762,26 @@ static LRESULT CALLBACK AnswerProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
   switch (msg) {
   case WM_COMMAND:
     if (LOWORD(wParam) == ID_ANS_CLOSE) ShowWindow(hwnd, SW_HIDE);
-    if (LOWORD(wParam) == ID_ANS_OPEN) {
-      wchar_t link[420] = {0};
-      if (g_plmLastLink[0]) lstrcpynW(link, g_plmLastLink, 420);
-      else if (g_answerEdit) {
+    if (LOWORD(wParam) == ID_ANS_OPEN ||
+        (LOWORD(wParam) == ID_ANS_LIST && HIWORD(wParam) == LBN_DBLCLK)) {
+      open_plm_selected();
+    }
+    if (LOWORD(wParam) == ID_ANS_COPY) {
+      if (g_plmCount > 0 && g_answerList) {
+        int i = (int)SendMessageW(g_answerList, LB_GETCURSEL, 0, 0);
+        if (i >= 0 && i < g_plmCount) {
+          clipboard_set(g_plmLinks[i]);
+          show_status(L"Ссылка скопирована");
+        }
+      } else if (g_answerEdit) {
         int len = GetWindowTextLengthW(g_answerEdit);
         wchar_t *w = (wchar_t *)malloc((len + 1) * sizeof(wchar_t));
         if (w) {
           GetWindowTextW(g_answerEdit, w, len + 1);
-          wchar_t *p = wcsstr(w, L"pmsz-plm:");
-          if (p) {
-            wchar_t *e = p;
-            while (*e && *e != L'\r' && *e != L'\n' && *e != L' ') e++;
-            *e = 0;
-            lstrcpynW(link, p, 420);
-          }
+          clipboard_set(w);
           free(w);
+          show_status(L"Выжимка скопирована");
         }
-      }
-      if (link[0]) {
-        ShellExecuteW(NULL, L"open", link, NULL, NULL, SW_SHOWNORMAL);
-        show_status(L"Открываю PLM");
-      } else {
-        show_status(L"Нет ссылки PLM");
-      }
-    }
-    if (LOWORD(wParam) == ID_ANS_COPY && g_answerEdit) {
-      int len = GetWindowTextLengthW(g_answerEdit);
-      wchar_t *w = (wchar_t *)malloc((len + 1) * sizeof(wchar_t));
-      if (w) {
-        GetWindowTextW(g_answerEdit, w, len + 1);
-        clipboard_set(w);
-        free(w);
-        show_status(L"Выжимка скопирована");
       }
     }
     if (LOWORD(wParam) == ID_ANS_NOTES && g_answerEdit) {
@@ -788,6 +823,10 @@ static void create_answer(HWND owner) {
       0, L"EDIT", L"",
       WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL,
       0, 0, 100, 100, g_answer, NULL, NULL, NULL);
+  g_answerList = CreateWindowExW(
+      WS_EX_CLIENTEDGE, L"LISTBOX", L"",
+      WS_CHILD | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT | WS_VSCROLL | WS_HSCROLL,
+      0, 0, 100, 100, g_answer, (HMENU)(INT_PTR)ID_ANS_LIST, NULL, NULL);
   HWND open = CreateWindowExW(0, L"BUTTON", L"Открыть PLM", WS_CHILD | WS_VISIBLE,
                               0, 0, 80, 24, g_answer, (HMENU)(INT_PTR)ID_ANS_OPEN, NULL, NULL);
   HWND copy = CreateWindowExW(0, L"BUTTON", L"Копировать", WS_CHILD | WS_VISIBLE,
@@ -797,6 +836,7 @@ static void create_answer(HWND owner) {
   HWND cls = CreateWindowExW(0, L"BUTTON", L"Закрыть", WS_CHILD | WS_VISIBLE,
                              0, 0, 80, 24, g_answer, (HMENU)(INT_PTR)ID_ANS_CLOSE, NULL, NULL);
   if (g_fontBody) SendMessageW(g_answerEdit, WM_SETFONT, (WPARAM)g_fontBody, TRUE);
+  if (g_fontBody && g_answerList) SendMessageW(g_answerList, WM_SETFONT, (WPARAM)g_fontBody, TRUE);
   if (g_fontUi) {
     SendMessageW(open, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
     SendMessageW(copy, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
@@ -807,8 +847,9 @@ static void create_answer(HWND owner) {
 }
 
 static void show_answer_text(const wchar_t *text) {
-  if (!g_answer || !g_answerEdit) return;
-  SetWindowTextW(g_answerEdit, text ? text : L"");
+  if (!g_answer) return;
+  if (g_answerEdit) SetWindowTextW(g_answerEdit, text ? text : L"");
+  fill_plm_list();
   POINT pt;
   GetCursorPos(&pt);
   int x = pt.x + 18, y = pt.y + 22;
