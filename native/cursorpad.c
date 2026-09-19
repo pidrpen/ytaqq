@@ -1376,6 +1376,8 @@ static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
       autostart_set(g_autostart);
       save_cursor_pref();
     }
+    if (LOWORD(wParam) == ID_FILES_ROOT && HIWORD(wParam) == EN_KILLFOCUS)
+      save_files_pref();
     if (LOWORD(wParam) == ID_SEARCH_EDIT && HIWORD(wParam) == EN_CHANGE) { /* live */ }
     return 0;
   case WM_HSCROLL:

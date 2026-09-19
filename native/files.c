@@ -9,6 +9,8 @@ static wchar_t **g_filesRel;
 static int g_filesN;
 static volatile LONG g_filesBusy;
 static ULONGLONG g_filesAt;
+static void files_mirror(const wchar_t *rel);
+static void save_files_pref(void);
 
 static void files_clear(void) {
   if (!g_filesRel) {
@@ -84,6 +86,7 @@ static BOOL files_load_idx(void) {
   ReadFile(h, buf, sz, &r, NULL);
   CloseHandle(h);
   buf[r] = 0;
+  wchar_t idxRoot[MAX_PATH] = {0};
   char *p = buf;
   while (p && *p) {
     char *nl = strchr(p, '\n');
@@ -91,7 +94,7 @@ static BOOL files_load_idx(void) {
     char *cr = strchr(p, '\r');
     if (cr) *cr = 0;
     if (!strncmp(p, "ROOT ", 5)) {
-      MultiByteToWideChar(CP_UTF8, 0, p + 5, -1, g_filesRoot, MAX_PATH);
+      MultiByteToWideChar(CP_UTF8, 0, p + 5, -1, idxRoot, MAX_PATH);
     } else if (p[0]) {
       wchar_t rel[MAX_PATH];
       MultiByteToWideChar(CP_UTF8, 0, p, -1, rel, MAX_PATH);
@@ -100,6 +103,10 @@ static BOOL files_load_idx(void) {
     p = nl ? nl + 1 : NULL;
   }
   free(buf);
+  if (g_filesRoot[0] && idxRoot[0] && _wcsicmp(g_filesRoot, idxRoot) != 0) {
+    files_clear();
+    return FALSE;
+  }
   return g_filesN > 0;
 }
 
@@ -144,6 +151,7 @@ static void files_walk(const wchar_t *dir, int depth) {
         while (*rel == L'\\' || *rel == L'/') rel++;
       }
       files_add(rel);
+      files_mirror(rel);
     }
   } while (FindNextFileW(h, &fd) && g_filesN < FILES_MAX);
   FindClose(h);
@@ -151,6 +159,9 @@ static void files_walk(const wchar_t *dir, int depth) {
 
 static DWORD WINAPI files_index_thread(LPVOID param) {
   (void)param;
+  wchar_t dir[MAX_PATH];
+  files_cache_dir(dir, MAX_PATH);
+  CreateDirectoryW(dir, NULL);
   files_clear();
   if (g_filesRoot[0]) files_walk(g_filesRoot, 0);
   files_save_idx();
@@ -190,27 +201,58 @@ static const wchar_t *files_name(const wchar_t *rel) {
   return last;
 }
 
-static void files_copy_hit(const wchar_t *full, const wchar_t *name) {
-  wchar_t dir[MAX_PATH], dest[MAX_PATH];
+static void files_mkdirs(const wchar_t *file) {
+  wchar_t tmp[MAX_PATH];
+  lstrcpynW(tmp, file, MAX_PATH);
+  for (wchar_t *p = tmp + 1; *p; p++) {
+    if (*p == L'\\' || *p == L'/') {
+      wchar_t c = *p;
+      *p = 0;
+      CreateDirectoryW(tmp, NULL);
+      *p = c;
+    }
+  }
+}
+
+static void files_local_path(const wchar_t *rel, wchar_t *out, int n) {
+  wchar_t dir[MAX_PATH];
   files_cache_dir(dir, MAX_PATH);
-  CreateDirectoryW(dir, NULL);
-  _snwprintf(dest, MAX_PATH, L"%s\\%s", dir, name);
-  CopyFileW(full, dest, FALSE);
+  if (!rel || !rel[0]) {
+    lstrcpynW(out, dir, n);
+    return;
+  }
+  _snwprintf(out, n, L"%s\\%s", dir, rel);
+}
+
+static BOOL files_newer(const wchar_t *src, const wchar_t *dst) {
+  WIN32_FILE_ATTRIBUTE_DATA a, b;
+  if (!GetFileAttributesExW(src, GetFileExInfoStandard, &a)) return FALSE;
+  if (!GetFileAttributesExW(dst, GetFileExInfoStandard, &b)) return TRUE;
+  return CompareFileTime(&a.ftLastWriteTime, &b.ftLastWriteTime) > 0;
+}
+
+static void files_mirror(const wchar_t *rel) {
+  wchar_t src[MAX_PATH], dst[MAX_PATH];
+  _snwprintf(src, MAX_PATH, L"%s\\%s", g_filesRoot, rel);
+  files_local_path(rel, dst, MAX_PATH);
+  files_mkdirs(dst);
+  if (files_newer(src, dst)) CopyFileW(src, dst, FALSE);
 }
 
 static BOOL files_search(const wchar_t *query, wchar_t *out, int cap) {
   g_plmCount = 0;
   g_resultFiles = TRUE;
-  if (g_filesRootEdit) GetWindowTextW(g_filesRootEdit, g_filesRoot, MAX_PATH);
+  save_files_pref();
   if (!g_filesRoot[0]) {
     lstrcpynW(out, L"Файлы\r\n\r\nУкажите папку сети в Настройках (\\\\сервер\\шара или диск).", cap);
     return FALSE;
   }
   if (g_filesN == 0) files_load_idx();
-  if (g_filesN == 0 || !files_idx_fresh()) files_start_index(FALSE);
   if (g_filesN == 0) {
     _snwprintf(out, cap,
-               L"Файлы\r\n\r\nИндексирую «%.80s»… Повторите F3 через минуту.", g_filesRoot);
+               L"Файлы\r\n\r\nЛокальный кеш пуст для «%.80s».\r\n"
+               L"Обход сети раз в час — подождите, затем F3 снова. Поиск по сети не идёт.",
+               g_filesRoot);
     return FALSE;
   }
   wchar_t q[200];
@@ -220,6 +262,9 @@ static BOOL files_search(const wchar_t *query, wchar_t *out, int cap) {
   wchar_t links[1800] = {0};
   for (int i = 0; i < g_filesN && n < 20; i++) {
     if (!wcs_istr(g_filesRel[i], q)) continue;
+    wchar_t local[MAX_PATH];
+    files_local_path(g_filesRel[i], local, MAX_PATH);
+    if (GetFileAttributesW(local) == INVALID_FILE_ATTRIBUTES) continue;
     const wchar_t *name = files_name(g_filesRel[i]);
     lstrcpynW(g_plmEsi[n], name, 200);
     const wchar_t *slash = wcsrchr(g_filesRel[i], L'\\');
@@ -231,8 +276,7 @@ static BOOL files_search(const wchar_t *query, wchar_t *out, int cap) {
     } else {
       g_plmTp[n][0] = 0;
     }
-    _snwprintf(g_plmLinks[n], 420, L"%s\\%s", g_filesRoot, g_filesRel[i]);
-    files_copy_hit(g_plmLinks[n], name);
+    lstrcpynW(g_plmLinks[n], local, 420);
     if (!g_plmLastLink[0]) lstrcpynW(g_plmLastLink, g_plmLinks[n], 420);
     if (n) wcscat(links, L"\r\n");
     if ((int)(wcslen(links) + wcslen(g_plmLinks[n]) + 8) < 1800) wcscat(links, g_plmLinks[n]);
@@ -240,10 +284,10 @@ static BOOL files_search(const wchar_t *query, wchar_t *out, int cap) {
   }
   g_plmCount = n;
   if (n == 0) {
-    _snwprintf(out, cap, L"Файлы\r\n\r\nНет совпадений по «%.80s» (в индексе %d файлов).", q, g_filesN);
+    _snwprintf(out, cap, L"Файлы\r\n\r\nВ кеше нет «%.80s» (%d имён в индексе).", q, g_filesN);
     return FALSE;
   }
-  _snwprintf(out, cap, L"Файлы · %d  (кеш обновляется каждый час)\r\n\r\n%s", n, links);
+  _snwprintf(out, cap, L"Файлы · %d из локального кеша\r\n\r\n%s", n, links);
   return TRUE;
 }
 
