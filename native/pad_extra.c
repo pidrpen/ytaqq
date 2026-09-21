@@ -1084,20 +1084,27 @@ static BOOL save_rect_bmp(int x, int y, int bw, int bh, const wchar_t *path) {
   return ok;
 }
 
-static wchar_t *ocr_file_sync(const wchar_t *bmp) {
-  wchar_t dir[MAX_PATH], script[MAX_PATH], cmd[1024];
-  exe_dir(dir, MAX_PATH);
-  _snwprintf(script, MAX_PATH, L"%s\\ocr.ps1", g_dataDir[0] ? g_dataDir : dir);
-  _snwprintf(cmd, 1024,
-             L"powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"%s\" -Path \"%s\"",
-             script, bmp);
+/* Spawn a helper and collect everything it writes. The old code stopped at a
+   fixed 4 KB, which silently cut off anything past about a page. */
+static BOOL run_capture(wchar_t *cmd, char **out, DWORD *outn, DWORD *code,
+                        char *err, int errcap) {
+  *out = NULL;
+  *outn = 0;
+  *code = (DWORD)-1;
+  if (err && errcap) err[0] = 0;
   SECURITY_ATTRIBUTES sa;
   memset(&sa, 0, sizeof(sa));
   sa.nLength = sizeof(sa);
   sa.bInheritHandle = TRUE;
-  HANDLE rd = NULL, wr = NULL;
-  if (!CreatePipe(&rd, &wr, &sa, 0)) return NULL;
-  SetHandleInformation(rd, HANDLE_FLAG_INHERIT, 0);
+  HANDLE ord = NULL, owr = NULL, erd = NULL, ewr = NULL;
+  if (!CreatePipe(&ord, &owr, &sa, 0)) return FALSE;
+  if (!CreatePipe(&erd, &ewr, &sa, 0)) {
+    CloseHandle(ord);
+    CloseHandle(owr);
+    return FALSE;
+  }
+  SetHandleInformation(ord, HANDLE_FLAG_INHERIT, 0);
+  SetHandleInformation(erd, HANDLE_FLAG_INHERIT, 0);
   STARTUPINFOW si;
   PROCESS_INFORMATION pi;
   memset(&si, 0, sizeof(si));
@@ -1105,34 +1112,122 @@ static wchar_t *ocr_file_sync(const wchar_t *bmp) {
   si.cb = sizeof(si);
   si.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
   si.wShowWindow = SW_HIDE;
-  si.hStdOutput = wr;
-  si.hStdError = wr;
+  si.hStdOutput = owr;
+  si.hStdError = ewr;
   BOOL ok = CreateProcessW(NULL, cmd, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
-  CloseHandle(wr);
+  CloseHandle(owr);
+  CloseHandle(ewr);
   if (!ok) {
-    CloseHandle(rd);
-    return NULL;
+    CloseHandle(ord);
+    CloseHandle(erd);
+    return FALSE;
   }
-  WaitForSingleObject(pi.hProcess, 20000);
-  char out[4096];
-  DWORD n = 0, total = 0;
-  while (total < sizeof(out) - 1) {
-    if (!ReadFile(rd, out + total, (DWORD)(sizeof(out) - 1 - total), &n, NULL) || !n) break;
-    total += n;
+  DWORD cap = 1 << 16, n = 0;
+  char *buf = (char *)malloc(cap);
+  if (buf) {
+    for (;;) {
+      if (n + 4096 > cap) {
+        DWORD grow = cap * 2;
+        char *nb = (char *)realloc(buf, grow);
+        if (!nb) break;
+        buf = nb;
+        cap = grow;
+      }
+      DWORD got = 0;
+      if (!ReadFile(ord, buf + n, cap - n - 1, &got, NULL) || !got) break;
+      n += got;
+    }
+    buf[n] = 0;
   }
-  out[total] = 0;
-  CloseHandle(rd);
+  /* helpers write one short line here, far below the pipe buffer, so reading
+     it after stdout cannot wedge them */
+  if (err && errcap > 1) {
+    DWORD got = 0;
+    if (ReadFile(erd, err, (DWORD)errcap - 1, &got, NULL)) err[got] = 0;
+  }
+  WaitForSingleObject(pi.hProcess, 30000);
+  GetExitCodeProcess(pi.hProcess, code);
+  CloseHandle(ord);
+  CloseHandle(erd);
   CloseHandle(pi.hThread);
   CloseHandle(pi.hProcess);
-  while (total > 0 && (out[total - 1] == '\n' || out[total - 1] == '\r' || out[total - 1] == ' '))
-    out[--total] = 0;
-  if (total == 0) return NULL;
-  int wlen = MultiByteToWideChar(CP_UTF8, 0, out, (int)total, NULL, 0);
-  wchar_t *wtxt = (wchar_t *)malloc((wlen + 1) * sizeof(wchar_t));
-  if (!wtxt) return NULL;
-  MultiByteToWideChar(CP_UTF8, 0, out, (int)total, wtxt, wlen);
-  wtxt[wlen] = 0;
-  return wtxt;
+  while (n > 0 && (buf[n - 1] == '\n' || buf[n - 1] == '\r' || buf[n - 1] == ' ')) buf[--n] = 0;
+  *out = buf;
+  *outn = n;
+  return buf != NULL;
+}
+
+static wchar_t *utf8_to_alloc(const char *s, DWORD n) {
+  if (!s || !n) return NULL;
+  int wlen = MultiByteToWideChar(CP_UTF8, 0, s, (int)n, NULL, 0);
+  if (wlen <= 0) return NULL;
+  wchar_t *w = (wchar_t *)malloc(((size_t)wlen + 1) * sizeof(wchar_t));
+  if (!w) return NULL;
+  MultiByteToWideChar(CP_UTF8, 0, s, (int)n, w, wlen);
+  w[wlen] = 0;
+  return w;
+}
+
+/* Turn the helper's one-line reason into something a person can act on. */
+static void ocr_explain(const char *reason) {
+  if (!reason || !reason[0]) {
+    lstrcpynW(g_ocrNote, L"Текст не распознан", 160);
+    return;
+  }
+  if (strstr(reason, "component missing"))
+    lstrcpynW(g_ocrNote, L"Распознавание Windows недоступно в этой системе", 160);
+  else if (strstr(reason, "no recognition languages"))
+    lstrcpynW(g_ocrNote, L"Нет пакетов распознавания — добавьте язык в параметрах Windows", 160);
+  else if (strstr(reason, "no engine for this language"))
+    lstrcpynW(g_ocrNote, L"Нет русского распознавания — добавьте его в параметрах Windows", 160);
+  else if (strstr(reason, "cannot read bitmap"))
+    lstrcpynW(g_ocrNote, L"Не удалось прочитать снимок экрана", 160);
+  else
+    lstrcpynW(g_ocrNote, L"Текст не распознан", 160);
+}
+
+/* Recognition runs in a helper process on purpose: it reaches into system
+   codecs, and a crash there must not take the notepad down. The companion
+   module is tried first; the PowerShell script stays as a fallback so an
+   older or stripped-down install is no worse off than before. */
+static wchar_t *ocr_file_sync(const wchar_t *bmp) {
+  wchar_t dir[MAX_PATH], path[MAX_PATH], cmd[1024];
+  char err[256] = {0}, *out = NULL;
+  DWORD n = 0, code = 0;
+  exe_dir(dir, MAX_PATH);
+  g_ocrNote[0] = 0;
+
+  _snwprintf(path, MAX_PATH, L"%s\\CursorPadOcr.exe", g_dataDir[0] ? g_dataDir : dir);
+  if (GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES) {
+    _snwprintf(cmd, 1024, L"\"%s\" \"%s\" ru", path, bmp);
+    if (run_capture(cmd, &out, &n, &code, err, 256)) {
+      if (code == 0 && n) {
+        wchar_t *w = utf8_to_alloc(out, n);
+        free(out);
+        return w;
+      }
+      free(out);
+      out = NULL;
+      /* a missing engine or empty page will not go better through PowerShell */
+      if (code == 2 || code == 3) {
+        ocr_explain(code == 3 ? "" : err);
+        return NULL;
+      }
+    }
+  }
+
+  _snwprintf(path, MAX_PATH, L"%s\\ocr.ps1", g_dataDir[0] ? g_dataDir : dir);
+  _snwprintf(cmd, 1024,
+             L"powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"%s\" -Path \"%s\"",
+             path, bmp);
+  if (run_capture(cmd, &out, &n, &code, NULL, 0) && n) {
+    wchar_t *w = utf8_to_alloc(out, n);
+    free(out);
+    return w;
+  }
+  free(out);
+  ocr_explain(err);
+  return NULL;
 }
 
 static DWORD WINAPI ocr_thread(LPVOID param) {

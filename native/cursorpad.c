@@ -194,6 +194,7 @@ static wchar_t g_prefPath[MAX_PATH];
 static wchar_t g_dataDir[MAX_PATH];
 static wchar_t g_imgDir[MAX_PATH];
 static wchar_t g_status[160];
+static wchar_t g_ocrNote[160]; /* why recognition produced nothing */
 static BOOL g_statusOn = FALSE;
 static HINSTANCE g_inst;
 static int g_skin = 1; /* 0 system, 1 sword, 2 gauntlet */
@@ -373,6 +374,8 @@ static void extract_payloads(void) {
   extract_rcdata(301, path);
   _snwprintf(path, MAX_PATH, L"%s\\ocr.ps1", g_dataDir);
   extract_rcdata(302, path);
+  _snwprintf(path, MAX_PATH, L"%s\\CursorPadOcr.exe", g_dataDir);
+  extract_rcdata(305, path);
   _snwprintf(path, MAX_PATH, L"%s\\k2_app.ani", g_dataDir);
   extract_rcdata(303, path);
   _snwprintf(path, MAX_PATH, L"%s\\k3_app.ani", g_dataDir);
@@ -2212,7 +2215,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
       show_answer_text(text);
       show_status(L"OCR: текст добавлен в блокнот");
     } else {
-      show_status(L"Текст не распознан");
+      show_status(g_ocrNote[0] ? g_ocrNote : L"Текст не распознан");
     }
     free(text);
     return 0;

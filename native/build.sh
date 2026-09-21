@@ -2,6 +2,9 @@
 set -eu
 cd "$(dirname "$0")"
 ZIG="${ZIG:-/opt/zig/zig}"
+# the OCR companion is embedded as a resource, so it has to exist first
+"$ZIG" cc -target x86_64-windows-gnu -O2 -o CursorPadOcr.exe ocr_module.c \
+  -lole32 -lruntimeobject -luser32 -municode
 "$ZIG" rc /fo /tmp/cursorpad.res cursorpad.rc
 "$ZIG" cc -target x86_64-windows-gnu -O2 -finput-charset=UTF-8 \
   -o /workspace/public/CursorPad.exe cursorpad.c /tmp/cursorpad.res \

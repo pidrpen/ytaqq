@@ -16,3 +16,4 @@ screenshots/
 .grok/preview.log
 *.res
 __pycache__/
+native/CursorPadOcr.exe
