@@ -1066,6 +1066,58 @@ static void card_operations(SQLHDBC dbc, long tpId, long verId, CardOut *c, Card
 }
 
 
+/* Куда этот объект входит по техсоставу. Прямой путь — изделие → TechCompCard
+   → ActualVersionTechComp → строка с нужной конфигурацией → коллекция
+   TechComposition. Здесь он проходится задом наперёд: ищем строки коллекций
+   TechComposition, которые ссылаются на нас, и поднимаемся к их владельцу.
+   Удалённые строки (IsRemoved) не в счёт — так же, как в сервисе. */
+static void card_where_used(SQLHDBC dbc, long id, CardOut *c, CardRow *rows, wchar_t *err) {
+  wchar_t *sql = (wchar_t *)malloc(3000 * sizeof(wchar_t));
+  if (!sql) return;
+  _snwprintf(
+      sql, 3000,
+      L"SELECT TOP 100 own.InfoObjectId, own.Name, ISNULL(pr.NM,N''), ISNULL(pr.PID,0), "
+      L"own.TemplateId "
+      L"FROM InfoObjectAttributes AS ea WITH(NOLOCK) "
+      L"JOIN InfoObjectCollectionElements AS ce WITH(NOLOCK) "
+      L"ON ce.CollectionElementId=ea.CollectionElementId AND ce.Outdated=0 "
+      L"JOIN InfoObjectAttributes AS la WITH(NOLOCK) ON la.AttributeId=ce.AttributeId "
+      L"JOIN NameKeys AS nkl WITH(NOLOCK) ON nkl.NameKeyId=la.NameKeyId "
+      L"AND nkl.Value=N'TechComposition' "
+      L"JOIN InfoObjects AS own WITH(NOLOCK) ON own.InfoObjectId=la.OwnerId AND own.Erased=0 "
+      L"OUTER APPLY (SELECT TOP 1 o3.Name AS NM, o3.InfoObjectId AS PID "
+      L"FROM InfoObjectAttributes AS pa WITH(NOLOCK) "
+      L"JOIN NameKeys AS nkp WITH(NOLOCK) ON nkp.NameKeyId=pa.NameKeyId AND nkp.Value=N'Product' "
+      L"JOIN InfoObjects AS o3 WITH(NOLOCK) ON o3.InfoObjectId=pa.Link "
+      L"WHERE pa.OwnerId=own.InfoObjectId AND pa.Outdated=0) AS pr "
+      L"WHERE ea.Link=%ld AND ea.Outdated=0 "
+      L"AND ce.CollectionElementId NOT IN ("
+      L"SELECT ioa.CollectionElementId FROM InfoObjectAttributes AS ioa WITH(NOLOCK) "
+      L"JOIN NameKeys AS nk WITH(NOLOCK) ON nk.NameKeyId=ioa.NameKeyId "
+      L"WHERE nk.Value=N'IsRemoved' AND ioa.BoolValue=1) "
+      L"ORDER BY own.InfoObjectId",
+      id);
+  int n = card_query(dbc, sql, rows, CARD_ROWS, err, 280);
+  free(sql);
+  card_add(c, L"\r\n────────────────\r\nКуда входит по техсоставу");
+  if (n < 0) {
+    card_add(c, L": запрос не выполнился.\r\n%s\r\n", err);
+    return;
+  }
+  if (n == 0) {
+    card_add(c, L": нигде не нашлось.\r\n"
+                L"Либо этот объект ни в один техсостав не включён, либо он сам верхний.\r\n");
+    return;
+  }
+  card_add(c, L" (%d):\r\n", n);
+  for (int i = 0; i < n; i++) {
+    card_add(c, L"  %s · ID %ld", rows[i].s1[0] ? rows[i].s1 : L"(без имени)", rows[i].n1);
+    if (rows[i].s2[0]) card_add(c, L" · изделие %s", rows[i].s2);
+    if (rows[i].n2) card_add(c, L" (%ld)", rows[i].n2);
+    card_add(c, L"\r\n");
+  }
+}
+
 static void plm_card(long id, wchar_t *out, int cap) {
   CardOut c;
   c.w = out;
@@ -1149,12 +1201,14 @@ static void plm_card(long id, wchar_t *out, int cap) {
   if (actualVer) {
     card_add(&c, L"Это техпроцесс%s.\r\n", mainFlag ? L" и он помечен основным" : L"");
     card_operations(dbc, id, actualVer, &c, rows, err);
+    card_where_used(dbc, id, &c, rows, err);
     goto freed;
   }
 
   if (!tpCard) {
     card_add(&c, L"У объекта нет ни ActualVersion, ни TechnologicalProcessesCard —\r\n"
-                 L"это не техпроцесс и не изделие, состав показывать неоткуда.\r\n");
+                 L"техпроцесса на него нет.\r\n");
+    card_where_used(dbc, id, &c, rows, err);
     goto freed;
   }
 
@@ -1184,6 +1238,7 @@ static void plm_card(long id, wchar_t *out, int cap) {
   n = card_query(dbc, sql, rows, CARD_ROWS, err, 280);
   if (n < 0) {
     card_add(&c, L"Техпроцессы: запрос не выполнился.\r\n%s\r\n", err);
+    card_where_used(dbc, id, &c, rows, err);
     goto freed;
   }
   if (n == 0) {
@@ -1197,6 +1252,7 @@ static void plm_card(long id, wchar_t *out, int cap) {
     int k = card_query(dbc, sql, rows, CARD_ROWS, err, 280);
     if (k <= 0) {
       card_add(&c, L"  в карточке нет списка TechnologicalProcesses\r\n");
+      card_where_used(dbc, id, &c, rows, err);
       goto freed;
     }
     _snwprintf(sql, 3600,
@@ -1206,6 +1262,7 @@ static void plm_card(long id, wchar_t *out, int cap) {
     k = card_query(dbc, sql, rows, CARD_ROWS, err, 280);
     card_add(&c, L"  строк в списке: %ld, но ссылок на сами ТП в них нет\r\n",
              k > 0 ? rows[0].n1 : 0);
+    card_where_used(dbc, id, &c, rows, err);
     goto freed;
   }
 
@@ -1223,9 +1280,11 @@ static void plm_card(long id, wchar_t *out, int cap) {
   card_add(&c, L"\r\n");
   if (!chosen) {
     card_add(&c, L"Основного среди них нет: ни у одного не стоит MainTP/IsActual.\r\n");
+    card_where_used(dbc, id, &c, rows, err);
     goto freed;
   }
   card_operations(dbc, chosen, chosenVer, &c, rows, err);
+  card_where_used(dbc, id, &c, rows, err);
 
 freed:
   free(rows);
