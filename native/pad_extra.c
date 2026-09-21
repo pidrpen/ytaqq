@@ -20,6 +20,7 @@
 #define ID_ANS_NOTES 121
 #define ID_ANS_CLOSE 122
 #define ID_ANS_SHOW 151 /* 131 was already ID_CLIP */
+#define ID_ANS_CARD 152
 #define TIMER_CURSOR_KEEP 6
 #define WM_SEARCH_DONE (WM_APP + 8)
 #define WM_OCR_DONE (WM_APP + 9)
@@ -537,6 +538,8 @@ static void fill_plm_list(void) {
     ShowWindow(open, g_plmCount > 0 ? SW_SHOW : SW_HIDE);
   }
   if (show) ShowWindow(show, g_resultFiles && g_plmCount > 0 ? SW_SHOW : SW_HIDE);
+  HWND card = GetDlgItem(g_answer, ID_ANS_CARD);
+  if (card) ShowWindow(card, !g_resultFiles && g_plmCount > 0 ? SW_SHOW : SW_HIDE);
   layout_answer();
 }
 
@@ -570,6 +573,9 @@ static void plm_sort(int col) {
       memcpy(tmpL, g_plmLinks[j], PLM_LINK * sizeof(wchar_t));
       memcpy(g_plmLinks[j], g_plmLinks[j - 1], PLM_LINK * sizeof(wchar_t));
       memcpy(g_plmLinks[j - 1], tmpL, PLM_LINK * sizeof(wchar_t));
+      long tmpId = g_plmIds[j];
+      g_plmIds[j] = g_plmIds[j - 1];
+      g_plmIds[j - 1] = tmpId;
     }
   }
   free(tmpA);
@@ -687,6 +693,7 @@ static BOOL plm_lookup(const wchar_t *query, wchar_t *out, int cap) {
   while (SQLFetch(st) == SQL_SUCCESS && n < 20) {
     long oid = (idInd == SQL_NULL_DATA || openId == 0) ? 0 : (long)openId;
     make_plm_link(g_plmLinks[n], PLM_LINK, oid);
+    g_plmIds[n] = oid;
     g_plmEsi[n][0] = 0;
     g_plmTp[n][0] = 0;
     if (tmpl == 1794) {
@@ -841,6 +848,303 @@ static void save_plm_pref(void) {
   LocalFree(out.pbData);
 }
 
+
+/* ---- PLM: карточка объекта и его техпроцессы ------------------------------
+
+   Схема PLM разобрана по сервису PlmApi (репозиторий wowdroch): значения
+   атрибутов лежат в InfoObjectAttributes в колонке по типу (DataType),
+   имя атрибута — в NameKeys.Value, а не в самой таблице. Путь к техпроцессам:
+   изделие → TechnologicalProcessesCard → TechnologicalProcesses (коллекция)
+   → элементы коллекции → сами ТП; актуальность — булев атрибут IsActual.
+   Операции: ТП → ActualVersion → MainVariantInVersion → дети варианта.
+
+   Имена атрибутов спрашиваются по названию, а не по номеру: номера в разных
+   базах разные, названия одни и те же. */
+
+typedef struct {
+  wchar_t *w;
+  int cap, len;
+} CardOut;
+
+static void card_add(CardOut *c, const wchar_t *fmt, ...) {
+  if (!c->w || c->len >= c->cap - 2) return;
+  va_list ap;
+  va_start(ap, fmt);
+  int n = _vsnwprintf(c->w + c->len, (size_t)(c->cap - c->len - 1), fmt, ap);
+  va_end(ap);
+  if (n < 0 || n > c->cap - c->len - 1) n = c->cap - c->len - 1;
+  c->len += n;
+  c->w[c->len] = 0;
+}
+
+/* Каждый запрос карточки возвращает один и тот же набор колонок, поэтому
+   привязка столбцов написана один раз. */
+typedef struct {
+  long n1, n2, n3;
+  wchar_t s1[260];
+  wchar_t s2[600];
+} CardRow;
+
+static int card_query(SQLHDBC dbc, const wchar_t *sql, CardRow *rows, int max, wchar_t *err,
+                      int ecap) {
+  if (err && ecap) err[0] = 0;
+  SQLHSTMT st = SQL_NULL_HSTMT;
+  if (!SQL_SUCCEEDED(SQLAllocHandle(SQL_HANDLE_STMT, dbc, &st))) return -1;
+  if (!SQL_SUCCEEDED(SQLExecDirectW(st, (SQLWCHAR *)sql, SQL_NTS))) {
+    if (err && ecap) odbc_err(st, SQL_HANDLE_STMT, err, ecap);
+    SQLFreeHandle(SQL_HANDLE_STMT, st);
+    return -1;
+  }
+  SQLINTEGER v1 = 0, v2 = 0, v3 = 0;
+  SQLWCHAR t1[260], t2[600];
+  SQLLEN i1 = 0, i2 = 0, i3 = 0, i4 = 0, i5 = 0;
+  SQLBindCol(st, 1, SQL_C_SLONG, &v1, sizeof(v1), &i1);
+  SQLBindCol(st, 2, SQL_C_WCHAR, t1, sizeof(t1), &i2);
+  SQLBindCol(st, 3, SQL_C_WCHAR, t2, sizeof(t2), &i3);
+  SQLBindCol(st, 4, SQL_C_SLONG, &v2, sizeof(v2), &i4);
+  SQLBindCol(st, 5, SQL_C_SLONG, &v3, sizeof(v3), &i5);
+  int n = 0;
+  while (n < max && SQLFetch(st) == SQL_SUCCESS) {
+    rows[n].n1 = (i1 == SQL_NULL_DATA) ? 0 : (long)v1;
+    rows[n].n2 = (i4 == SQL_NULL_DATA) ? 0 : (long)v2;
+    rows[n].n3 = (i5 == SQL_NULL_DATA) ? 0 : (long)v3;
+    rows[n].s1[0] = 0;
+    rows[n].s2[0] = 0;
+    if (i2 > 0) lstrcpynW(rows[n].s1, (wchar_t *)t1, 260);
+    if (i3 > 0) lstrcpynW(rows[n].s2, (wchar_t *)t2, 600);
+    n++;
+  }
+  SQLFreeHandle(SQL_HANDLE_STMT, st);
+  return n;
+}
+
+/* значение атрибута одним выражением: колонка зависит от DataType */
+#define CARD_VALUE_SQL                                                                   \
+  L"CASE a.DataType "                                                                    \
+  L"WHEN 3 THEN CASE WHEN a.BoolValue=1 THEN N'да' ELSE N'нет' END "                     \
+  L"WHEN 2 THEN a.ShortText "                                                            \
+  L"WHEN 24 THEN CAST(a.LargeText AS NVARCHAR(400)) "                                    \
+  L"WHEN 1 THEN CONVERT(NVARCHAR(64), a.FloatNumber) "                                   \
+  L"WHEN 13 THEN CONVERT(NVARCHAR(64), a.IntegerNumber) "                                \
+  L"WHEN 32 THEN CONVERT(NVARCHAR(64), a.LongNumber) "                                   \
+  L"WHEN 4 THEN CONVERT(NVARCHAR(64), a.LongNumber) "                                    \
+  L"WHEN 33 THEN CONVERT(NVARCHAR(64), a.LongNumber) "                                   \
+  L"ELSE N'' END"
+
+static const wchar_t *card_type_name(long t) {
+  switch (t) {
+  case 1: return L"число";
+  case 2: return L"текст";
+  case 3: return L"да/нет";
+  case 4: return L"время";
+  case 6: return L"ссылка";
+  case 8: return L"коллекция";
+  case 11: return L"перечисление";
+  case 13: return L"целое";
+  case 23: return L"составной";
+  case 24: return L"текст";
+  case 32: return L"длинное целое";
+  case 33: return L"дата";
+  default: return L"—";
+  }
+}
+
+#define CARD_ROWS 220
+
+static void plm_card(long id, wchar_t *out, int cap) {
+  CardOut c;
+  c.w = out;
+  c.cap = cap;
+  c.len = 0;
+  out[0] = 0;
+
+  SQLHENV env = SQL_NULL_HENV;
+  SQLHDBC dbc = SQL_NULL_HDBC;
+  wchar_t err[280];
+  if (!plm_connect(&env, &dbc, err, 280)) {
+    ans_printf(out, cap, L"Не удалось подключиться к %s.\r\n%s", g_sqlHost, err);
+    return;
+  }
+  CardRow *rows = (CardRow *)malloc(sizeof(CardRow) * CARD_ROWS);
+  if (!rows) {
+    ans_printf(out, cap, L"Не хватило памяти");
+    goto done;
+  }
+  wchar_t sql[3600];
+
+  /* 1. сам объект */
+  _snwprintf(sql, 3600,
+             L"SELECT TOP 1 o.InfoObjectId, o.Name, t.NameKey, ISNULL(o.ParentId,0), o.TemplateId "
+             L"FROM InfoObjects AS o WITH(NOLOCK) "
+             L"JOIN Templates AS t WITH(NOLOCK) ON t.TemplateId=o.TemplateId "
+             L"WHERE o.InfoObjectId=%ld",
+             id);
+  int n = card_query(dbc, sql, rows, CARD_ROWS, err, 280);
+  if (n < 0) {
+    card_add(&c, L"Запрос об объекте не выполнился.\r\n%s\r\n", err);
+    goto freed;
+  }
+  if (n == 0) {
+    card_add(&c, L"Объект %ld в базе не найден.\r\n", id);
+    goto freed;
+  }
+  card_add(&c, L"%s\r\nID %ld · шаблон %s (%ld)", rows[0].s1[0] ? rows[0].s1 : L"(без имени)", id,
+           rows[0].s2[0] ? rows[0].s2 : L"?", rows[0].n3);
+  if (rows[0].n2) card_add(&c, L" · родитель %ld", rows[0].n2);
+  card_add(&c, L"\r\n\r\n");
+
+  /* 2. его атрибуты */
+  _snwprintf(sql, 3600,
+             L"SELECT TOP 200 a.AttributeId, nk.Value, %s, ISNULL(a.Link,0), a.DataType "
+             L"FROM InfoObjectAttributes AS a WITH(NOLOCK) "
+             L"JOIN NameKeys AS nk WITH(NOLOCK) ON nk.NameKeyId=a.NameKeyId "
+             L"WHERE a.OwnerId=%ld AND a.Outdated=0 AND ISNULL(a.CollectionElementId,0)=0 "
+             L"ORDER BY nk.Value",
+             CARD_VALUE_SQL, id);
+  n = card_query(dbc, sql, rows, CARD_ROWS, err, 280);
+  if (n < 0) {
+    card_add(&c, L"Атрибуты не прочитались.\r\n%s\r\n\r\n", err);
+  } else if (n == 0) {
+    card_add(&c, L"Атрибутов нет.\r\n\r\n");
+  } else {
+    card_add(&c, L"Что в объекте (%d):\r\n", n);
+    for (int i = 0; i < n; i++) {
+      if (rows[i].s2[0])
+        card_add(&c, L"  %s = %s\r\n", rows[i].s1, rows[i].s2);
+      else if (rows[i].n2)
+        card_add(&c, L"  %s → объект %ld\r\n", rows[i].s1, rows[i].n2);
+      else
+        card_add(&c, L"  %s (%s)\r\n", rows[i].s1, card_type_name(rows[i].n3));
+    }
+    card_add(&c, L"\r\n");
+  }
+
+  /* 3. техпроцессы: изделие → карточка ТП → коллекция → сами ТП */
+  _snwprintf(
+      sql, 3600,
+      L"SELECT TOP 50 tp.InfoObjectId, tp.Name, ISNULL(act.V,N''), "
+      L"ISNULL(ver.N,0), ISNULL(tp.TemplateId,0) "
+      L"FROM InfoObjectAttributes AS ca WITH(NOLOCK) "
+      L"JOIN NameKeys AS nkc WITH(NOLOCK) ON nkc.NameKeyId=ca.NameKeyId "
+      L"AND nkc.Value=N'TechnologicalProcessesCard' "
+      L"JOIN InfoObjectAttributes AS la WITH(NOLOCK) ON la.OwnerId=ca.Link AND la.Outdated=0 "
+      L"JOIN NameKeys AS nkl WITH(NOLOCK) ON nkl.NameKeyId=la.NameKeyId "
+      L"AND nkl.Value=N'TechnologicalProcesses' "
+      L"JOIN InfoObjectCollectionElements AS ce WITH(NOLOCK) ON ce.AttributeId=la.AttributeId "
+      L"AND ce.Outdated=0 "
+      L"JOIN InfoObjectAttributes AS ea WITH(NOLOCK) "
+      L"ON ea.CollectionElementId=ce.CollectionElementId AND ea.DataType=6 "
+      L"JOIN InfoObjects AS tp WITH(NOLOCK) ON tp.InfoObjectId=ea.Link AND tp.Erased=0 "
+      L"OUTER APPLY (SELECT TOP 1 CASE WHEN ia.BoolValue=1 THEN N'да' ELSE N'нет' END AS V "
+      L"FROM InfoObjectAttributes AS ia WITH(NOLOCK) "
+      L"JOIN NameKeys AS nki WITH(NOLOCK) ON nki.NameKeyId=ia.NameKeyId "
+      L"WHERE ia.OwnerId=tp.InfoObjectId AND nki.Value=N'IsActual' AND ia.Outdated=0) AS act "
+      L"OUTER APPLY (SELECT TOP 1 iv.IntegerNumber AS N "
+      L"FROM InfoObjectAttributes AS iv WITH(NOLOCK) "
+      L"JOIN NameKeys AS nkv WITH(NOLOCK) ON nkv.NameKeyId=iv.NameKeyId "
+      L"WHERE iv.OwnerId=tp.InfoObjectId AND nkv.Value=N'VersionNumber' AND iv.Outdated=0) AS ver "
+      L"WHERE ca.OwnerId=%ld AND ca.Outdated=0",
+      id);
+  n = card_query(dbc, sql, rows, CARD_ROWS, err, 280);
+  if (n < 0) {
+    card_add(&c, L"Техпроцессы: запрос не выполнился.\r\n%s\r\n", err);
+    goto freed;
+  }
+  if (n == 0) {
+    /* пусто — говорим, на каком именно шаге оборвалось */
+    card_add(&c, L"Техпроцессы не найдены. Где оборвалось:\r\n");
+    _snwprintf(sql, 3600,
+               L"SELECT TOP 1 ISNULL(a.Link,0), N'', N'', 0, 0 "
+               L"FROM InfoObjectAttributes AS a WITH(NOLOCK) "
+               L"JOIN NameKeys AS nk WITH(NOLOCK) ON nk.NameKeyId=a.NameKeyId "
+               L"WHERE a.OwnerId=%ld AND a.Outdated=0 "
+               L"AND nk.Value=N'TechnologicalProcessesCard'",
+               id);
+    int k = card_query(dbc, sql, rows, CARD_ROWS, err, 280);
+    if (k <= 0 || rows[0].n1 == 0) {
+      card_add(&c, L"  у объекта нет ссылки TechnologicalProcessesCard —\r\n"
+                   L"  похоже, это не изделие, а что-то другое\r\n");
+      goto freed;
+    }
+    long cardId = rows[0].n1;
+    card_add(&c, L"  карточка ТП: объект %ld — есть\r\n", cardId);
+    _snwprintf(sql, 3600,
+               L"SELECT TOP 1 a.AttributeId, N'', N'', 0, a.DataType "
+               L"FROM InfoObjectAttributes AS a WITH(NOLOCK) "
+               L"JOIN NameKeys AS nk WITH(NOLOCK) ON nk.NameKeyId=a.NameKeyId "
+               L"WHERE a.OwnerId=%ld AND a.Outdated=0 AND nk.Value=N'TechnologicalProcesses'",
+               cardId);
+    k = card_query(dbc, sql, rows, CARD_ROWS, err, 280);
+    if (k <= 0) {
+      card_add(&c, L"  в карточке нет списка TechnologicalProcesses\r\n");
+      goto freed;
+    }
+    long listAttr = rows[0].n1;
+    card_add(&c, L"  список ТП: атрибут %ld — есть\r\n", listAttr);
+    _snwprintf(sql, 3600,
+               L"SELECT COUNT(*), N'', N'', 0, 0 FROM InfoObjectCollectionElements WITH(NOLOCK) "
+               L"WHERE AttributeId=%ld AND Outdated=0",
+               listAttr);
+    k = card_query(dbc, sql, rows, CARD_ROWS, err, 280);
+    card_add(&c, L"  строк в списке: %ld\r\n", k > 0 ? rows[0].n1 : 0);
+    card_add(&c, L"  дальше ссылок на сами ТП не нашлось\r\n");
+    goto freed;
+  }
+
+  card_add(&c, L"Техпроцессы (%d):\r\n", n);
+  long actual = 0;
+  for (int i = 0; i < n; i++) {
+    BOOL act = _wcsicmp(rows[i].s2, L"да") == 0;
+    if (act && !actual) actual = rows[i].n1;
+    card_add(&c, L"  %s %s · ID %ld", act ? L"[актуальный]" : L"[     —     ]",
+             rows[i].s1[0] ? rows[i].s1 : L"(без имени)", rows[i].n1);
+    if (rows[i].n2) card_add(&c, L" · версия %ld", rows[i].n2);
+    card_add(&c, L"\r\n");
+  }
+  card_add(&c, L"\r\n");
+
+  if (!actual) {
+    card_add(&c, L"Актуального среди них нет (атрибут IsActual нигде не стоит).\r\n");
+    goto freed;
+  }
+
+  /* 4. операции актуального ТП: ActualVersion → MainVariantInVersion → дети */
+  _snwprintf(sql, 3600,
+             L"SELECT TOP 200 ch.InfoObjectId, ch.Name, t.NameKey, ISNULL(ch.ParentId,0), "
+             L"ch.TemplateId "
+             L"FROM InfoObjectAttributes AS av WITH(NOLOCK) "
+             L"JOIN NameKeys AS nka WITH(NOLOCK) ON nka.NameKeyId=av.NameKeyId "
+             L"AND nka.Value=N'ActualVersion' "
+             L"JOIN InfoObjectAttributes AS mv WITH(NOLOCK) ON mv.OwnerId=av.Link AND mv.Outdated=0 "
+             L"JOIN NameKeys AS nkm WITH(NOLOCK) ON nkm.NameKeyId=mv.NameKeyId "
+             L"AND nkm.Value=N'MainVariantInVersion' "
+             L"JOIN InfoObjects AS ch WITH(NOLOCK) ON ch.ParentId=mv.Link AND ch.Erased=0 "
+             L"JOIN Templates AS t WITH(NOLOCK) ON t.TemplateId=ch.TemplateId "
+             L"WHERE av.OwnerId=%ld AND av.Outdated=0 "
+             L"ORDER BY ch.InfoObjectId",
+             actual);
+  n = card_query(dbc, sql, rows, CARD_ROWS, err, 280);
+  if (n < 0) {
+    card_add(&c, L"Состав ТП %ld не прочитался.\r\n%s\r\n", actual, err);
+  } else if (n == 0) {
+    card_add(&c, L"У актуального ТП %ld не нашлось состава\r\n"
+                 L"(нет ActualVersion → MainVariantInVersion → детей).\r\n",
+             actual);
+  } else {
+    card_add(&c, L"Состав актуального ТП %ld (%d):\r\n", actual, n);
+    for (int i = 0; i < n; i++)
+      card_add(&c, L"  %s · %s · ID %ld\r\n", rows[i].s1[0] ? rows[i].s1 : L"(без имени)",
+               rows[i].s2[0] ? rows[i].s2 : L"?", rows[i].n1);
+  }
+
+freed:
+  free(rows);
+done:
+  SQLDisconnect(dbc);
+  SQLFreeHandle(SQL_HANDLE_DBC, dbc);
+  SQLFreeHandle(SQL_HANDLE_ENV, env);
+}
+
 static void compose_answer(const wchar_t *query, wchar_t *out, int cap) {
   wchar_t a[1200] = {0};
   const wchar_t *src = L"";
@@ -867,6 +1171,7 @@ typedef struct {
 } SearchJob;
 
 static void show_answer_text(const wchar_t *text);
+static void show_card_selected(void);
 
 static DWORD WINAPI search_thread(LPVOID param) {
   SearchJob *job = (SearchJob *)param;
@@ -908,13 +1213,16 @@ static void layout_answer(void) {
   HWND notes = GetDlgItem(g_answer, ID_ANS_NOTES);
   HWND cls = GetDlgItem(g_answer, ID_ANS_CLOSE);
   /* "В проводнике" only makes sense for file hits, so the row is 4 or 5 wide */
+  HWND card = GetDlgItem(g_answer, ID_ANS_CARD);
   BOOL withOpen = open && g_plmCount > 0;
   BOOL withShow = show && g_resultFiles && g_plmCount > 0;
-  int cols = 3 + (withOpen ? 1 : 0) + (withShow ? 1 : 0);
+  BOOL withCard = card && !g_resultFiles && g_plmCount > 0;
+  int cols = 3 + (withOpen ? 1 : 0) + (withShow ? 1 : 0) + (withCard ? 1 : 0);
   int bw = (rc.right - pad * 2 - gap * (cols - 1)) / cols;
   int slot = 0;
   if (withOpen) MoveWindow(open, pad + (bw + gap) * slot++, by, bw, btnH, TRUE);
   if (withShow) MoveWindow(show, pad + (bw + gap) * slot++, by, bw, btnH, TRUE);
+  if (withCard) MoveWindow(card, pad + (bw + gap) * slot++, by, bw, btnH, TRUE);
   if (copy) MoveWindow(copy, pad + (bw + gap) * slot++, by, bw, btnH, TRUE);
   if (notes) MoveWindow(notes, pad + (bw + gap) * slot++, by, bw, btnH, TRUE);
   if (cls) MoveWindow(cls, pad + (bw + gap) * slot++, by, bw, btnH, TRUE);
@@ -945,6 +1253,7 @@ static LRESULT CALLBACK AnswerProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
     if (LOWORD(wParam) == ID_ANS_CLOSE) ShowWindow(hwnd, SW_HIDE);
     if (LOWORD(wParam) == ID_ANS_OPEN) open_plm_selected();
     if (LOWORD(wParam) == ID_ANS_SHOW) show_selected_in_explorer();
+    if (LOWORD(wParam) == ID_ANS_CARD) show_card_selected();
     if (LOWORD(wParam) == ID_ANS_COPY) {
       int i = plm_selected_index();
       if (i >= 0 && i < g_plmCount) {
@@ -1060,6 +1369,7 @@ static void create_answer(HWND owner) {
   }
   HWND open = mk_btn(g_answer, L"Открыть PLM", ID_ANS_OPEN);
   HWND show = mk_btn(g_answer, L"В проводнике", ID_ANS_SHOW);
+  HWND card = mk_btn(g_answer, L"Что внутри", ID_ANS_CARD);
   HWND copy = mk_btn(g_answer, L"Копировать", ID_ANS_COPY);
   HWND notes = mk_btn(g_answer, L"В блокнот", ID_ANS_NOTES);
   HWND cls = mk_btn(g_answer, L"Закрыть", ID_ANS_CLOSE);
@@ -1068,11 +1378,46 @@ static void create_answer(HWND owner) {
   if (g_fontUi) {
     SendMessageW(open, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
     SendMessageW(show, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
+    SendMessageW(card, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
     SendMessageW(copy, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
     SendMessageW(notes, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
     SendMessageW(cls, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
   }
   layout_answer();
+}
+
+/* The card can take a few seconds on a loaded server, so it runs off the UI
+   thread exactly like a search does. */
+static DWORD WINAPI card_thread(LPVOID param) {
+  long id = (long)(LONG_PTR)param;
+  wchar_t *out = (wchar_t *)malloc(40000 * sizeof(wchar_t));
+  if (out) {
+    out[0] = 0;
+    plm_card(id, out, 40000);
+    if (!PostMessageW(g_hwnd, WM_SEARCH_DONE, 0, (LPARAM)out)) free(out);
+  }
+  InterlockedExchange(&g_netBusy, 0);
+  return 0;
+}
+
+static void show_card_selected(void) {
+  int i = plm_selected_index();
+  if (i < 0 || i >= g_plmCount || !g_plmIds[i]) {
+    show_status(L"Выберите строку");
+    return;
+  }
+  if (InterlockedCompareExchange(&g_netBusy, 1, 0) != 0) {
+    show_status(L"Запрос уже идёт");
+    return;
+  }
+  g_ansTitle = L"Что внутри";
+  g_plmCount = 0; /* текст вместо списка */
+  wchar_t wait[120];
+  _snwprintf(wait, 120, L"Смотрю объект %ld в PLM…", g_plmIds[i]);
+  show_answer_text(wait);
+  HANDLE th = CreateThread(NULL, 0, card_thread, (LPVOID)(LONG_PTR)g_plmIds[i], 0, NULL);
+  if (th) CloseHandle(th);
+  else InterlockedExchange(&g_netBusy, 0);
 }
 
 static void show_answer_text(const wchar_t *text) {

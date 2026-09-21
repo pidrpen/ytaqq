@@ -248,6 +248,7 @@ static wchar_t g_plmLastLink[PLM_LINK];
 static wchar_t g_plmLinks[PLM_ROWS][PLM_LINK];
 static wchar_t g_plmEsi[PLM_ROWS][PLM_COL1];
 static wchar_t g_plmTp[PLM_ROWS][PLM_COL2];
+static long g_plmIds[PLM_ROWS];  /* InfoObjectId каждой строки — для карточки */
 static int g_plmCount = 0;
 static BOOL g_autostart = FALSE;
 static void show_status(const wchar_t *text);
