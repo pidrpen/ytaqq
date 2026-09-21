@@ -21,6 +21,7 @@
 #define ID_ANS_CLOSE 122
 #define ID_ANS_SHOW 151 /* 131 was already ID_CLIP */
 #define ID_ANS_CARD 152
+#define ID_ANS_DRAW 154
 #define TIMER_CURSOR_KEEP 6
 #define WM_SEARCH_DONE (WM_APP + 8)
 #define WM_OCR_DONE (WM_APP + 9)
@@ -493,6 +494,7 @@ static void open_plm_link(const wchar_t *link) {
   ShellExecuteW(NULL, L"open", link, NULL, NULL, SW_SHOWNORMAL);
 }
 
+static wchar_t g_cardDraw[PLM_LINK]; /* чертёж, найденный для карточки */
 static int g_sortCol = -1, g_sortDesc = 0; /* which column the list is ordered by */
 
 static void fill_plm_list(void) {
@@ -540,6 +542,8 @@ static void fill_plm_list(void) {
   if (show) ShowWindow(show, g_resultFiles && g_plmCount > 0 ? SW_SHOW : SW_HIDE);
   HWND card = GetDlgItem(g_answer, ID_ANS_CARD);
   if (card) ShowWindow(card, !g_resultFiles && g_plmCount > 0 ? SW_SHOW : SW_HIDE);
+  HWND draw = GetDlgItem(g_answer, ID_ANS_DRAW);
+  if (draw) ShowWindow(draw, g_cardDraw[0] ? SW_SHOW : SW_HIDE);
   layout_answer();
 }
 
@@ -654,9 +658,14 @@ static BOOL plm_lookup(const wchar_t *query, wchar_t *out, int cap) {
       L"SELECT a0.OwnerId FROM InfoObjectAttributes AS a0 WITH(NOLOCK) "
       L"WHERE a0.DataType=3 AND a0.Outdated=0 AND a0.CollectionElementId IS NULL "
       L"AND a0.NameKeyId=1739 AND a0.Indexed=1 AND a0.BoolValue=1))"
-      L") AND o0.Name LIKE N'%s' ESCAPE '\\' COLLATE Cyrillic_General_CI_AS "
+      L") AND (o0.Name LIKE N'%s' ESCAPE '\\' COLLATE Cyrillic_General_CI_AS "
+      /* обозначение живёт не в объекте, а его атрибутом — по имени его не найти */
+      L"OR EXISTS (SELECT 1 FROM InfoObjectAttributes AS ad WITH(NOLOCK) "
+      L"JOIN NameKeys AS nkd WITH(NOLOCK) ON nkd.NameKeyId=ad.NameKeyId "
+      L"WHERE ad.OwnerId=o0.InfoObjectId AND ad.Outdated=0 AND nkd.Value=N'Designation' "
+      L"AND ad.ShortText LIKE N'%s' ESCAPE '\\' COLLATE Cyrillic_General_CI_AS)) "
       L"OPTION(MAXDOP 0)",
-      pat);
+      pat, pat);
 
   SQLHENV env = SQL_NULL_HENV;
   SQLHDBC dbc = SQL_NULL_HDBC;
@@ -1281,6 +1290,81 @@ static void card_where_used(SQLHDBC dbc, long id, CardOut *c, CardRow *rows, wch
   }
 }
 
+/* Файл чертежа в PLM не лежит — там только ссылка на объект-документ, а сами
+   файлы у нас на сетевом диске, который уже проиндексирован. Поэтому чертёж
+   ищем не в базе, а в том же json, что и обычный поиск файлов. */
+static BOOL card_is_drawing(const wchar_t *name) {
+  static const wchar_t *ext[] = {L"cdw", L"frw", L"spw", L"a3d", L"m3d", L"dwg",
+                                 L"dxf", L"pdf", L"tif", L"tiff", L"jpg", L"png"};
+  const wchar_t *dot = wcsrchr(name, L'.');
+  if (!dot || !dot[1]) return FALSE;
+  for (int i = 0; i < (int)(sizeof(ext) / sizeof(ext[0])); i++)
+    if (_wcsicmp(dot + 1, ext[i]) == 0) return TRUE;
+  return FALSE;
+}
+
+static int card_find_files(const wchar_t *key, CardOut *c, int wantDrawings) {
+  int shown = 0;
+  files_lock();
+  FileIdx *ix = g_idx;
+  if (ix) {
+    for (int i = 0; i < ix->n && shown < 12; i++) {
+      if (!wcs_istr(ix->ent[i].name, key)) continue;
+      BOOL draw = card_is_drawing(ix->ent[i].name);
+      if (wantDrawings != (draw ? 1 : 0)) continue;
+      const wchar_t *dir = ix->ent[i].dir < ix->dirsN ? ix->dirs[ix->ent[i].dir] : L"";
+      card_add(c, L"  %s\r\n       %s\r\n", ix->ent[i].name, dir);
+      if (draw && !g_cardDraw[0]) _snwprintf(g_cardDraw, PLM_LINK, L"%s\\%s", dir, ix->ent[i].name);
+      shown++;
+    }
+  }
+  files_unlock();
+  return shown;
+}
+
+static void card_drawings(const wchar_t *designation, CardOut *c) {
+  card_add(c, L"\r\nЧЕРТЁЖ И ФАЙЛЫ");
+  if (!designation || !designation[0]) {
+    card_add(c, L": у объекта нет обозначения, искать нечего.\r\n");
+    return;
+  }
+  if (g_filesN == 0) files_load_idx();
+  if (g_filesN == 0) {
+    card_add(c, L": индекс файлов пуст — нажмите «Обновить JSON» в Настройках.\r\n");
+    return;
+  }
+  /* Обозначение ЭСИ бывает длиннее имени файла: у техпроцесса на конце -01ТП,
+     а чертёж назван по самой детали. Не нашли — отрезаем хвост и пробуем ещё. */
+  wchar_t key[200];
+  lstrcpynW(key, designation, 200);
+  int found = 0;
+  for (int attempt = 0; attempt < 3 && !found; attempt++) {
+    if (attempt) {
+      wchar_t *cut = wcsrchr(key, L'-');
+      if (!cut || cut == key) break;
+      *cut = 0;
+    }
+    files_lock();
+    FileIdx *ix = g_idx;
+    if (ix)
+      for (int i = 0; i < ix->n; i++)
+        if (wcs_istr(ix->ent[i].name, key)) {
+          found = 1;
+          break;
+        }
+    files_unlock();
+  }
+  if (!found) {
+    card_add(c, L": по «%s» в индексе ничего нет.\r\n", designation);
+    return;
+  }
+  card_add(c, L" (по «%s»)\r\n", key);
+  int d = card_find_files(key, c, 1);
+  if (!d) card_add(c, L"  чертежей не нашлось\r\n");
+  int o = card_find_files(key, c, 0);
+  if (o) card_add(c, L"  — и ещё %d файлов рядом\r\n", o);
+}
+
 static void plm_card(long id, wchar_t *out, int cap) {
   CardOut c;
   c.w = out;
@@ -1296,7 +1380,9 @@ static void plm_card(long id, wchar_t *out, int cap) {
     return;
   }
   long actualVer = 0, tpCard = 0;
+  wchar_t designation[200] = {0};
   BOOL mainFlag = FALSE;
+  g_cardDraw[0] = 0;
   CardRow *rows = (CardRow *)malloc(sizeof(CardRow) * CARD_ROWS);
   if (!rows) {
     ans_printf(out, cap, L"Не хватило памяти");
@@ -1345,6 +1431,8 @@ static void plm_card(long id, wchar_t *out, int cap) {
     for (int i = 0; i < n; i++) {
       /* эти три решают, куда идти дальше, и они уже прочитаны — лишний
          запрос к серверу за ними не нужен */
+      if (_wcsicmp(rows[i].s1, L"Designation") == 0 && rows[i].s2[0])
+        lstrcpynW(designation, rows[i].s2, 200);
       if (_wcsicmp(rows[i].s1, L"ActualVersion") == 0) actualVer = rows[i].n2;
       if (_wcsicmp(rows[i].s1, L"TechnologicalProcessesCard") == 0) tpCard = rows[i].n2;
       if (_wcsicmp(rows[i].s1, L"MainTP") == 0 || _wcsicmp(rows[i].s1, L"IsActual") == 0)
@@ -1456,6 +1544,7 @@ static void plm_card(long id, wchar_t *out, int cap) {
   card_where_used(dbc, id, &c, rows, err);
 
 freed:
+  card_drawings(designation, &c);
   free(rows);
 done:
   SQLDisconnect(dbc);
@@ -1532,15 +1621,19 @@ static void layout_answer(void) {
   HWND cls = GetDlgItem(g_answer, ID_ANS_CLOSE);
   /* "В проводнике" only makes sense for file hits, so the row is 4 or 5 wide */
   HWND card = GetDlgItem(g_answer, ID_ANS_CARD);
+  HWND draw = GetDlgItem(g_answer, ID_ANS_DRAW);
+  BOOL withDraw = draw && g_cardDraw[0] != 0;
   BOOL withOpen = open && g_plmCount > 0;
   BOOL withShow = show && g_resultFiles && g_plmCount > 0;
   BOOL withCard = card && !g_resultFiles && g_plmCount > 0;
-  int cols = 3 + (withOpen ? 1 : 0) + (withShow ? 1 : 0) + (withCard ? 1 : 0);
+  int cols = 3 + (withOpen ? 1 : 0) + (withShow ? 1 : 0) + (withCard ? 1 : 0) +
+             (withDraw ? 1 : 0);
   int bw = (rc.right - pad * 2 - gap * (cols - 1)) / cols;
   int slot = 0;
   if (withOpen) MoveWindow(open, pad + (bw + gap) * slot++, by, bw, btnH, TRUE);
   if (withShow) MoveWindow(show, pad + (bw + gap) * slot++, by, bw, btnH, TRUE);
   if (withCard) MoveWindow(card, pad + (bw + gap) * slot++, by, bw, btnH, TRUE);
+  if (withDraw) MoveWindow(draw, pad + (bw + gap) * slot++, by, bw, btnH, TRUE);
   if (copy) MoveWindow(copy, pad + (bw + gap) * slot++, by, bw, btnH, TRUE);
   if (notes) MoveWindow(notes, pad + (bw + gap) * slot++, by, bw, btnH, TRUE);
   if (cls) MoveWindow(cls, pad + (bw + gap) * slot++, by, bw, btnH, TRUE);
@@ -1572,6 +1665,8 @@ static LRESULT CALLBACK AnswerProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
     if (LOWORD(wParam) == ID_ANS_OPEN) open_plm_selected();
     if (LOWORD(wParam) == ID_ANS_SHOW) show_selected_in_explorer();
     if (LOWORD(wParam) == ID_ANS_CARD) show_card_selected();
+    if (LOWORD(wParam) == ID_ANS_DRAW && g_cardDraw[0])
+      ShellExecuteW(NULL, L"open", g_cardDraw, NULL, NULL, SW_SHOWNORMAL);
     if (LOWORD(wParam) == ID_ANS_COPY) {
       int i = plm_selected_index();
       if (i >= 0 && i < g_plmCount) {
@@ -1688,6 +1783,7 @@ static void create_answer(HWND owner) {
   HWND open = mk_btn(g_answer, L"Открыть PLM", ID_ANS_OPEN);
   HWND show = mk_btn(g_answer, L"В проводнике", ID_ANS_SHOW);
   HWND card = mk_btn(g_answer, L"Что внутри", ID_ANS_CARD);
+  HWND draw = mk_btn(g_answer, L"Открыть чертёж", ID_ANS_DRAW);
   HWND copy = mk_btn(g_answer, L"Копировать", ID_ANS_COPY);
   HWND notes = mk_btn(g_answer, L"В блокнот", ID_ANS_NOTES);
   HWND cls = mk_btn(g_answer, L"Закрыть", ID_ANS_CLOSE);
@@ -1697,6 +1793,7 @@ static void create_answer(HWND owner) {
     SendMessageW(open, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
     SendMessageW(show, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
     SendMessageW(card, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
+    SendMessageW(draw, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
     SendMessageW(copy, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
     SendMessageW(notes, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
     SendMessageW(cls, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
@@ -1730,6 +1827,7 @@ static void show_card_selected(void) {
   }
   g_ansTitle = L"Что внутри";
   g_ansMono = TRUE;
+  g_cardDraw[0] = 0;
   g_plmCount = 0; /* текст вместо списка */
   wchar_t wait[120];
   _snwprintf(wait, 120, L"Смотрю объект %ld в PLM…", g_plmIds[i]);
@@ -1770,6 +1868,7 @@ static void start_lookup(const wchar_t *q) {
   if (!q) return;
   g_ansTitle = NULL;
   g_ansMono = FALSE;
+  g_cardDraw[0] = 0;
   while (*q == L' ' || *q == L'\t' || *q == L'\r' || *q == L'\n') q++;
   if (!q[0]) {
     show_status(L"Нечего искать — скопируйте текст");
