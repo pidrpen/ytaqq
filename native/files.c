@@ -133,8 +133,31 @@ static int idx_dir(FileIdx *ix, const wchar_t *dir) {
   return ix->dirsN++;
 }
 
+/* Служебные файлы, которые Windows и программы раскидывают сами: в поиске
+   они только мешают и раздувают индекс. Проверка стоит здесь, а не в обходе,
+   чтобы старый files.json тоже читался уже без них. */
+static const wchar_t *kSkipExt[] = {L"db",  L"tmp",  L"temp",    L"bak",    L"swp",
+                                    L"part", L"partial", L"crdownload", L"lock"};
+static const wchar_t *kSkipName[] = {L"thumbs.db", L"ehthumbs.db", L"desktop.ini",
+                                     L".ds_store", L"folder.ini"};
+
+static BOOL files_junk(const wchar_t *name) {
+  if (name[0] == L'~' && name[1] == L'$') return TRUE; /* замок Office */
+  size_t n = wcslen(name);
+  if (n && name[n - 1] == L'~') return TRUE;
+  for (int i = 0; i < (int)(sizeof(kSkipName) / sizeof(kSkipName[0])); i++)
+    if (_wcsicmp(name, kSkipName[i]) == 0) return TRUE;
+  const wchar_t *dot = wcsrchr(name, L'.');
+  if (!dot || !dot[1]) return FALSE;
+  for (int i = 0; i < (int)(sizeof(kSkipExt) / sizeof(kSkipExt[0])); i++)
+    if (_wcsicmp(dot + 1, kSkipExt[i]) == 0) return TRUE;
+  return FALSE;
+}
+
 static BOOL idx_add(FileIdx *ix, int dirIdx, const wchar_t *name) {
   if (dirIdx < 0 || !name || !name[0]) return FALSE;
+  /* не ошибка, а «этот файл нам не нужен» — вызывающий считает FALSE сбоем */
+  if (files_junk(name)) return TRUE;
   if (ix->n >= ix->cap) {
     int cap = ix->cap ? ix->cap * 2 : 4096;
     FileEnt *grown = (FileEnt *)realloc(ix->ent, (size_t)cap * sizeof(FileEnt));
