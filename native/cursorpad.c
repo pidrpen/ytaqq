@@ -53,6 +53,7 @@
 #define ID_SEARCH_GO 113
 #define ID_ASK_TAB 114
 #define ID_CLIP 131
+#define ID_CLIPCLR 153
 #define TIMER_FOLLOW 1
 #define TIMER_SAVE 2
 #define TIMER_PASTE 3
@@ -133,6 +134,7 @@ static COLORREF blend_rgb(COLORREF a, COLORREF b, int t) {
 static HWND g_hwnd;
 static HWND g_edit;
 static HWND g_clipEdit;
+static HWND g_clipClr;
 static HWND g_pin;
 static HWND g_close;
 static HWND g_btnK2;
@@ -736,8 +738,11 @@ static void layout_children(void) {
   if (g_min)
     MoveWindow(g_min, cw - pad - closeW - gap - closeW, (th - btnH) / 2, closeW, btnH, TRUE);
   MoveWindow(g_pin, cw - pad - closeW * 2 - gap * 2 - pinW, (th - btnH) / 2, pinW, btnH, TRUE);
+
   int clipH = MulDiv(CLIP_H, dpi, 96);
-  if (g_clipEdit) MoveWindow(g_clipEdit, gut, th, cw - gut - pad, clipH, TRUE);
+  int clrW = MulDiv(56, dpi, 96);
+  if (g_clipEdit) MoveWindow(g_clipEdit, gut, th, cw - gut - pad - clrW - gap, clipH, TRUE);
+  if (g_clipClr) MoveWindow(g_clipClr, cw - pad - clrW, th, clrW, clipH, TRUE);
   MoveWindow(g_edit, gut, th + clipH, cw - gut - pad, ch - th - clipH - fh, TRUE);
   int half = (cw - pad * 2 - gap) / 2;
   int fy = ch - fh + (fh - btnH) / 2;
@@ -763,6 +768,7 @@ static void apply_follow_state(void) {
   apply_alpha_now();
   EnableWindow(g_edit, !g_follow);
   if (g_clipEdit) EnableWindow(g_clipEdit, !g_follow);
+  if (g_clipClr) EnableWindow(g_clipClr, !g_follow);
   EnableWindow(g_pin, !g_follow);
   EnableWindow(g_close, !g_follow);
   EnableWindow(g_min, !g_follow);
@@ -1407,6 +1413,23 @@ static void run_ocr_test(void) {
   start_ocr_pick();
 }
 
+/* Сброс скопированного: буфер обмена чистится, строка поиска пустеет.
+   Нужен, чтобы случайно не вставить в чужой документ то, что копировал
+   час назад, и чтобы видеть, что буфер действительно пуст. */
+static void clear_copied(void) {
+  BOOL ok = FALSE;
+  for (int tries = 0; tries < 5 && !ok; tries++) {
+    if (OpenClipboard(g_hwnd)) {
+      ok = EmptyClipboard();
+      CloseClipboard();
+    } else {
+      Sleep(30);
+    }
+  }
+  if (g_clipEdit) SetWindowTextW(g_clipEdit, L"");
+  show_status(ok ? L"Буфер очищен" : L"Буфер занят другой программой");
+}
+
 static void paste_line(int n) {
   wchar_t *line = nth_nonempty_line(n);
   if (!line) {
@@ -1521,6 +1544,82 @@ static HFONT make_font(const wchar_t *face, int px, int weight) {
                      DEFAULT_PITCH | FF_DONTCARE, face);
 }
 
+/* Ctrl+1…9 копируют первые девять непустых строк заметок. Какая строка под
+   каким номером — приходилось держать в голове и пересчитывать после каждой
+   правки. Теперь они обведены и пронумерованы прямо в тексте. */
+static void draw_slot_marks(HWND ed) {
+  if (!ed) return;
+  int len = GetWindowTextLengthW(ed);
+  if (len <= 0) return;
+  wchar_t *buf = (wchar_t *)malloc(((size_t)len + 1) * sizeof(wchar_t));
+  if (!buf) return;
+  GetWindowTextW(ed, buf, len + 1);
+  HDC dc = GetDC(ed);
+  if (!dc) {
+    free(buf);
+    return;
+  }
+  RECT cl;
+  GetClientRect(ed, &cl);
+  HFONT ef = (HFONT)SendMessageW(ed, WM_GETFONT, 0, 0);
+  HFONT prevFont = ef ? (HFONT)SelectObject(dc, ef) : NULL;
+  TEXTMETRICW tm;
+  GetTextMetricsW(dc, &tm);
+  int lh = tm.tmHeight;
+  int gutter = 16;
+  HPEN pen = CreatePen(PS_SOLID, 1, blend_rgb(COL_SAGE, COL_PAPER, 150));
+  HGDIOBJ prevPen = SelectObject(dc, pen);
+  HGDIOBJ prevBrush = SelectObject(dc, GetStockObject(NULL_BRUSH));
+  int prevBk = SetBkMode(dc, TRANSPARENT);
+  COLORREF prevCol = SetTextColor(dc, blend_rgb(COL_SAGE, COL_PAPER, 70));
+
+  int slot = 0, i = 0;
+  while (i < len && slot < 9) {
+    int start = i;
+    while (i < len && buf[i] != L'\n' && buf[i] != L'\r') i++;
+    int end = i;
+    if (i < len && buf[i] == L'\r') i++;
+    if (i < len && buf[i] == L'\n') i++;
+    if (end == start) continue; /* пустые строки Ctrl+N пропускает */
+    slot++;
+    LRESULT p1 = SendMessageW(ed, EM_POSFROMCHAR, (WPARAM)start, 0);
+    LRESULT p2 = SendMessageW(ed, EM_POSFROMCHAR, (WPARAM)(end - 1), 0);
+    if (p1 == -1 || p2 == -1) continue; /* строка прокручена за край */
+    int x1 = (short)LOWORD(p1), y1 = (short)HIWORD(p1);
+    int y2 = (short)HIWORD(p2);
+    if (y2 + lh < 0 || y1 > cl.bottom) continue;
+    int right;
+    if (y1 == y2) {
+      SIZE sz;
+      sz.cx = 0;
+      GetTextExtentPoint32W(dc, buf + start, end - start, &sz);
+      right = x1 + sz.cx + 4;
+    } else {
+      right = cl.right - gutter - 4; /* строка перенеслась — рамка во всю ширину */
+    }
+    if (right > cl.right - gutter - 4) right = cl.right - gutter - 4;
+    if (right <= x1 + 6) right = x1 + 6;
+    RoundRect(dc, x1 - 4, y1 - 1, right, y2 + lh + 1, 7, 7);
+    wchar_t d[4];
+    _snwprintf(d, 4, L"%d", slot);
+    RECT nr;
+    nr.left = cl.right - gutter;
+    nr.right = cl.right - 2;
+    nr.top = y1 - 1;
+    nr.bottom = y1 + lh;
+    DrawTextW(dc, d, -1, &nr, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+  }
+
+  SetTextColor(dc, prevCol);
+  SetBkMode(dc, prevBk);
+  SelectObject(dc, prevBrush);
+  SelectObject(dc, prevPen);
+  DeleteObject(pen);
+  if (prevFont) SelectObject(dc, prevFont);
+  ReleaseDC(ed, dc);
+  free(buf);
+}
+
 static LRESULT CALLBACK EditProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
   if (msg == WM_PASTE) {
     if (try_paste_image()) return 0;
@@ -1531,6 +1630,12 @@ static LRESULT CALLBACK EditProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
   if (msg == WM_MOUSEWHEEL || msg == WM_VSCROLL) {
     LRESULT r = CallWindowProcW(g_oldEdit, hwnd, msg, wParam, lParam);
     InvalidateRect(g_hwnd, NULL, FALSE);
+    InvalidateRect(hwnd, NULL, TRUE); /* рамки уехали вместе с текстом */
+    return r;
+  }
+  if (msg == WM_PAINT) {
+    LRESULT r = CallWindowProcW(g_oldEdit, hwnd, msg, wParam, lParam);
+    draw_slot_marks(hwnd);
     return r;
   }
   return CallWindowProcW(g_oldEdit, hwnd, msg, wParam, lParam);
@@ -1736,6 +1841,7 @@ static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
     if (LOWORD(wParam) == ID_CUR_K2) set_skin(1);
     if (LOWORD(wParam) == ID_CUR_K3) set_skin(2);
     if (LOWORD(wParam) == ID_SYS_CUR) set_skin(0);
+    if (LOWORD(wParam) == ID_CLIPCLR) clear_copied();
     if (LOWORD(wParam) == ID_OCR) run_ocr_test();
     if (LOWORD(wParam) == ID_UPDATE) start_update();
     if (LOWORD(wParam) >= ID_THEME_BASE && LOWORD(wParam) < ID_THEME_BASE + THEME_COUNT)
@@ -2106,6 +2212,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     if (!g_fontSmall) g_fontSmall = make_font(L"Segoe UI", 8, FW_NORMAL);
 
     g_pin = mk_btn(hwnd, L"Закрепить", ID_PIN);
+    g_clipClr = mk_btn(hwnd, L"Сброс", ID_CLIPCLR);
     g_close = mk_btn(hwnd, L"×", ID_CLOSE);
     g_min = mk_btn(hwnd, L"–", ID_MIN);
     g_edit = CreateWindowExW(0, L"EDIT", L"",
@@ -2118,6 +2225,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     g_btnAsk = mk_btn(hwnd, L"Поиск", ID_ASK_TAB);
     g_btnSet = mk_btn(hwnd, L"Настройки", ID_SETTINGS);
     SendMessageW(g_pin, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
+    if (g_clipClr) SendMessageW(g_clipClr, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
     SendMessageW(g_close, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
     SendMessageW(g_min, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
     SendMessageW(g_edit, WM_SETFONT, (WPARAM)g_fontBody, TRUE);
@@ -2256,6 +2364,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     if (LOWORD(wParam) == ID_EDIT && HIWORD(wParam) == EN_CHANGE) {
       g_dirty = TRUE;
       InvalidateRect(hwnd, NULL, FALSE);
+      if (g_edit) InvalidateRect(g_edit, NULL, TRUE);
     }
     return 0;
   case WM_HOTKEY:
