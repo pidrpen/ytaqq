@@ -18,7 +18,7 @@
 #define ID_ANS_COPY 120
 #define ID_ANS_NOTES 121
 #define ID_ANS_CLOSE 122
-#define ID_ANS_SHOW 131
+#define ID_ANS_SHOW 151 /* 131 was already ID_CLIP */
 #define TIMER_CURSOR_KEEP 6
 #define WM_SEARCH_DONE (WM_APP + 8)
 #define WM_OCR_DONE (WM_APP + 9)
@@ -506,6 +506,7 @@ static void fill_plm_list(void) {
     sel.state = LVIS_SELECTED | LVIS_FOCUSED;
     SendMessageW(g_answerList, LVM_SETITEMSTATE, 0, (LPARAM)&sel);
   }
+  InvalidateRect(g_answer, NULL, TRUE);
   ShowWindow(g_answerList, g_plmCount > 0 ? SW_SHOW : SW_HIDE);
   if (g_answerEdit) ShowWindow(g_answerEdit, g_plmCount > 0 ? SW_HIDE : SW_SHOW);
   HWND open = GetDlgItem(g_answer, ID_ANS_OPEN);
@@ -823,12 +824,13 @@ static void layout_answer(void) {
   if (!g_answer) return;
   RECT rc;
   GetClientRect(g_answer, &rc);
-  int pad = 10, btnH = 26, gap = 6;
+  int pad = 12, btnH = 28, gap = 7;
+  int top = PANEL_TITLE_H + 6;
   int by = rc.bottom - pad - btnH;
   if (g_answerEdit)
-    MoveWindow(g_answerEdit, pad, pad, rc.right - pad * 2, by - pad - 4, TRUE);
+    MoveWindow(g_answerEdit, pad, top, rc.right - pad * 2, by - top - 6, TRUE);
   if (g_answerList) {
-    MoveWindow(g_answerList, pad, pad, rc.right - pad * 2, by - pad - 4, TRUE);
+    MoveWindow(g_answerList, pad, top, rc.right - pad * 2, by - top - 6, TRUE);
     int cw = rc.right - pad * 2 - 24;
     if (cw < 80) cw = 80;
     LVCOLUMNW col;
@@ -858,6 +860,20 @@ static void layout_answer(void) {
 
 static LRESULT CALLBACK AnswerProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
   switch (msg) {
+  case WM_ERASEBKGND:
+    return 1;
+  case WM_PAINT: {
+    PAINTSTRUCT ps;
+    HDC hdc = BeginPaint(hwnd, &ps);
+    RECT rc;
+    GetClientRect(hwnd, &rc);
+    FillRect(hdc, &rc, g_paper);
+    draw_panel_header(hwnd, hdc, g_resultFiles ? L"Найденные файлы" : L"Находки");
+    EndPaint(hwnd, &ps);
+    return 0;
+  }
+  case WM_NCHITTEST:
+    return panel_hittest(hwnd, lParam);
   case WM_DRAWITEM:
     draw_pad_button((const DRAWITEMSTRUCT *)lParam);
     return TRUE;
@@ -915,6 +931,8 @@ static void create_answer(HWND owner) {
   WNDCLASSEXW wc;
   memset(&wc, 0, sizeof(wc));
   wc.cbSize = sizeof(wc);
+  /* without these the header keeps whatever it was drawn at before a resize */
+  wc.style = CS_HREDRAW | CS_VREDRAW;
   wc.lpfnWndProc = AnswerProc;
   wc.hInstance = g_inst;
   wc.hCursor = LoadCursorW(NULL, IDC_ARROW);
@@ -923,19 +941,23 @@ static void create_answer(HWND owner) {
   RegisterClassExW(&wc);
   g_answer = CreateWindowExW(
       WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, L"CursorPadAnswer",
-      L"Краткая выжимка", WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN, 0, 0,
+      L"Находки", WS_POPUP | WS_CLIPCHILDREN, 0, 0,
       ANS_W, ANS_H, owner, NULL, g_inst, NULL);
+  round_corners(g_answer);
   g_answerEdit = CreateWindowExW(
       0, L"EDIT", L"",
       WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL,
       0, 0, 100, 100, g_answer, NULL, NULL, NULL);
   g_answerList = CreateWindowExW(
-      WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
+      0, WC_LISTVIEWW, L"",
       WS_CHILD | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | LVS_NOSORTHEADER | WS_TABSTOP,
       0, 0, 100, 100, g_answer, (HMENU)(INT_PTR)ID_ANS_LIST, NULL, NULL);
   if (g_answerList) {
     SendMessageW(g_answerList, LVM_SETEXTENDEDLISTVIEWSTYLE, 0,
-                 LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES | LVS_EX_DOUBLEBUFFER);
+                 LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
+    SendMessageW(g_answerList, LVM_SETBKCOLOR, 0, (LPARAM)COL_PAPER);
+    SendMessageW(g_answerList, LVM_SETTEXTBKCOLOR, 0, (LPARAM)COL_PAPER);
+    SendMessageW(g_answerList, LVM_SETTEXTCOLOR, 0, (LPARAM)COL_INK);
     LVCOLUMNW col;
     memset(&col, 0, sizeof(col));
     col.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;

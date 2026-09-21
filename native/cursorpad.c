@@ -93,16 +93,16 @@
 #define SET_W 312
 #define SET_H 780
 #define ASK_W 312
-#define ASK_H 188
+#define ASK_H 224 /* room for the drawn header */
 #define ID_THEME_BASE 140
 #define THEME_COUNT 8
 
-static COLORREF COL_PAPER = RGB(243, 238, 228);
-static COLORREF COL_PAPER_DARK = RGB(230, 223, 211);
-static COLORREF COL_INK = RGB(26, 24, 20);
-static COLORREF COL_MUTED = RGB(106, 100, 92);
-static COLORREF COL_SAGE = RGB(90, 111, 98);
-static COLORREF COL_LINE = RGB(210, 202, 188);
+static COLORREF COL_PAPER = RGB(255, 255, 255);
+static COLORREF COL_PAPER_DARK = RGB(243, 244, 246);
+static COLORREF COL_INK = RGB(17, 24, 39);
+static COLORREF COL_MUTED = RGB(107, 114, 128);
+static COLORREF COL_SAGE = RGB(37, 99, 235);
+static COLORREF COL_LINE = RGB(226, 229, 233);
 
 typedef struct {
   COLORREF paper, dark, ink, muted, sage;
@@ -110,14 +110,15 @@ typedef struct {
 } PadTheme;
 
 static const PadTheme kThemes[THEME_COUNT] = {
-    {RGB(243, 238, 228), RGB(230, 223, 211), RGB(26, 24, 20), RGB(106, 100, 92), RGB(90, 111, 98), L"Пергамент"},
-    {RGB(20, 19, 18), RGB(12, 11, 10), RGB(242, 239, 232), RGB(156, 151, 143), RGB(138, 163, 150), L"Ночь"},
-    {RGB(230, 237, 228), RGB(211, 224, 212), RGB(28, 42, 32), RGB(90, 110, 96), RGB(62, 122, 88), L"Шалфей"},
-    {RGB(230, 238, 244), RGB(210, 222, 232), RGB(22, 32, 44), RGB(90, 106, 122), RGB(61, 106, 150), L"Сталь"},
-    {RGB(22, 24, 26), RGB(14, 15, 16), RGB(232, 234, 236), RGB(148, 152, 156), RGB(120, 140, 148), L"Уголь"},
-    {RGB(236, 233, 222), RGB(222, 218, 204), RGB(40, 38, 32), RGB(108, 104, 92), RGB(120, 112, 88), L"Лён"},
-    {RGB(18, 26, 38), RGB(12, 18, 28), RGB(236, 232, 220), RGB(150, 158, 170), RGB(88, 122, 158), L"Чернила"},
-    {RGB(28, 36, 32), RGB(18, 24, 20), RGB(232, 230, 220), RGB(150, 158, 148), RGB(160, 168, 140), L"Мел"},
+    /* flat surfaces, one accent each: four light, four dark */
+    {RGB(255, 255, 255), RGB(243, 244, 246), RGB(17, 24, 39), RGB(107, 114, 128), RGB(37, 99, 235), L"Светлая"},
+    {RGB(250, 250, 249), RGB(240, 239, 236), RGB(28, 25, 23), RGB(120, 113, 108), RGB(180, 83, 9), L"Песок"},
+    {RGB(248, 250, 250), RGB(238, 244, 243), RGB(15, 31, 28), RGB(95, 122, 116), RGB(13, 148, 136), L"Мята"},
+    {RGB(253, 249, 249), RGB(246, 238, 238), RGB(31, 20, 22), RGB(124, 99, 103), RGB(190, 18, 60), L"Роза"},
+    {RGB(26, 27, 30), RGB(35, 37, 41), RGB(232, 234, 237), RGB(154, 160, 166), RGB(96, 165, 250), L"Тёмная"},
+    {RGB(15, 17, 21), RGB(23, 26, 32), RGB(230, 232, 236), RGB(139, 146, 158), RGB(129, 140, 248), L"Ночь"},
+    {RGB(32, 33, 36), RGB(23, 24, 26), RGB(227, 227, 227), RGB(158, 158, 158), RGB(52, 211, 153), L"Графит"},
+    {RGB(24, 24, 27), RGB(33, 33, 36), RGB(237, 237, 239), RGB(155, 155, 163), RGB(245, 158, 11), L"Уголь"},
 };
 
 static COLORREF blend_rgb(COLORREF a, COLORREF b, int t) {
@@ -444,7 +445,7 @@ static void apply_theme(void) {
   COL_INK = kThemes[g_theme].ink;
   COL_MUTED = kThemes[g_theme].muted;
   COL_SAGE = kThemes[g_theme].sage;
-  COL_LINE = blend_rgb(COL_INK, COL_PAPER, 214);
+  COL_LINE = blend_rgb(COL_INK, COL_PAPER, 224);
   if (g_paper) DeleteObject(g_paper);
   if (g_paperDark) DeleteObject(g_paperDark);
   g_paper = CreateSolidBrush(COL_PAPER);
@@ -1236,6 +1237,13 @@ static void append_notes(const wchar_t *text) {
 
 static void draw_pad_button(const DRAWITEMSTRUCT *dis);
 static HWND mk_btn(HWND parent, const wchar_t *text, int id);
+/* panels draw their own title bar instead of wearing the system one */
+#define PANEL_TITLE_H 36
+#define ID_PANEL_CLOSE 150 /* keep clear of ID_THEME_BASE..+THEME_COUNT */
+static void draw_panel_header(HWND hwnd, HDC hdc, const wchar_t *title);
+static LRESULT panel_hittest(HWND hwnd, LPARAM lParam);
+static void place_panel_close(HWND hwnd);
+static void round_corners(HWND hwnd);
 
 #include "pad_extra.c"
 
@@ -1253,6 +1261,41 @@ static void fill_round_rect(HDC hdc, RECT rc, COLORREF fill, COLORREF border, in
   DeleteObject(pn);
 }
 
+static void draw_panel_header(HWND hwnd, HDC hdc, const wchar_t *title) {
+  RECT rc;
+  GetClientRect(hwnd, &rc);
+  RECT hd = {0, 0, rc.right, PANEL_TITLE_H};
+  FillRect(hdc, &hd, g_paperDark);
+  RECT rule = {14, PANEL_TITLE_H - 1, rc.right - 14, PANEL_TITLE_H};
+  HBRUSH line = CreateSolidBrush(COL_LINE);
+  FillRect(hdc, &rule, line);
+  DeleteObject(line);
+  SetBkMode(hdc, TRANSPARENT);
+  SetTextColor(hdc, COL_INK);
+  if (g_fontUi) SelectObject(hdc, g_fontUi);
+  RECT t = {16, 0, rc.right - 44, PANEL_TITLE_H};
+  DrawTextW(hdc, title, -1, &t, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+}
+
+/* the header doubles as the drag handle, the way the pad's own title does */
+static LRESULT panel_hittest(HWND hwnd, LPARAM lParam) {
+  POINT pt = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+  ScreenToClient(hwnd, &pt);
+  if (pt.y >= 0 && pt.y < PANEL_TITLE_H) {
+    HWND child = ChildWindowFromPoint(hwnd, pt);
+    if (!child || child == hwnd) return HTCAPTION;
+  }
+  return HTCLIENT;
+}
+
+static void place_panel_close(HWND hwnd) {
+  HWND b = GetDlgItem(hwnd, ID_PANEL_CLOSE);
+  if (!b) return;
+  RECT rc;
+  GetClientRect(hwnd, &rc);
+  MoveWindow(b, rc.right - 14 - 26, (PANEL_TITLE_H - 24) / 2, 26, 24, TRUE);
+}
+
 static void draw_pad_button(const DRAWITEMSTRUCT *dis) {
   if (!dis || dis->CtlType != ODT_BUTTON) return;
   RECT rc = dis->rcItem;
@@ -1266,7 +1309,7 @@ static void draw_pad_button(const DRAWITEMSTRUCT *dis) {
   BOOL on = t[0] == 0x25CF || (themeBtn && g_theme == ti);
   BOOL primary = id == ID_SETTINGS || id == ID_SEARCH_GO || id == ID_UPDATE || id == ID_PIN ||
                  id == ID_ANS_OPEN || (id == ID_ASK_TAB && g_askOpen);
-  BOOL quiet = id == ID_CLOSE || id == ID_MIN;
+  BOOL quiet = id == ID_CLOSE || id == ID_MIN || id == ID_PANEL_CLOSE;
   COLORREF fill, fg, bd;
   if (themeBtn && ti >= 0) {
     const PadTheme *th = &kThemes[ti];
@@ -1465,9 +1508,10 @@ static void layout_settings(void) {
   if (!g_setHwnd) return;
   RECT rc;
   GetClientRect(g_setHwnd, &rc);
-  int pad = 14, gap = 7, btnH = 28, y = 30;
+  int pad = 14, gap = 7, btnH = 28, y = PANEL_TITLE_H + 26;
   int cw = rc.right - pad;
   int half = (cw - pad - gap) / 2;
+  place_panel_close(g_setHwnd);
   if (g_filesRootEdit) MoveWindow(g_filesRootEdit, pad, y, cw - pad, btnH, TRUE);
   y += btnH + gap;
   if (g_btnIdx) MoveWindow(g_btnIdx, pad, y, cw - pad, btnH, TRUE);
@@ -1516,11 +1560,12 @@ static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
     RECT rc;
     GetClientRect(hwnd, &rc);
     FillRect(hdc, &rc, g_paperDark);
+    draw_panel_header(hwnd, hdc, L"Настройки");
     SetBkMode(hdc, TRANSPARENT);
     if (g_fontSmall) SelectObject(hdc, g_fontSmall);
     SetTextColor(hdc, COL_MUTED);
     {
-      RECT cap = {14, 10, rc.right - 14, 28};
+      RECT cap = {14, PANEL_TITLE_H + 6, rc.right - 14, PANEL_TITLE_H + 24};
       DrawTextW(hdc, L"PLM и файлы", -1, &cap, DT_LEFT | DT_SINGLELINE);
     }
     if (g_btnK2) {
@@ -1563,13 +1608,26 @@ static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
   case WM_DRAWITEM:
     draw_pad_button((const DRAWITEMSTRUCT *)lParam);
     return TRUE;
+  case WM_CTLCOLOREDIT: {
+    /* fields read as filled surfaces against the panel, no sunken border */
+    HDC hdc = (HDC)wParam;
+    SetBkColor(hdc, COL_PAPER);
+    SetTextColor(hdc, COL_INK);
+    return (LRESULT)g_paper;
+  }
   case WM_CTLCOLORSTATIC: {
     HDC hdc = (HDC)wParam;
     SetBkColor(hdc, COL_PAPER_DARK);
     SetTextColor(hdc, COL_MUTED);
     return (LRESULT)g_paperDark;
   }
+  case WM_NCHITTEST:
+    return panel_hittest(hwnd, lParam);
   case WM_COMMAND:
+    if (LOWORD(wParam) == ID_PANEL_CLOSE) {
+      ShowWindow(hwnd, SW_HIDE);
+      return 0;
+    }
     if (LOWORD(wParam) == ID_CUR_K2) set_skin(1);
     if (LOWORD(wParam) == ID_CUR_K3) set_skin(2);
     if (LOWORD(wParam) == ID_SYS_CUR) set_skin(0);
@@ -1664,9 +1722,10 @@ static void layout_ask(void) {
   if (!g_askHwnd) return;
   RECT rc;
   GetClientRect(g_askHwnd, &rc);
-  int pad = 14, gap = 7, btnH = 28, y = 14;
+  int pad = 14, gap = 7, btnH = 28, y = PANEL_TITLE_H + 12;
   int cw = rc.right - pad;
   int goW = 88;
+  place_panel_close(g_askHwnd);
   if (g_searchEdit) MoveWindow(g_searchEdit, pad, y, cw - pad - goW - gap, btnH, TRUE);
   if (g_searchGo) MoveWindow(g_searchGo, cw - goW, y, goW, btnH, TRUE);
   y += btnH + gap + 20;
@@ -1699,6 +1758,7 @@ static void sync_ask_btn(void) {
   if (g_hwnd) InvalidateRect(g_hwnd, NULL, FALSE);
 }
 
+static void toggle_ask(void);
 static LRESULT CALLBACK AskProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
   switch (msg) {
   case WM_PAINT: {
@@ -1707,6 +1767,7 @@ static LRESULT CALLBACK AskProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     RECT rc;
     GetClientRect(hwnd, &rc);
     FillRect(hdc, &rc, g_paperDark);
+    draw_panel_header(hwnd, hdc, L"Поиск");
     SetBkMode(hdc, TRANSPARENT);
     if (g_fontSmall) SelectObject(hdc, g_fontSmall);
     SetTextColor(hdc, COL_MUTED);
@@ -1740,7 +1801,13 @@ static LRESULT CALLBACK AskProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     SetTextColor(hdc, COL_MUTED);
     return (LRESULT)g_paperDark;
   }
+  case WM_NCHITTEST:
+    return panel_hittest(hwnd, lParam);
   case WM_COMMAND:
+    if (LOWORD(wParam) == ID_PANEL_CLOSE) {
+      toggle_ask();
+      return 0;
+    }
     if (LOWORD(wParam) == ID_SEARCH_GO) search_clipboard_or_edit();
     if (LOWORD(wParam) == ID_ENG_AI) {
       g_engine = 3;
@@ -1790,6 +1857,7 @@ static void create_ask(HWND owner) {
   WNDCLASSEXW wc;
   memset(&wc, 0, sizeof(wc));
   wc.cbSize = sizeof(wc);
+  wc.style = CS_HREDRAW | CS_VREDRAW;
   wc.lpfnWndProc = AskProc;
   wc.hInstance = g_inst;
   wc.hCursor = LoadCursorW(NULL, IDC_ARROW);
@@ -1798,9 +1866,11 @@ static void create_ask(HWND owner) {
   RegisterClassExW(&wc);
   g_askHwnd = CreateWindowExW(
       WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED, L"CursorPadAsk",
-      L"Поиск", WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN, 0, 0,
+      L"Поиск", WS_POPUP | WS_CLIPCHILDREN, 0, 0,
       ASK_W, ASK_H, owner, NULL, g_inst, NULL);
-  g_searchEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+  mk_btn(g_askHwnd, L"×", ID_PANEL_CLOSE);
+  round_corners(g_askHwnd);
+  g_searchEdit = CreateWindowExW(0, L"EDIT", L"",
                                  WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
                                  0, 0, 160, 26, g_askHwnd, (HMENU)(INT_PTR)ID_SEARCH_EDIT, NULL, NULL);
   g_searchGo = mk_btn(g_askHwnd, L"Спросить", ID_SEARCH_GO);
@@ -1824,6 +1894,7 @@ static void create_settings(HWND owner) {
   WNDCLASSEXW wc;
   memset(&wc, 0, sizeof(wc));
   wc.cbSize = sizeof(wc);
+  wc.style = CS_HREDRAW | CS_VREDRAW;
   wc.lpfnWndProc = SettingsProc;
   wc.hInstance = g_inst;
   wc.hCursor = LoadCursorW(NULL, IDC_ARROW);
@@ -1832,9 +1903,11 @@ static void create_settings(HWND owner) {
   RegisterClassExW(&wc);
   g_setHwnd = CreateWindowExW(
       WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED, L"CursorPadSettings",
-      L"Настройки", WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN, 0, 0,
+      L"Настройки", WS_POPUP | WS_CLIPCHILDREN, 0, 0,
       SET_W, SET_H, owner, NULL, g_inst, NULL);
-  g_filesRootEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", g_filesRoot,
+  mk_btn(g_setHwnd, L"×", ID_PANEL_CLOSE);
+  round_corners(g_setHwnd);
+  g_filesRootEdit = CreateWindowExW(0, L"EDIT", g_filesRoot,
                                     WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
                                     0, 0, 200, 26, g_setHwnd, (HMENU)(INT_PTR)ID_FILES_ROOT, NULL, NULL);
   g_btnIdx = mk_btn(g_setHwnd, L"Обновить JSON", ID_FILES_REFRESH);
@@ -1843,16 +1916,16 @@ static void create_settings(HWND owner) {
                                 (HMENU)(INT_PTR)136, NULL, NULL);
   g_filesBar = CreateWindowExW(0, PROGRESS_CLASSW, L"", WS_CHILD | PBS_MARQUEE, 0, 0, 200, 6,
                                g_setHwnd, (HMENU)(INT_PTR)137, NULL, NULL);
-  g_plmServer = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", g_sqlHost,
+  g_plmServer = CreateWindowExW(0, L"EDIT", g_sqlHost,
                                 WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
                                 0, 0, 120, 26, g_setHwnd, (HMENU)(INT_PTR)ID_PLM_SERVER, NULL, NULL);
-  g_plmDb = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", g_plmDatabase[0] ? g_plmDatabase : L"",
+  g_plmDb = CreateWindowExW(0, L"EDIT", g_plmDatabase[0] ? g_plmDatabase : L"",
                             WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
                             0, 0, 120, 26, g_setHwnd, (HMENU)(INT_PTR)ID_PLM_DB, NULL, NULL);
-  g_plmUser = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", g_sqlUser,
+  g_plmUser = CreateWindowExW(0, L"EDIT", g_sqlUser,
                               WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
                               0, 0, 120, 26, g_setHwnd, (HMENU)(INT_PTR)ID_PLM_USER, NULL, NULL);
-  g_plmPass = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+  g_plmPass = CreateWindowExW(0, L"EDIT", L"",
                               WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_PASSWORD,
                               0, 0, 120, 26, g_setHwnd, (HMENU)(INT_PTR)ID_PLM_PASS, NULL, NULL);
   g_btnK2 = mk_btn(g_setHwnd, L"Мечник", ID_CUR_K2);
@@ -1909,11 +1982,14 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     apply_dpi(hwnd);
     g_paper = CreateSolidBrush(COL_PAPER);
     g_paperDark = CreateSolidBrush(COL_PAPER_DARK);
-    g_fontDisplay = make_font(L"Georgia", 12, FW_SEMIBOLD);
-    if (!g_fontDisplay) g_fontDisplay = make_font(L"Palatino Linotype", 12, FW_SEMIBOLD);
-    g_fontUi = make_font(L"Segoe UI", 9, FW_SEMIBOLD);
-    g_fontBody = make_font(L"Segoe UI", 10, FW_NORMAL);
-    g_fontSmall = make_font(L"Segoe UI", 8, FW_NORMAL);
+    g_fontDisplay = make_font(L"Segoe UI Variable Display", 13, FW_SEMIBOLD);
+    if (!g_fontDisplay) g_fontDisplay = make_font(L"Segoe UI", 13, FW_SEMIBOLD);
+    g_fontUi = make_font(L"Segoe UI Variable Text", 9, FW_SEMIBOLD);
+    if (!g_fontUi) g_fontUi = make_font(L"Segoe UI", 9, FW_SEMIBOLD);
+    g_fontBody = make_font(L"Segoe UI Variable Text", 10, FW_NORMAL);
+    if (!g_fontBody) g_fontBody = make_font(L"Segoe UI", 10, FW_NORMAL);
+    g_fontSmall = make_font(L"Segoe UI Variable Small", 8, FW_NORMAL);
+    if (!g_fontSmall) g_fontSmall = make_font(L"Segoe UI", 8, FW_NORMAL);
 
     g_pin = mk_btn(hwnd, L"Закрепить", ID_PIN);
     g_close = mk_btn(hwnd, L"×", ID_CLOSE);
@@ -1922,7 +1998,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                              WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL |
                                  ES_WANTRETURN | WS_VSCROLL,
                              0, 0, 100, 100, hwnd, (HMENU)(INT_PTR)ID_EDIT, NULL, NULL);
-    g_clipEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+    g_clipEdit = CreateWindowExW(0, L"EDIT", L"",
                                  WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
                                  0, 0, 100, 24, hwnd, (HMENU)(INT_PTR)ID_CLIP, NULL, NULL);
     g_btnAsk = mk_btn(hwnd, L"Поиск", ID_ASK_TAB);
