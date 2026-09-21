@@ -53,6 +53,7 @@ static ULONGLONG g_filesT0;          /* when the current walk started */
 static ULONGLONG g_filesTook;        /* how long the last one took, ms */
 static long g_filesDirsDone;         /* folders in the finished index */
 static int g_filesWorkers;           /* how many folders were fetched at once */
+static volatile LONG g_filesIdle;    /* workers with nothing to do right now */
 static void save_files_pref(void);
 static void files_refresh_status(void);
 
@@ -267,9 +268,11 @@ static void files_refresh_status(void) {
     long dirs = (long)InterlockedCompareExchange(&g_filesDirs, 0, 0);
     ULONGLONG ms = g_filesT0 ? GetTickCount64() - g_filesT0 : 0;
     long persec = ms > 500 ? (long)(done * 1000ull / ms) : 0;
+    long dsec = ms > 500 ? (long)(dirs * 1000ull / ms) : 0;
+    long idle = (long)InterlockedCompareExchange(&g_filesIdle, 0, 0);
     if (persec > 0)
-      _snwprintf(t, 200, L"Обход: %ld файлов, %ld папок · %ld файл/с · %d потоков", done, dirs,
-                 persec, g_filesWorkers);
+      _snwprintf(t, 200, L"Обход: %ld файлов / %ld папок · %ld ф/с · %ld п/с · %d потоков, ждут %ld",
+                 done, dirs, persec, dsec, g_filesWorkers, idle);
     else
       _snwprintf(t, 200, L"Обход: %ld файлов, %ld папок…", done, dirs);
   }
@@ -761,7 +764,7 @@ static BOOL wp_init(WalkPath *p, const wchar_t *root) {
    together at the end. */
 typedef struct {
   wchar_t **item;
-  int n, cap;
+  int head, n, cap;
   int active;
   BOOL oom;
   CRITICAL_SECTION cs;
@@ -776,7 +779,12 @@ static BOOL files_cancelled(void) {
 
 /* caller holds q->cs */
 static BOOL wq_push(WalkQ *q, const wchar_t *full) {
-  if (q->n >= q->cap) {
+  if (q->head && q->head + q->n >= q->cap) {
+    /* slide the live part back to the front before growing */
+    memmove(q->item, q->item + q->head, (size_t)q->n * sizeof(wchar_t *));
+    q->head = 0;
+  }
+  if (q->head + q->n >= q->cap) {
     int cap = q->cap ? q->cap * 2 : 256;
     wchar_t **grown = (wchar_t **)realloc(q->item, (size_t)cap * sizeof(wchar_t *));
     if (!grown) return FALSE;
@@ -787,7 +795,8 @@ static BOOL wq_push(WalkQ *q, const wchar_t *full) {
   wchar_t *copy = (wchar_t *)malloc(need * sizeof(wchar_t));
   if (!copy) return FALSE;
   memcpy(copy, full, need * sizeof(wchar_t));
-  q->item[q->n++] = copy;
+  q->item[q->head + q->n] = copy;
+  q->n++;
   return TRUE;
 }
 
@@ -827,12 +836,22 @@ static DWORD WINAPI files_walk_worker(LPVOID param) {
   size_t patCap = 0, childCap = 0, dispCap = 0;
   for (;;) {
     EnterCriticalSection(&q->cs);
-    while (q->n == 0 && q->active > 0) SleepConditionVariableCS(&q->cv, &q->cs, 100);
+    if (q->n == 0 && q->active > 0) {
+      /* counted, because a worker waiting for folders is the difference
+         between "the server is slow" and "we are not asking it enough" */
+      InterlockedIncrement(&g_filesIdle);
+      while (q->n == 0 && q->active > 0) SleepConditionVariableCS(&q->cv, &q->cs, 100);
+      InterlockedDecrement(&g_filesIdle);
+    }
     if (q->n == 0) {
       LeaveCriticalSection(&q->cs);
       break;
     }
-    wchar_t *dir = q->item[--q->n];
+    /* oldest folder first: a depth-first queue keeps only a handful of
+       folders in flight, and workers sit idle waiting for the next level */
+    wchar_t *dir = q->item[q->head++];
+    q->n--;
+    if (q->n == 0) q->head = 0;
     q->active++;
     LeaveCriticalSection(&q->cs);
 
@@ -1003,7 +1022,7 @@ static void files_walk_all(const wchar_t *root, FileIdx *out, BOOL *oom, BOOL *s
     }
   }
   if (q.oom || !ok) *oom = TRUE;
-  for (int i = 0; i < q.n; i++) free(q.item[i]);
+  for (int i = 0; i < q.n; i++) free(q.item[q.head + i]);
   free(q.item);
   free(w);
   free(th);
@@ -1015,6 +1034,7 @@ static DWORD WINAPI files_index_thread(LPVOID param) {
 again:;
   InterlockedExchange(&g_filesScanned, 0);
   InterlockedExchange(&g_filesDirs, 0);
+  InterlockedExchange(&g_filesIdle, 0);
   g_filesT0 = GetTickCount64();
   FileIdx *ix = idx_new();
   BOOL oom = FALSE, stopped = FALSE;
