@@ -182,6 +182,8 @@ static HBRUSH g_paperDark;
 static NOTIFYICONDATAW g_nid;
 static BOOL g_follow = TRUE;
 static BOOL g_dirty = FALSE;
+static BOOL g_notesTruncated = FALSE; /* loaded file was bigger than the box */
+static int g_ansW = 0, g_ansH = 0; /* remembered size of the results panel */
 static BOOL g_trayAdded = FALSE;
 static BOOL g_hidden = FALSE;
 static double g_x, g_y;
@@ -499,8 +501,10 @@ static void load_cursor_pref(void) {
   buf[n] = 0;
   char skin[16] = {0};
   char eng[16] = {0};
-  int bg = g_alphaFollow, fg = g_alphaPinned, autoOn = -1, theme = 0;
-  sscanf(buf, "%15s %d %d %15s %d %d", skin, &bg, &fg, eng, &autoOn, &theme);
+  int bg = g_alphaFollow, fg = g_alphaPinned, autoOn = -1, theme = 0, aw = 0, ah = 0;
+  sscanf(buf, "%15s %d %d %15s %d %d %d %d", skin, &bg, &fg, eng, &autoOn, &theme, &aw, &ah);
+  if (aw >= 320 && aw <= 4000) g_ansW = aw;
+  if (ah >= 200 && ah <= 3000) g_ansH = ah;
   if (skin[0] == 'k' && skin[1] == '3') g_skin = 2;
   else if (skin[0] == 's') g_skin = 0;
   else g_skin = 1;
@@ -518,8 +522,8 @@ static void save_cursor_pref(void) {
   const char *v = g_skin == 2 ? "k3" : (g_skin == 0 ? "system" : "k2");
   const char *e = g_engine == 4 ? "plm" : (g_engine == 5 ? "files" : "ai");
   char buf[96];
-  snprintf(buf, sizeof(buf), "%s %d %d %s %d %d\n", v, g_alphaFollow, g_alphaPinned, e,
-           g_autostart ? 1 : 0, g_theme);
+  snprintf(buf, sizeof(buf), "%s %d %d %s %d %d %d %d\n", v, g_alphaFollow, g_alphaPinned, e,
+           g_autostart ? 1 : 0, g_theme, g_ansW, g_ansH);
   HANDLE h = CreateFileW(g_prefPath, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
                          FILE_ATTRIBUTE_NORMAL, NULL);
   if (h == INVALID_HANDLE_VALUE) return;
@@ -647,6 +651,12 @@ static void load_notes(void) {
     MultiByteToWideChar(CP_UTF8, 0, utf8, read, w, wlen);
     w[wlen] = 0;
     SetWindowTextW(g_edit, w);
+    /* the edit control caps what it accepts; saving a truncated copy back
+       would destroy the rest of an oversized file */
+    if (GetWindowTextLengthW(g_edit) < wlen) {
+      g_notesTruncated = TRUE;
+      show_status(L"Файл заметок слишком велик — правки не сохраняются");
+    }
     free(w);
   }
   free(utf8);
@@ -654,7 +664,7 @@ static void load_notes(void) {
 }
 
 static void save_notes(void) {
-  if (!g_edit) return;
+  if (!g_edit || g_notesTruncated) return;
   int len = GetWindowTextLengthW(g_edit);
   wchar_t *w = (wchar_t *)malloc((len + 1) * sizeof(wchar_t));
   if (!w) return;
@@ -666,13 +676,19 @@ static void save_notes(void) {
     return;
   }
   WideCharToMultiByte(CP_UTF8, 0, w, -1, utf8, nbytes, NULL, NULL);
-  HANDLE h = CreateFileW(g_notesPath, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
+  /* write beside the real file and swap it in: overwriting in place leaves a
+     window where a crash or a power cut finds an empty notes.txt */
+  wchar_t tmp[MAX_PATH];
+  _snwprintf(tmp, MAX_PATH, L"%s.tmp", g_notesPath);
+  HANDLE h = CreateFileW(tmp, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
                          FILE_ATTRIBUTE_NORMAL, NULL);
   if (h != INVALID_HANDLE_VALUE) {
-    DWORD written = 0;
-    if (nbytes > 0) WriteFile(h, utf8, (DWORD)nbytes - 1, &written, NULL);
+    DWORD written = 0, want = nbytes > 0 ? (DWORD)nbytes - 1 : 0;
+    BOOL ok = want == 0 || (WriteFile(h, utf8, want, &written, NULL) && written == want);
+    if (ok) ok = FlushFileBuffers(h);
     CloseHandle(h);
-    g_dirty = FALSE;
+    if (ok && MoveFileExW(tmp, g_notesPath, MOVEFILE_REPLACE_EXISTING)) g_dirty = FALSE;
+    else DeleteFileW(tmp);
   }
   free(utf8);
   free(w);
@@ -1282,6 +1298,10 @@ static void draw_panel_header(HWND hwnd, HDC hdc, const wchar_t *title) {
 
 /* the header doubles as the drag handle, the way the pad's own title does */
 static LRESULT panel_hittest(HWND hwnd, LPARAM lParam) {
+  /* a resizable panel must keep its edges: ask the default handler first and
+     only claim the hit when it is not one of the sizing borders */
+  LRESULT edge = DefWindowProcW(hwnd, WM_NCHITTEST, 0, lParam);
+  if (edge >= HTLEFT && edge <= HTBOTTOMRIGHT) return edge;
   POINT pt = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
   ScreenToClient(hwnd, &pt);
   if (pt.y >= 0 && pt.y < PANEL_TITLE_H) {
@@ -1507,6 +1527,57 @@ static LRESULT CALLBACK SearchEditProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
   return CallWindowProcW(g_oldSearch ? g_oldSearch : DefWindowProcW, hwnd, msg, wParam, lParam);
 }
 
+/* Spelled out rather than linked from libuuid: pulling that in for two
+   values cost 400 KB of exe, which is a lot for one button. */
+static const GUID kCLSID_FileOpenDialog = {0xdc1c5a9c, 0xe88a, 0x4dde,
+                                           {0xa5, 0xa1, 0x60, 0xf8, 0x2a, 0x20, 0xae, 0xf7}};
+static const GUID kIID_FileOpenDialog = {0xd57c7288, 0xd4ad, 0x4768,
+                                         {0xbe, 0x02, 0x9d, 0x96, 0x95, 0x32, 0xd9, 0x60}};
+
+/* Typing a network path by hand is the easiest thing in the program to get
+   wrong, and a typo just yields an empty index with no explanation. */
+static BOOL pick_folder(HWND owner, wchar_t *out, int cap) {
+  out[0] = 0;
+  HRESULT init = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+  BOOL ok = FALSE;
+  IFileOpenDialog *dlg = NULL;
+  if (SUCCEEDED(CoCreateInstance(&kCLSID_FileOpenDialog, NULL, CLSCTX_INPROC_SERVER,
+                                 &kIID_FileOpenDialog, (void **)&dlg))) {
+    DWORD opts = 0;
+    dlg->lpVtbl->GetOptions(dlg, &opts);
+    dlg->lpVtbl->SetOptions(dlg, opts | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM |
+                                     FOS_PATHMUSTEXIST);
+    dlg->lpVtbl->SetTitle(dlg, L"Папка для поиска файлов");
+    if (SUCCEEDED(dlg->lpVtbl->Show(dlg, owner))) {
+      IShellItem *item = NULL;
+      if (SUCCEEDED(dlg->lpVtbl->GetResult(dlg, &item)) && item) {
+        PWSTR path = NULL;
+        if (SUCCEEDED(item->lpVtbl->GetDisplayName(item, SIGDN_FILESYSPATH, &path)) && path) {
+          lstrcpynW(out, path, cap);
+          CoTaskMemFree(path);
+          ok = out[0] != 0;
+        }
+        item->lpVtbl->Release(item);
+      }
+    }
+    dlg->lpVtbl->Release(dlg);
+  } else {
+    /* pre-Vista shells, and anything that refuses the modern dialog */
+    BROWSEINFOW bi;
+    memset(&bi, 0, sizeof(bi));
+    bi.hwndOwner = owner;
+    bi.lpszTitle = L"Папка для поиска файлов";
+    bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
+    LPITEMIDLIST id = SHBrowseForFolderW(&bi);
+    if (id) {
+      if (SHGetPathFromIDListW(id, out)) ok = out[0] != 0;
+      CoTaskMemFree(id);
+    }
+  }
+  if (init == S_OK || init == S_FALSE) CoUninitialize();
+  return ok;
+}
+
 static void layout_settings(void) {
   if (!g_setHwnd) return;
   RECT rc;
@@ -1515,7 +1586,13 @@ static void layout_settings(void) {
   int cw = rc.right - pad;
   int half = (cw - pad - gap) / 2;
   place_panel_close(g_setHwnd);
-  if (g_filesRootEdit) MoveWindow(g_filesRootEdit, pad, y, cw - pad, btnH, TRUE);
+  {
+    int browseW = 78;
+    if (g_filesRootEdit)
+      MoveWindow(g_filesRootEdit, pad, y, cw - pad - browseW - gap, btnH, TRUE);
+    HWND br = GetDlgItem(g_setHwnd, ID_FILES_BROWSE);
+    if (br) MoveWindow(br, cw - browseW, y, browseW, btnH, TRUE);
+  }
   y += btnH + gap;
   if (g_btnIdx) MoveWindow(g_btnIdx, pad, y, cw - pad, btnH, TRUE);
   y += btnH + gap;
@@ -1629,6 +1706,14 @@ static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
   case WM_COMMAND:
     if (LOWORD(wParam) == ID_PANEL_CLOSE) {
       ShowWindow(hwnd, SW_HIDE);
+      return 0;
+    }
+    if (LOWORD(wParam) == ID_FILES_BROWSE) {
+      wchar_t picked[MAX_PATH];
+      if (pick_folder(hwnd, picked, MAX_PATH)) {
+        if (g_filesRootEdit) SetWindowTextW(g_filesRootEdit, picked);
+        files_apply_root(TRUE);
+      }
       return 0;
     }
     if (LOWORD(wParam) == ID_CUR_K2) set_skin(1);
@@ -1913,6 +1998,7 @@ static void create_settings(HWND owner) {
   g_filesRootEdit = CreateWindowExW(0, L"EDIT", g_filesRoot,
                                     WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
                                     0, 0, 200, 26, g_setHwnd, (HMENU)(INT_PTR)ID_FILES_ROOT, NULL, NULL);
+  mk_btn(g_setHwnd, L"Обзор…", ID_FILES_BROWSE);
   g_btnIdx = mk_btn(g_setHwnd, L"Обновить JSON", ID_FILES_REFRESH);
   g_filesStat = CreateWindowExW(0, L"STATIC", L"Индекс: —",
                                 WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP, 0, 0, 200, 22, g_setHwnd,
@@ -2262,6 +2348,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     return 0;
   case WM_DESTROY:
     save_notes();
+    save_cursor_pref(); /* keeps the results panel's size across restarts */
     if (g_oldEdit && g_edit)
       SetWindowLongPtrW(g_edit, GWLP_WNDPROC, (LONG_PTR)g_oldEdit);
     if (g_oldSearch && g_searchEdit)

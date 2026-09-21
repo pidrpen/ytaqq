@@ -8,6 +8,7 @@
 #define ID_ENG_FILES 132
 #define ID_FILES_ROOT 133
 #define ID_FILES_REFRESH 135
+#define ID_FILES_BROWSE 152
 #define ID_PLM_SERVER 125
 #define ID_PLM_DB 126
 #define ID_PLM_USER 128
@@ -478,14 +479,20 @@ static void open_plm_link(const wchar_t *link) {
   ShellExecuteW(NULL, L"open", link, NULL, NULL, SW_SHOWNORMAL);
 }
 
+static int g_sortCol = -1, g_sortDesc = 0; /* which column the list is ordered by */
+
 static void fill_plm_list(void) {
   if (!g_answerList) return;
   LVCOLUMNW col;
   memset(&col, 0, sizeof(col));
   col.mask = LVCF_TEXT;
-  col.pszText = g_resultFiles ? L"1 файл" : L"1 ЭСИ";
+  wchar_t h0[64], h1[64];
+  const wchar_t *mark = g_sortDesc ? L" ↓" : L" ↑";
+  _snwprintf(h0, 64, L"%s%s", g_resultFiles ? L"файл" : L"ЭСИ", g_sortCol == 0 ? mark : L"");
+  _snwprintf(h1, 64, L"%s%s", g_resultFiles ? L"папка" : L"ТП", g_sortCol == 1 ? mark : L"");
+  col.pszText = h0;
   SendMessageW(g_answerList, LVM_SETCOLUMNW, 0, (LPARAM)&col);
-  col.pszText = g_resultFiles ? L"2 папка" : L"2 ТП";
+  col.pszText = h1;
   SendMessageW(g_answerList, LVM_SETCOLUMNW, 1, (LPARAM)&col);
   SendMessageW(g_answerList, LVM_DELETEALLITEMS, 0, 0);
   for (int i = 0; i < g_plmCount; i++) {
@@ -514,6 +521,43 @@ static void fill_plm_list(void) {
   if (open) SetWindowTextW(open, g_resultFiles ? L"Открыть файл" : L"Открыть PLM");
   if (show) ShowWindow(show, g_resultFiles ? SW_SHOW : SW_HIDE);
   layout_answer();
+}
+
+/* Rows are three parallel arrays; with at most PLM_ROWS of them an insertion
+   sort that swaps whole rows is simpler than juggling an index permutation. */
+
+static void plm_sort(int col) {
+  if (col < 0 || col > 1 || g_plmCount < 2) return;
+  wchar_t *tmpA = (wchar_t *)malloc(PLM_COL1 * sizeof(wchar_t));
+  wchar_t *tmpB = (wchar_t *)malloc(PLM_COL2 * sizeof(wchar_t));
+  wchar_t *tmpL = (wchar_t *)malloc(PLM_LINK * sizeof(wchar_t));
+  if (!tmpA || !tmpB || !tmpL) {
+    free(tmpA);
+    free(tmpB);
+    free(tmpL);
+    return;
+  }
+  for (int i = 1; i < g_plmCount; i++) {
+    for (int j = i; j > 0; j--) {
+      const wchar_t *a = col == 0 ? g_plmEsi[j] : g_plmTp[j];
+      const wchar_t *b = col == 0 ? g_plmEsi[j - 1] : g_plmTp[j - 1];
+      int cmp = _wcsicmp(a, b);
+      if (g_sortDesc) cmp = -cmp;
+      if (cmp >= 0) break;
+      memcpy(tmpA, g_plmEsi[j], PLM_COL1 * sizeof(wchar_t));
+      memcpy(g_plmEsi[j], g_plmEsi[j - 1], PLM_COL1 * sizeof(wchar_t));
+      memcpy(g_plmEsi[j - 1], tmpA, PLM_COL1 * sizeof(wchar_t));
+      memcpy(tmpB, g_plmTp[j], PLM_COL2 * sizeof(wchar_t));
+      memcpy(g_plmTp[j], g_plmTp[j - 1], PLM_COL2 * sizeof(wchar_t));
+      memcpy(g_plmTp[j - 1], tmpB, PLM_COL2 * sizeof(wchar_t));
+      memcpy(tmpL, g_plmLinks[j], PLM_LINK * sizeof(wchar_t));
+      memcpy(g_plmLinks[j], g_plmLinks[j - 1], PLM_LINK * sizeof(wchar_t));
+      memcpy(g_plmLinks[j - 1], tmpL, PLM_LINK * sizeof(wchar_t));
+    }
+  }
+  free(tmpA);
+  free(tmpB);
+  free(tmpL);
 }
 
 static int plm_selected_index(void) {
@@ -915,13 +959,36 @@ static LRESULT CALLBACK AnswerProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
       open_plm_selected();
       return 0;
     }
+    if (nm && nm->idFrom == ID_ANS_LIST && nm->code == LVN_COLUMNCLICK) {
+      int col = ((NMLISTVIEW *)lParam)->iSubItem;
+      g_sortDesc = (col == g_sortCol) ? !g_sortDesc : 0;
+      g_sortCol = col;
+      plm_sort(col);
+      fill_plm_list();
+      return 0;
+    }
     break;
   }
   case WM_CLOSE:
     ShowWindow(hwnd, SW_HIDE);
     return 0;
+  case WM_EXITSIZEMOVE:
+    layout_answer();
+    InvalidateRect(hwnd, NULL, TRUE);
+    if (g_answerList) InvalidateRect(g_answerList, NULL, TRUE);
+    return 0;
   case WM_SIZE:
     layout_answer();
+    /* moving the children is not enough: the uncovered strip has to be
+       repainted too, or the list is left drawn at its old offset */
+    InvalidateRect(hwnd, NULL, TRUE);
+    if (g_answerList) InvalidateRect(g_answerList, NULL, TRUE);
+    if (wParam != SIZE_MINIMIZED) {
+      RECT wr;
+      GetWindowRect(hwnd, &wr);
+      g_ansW = wr.right - wr.left;
+      g_ansH = wr.bottom - wr.top;
+    }
     return 0;
   }
   return DefWindowProcW(hwnd, msg, wParam, lParam);
@@ -940,8 +1007,9 @@ static void create_answer(HWND owner) {
   wc.lpszClassName = L"CursorPadAnswer";
   RegisterClassExW(&wc);
   g_answer = CreateWindowExW(
-      WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, L"CursorPadAnswer",
-      L"Находки", WS_POPUP | WS_CLIPCHILDREN, 0, 0,
+      /* no NOACTIVATE: the list is meant to be walked with the keyboard */
+      WS_EX_TOPMOST | WS_EX_TOOLWINDOW, L"CursorPadAnswer",
+      L"Находки", WS_POPUP | WS_THICKFRAME | WS_CLIPCHILDREN, 0, 0,
       ANS_W, ANS_H, owner, NULL, g_inst, NULL);
   round_corners(g_answer);
   g_answerEdit = CreateWindowExW(
@@ -950,7 +1018,7 @@ static void create_answer(HWND owner) {
       0, 0, 100, 100, g_answer, NULL, NULL, NULL);
   g_answerList = CreateWindowExW(
       0, WC_LISTVIEWW, L"",
-      WS_CHILD | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | LVS_NOSORTHEADER | WS_TABSTOP,
+      WS_CHILD | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | WS_TABSTOP,
       0, 0, 100, 100, g_answer, (HMENU)(INT_PTR)ID_ANS_LIST, NULL, NULL);
   if (g_answerList) {
     SendMessageW(g_answerList, LVM_SETEXTENDEDLISTVIEWSTYLE, 0,
@@ -1000,8 +1068,14 @@ static void show_answer_text(const wchar_t *text) {
   if (y + ANS_H > wa.bottom) y = wa.bottom - ANS_H - 8;
   if (x < wa.left) x = wa.left + 8;
   if (y < wa.top) y = wa.top + 8;
-  SetWindowPos(g_answer, HWND_TOPMOST, x, y, ANS_W, ANS_H, SWP_SHOWWINDOW);
+  int aw = g_ansW > 0 ? g_ansW : ANS_W, ah = g_ansH > 0 ? g_ansH : ANS_H;
+  if (x + aw > wa.right) x = wa.right - aw - 8;
+  if (y + ah > wa.bottom) y = wa.bottom - ah - 8;
+  if (x < wa.left) x = wa.left + 8;
+  if (y < wa.top) y = wa.top + 8;
+  SetWindowPos(g_answer, HWND_TOPMOST, x, y, aw, ah, SWP_SHOWWINDOW);
   layout_answer();
+  if (g_plmCount > 0 && g_answerList) SetFocus(g_answerList);
 }
 
 static void start_lookup(const wchar_t *q) {

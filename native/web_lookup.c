@@ -99,6 +99,10 @@ static int parse_ddg_lite(const char *html, NetHit *hits, int maxn) {
     const char *tag = p;
     while (tag > html && *tag != '<') tag--;
     const char *href = NULL;
+    /* dec used to live inside the block below; the pointer kept into it went
+       out of scope before the copy at the bottom of the loop, so the compiler
+       was free to reuse that stack for the title and snippet buffers */
+    char dec[800];
     const char *q = tag;
     while (q < p && n < maxn) {
       const char *u = strstr(q, "uddg=");
@@ -106,7 +110,7 @@ static int parse_ddg_lite(const char *html, NetHit *hits, int maxn) {
       u += 5;
       const char *e = u;
       while (*e && *e != '&' && *e != '"' && *e != '\'') e++;
-      char enc[800], dec[800];
+      char enc[800];
       int el = (int)(e - u);
       if (el > 0 && el < 799) {
         memcpy(enc, u, (size_t)el);
