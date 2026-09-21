@@ -25,6 +25,21 @@
 #ifndef WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY
 #define WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY 4
 #endif
+#ifndef WINHTTP_OPTION_AUTOLOGON_POLICY
+#define WINHTTP_OPTION_AUTOLOGON_POLICY 77
+#endif
+#ifndef WINHTTP_AUTOLOGON_SECURITY_LEVEL_LOW
+#define WINHTTP_AUTOLOGON_SECURITY_LEVEL_LOW 0
+#endif
+#ifndef WINHTTP_AUTH_SCHEME_NTLM
+#define WINHTTP_AUTH_SCHEME_NTLM 0x00000002
+#endif
+#ifndef WINHTTP_AUTH_SCHEME_DIGEST
+#define WINHTTP_AUTH_SCHEME_DIGEST 0x00000008
+#endif
+#ifndef WINHTTP_AUTH_SCHEME_NEGOTIATE
+#define WINHTTP_AUTH_SCHEME_NEGOTIATE 0x00000010
+#endif
 #ifndef CRYPT_STRING_BASE64
 #define CRYPT_STRING_BASE64 0x00000001
 #endif
@@ -75,6 +90,7 @@ static void upd_log(const wchar_t *fmt, ...) {
 }
 static wchar_t g_updLaunch[MAX_PATH];
 static wchar_t g_updHostUsed[80];
+static int g_updAuthWall; /* something in this network demanded a login */
 static wchar_t g_updPin[96]; /* immutable ref (tag or commit) the CDN can't stale */
 static BOOL g_updPinned;
 
@@ -387,8 +403,51 @@ static BOOL http_get_to_file(const wchar_t *host, const wchar_t *path, const wch
     WinHttpSetOption(req, WINHTTP_OPTION_DECOMPRESSION, &decomp, sizeof(decomp));
   }
 #endif
-  BOOL ok = WinHttpSendRequest(req, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0);
-  if (ok) ok = WinHttpReceiveResponse(req, NULL);
+  {
+    /* a company proxy that wants a logged-in user gets the Windows account
+       this program already runs as, without asking anybody for a password */
+    DWORD lvl = WINHTTP_AUTOLOGON_SECURITY_LEVEL_LOW;
+    WinHttpSetOption(req, WINHTTP_OPTION_AUTOLOGON_POLICY, &lvl, sizeof(lvl));
+  }
+  DWORD status = 0, slen = sizeof(status);
+  BOOL ok;
+  for (int attempt = 0;; attempt++) {
+    ok = WinHttpSendRequest(req, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0);
+    if (ok) ok = WinHttpReceiveResponse(req, NULL);
+    if (!ok) break;
+    status = 0;
+    slen = sizeof(status);
+    WinHttpQueryHeaders(req, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, NULL, &status,
+                        &slen, WINHTTP_NO_HEADER_INDEX);
+    if ((status != 401 && status != 407) || attempt >= 2) break;
+    /* say who is asking — that is the difference between "GitHub refused"
+       and "something in this network refused" */
+    wchar_t who[200];
+    DWORD wl = sizeof(who);
+    if (WinHttpQueryHeaders(req,
+                            status == 407 ? WINHTTP_QUERY_PROXY_AUTHENTICATE
+                                          : WINHTTP_QUERY_WWW_AUTHENTICATE,
+                            NULL, who, &wl, WINHTTP_NO_HEADER_INDEX))
+      upd_log(L"  %s → HTTP %lu, спрашивает вход: %s", host, status, who);
+    DWORD supported = 0, firstScheme = 0, target = 0;
+    if (!WinHttpQueryAuthSchemes(req, &supported, &firstScheme, &target)) break;
+    DWORD pick = 0;
+    if (supported & WINHTTP_AUTH_SCHEME_NEGOTIATE) pick = WINHTTP_AUTH_SCHEME_NEGOTIATE;
+    else if (supported & WINHTTP_AUTH_SCHEME_NTLM) pick = WINHTTP_AUTH_SCHEME_NTLM;
+    else if (supported & WINHTTP_AUTH_SCHEME_DIGEST) pick = WINHTTP_AUTH_SCHEME_DIGEST;
+    if (!pick) break; /* Basic needs a password we do not have */
+    /* the old answer has to be consumed before the request can be sent again */
+    for (;;) {
+      DWORD avail = 0, got = 0;
+      char sink[4096];
+      if (!WinHttpQueryDataAvailable(req, &avail) || !avail) break;
+      if (!WinHttpReadData(req, sink, avail > sizeof(sink) ? (DWORD)sizeof(sink) : avail, &got) ||
+          !got)
+        break;
+    }
+    if (!WinHttpSetCredentials(req, target, pick, NULL, NULL, NULL)) break;
+    upd_log(L"  %s → вхожу под учётной записью Windows", host);
+  }
   if (!ok) {
     {
       DWORD e = GetLastError();
@@ -404,11 +463,14 @@ static BOOL http_get_to_file(const wchar_t *host, const wchar_t *path, const wch
     DeleteFileW(dest);
     return FALSE;
   }
-  DWORD status = 0, slen = sizeof(status);
-  WinHttpQueryHeaders(req, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, NULL, &status,
-                      &slen, WINHTTP_NO_HEADER_INDEX);
+  if (status == 401 || status == 407) g_updAuthWall = 1;
   if (status != 200) {
-    upd_log(L"  %s → HTTP %lu", host, status);
+    wchar_t srv[120];
+    DWORD sl2 = sizeof(srv);
+    if (WinHttpQueryHeaders(req, WINHTTP_QUERY_SERVER, NULL, srv, &sl2, WINHTTP_NO_HEADER_INDEX))
+      upd_log(L"  %s → HTTP %lu, отвечает: %s", host, status, srv);
+    else
+      upd_log(L"  %s → HTTP %lu", host, status);
     _snwprintf(g_updErr, 240, L"%s → HTTP %lu", host, status);
     WinHttpCloseHandle(req);
     WinHttpCloseHandle(con);
@@ -798,6 +860,7 @@ static DWORD WINAPI update_thread(LPVOID param) {
   g_updPrefer = -1;
   g_updPin[0] = 0;
   g_updPinned = FALSE;
+  g_updAuthWall = 0;
   SYSTEMTIME st;
   GetLocalTime(&st);
   upd_log(L"Обновление CursorPad — %02u.%02u.%04u %02u:%02u", (unsigned)st.wDay,
@@ -867,6 +930,13 @@ static DWORD WINAPI update_thread(LPVOID param) {
   }
   if (!answered) {
     upd_log(L"Итог: ни один источник не отдал version.txt.");
+    if (g_updAuthWall) {
+      upd_log(L"");
+      upd_log(L"Все адреса сразу потребовали вход — так отвечает не GitHub,");
+      upd_log(L"а что-то в вашей сети: прокси или фильтр посередине.");
+      upd_log(L"Программа уже пробует войти под вашей учётной записью Windows.");
+      upd_log(L"Если не помогает, сети нужно пропустить cdn.jsdelivr.net.");
+    }
     if (!g_updErr[0]) upd_fail(L"GitHub/CDN не отдали version.txt", 0);
     code = 0;
     goto done;
