@@ -46,6 +46,7 @@ static SYSTEMTIME g_filesWhen;
 static BOOL g_filesWhenOk;
 static wchar_t g_filesNote[120];   /* last problem worth telling the user about */
 static volatile LONG g_filesScanned; /* live counter for the progress line */
+static volatile LONG g_filesCancel;  /* set to abandon a walk in progress */
 static void save_files_pref(void);
 static void files_refresh_status(void);
 
@@ -190,6 +191,7 @@ static void files_refresh_status(void) {
     SendMessageW(g_filesBar, PBM_SETMARQUEE, (WPARAM)busy, 40);
     ShowWindow(g_filesBar, busy ? SW_SHOW : SW_HIDE);
   }
+  if (g_btnIdx) SetWindowTextW(g_btnIdx, busy ? L"Остановить" : L"Обновить JSON");
   if (busy)
     _snwprintf(t, 200, L"Обход папки: %ld файлов…",
                (long)InterlockedCompareExchange(&g_filesScanned, 0, 0));
@@ -671,10 +673,19 @@ typedef struct {
   wchar_t *disp;
   size_t dispCap;
   BOOL oom;
+  BOOL stopped;
 } WalkCtx;
 
+static BOOL files_cancelled(void) {
+  return InterlockedCompareExchange(&g_filesCancel, 0, 0) != 0;
+}
+
 static void files_walk(WalkCtx *c, int depth) {
-  if (c->oom || depth > FILES_WALK_GUARD) return;
+  if (c->oom || c->stopped || depth > FILES_WALK_GUARD) return;
+  if (files_cancelled()) {
+    c->stopped = TRUE;
+    return;
+  }
   size_t mark = c->path.len;
   if (!wp_push(&c->path, L"*")) {
     c->oom = TRUE;
@@ -697,7 +708,7 @@ static void files_walk(WalkCtx *c, int depth) {
       }
       files_walk(c, depth + 1);
       wp_pop(&c->path, mark);
-      if (c->oom) break;
+      if (c->oom || c->stopped) break;
     } else {
       if (dirIdx < 0) {
         if (!wp_display(&c->path, &c->disp, &c->dispCap)) {
@@ -714,7 +725,12 @@ static void files_walk(WalkCtx *c, int depth) {
         c->oom = TRUE;
         break;
       }
-      InterlockedIncrement(&g_filesScanned);
+      /* checked in batches: a folder full of files should not pay for an
+         interlocked read on every entry */
+      if ((InterlockedIncrement(&g_filesScanned) & 255) == 0 && files_cancelled()) {
+        c->stopped = TRUE;
+        break;
+      }
     }
   } while (FindNextFileW(h, &fd));
   FindClose(h);
@@ -725,7 +741,7 @@ static DWORD WINAPI files_index_thread(LPVOID param) {
 again:;
   InterlockedExchange(&g_filesScanned, 0);
   FileIdx *ix = idx_new();
-  BOOL oom = FALSE;
+  BOOL oom = FALSE, stopped = FALSE;
   if (ix && g_filesRoot[0]) {
     WalkCtx c;
     memset(&c, 0, sizeof(c));
@@ -733,10 +749,17 @@ again:;
     if (wp_init(&c.path, g_filesRoot)) files_walk(&c, 0);
     else c.oom = TRUE;
     oom = c.oom;
+    stopped = c.stopped;
     free(c.path.w);
     free(c.disp);
   }
-  if (ix) {
+  if (stopped) {
+    /* a half-finished walk is worse than the index already on disk, so the
+       partial result is thrown away and the previous one left alone */
+    idx_free(ix);
+    lstrcpynW(g_filesNote, L"Обход прерван — прежний индекс сохранён", 120);
+    InterlockedExchange(&g_filesAgain, 0);
+  } else if (ix) {
     BOOL saved = files_save_idx(ix);
     g_filesNote[0] = 0;
     if (oom) lstrcpynW(g_filesNote, L"Не хватило памяти — индекс неполный", 120);
@@ -763,6 +786,7 @@ static void files_start_index(BOOL force) {
     return;
   }
   InterlockedExchange(&g_filesScanned, 0);
+  InterlockedExchange(&g_filesCancel, 0);
   files_refresh_status();
   HANDLE th = CreateThread(NULL, 0, files_index_thread, NULL, 0, NULL);
   if (th) {
@@ -772,6 +796,21 @@ static void files_start_index(BOOL force) {
     InterlockedExchange(&g_filesBusy, 0);
     files_refresh_status();
   }
+}
+
+/* Asks the walk to give up; it notices within a few hundred files. */
+static void files_stop_index(void) {
+  if (!InterlockedCompareExchange(&g_filesBusy, 0, 0)) return;
+  InterlockedExchange(&g_filesAgain, 0);
+  InterlockedExchange(&g_filesCancel, 1);
+  if (g_filesStat) SetWindowTextW(g_filesStat, L"Останавливаю обход…");
+}
+
+/* Called on the way out so a walk over a slow share cannot outlive the app. */
+static void files_wait_idle(DWORD ms) {
+  InterlockedExchange(&g_filesCancel, 1);
+  for (DWORD i = 0; i < ms / 20 && InterlockedCompareExchange(&g_filesBusy, 0, 0); i++)
+    Sleep(20);
 }
 
 static void files_apply_root(BOOL force) {

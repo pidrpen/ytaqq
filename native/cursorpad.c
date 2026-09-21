@@ -1734,7 +1734,11 @@ static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
       files_apply_root(FALSE);
       update_engine_buttons();
     }
-    if (LOWORD(wParam) == ID_FILES_REFRESH) files_apply_root(TRUE);
+    if (LOWORD(wParam) == ID_FILES_REFRESH) {
+      /* the same button stops a walk that is already running */
+      if (InterlockedCompareExchange(&g_filesBusy, 0, 0)) files_stop_index();
+      else files_apply_root(TRUE);
+    }
     if (LOWORD(wParam) == ID_AUTOSTART) {
       g_autostart = (SendMessageW(g_chkAuto, BM_GETCHECK, 0, 0) == BST_CHECKED);
       autostart_set(g_autostart);
@@ -2363,6 +2367,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     KillTimer(hwnd, TIMER_CURSOR_KEEP);
     KillTimer(hwnd, TIMER_FILES);
     KillTimer(hwnd, TIMER_FILES_TICK);
+    files_wait_idle(2000); /* a walk over a slow share must not outlive us */
     save_files_pref();
     files_clear();
     UnregisterHotKey(hwnd, HOTKEY_TOGGLE);
