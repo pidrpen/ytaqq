@@ -1036,7 +1036,7 @@ static BOOL card_is_time(const wchar_t *key, long dataType) {
 /* В базе норма лежит в минутах, поэтому часы — это оно же на шестьдесят
    делённое. Единицу подтвердил заказчик; если где-то окажется иначе,
    правится здесь одной строкой. */
-static BOOL card_time_text(const wchar_t *val, wchar_t *out, int cap) {
+static BOOL card_time_text(const wchar_t *val, wchar_t *out, int cap, double *mins_out) {
   if (!val || !val[0]) return FALSE;
   wchar_t norm[64];
   int j = 0;
@@ -1047,17 +1047,18 @@ static BOOL card_time_text(const wchar_t *val, wchar_t *out, int cap) {
   if (stop == norm) return FALSE; /* не число — пусть показывается как есть */
   _snwprintf(out, cap, L"%.4f ч · %g мин", mins / 60.0, mins);
   out[cap - 1] = 0;
+  if (mins_out) *mins_out += mins;
   return TRUE;
 }
 
 /* одна строка «название — значение» с выровненной колонкой */
-static void card_pair_t(CardOut *c, const wchar_t *pad, const wchar_t *key, const wchar_t *val,
-                        long link, long dataType) {
+static void card_pair_s(CardOut *c, const wchar_t *pad, const wchar_t *key, const wchar_t *val,
+                        long link, long dataType, double *sum) {
   const wchar_t *ru = card_label(key);
   wchar_t name[64], t[64];
   lstrcpynW(name, ru ? ru : key, 64);
   if (val && val[0]) {
-    if (card_is_time(key, dataType) && card_time_text(val, t, 64))
+    if (card_is_time(key, dataType) && card_time_text(val, t, 64, sum))
       card_add(c, L"%s%-28s %s\r\n", pad, name, t);
     else
       card_add(c, L"%s%-28s %s\r\n", pad, name, val);
@@ -1066,9 +1067,19 @@ static void card_pair_t(CardOut *c, const wchar_t *pad, const wchar_t *key, cons
   }
 }
 
+static void card_pair_t(CardOut *c, const wchar_t *pad, const wchar_t *key, const wchar_t *val,
+                        long link, long dataType) {
+  card_pair_s(c, pad, key, val, link, dataType, NULL);
+}
+
 static void card_pair(CardOut *c, const wchar_t *pad, const wchar_t *key, const wchar_t *val,
                       long link) {
-  card_pair_t(c, pad, key, val, link, 0);
+  card_pair_s(c, pad, key, val, link, 0, NULL);
+}
+
+/* «0.7083 ч · 42.5 мин» одной строкой — для итогов */
+static void card_total(CardOut *c, const wchar_t *pad, const wchar_t *title, double mins) {
+  card_add(c, L"%s%-28s %.4f ч · %g мин\r\n", pad, title, mins / 60.0, mins);
 }
 
 static const wchar_t *card_type_name(long t) {
@@ -1157,6 +1168,8 @@ static void card_operations(SQLHDBC dbc, long tpId, long verId, CardOut *c, Card
   CardRow *ops = (CardRow *)malloc(sizeof(CardRow) * (size_t)(n > 0 ? n : 1));
   if (ops) memcpy(ops, rows, sizeof(CardRow) * (size_t)n);
 
+  double totalMins = 0.0;
+  int counted = 0;
   int na = 0;
   if (ops && nid) {
     wchar_t list[CARD_OPS * 2 * 12];
@@ -1190,18 +1203,30 @@ static void card_operations(SQLHDBC dbc, long tpId, long verId, CardOut *c, Card
       card_add(c, L"       %s\r\n", o->s2);
     if (!ops || na <= 0 || i >= shown) continue;
     int printed = 0;
+    double opMins = 0.0;
     for (int k = 0; k < na && printed < 40; k++) {
       if (rows[k].n1 != o->n1 && rows[k].n1 != o->n3) continue;
       if (card_hidden(rows[k].s1)) continue;
       if (!rows[k].s2[0] && !rows[k].n2) continue;
-      card_pair_t(c, L"       ", rows[k].s1, rows[k].s2, rows[k].n2, rows[k].n3);
+      card_pair_s(c, L"       ", rows[k].s1, rows[k].s2, rows[k].n2, rows[k].n3, &opMins);
       printed++;
     }
     if (!printed) card_add(c, L"       (своих значений нет)\r\n");
+    if (opMins > 0.0) {
+      card_total(c, L"       ", L"Итого на операцию", opMins);
+      totalMins += opMins;
+      counted++;
+    }
     card_add(c, L"\r\n");
   }
+  if (counted) {
+    card_add(c, L"  ────────────────────────────────────────\r\n");
+    card_total(c, L"  ", L"ИТОГО НА ДЕТАЛЬ", totalMins);
+    if (counted < n)
+      card_add(c, L"  (сложено по %d операциям из %d)\r\n", counted, n);
+  }
   if (n > shown)
-    card_add(c, L"\r\n  показано подробно первых %d операций из %d\r\n", shown, n);
+    card_add(c, L"  показано подробно первых %d операций из %d\r\n", shown, n);
   free(ops);
 }
 
