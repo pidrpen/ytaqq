@@ -22,10 +22,7 @@ with zipfile.ZipFile(root / "CursorPad.zip", "w", zipfile.ZIP_DEFLATED) as z:
     z.write(native / "cursorpad.manifest", "CursorPad.exe.manifest")
     z.write(native / "README.txt", "README.txt")
     z.write(native / "ocr.ps1", "ocr.ps1")
-    for p in sorted((native / "cursors").glob("*.cur")):
-        z.write(p, f"cursors/{p.name}")
-    for p in sorted((native / "cursors").glob("*.ani")):
-        z.write(p, f"cursors/{p.name}")
+    # все курсоры зашиты в exe ресурсами; в архиве они были второй копией
 print("wrote", root / "CursorPad.zip")
 PY
 # jsDelivr will not serve .exe, so the CDN mirrors get the same bytes as .bin
