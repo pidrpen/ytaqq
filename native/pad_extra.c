@@ -949,7 +949,8 @@ static const wchar_t *card_type_name(long t) {
   }
 }
 
-#define CARD_ROWS 220
+#define CARD_ROWS 900
+#define CARD_OPS 40 /* для скольких операций тянем все атрибуты */
 
 /* Состав техпроцесса: ТП → ActualVersion → MainVariantInVersion → дети
    варианта. У самой операции содержательное имя часто лежит не на ней, а на
@@ -976,10 +977,10 @@ static void card_operations(SQLHDBC dbc, long tpId, long verId, CardOut *c, Card
 
   _snwprintf(sql, 3000,
              L"SELECT TOP 300 ch.InfoObjectId, ch.Name, "
-             L"ISNULL(op.NM, t.NameKey), ISNULL(num.N,0), ch.TemplateId "
+             L"ISNULL(op.NM, t.NameKey), ISNULL(num.N,0), ISNULL(op.OID,0) "
              L"FROM InfoObjects AS ch WITH(NOLOCK) "
              L"JOIN Templates AS t WITH(NOLOCK) ON t.TemplateId=ch.TemplateId "
-             L"OUTER APPLY (SELECT TOP 1 o2.Name AS NM "
+             L"OUTER APPLY (SELECT TOP 1 o2.Name AS NM, o2.InfoObjectId AS OID "
              L"FROM InfoObjectAttributes AS ts WITH(NOLOCK) "
              L"JOIN NameKeys AS nkt WITH(NOLOCK) ON nkt.NameKeyId=ts.NameKeyId "
              L"AND nkt.Value=N'TSOperation' "
@@ -1003,14 +1004,65 @@ static void card_operations(SQLHDBC dbc, long tpId, long verId, CardOut *c, Card
     return;
   }
   card_add(c, L"Состав (%d):\r\n", n);
-  for (int i = 0; i < n; i++) {
-    if (rows[i].n2) card_add(c, L"  %ld ", rows[i].n2);
-    else card_add(c, L"  ");
-    card_add(c, L"%s", rows[i].s1[0] ? rows[i].s1 : L"(без имени)");
-    if (rows[i].s2[0] && _wcsicmp(rows[i].s2, rows[i].s1) != 0)
-      card_add(c, L" · %s", rows[i].s2);
-    card_add(c, L" · ID %ld\r\n", rows[i].n1);
+  /* Нормы времени лежат атрибутами на самой операции либо на объекте по
+     ссылке TSOperation — как называются, в разных базах по-разному, поэтому
+     показываем всё, что есть со значением, а не угаданный список имён. */
+  long ids[CARD_OPS * 2];
+  int nid = 0, shown = n < CARD_OPS ? n : CARD_OPS;
+  for (int i = 0; i < shown; i++) {
+    ids[nid++] = rows[i].n1;
+    if (rows[i].n3) ids[nid++] = rows[i].n3;
   }
+  /* строки состава переживут второй запрос, сам rows — нет */
+  CardRow *ops = (CardRow *)malloc(sizeof(CardRow) * (size_t)(n > 0 ? n : 1));
+  if (ops) memcpy(ops, rows, sizeof(CardRow) * (size_t)n);
+
+  int na = 0;
+  if (ops && nid) {
+    wchar_t list[CARD_OPS * 2 * 12];
+    int p = 0;
+    for (int i = 0; i < nid && p < (int)(sizeof(list) / sizeof(list[0])) - 14; i++)
+      p += _snwprintf(list + p, 13, i ? L",%ld" : L"%ld", ids[i]);
+    list[p] = 0;
+    wchar_t *big = (wchar_t *)malloc(4200 * sizeof(wchar_t));
+    if (big) {
+      _snwprintf(big, 4200,
+                 L"SELECT TOP 800 a.OwnerId, nk.Value, %s, ISNULL(a.Link,0), a.DataType "
+                 L"FROM InfoObjectAttributes AS a WITH(NOLOCK) "
+                 L"JOIN NameKeys AS nk WITH(NOLOCK) ON nk.NameKeyId=a.NameKeyId "
+                 L"WHERE a.OwnerId IN (%s) AND a.Outdated=0 "
+                 L"AND ISNULL(a.CollectionElementId,0)=0 "
+                 L"ORDER BY a.OwnerId, nk.Value",
+                 CARD_VALUE_SQL, list);
+      na = card_query(dbc, big, rows, CARD_ROWS, err, 280);
+      free(big);
+    }
+  }
+
+  for (int i = 0; i < n; i++) {
+    CardRow *o = ops ? &ops[i] : &rows[i];
+    if (o->n2) card_add(c, L"  %ld ", o->n2);
+    else card_add(c, L"  ");
+    card_add(c, L"%s", o->s1[0] ? o->s1 : L"(без имени)");
+    if (o->s2[0] && _wcsicmp(o->s2, o->s1) != 0) card_add(c, L" · %s", o->s2);
+    card_add(c, L" · ID %ld\r\n", o->n1);
+    if (!ops || na <= 0 || i >= shown) continue;
+    int printed = 0;
+    for (int k = 0; k < na && printed < 40; k++) {
+      if (rows[k].n1 != o->n1 && rows[k].n1 != o->n3) continue;
+      if (rows[k].s2[0])
+        card_add(c, L"       %s = %s\r\n", rows[k].s1, rows[k].s2);
+      else if (rows[k].n2)
+        card_add(c, L"       %s → объект %ld\r\n", rows[k].s1, rows[k].n2);
+      else
+        continue;
+      printed++;
+    }
+    if (!printed) card_add(c, L"       (значений нет)\r\n");
+  }
+  if (n > shown)
+    card_add(c, L"\r\n  показано подробно первых %d операций из %d\r\n", shown, n);
+  free(ops);
 }
 
 
@@ -1428,10 +1480,10 @@ static void create_answer(HWND owner) {
    thread exactly like a search does. */
 static DWORD WINAPI card_thread(LPVOID param) {
   long id = (long)(LONG_PTR)param;
-  wchar_t *out = (wchar_t *)malloc(40000 * sizeof(wchar_t));
+  wchar_t *out = (wchar_t *)malloc(160000 * sizeof(wchar_t));
   if (out) {
     out[0] = 0;
-    plm_card(id, out, 40000);
+    plm_card(id, out, 160000);
     if (!PostMessageW(g_hwnd, WM_SEARCH_DONE, 0, (LPARAM)out)) free(out);
   }
   InterlockedExchange(&g_netBusy, 0);
