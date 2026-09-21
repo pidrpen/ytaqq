@@ -166,6 +166,8 @@ static HWND g_btnFiles;
 static HWND g_filesRootEdit;
 static HWND g_btnIdx;
 static HWND g_filesStat;
+static HFONT g_fontMono;
+static BOOL g_ansMono; /* ответ показывается колонками */
 static HWND g_filesBar;
 static HWND g_chkAuto;
 static HWND g_answer;
@@ -2096,6 +2098,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     if (!g_fontUi) g_fontUi = make_font(L"Segoe UI", 9, FW_SEMIBOLD);
     g_fontBody = make_font(L"Segoe UI Variable Text", 10, FW_NORMAL);
     if (!g_fontBody) g_fontBody = make_font(L"Segoe UI", 10, FW_NORMAL);
+    /* карточка PLM печатается колонками — на пропорциональном шрифте они
+       разъезжаются, поэтому для неё держим моноширинный */
+    g_fontMono = make_font(L"Consolas", 10, FW_NORMAL);
+    if (!g_fontMono) g_fontMono = make_font(L"Courier New", 10, FW_NORMAL);
     g_fontSmall = make_font(L"Segoe UI Variable Small", 8, FW_NORMAL);
     if (!g_fontSmall) g_fontSmall = make_font(L"Segoe UI", 8, FW_NORMAL);
 

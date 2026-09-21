@@ -931,6 +931,103 @@ static int card_query(SQLHDBC dbc, const wchar_t *sql, CardRow *rows, int max, w
   L"WHEN 33 THEN CONVERT(NVARCHAR(64), a.LongNumber) "                                   \
   L"ELSE N'' END"
 
+/* Внутренние имена атрибутов человеку ничего не говорят. Известные
+   переводим, неизвестные показываем как есть — угадывать не нужно, просто
+   видно, что это редкий атрибут. */
+typedef struct {
+  const wchar_t *key;
+  const wchar_t *ru;
+} CardLabel;
+
+static const CardLabel kCardLabels[] = {
+    {L"Name", L"Наименование"},
+    {L"Designation", L"Обозначение"},
+    {L"TradeDesignation", L"Торговое обозначение"},
+    {L"ProductCode", L"Код изделия"},
+    {L"ProductClass", L"Класс изделия"},
+    {L"Mass", L"Масса"},
+    {L"MassMeasureUnit", L"Единица массы"},
+    {L"MeasureUnit", L"Единица измерения"},
+    {L"VolumeMeasureUnit", L"Единица объёма"},
+    {L"Material", L"Материал"},
+    {L"MaterialLink", L"Материал"},
+    {L"SubstituteMaterial", L"Материал-заменитель"},
+    {L"Section", L"Раздел"},
+    {L"Format", L"Формат"},
+    {L"IsActual", L"Актуальный"},
+    {L"MainTP", L"Основной техпроцесс"},
+    {L"Through", L"Сквозной"},
+    {L"IsGroup", L"Групповой"},
+    {L"IsRemoved", L"Удалён"},
+    {L"ActualVersion", L"Актуальная версия"},
+    {L"PreviousActualVersion", L"Предыдущая версия"},
+    {L"VersionNumber", L"Номер версии"},
+    {L"MainVariantInVersion", L"Основной вариант"},
+    {L"LifeCycleState", L"Состояние"},
+    {L"DateTimeOfActualization", L"Актуализирован"},
+    {L"ManufactureKind", L"Вид изготовления"},
+    {L"KindOfTechnologicalProcess", L"Вид техпроцесса"},
+    {L"KindOfStorageItems", L"Вид хранения"},
+    {L"KindOfTimeLimitTSClassification", L"Вид нормирования"},
+    {L"HideVariantsInTree", L"Прятать варианты"},
+    {L"TechnologicalProcesses", L"Техпроцессы"},
+    {L"TechnologicalProcessesCard", L"Карточка техпроцессов"},
+    {L"TechCompCard", L"Карточка техсостава"},
+    {L"TechComposition", L"Техсостав"},
+    {L"ActualVersionTechComp", L"Актуальная версия техсостава"},
+    {L"ProductConfiguration", L"Конфигурация"},
+    {L"ProductConfigurationCode", L"Код конфигурации"},
+    {L"ProductInterconnectCard", L"Карта взаимосвязей"},
+    {L"ProductPreformsCard", L"Карточка заготовок"},
+    {L"PreformConfigurationLink", L"Конфигурация заготовки"},
+    {L"Product", L"Изделие"},
+    {L"UnifiedProduct", L"Унифицированное изделие"},
+    {L"PrimaryUsage", L"Первичное применение"},
+    {L"EnterpriseName", L"Предприятие"},
+    {L"MainDocument", L"Основной документ"},
+    {L"OriginalDocument", L"Подлинник"},
+    {L"SpecificationDocument", L"Спецификация"},
+    {L"ECNDocument", L"Извещение"},
+    {L"TSOperation", L"Операция"},
+    {L"Items", L"Позиции"},
+    {L"PurchasedKind", L"Вид покупного"},
+    {L"TechPurchasedKind", L"Вид покупного (тех.)"},
+    {L"ComponentOfTheTooling", L"Составляющая оснастки"},
+    {L"ManufacturingSign", L"Признак изготовления"},
+    {L"MainPVC", L"Основной ПВС"},
+};
+
+/* Служебное: счётчики, флаги интерфейса, история. В карточке только мешают. */
+static const wchar_t *kCardHidden[] = {
+    L"BlockInit",      L"CommandSaveOnly",  L"IgnoreStructure", L"SortedManual",
+    L"ShowAgreements", L"IndexView",        L"LocalIdCounter",  L"OperationIdCounter",
+    L"SourceApplication", L"HistoryList",   L"SignaturesTable", L"LastChanged",
+};
+
+static const wchar_t *card_label(const wchar_t *key) {
+  for (int i = 0; i < (int)(sizeof(kCardLabels) / sizeof(kCardLabels[0])); i++)
+    if (_wcsicmp(key, kCardLabels[i].key) == 0) return kCardLabels[i].ru;
+  return NULL;
+}
+
+static BOOL card_hidden(const wchar_t *key) {
+  for (int i = 0; i < (int)(sizeof(kCardHidden) / sizeof(kCardHidden[0])); i++)
+    if (_wcsicmp(key, kCardHidden[i]) == 0) return TRUE;
+  return FALSE;
+}
+
+/* одна строка «название — значение» с выровненной колонкой */
+static void card_pair(CardOut *c, const wchar_t *pad, const wchar_t *key, const wchar_t *val,
+                      long link) {
+  const wchar_t *ru = card_label(key);
+  wchar_t name[64];
+  lstrcpynW(name, ru ? ru : key, 64);
+  if (val && val[0])
+    card_add(c, L"%s%-28s %s\r\n", pad, name, val);
+  else if (link)
+    card_add(c, L"%s%-28s → %ld\r\n", pad, name, link);
+}
+
 static const wchar_t *card_type_name(long t) {
   switch (t) {
   case 1: return L"число";
@@ -971,9 +1068,9 @@ static void card_operations(SQLHDBC dbc, long tpId, long verId, CardOut *c, Card
              verId);
   int k = card_query(dbc, sql, rows, CARD_ROWS, err, 280);
   long parent = (k > 0 && rows[0].n1) ? rows[0].n1 : verId;
-  card_add(c, L"Версия %ld", verId);
-  if (parent != verId) card_add(c, L" · основной вариант %ld", parent);
-  card_add(c, L"\r\n\r\n");
+  card_add(c, L"СОСТАВ  (версия %ld", verId);
+  if (parent != verId) card_add(c, L", вариант %ld", parent);
+  card_add(c, L")\r\n");
 
   _snwprintf(sql, 3000,
              L"SELECT TOP 300 ch.InfoObjectId, ch.Name, "
@@ -1003,7 +1100,7 @@ static void card_operations(SQLHDBC dbc, long tpId, long verId, CardOut *c, Card
     card_add(c, L"Состав пуст: у объекта %ld нет детей.\r\n", parent);
     return;
   }
-  card_add(c, L"Состав (%d):\r\n", n);
+  card_add(c, L"  операций: %d\r\n\r\n", n);
   /* Нормы времени лежат атрибутами на самой операции либо на объекте по
      ссылке TSOperation — как называются, в разных базах по-разному, поэтому
      показываем всё, что есть со значением, а не угаданный список имён. */
@@ -1041,24 +1138,24 @@ static void card_operations(SQLHDBC dbc, long tpId, long verId, CardOut *c, Card
 
   for (int i = 0; i < n; i++) {
     CardRow *o = ops ? &ops[i] : &rows[i];
-    if (o->n2) card_add(c, L"  %ld ", o->n2);
-    else card_add(c, L"  ");
-    card_add(c, L"%s", o->s1[0] ? o->s1 : L"(без имени)");
-    if (o->s2[0] && _wcsicmp(o->s2, o->s1) != 0) card_add(c, L" · %s", o->s2);
-    card_add(c, L" · ID %ld\r\n", o->n1);
+    wchar_t num[16];
+    if (o->n2) _snwprintf(num, 16, L"%ld", o->n2);
+    else lstrcpynW(num, L"—", 16);
+    const wchar_t *nm = o->s1[0] ? o->s1 : (o->s2[0] ? o->s2 : L"(без имени)");
+    card_add(c, L"  %-4s %-40s %ld\r\n", num, nm, o->n1);
+    if (o->s2[0] && o->s1[0] && _wcsicmp(o->s2, o->s1) != 0)
+      card_add(c, L"       %s\r\n", o->s2);
     if (!ops || na <= 0 || i >= shown) continue;
     int printed = 0;
     for (int k = 0; k < na && printed < 40; k++) {
       if (rows[k].n1 != o->n1 && rows[k].n1 != o->n3) continue;
-      if (rows[k].s2[0])
-        card_add(c, L"       %s = %s\r\n", rows[k].s1, rows[k].s2);
-      else if (rows[k].n2)
-        card_add(c, L"       %s → объект %ld\r\n", rows[k].s1, rows[k].n2);
-      else
-        continue;
+      if (card_hidden(rows[k].s1)) continue;
+      if (!rows[k].s2[0] && !rows[k].n2) continue;
+      card_pair(c, L"       ", rows[k].s1, rows[k].s2, rows[k].n2);
       printed++;
     }
-    if (!printed) card_add(c, L"       (значений нет)\r\n");
+    if (!printed) card_add(c, L"       (своих значений нет)\r\n");
+    card_add(c, L"\r\n");
   }
   if (n > shown)
     card_add(c, L"\r\n  показано подробно первых %d операций из %d\r\n", shown, n);
@@ -1099,7 +1196,7 @@ static void card_where_used(SQLHDBC dbc, long id, CardOut *c, CardRow *rows, wch
       id);
   int n = card_query(dbc, sql, rows, CARD_ROWS, err, 280);
   free(sql);
-  card_add(c, L"\r\n────────────────\r\nКуда входит по техсоставу");
+  card_add(c, L"\r\nВХОДИМОСТЬ ПО ТЕХСОСТАВУ");
   if (n < 0) {
     card_add(c, L": запрос не выполнился.\r\n%s\r\n", err);
     return;
@@ -1111,10 +1208,8 @@ static void card_where_used(SQLHDBC dbc, long id, CardOut *c, CardRow *rows, wch
   }
   card_add(c, L" (%d):\r\n", n);
   for (int i = 0; i < n; i++) {
-    card_add(c, L"  %s · ID %ld", rows[i].s1[0] ? rows[i].s1 : L"(без имени)", rows[i].n1);
-    if (rows[i].s2[0]) card_add(c, L" · изделие %s", rows[i].s2);
-    if (rows[i].n2) card_add(c, L" (%ld)", rows[i].n2);
-    card_add(c, L"\r\n");
+    card_add(c, L"  %-40s %ld\r\n", rows[i].s1[0] ? rows[i].s1 : L"(без имени)", rows[i].n1);
+    if (rows[i].s2[0]) card_add(c, L"       в изделии %s (%ld)\r\n", rows[i].s2, rows[i].n2);
   }
 }
 
@@ -1157,10 +1252,11 @@ static void plm_card(long id, wchar_t *out, int cap) {
     card_add(&c, L"Объект %ld в базе не найден.\r\n", id);
     goto freed;
   }
-  card_add(&c, L"%s\r\nID %ld · шаблон %s (%ld)", rows[0].s1[0] ? rows[0].s1 : L"(без имени)", id,
-           rows[0].s2[0] ? rows[0].s2 : L"?", rows[0].n3);
-  if (rows[0].n2) card_add(&c, L" · родитель %ld", rows[0].n2);
-  card_add(&c, L"\r\n\r\n");
+  card_add(&c, L"┌──────────────────────────────────────────────────────────┐\r\n");
+  card_add(&c, L"  %s\r\n", rows[0].s1[0] ? rows[0].s1 : L"(без имени)");
+  card_add(&c, L"  %s · ID %ld", rows[0].s2[0] ? rows[0].s2 : L"?", id);
+  if (rows[0].n2) card_add(&c, L" · внутри %ld", rows[0].n2);
+  card_add(&c, L"\r\n└──────────────────────────────────────────────────────────┘\r\n\r\n");
 
   /* 2. его атрибуты */
   _snwprintf(sql, 3600,
@@ -1176,7 +1272,8 @@ static void plm_card(long id, wchar_t *out, int cap) {
   } else if (n == 0) {
     card_add(&c, L"Атрибутов нет.\r\n\r\n");
   } else {
-    card_add(&c, L"Что в объекте (%d):\r\n", n);
+    card_add(&c, L"СВОЙСТВА\r\n");
+    int skipped = 0, unknown = 0;
     for (int i = 0; i < n; i++) {
       /* эти три решают, куда идти дальше, и они уже прочитаны — лишний
          запрос к серверу за ними не нужен */
@@ -1184,13 +1281,16 @@ static void plm_card(long id, wchar_t *out, int cap) {
       if (_wcsicmp(rows[i].s1, L"TechnologicalProcessesCard") == 0) tpCard = rows[i].n2;
       if (_wcsicmp(rows[i].s1, L"MainTP") == 0 || _wcsicmp(rows[i].s1, L"IsActual") == 0)
         mainFlag = _wcsicmp(rows[i].s2, L"да") == 0;
-      if (rows[i].s2[0])
-        card_add(&c, L"  %s = %s\r\n", rows[i].s1, rows[i].s2);
-      else if (rows[i].n2)
-        card_add(&c, L"  %s → объект %ld\r\n", rows[i].s1, rows[i].n2);
-      else
-        card_add(&c, L"  %s (%s)\r\n", rows[i].s1, card_type_name(rows[i].n3));
+      if (card_hidden(rows[i].s1)) {
+        skipped++;
+        continue;
+      }
+      if (!rows[i].s2[0] && !rows[i].n2) continue; /* пустое не показываем */
+      if (!card_label(rows[i].s1)) unknown++;
+      card_pair(&c, L"  ", rows[i].s1, rows[i].s2, rows[i].n2);
     }
+    if (skipped) card_add(&c, L"  (служебных скрыто: %d)\r\n", skipped);
+    (void)unknown;
     card_add(&c, L"\r\n");
   }
 
@@ -1199,7 +1299,8 @@ static void plm_card(long id, wchar_t *out, int cap) {
         Изделие несёт TechnologicalProcessesCard — тогда сперва находим,
         какой из его техпроцессов основной. */
   if (actualVer) {
-    card_add(&c, L"Это техпроцесс%s.\r\n", mainFlag ? L" и он помечен основным" : L"");
+    card_add(&c, L"Это сам техпроцесс%s.\r\n\r\n",
+              mainFlag ? L", помечен основным" : L"");
     card_operations(dbc, id, actualVer, &c, rows, err);
     card_where_used(dbc, id, &c, rows, err);
     goto freed;
@@ -1266,7 +1367,7 @@ static void plm_card(long id, wchar_t *out, int cap) {
     goto freed;
   }
 
-  card_add(&c, L"Техпроцессы (%d):\r\n", n);
+  card_add(&c, L"ТЕХПРОЦЕССЫ (%d)\r\n", n);
   long chosen = 0, chosenVer = 0;
   for (int i = 0; i < n; i++) {
     BOOL act = _wcsicmp(rows[i].s2, L"да") == 0;
@@ -1274,7 +1375,7 @@ static void plm_card(long id, wchar_t *out, int cap) {
       chosen = rows[i].n1;
       chosenVer = rows[i].n2;
     }
-    card_add(&c, L"  %s %s · ID %ld\r\n", act ? L"[основной]" : L"[    —    ]",
+    card_add(&c, L"  %s %-40s %ld\r\n", act ? L"●" : L"○",
              rows[i].s1[0] ? rows[i].s1 : L"(без имени)", rows[i].n1);
   }
   card_add(&c, L"\r\n");
@@ -1560,6 +1661,7 @@ static void show_card_selected(void) {
     return;
   }
   g_ansTitle = L"Что внутри";
+  g_ansMono = TRUE;
   g_plmCount = 0; /* текст вместо списка */
   wchar_t wait[120];
   _snwprintf(wait, 120, L"Смотрю объект %ld в PLM…", g_plmIds[i]);
@@ -1571,7 +1673,11 @@ static void show_card_selected(void) {
 
 static void show_answer_text(const wchar_t *text) {
   if (!g_answer) return;
-  if (g_answerEdit) SetWindowTextW(g_answerEdit, text ? text : L"");
+  if (g_answerEdit) {
+    HFONT f = (g_ansMono && g_fontMono) ? g_fontMono : g_fontBody;
+    if (f) SendMessageW(g_answerEdit, WM_SETFONT, (WPARAM)f, TRUE);
+    SetWindowTextW(g_answerEdit, text ? text : L"");
+  }
   fill_plm_list();
   POINT pt;
   GetCursorPos(&pt);
@@ -1595,6 +1701,7 @@ static void show_answer_text(const wchar_t *text) {
 static void start_lookup(const wchar_t *q) {
   if (!q) return;
   g_ansTitle = NULL;
+  g_ansMono = FALSE;
   while (*q == L' ' || *q == L'\t' || *q == L'\r' || *q == L'\n') q++;
   if (!q[0]) {
     show_status(L"Нечего искать — скопируйте текст");
