@@ -48,6 +48,10 @@ static BOOL g_filesWhenOk;
 static wchar_t g_filesNote[120];   /* last problem worth telling the user about */
 static volatile LONG g_filesScanned; /* live counter for the progress line */
 static volatile LONG g_filesCancel;  /* set to abandon a walk in progress */
+static volatile LONG g_filesDirs;    /* folders enumerated, for the speed line */
+static ULONGLONG g_filesT0;          /* when the current walk started */
+static ULONGLONG g_filesTook;        /* how long the last one took, ms */
+static long g_filesDirsDone;         /* folders in the finished index */
 static void save_files_pref(void);
 static void files_refresh_status(void);
 
@@ -234,15 +238,28 @@ static void files_refresh_status(void) {
     ShowWindow(g_filesBar, busy ? SW_SHOW : SW_HIDE);
   }
   if (g_btnIdx) SetWindowTextW(g_btnIdx, busy ? L"Остановить" : L"Обновить JSON");
-  if (busy)
-    _snwprintf(t, 200, L"Обход папки: %ld файлов…",
-               (long)InterlockedCompareExchange(&g_filesScanned, 0, 0));
+  if (busy) {
+    long done = (long)InterlockedCompareExchange(&g_filesScanned, 0, 0);
+    long dirs = (long)InterlockedCompareExchange(&g_filesDirs, 0, 0);
+    ULONGLONG ms = g_filesT0 ? GetTickCount64() - g_filesT0 : 0;
+    long persec = ms > 500 ? (long)(done * 1000ull / ms) : 0;
+    if (persec > 0)
+      _snwprintf(t, 200, L"Обход: %ld файлов, %ld папок · %ld файл/с", done, dirs, persec);
+    else
+      _snwprintf(t, 200, L"Обход: %ld файлов, %ld папок…", done, dirs);
+  }
   else if (!g_filesRoot[0])
     lstrcpynW(t, L"Индекс: укажите папку", 200);
   else if (g_filesNote[0])
     lstrcpynW(t, g_filesNote, 200);
   else if (g_filesN <= 0)
     lstrcpynW(t, L"JSON пуст — «Обновить JSON»", 200);
+  else if (g_filesWhenOk && g_filesTook)
+    _snwprintf(t, 200, L"JSON: %d файлов · %02u.%02u %02u:%02u · обход %lu:%02lu, %ld папок",
+               g_filesN, (unsigned)g_filesWhen.wDay, (unsigned)g_filesWhen.wMonth,
+               (unsigned)g_filesWhen.wHour, (unsigned)g_filesWhen.wMinute,
+               (unsigned long)(g_filesTook / 60000ull),
+               (unsigned long)((g_filesTook / 1000ull) % 60ull), g_filesDirsDone);
   else if (g_filesWhenOk)
     _snwprintf(t, 200, L"JSON: %d файлов · %02u.%02u %02u:%02u", g_filesN,
                (unsigned)g_filesWhen.wDay, (unsigned)g_filesWhen.wMonth,
@@ -800,8 +817,15 @@ static DWORD WINAPI files_walk_worker(LPVOID param) {
         pat[dl + 1] = L'*';
         pat[dl + 2] = 0;
         WIN32_FIND_DATAW fd;
-        HANDLE h = FindFirstFileW(pat, &fd);
+        /* FindExInfoBasic skips the 8.3 short name, which a server has to
+           look up separately; LARGE_FETCH asks for entries in big batches
+           instead of small ones. Both only matter over the network — which
+           is exactly where the time goes. */
+        HANDLE h = FindFirstFileExW(pat, FindExInfoBasic, &fd, FindExSearchNameMatch, NULL,
+                                    FIND_FIRST_EX_LARGE_FETCH);
+        if (h == INVALID_HANDLE_VALUE) h = FindFirstFileW(pat, &fd); /* very old server */
         if (h != INVALID_HANDLE_VALUE) {
+          InterlockedIncrement(&g_filesDirs);
           int dirIdx = -1;
           do {
             if (fd.cFileName[0] == L'.' &&
@@ -873,7 +897,7 @@ static DWORD WINAPI files_walk_worker(LPVOID param) {
 static int walk_worker_count(const wchar_t *root) {
   BOOL net = (root[0] == L'\\' && root[1] == L'\\') ||
              _wcsnicmp(root, L"\\\\?\\UNC\\", 8) == 0;
-  if (net) return 16;
+  if (net) return 32;
   SYSTEM_INFO si;
   GetSystemInfo(&si);
   int cpus = (int)si.dwNumberOfProcessors;
@@ -951,9 +975,13 @@ static DWORD WINAPI files_index_thread(LPVOID param) {
   (void)param;
 again:;
   InterlockedExchange(&g_filesScanned, 0);
+  InterlockedExchange(&g_filesDirs, 0);
+  g_filesT0 = GetTickCount64();
   FileIdx *ix = idx_new();
   BOOL oom = FALSE, stopped = FALSE;
   if (ix && g_filesRoot[0]) files_walk_all(g_filesRoot, ix, &oom, &stopped);
+  g_filesTook = GetTickCount64() - g_filesT0;
+  g_filesDirsDone = (long)InterlockedCompareExchange(&g_filesDirs, 0, 0);
   if (stopped) {
     /* a half-finished walk is worse than the index already on disk, so the
        partial result is thrown away and the previous one left alone */
