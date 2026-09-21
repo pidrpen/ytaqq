@@ -18,15 +18,17 @@
 #define ID_ANS_COPY 120
 #define ID_ANS_NOTES 121
 #define ID_ANS_CLOSE 122
+#define ID_ANS_SHOW 131
 #define TIMER_CURSOR_KEEP 6
 #define WM_SEARCH_DONE (WM_APP + 8)
 #define WM_OCR_DONE (WM_APP + 9)
 #define WM_SHOW_PAD (WM_APP + 10)
-#define ANS_W 460
+#define ANS_W 560
 #define ANS_H 340
 
 #include <wctype.h>
 static void autostart_write(BOOL on, const wchar_t *exe);
+static void layout_answer(void);
 #include "files.c"
 #include "update.c"
 
@@ -506,6 +508,11 @@ static void fill_plm_list(void) {
   }
   ShowWindow(g_answerList, g_plmCount > 0 ? SW_SHOW : SW_HIDE);
   if (g_answerEdit) ShowWindow(g_answerEdit, g_plmCount > 0 ? SW_HIDE : SW_SHOW);
+  HWND open = GetDlgItem(g_answer, ID_ANS_OPEN);
+  HWND show = GetDlgItem(g_answer, ID_ANS_SHOW);
+  if (open) SetWindowTextW(open, g_resultFiles ? L"Открыть файл" : L"Открыть PLM");
+  if (show) ShowWindow(show, g_resultFiles ? SW_SHOW : SW_HIDE);
+  layout_answer();
 }
 
 static int plm_selected_index(void) {
@@ -519,9 +526,44 @@ static void open_plm_selected(void) {
     show_status(L"Выберите строку в списке");
     return;
   }
-  lstrcpynW(g_plmLastLink, g_plmLinks[i], 420);
+  lstrcpynW(g_plmLastLink, g_plmLinks[i], PLM_LINK);
   open_plm_link(g_plmLinks[i]);
-  show_status(L"В текущий клиент PLM");
+  show_status(g_resultFiles ? L"Открываю файл" : L"В текущий клиент PLM");
+}
+
+/* Reveal the selected file in Explorer with the row highlighted; if the file
+   itself is gone, settle for opening the folder it lived in. */
+static void show_in_explorer(const wchar_t *path) {
+  if (!path || !path[0]) return;
+  size_t n = wcslen(path) + 24;
+  wchar_t *args = (wchar_t *)malloc(n * sizeof(wchar_t));
+  if (!args) return;
+  if (GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES) {
+    _snwprintf(args, n, L"/select,\"%s\"", path);
+    args[n - 1] = 0;
+    if ((INT_PTR)ShellExecuteW(NULL, L"open", L"explorer.exe", args, NULL, SW_SHOWNORMAL) > 32) {
+      free(args);
+      show_status(L"Показано в проводнике");
+      return;
+    }
+  }
+  lstrcpynW(args, path, (int)n);
+  wchar_t *slash = wcsrchr(args, L'\\');
+  if (slash) *slash = 0;
+  if ((INT_PTR)ShellExecuteW(NULL, L"open", args, NULL, NULL, SW_SHOWNORMAL) > 32)
+    show_status(L"Открыта папка — файла уже нет");
+  else
+    show_status(L"Проводник не открылся — проверьте путь");
+  free(args);
+}
+
+static void show_selected_in_explorer(void) {
+  int i = plm_selected_index();
+  if (i < 0 || i >= g_plmCount) {
+    show_status(L"Выберите строку в списке");
+    return;
+  }
+  show_in_explorer(g_plmLinks[i]);
 }
 
 static BOOL plm_lookup(const wchar_t *query, wchar_t *out, int cap) {
@@ -579,23 +621,32 @@ static BOOL plm_lookup(const wchar_t *query, wchar_t *out, int cap) {
   SQLBindCol(st, 4, SQL_C_WCHAR, pnm, sizeof(pnm), &pInd);
   int n = 0;
   wchar_t links[1800] = {0};
+  size_t linkLen = 0;
   while (SQLFetch(st) == SQL_SUCCESS && n < 20) {
     long oid = (idInd == SQL_NULL_DATA || openId == 0) ? 0 : (long)openId;
-    make_plm_link(g_plmLinks[n], 420, oid);
+    make_plm_link(g_plmLinks[n], PLM_LINK, oid);
     g_plmEsi[n][0] = 0;
     g_plmTp[n][0] = 0;
     if (tmpl == 1794) {
-      if (pInd > 0 && pnm[0]) lstrcpynW(g_plmEsi[n], (wchar_t *)pnm, 200);
-      else _snwprintf(g_plmEsi[n], 200, L"IO.%ld", oid);
-      if (nmInd > 0) lstrcpynW(g_plmTp[n], (wchar_t *)nm, 200);
+      if (pInd > 0 && pnm[0]) lstrcpynW(g_plmEsi[n], (wchar_t *)pnm, PLM_COL1);
+      else _snwprintf(g_plmEsi[n], PLM_COL1, L"IO.%ld", oid);
+      if (nmInd > 0) lstrcpynW(g_plmTp[n], (wchar_t *)nm, PLM_COL2);
     } else if (nmInd > 0) {
-      lstrcpynW(g_plmEsi[n], (wchar_t *)nm, 200);
+      lstrcpynW(g_plmEsi[n], (wchar_t *)nm, PLM_COL1);
     } else {
-      _snwprintf(g_plmEsi[n], 200, L"IO.%ld", oid);
+      _snwprintf(g_plmEsi[n], PLM_COL1, L"IO.%ld", oid);
     }
-    if (!g_plmLastLink[0]) lstrcpynW(g_plmLastLink, g_plmLinks[n], 420);
-    if (n) wcscat(links, L"\r\n");
-    if ((int)(wcslen(links) + wcslen(g_plmLinks[n]) + 8) < 1800) wcscat(links, g_plmLinks[n]);
+    if (!g_plmLastLink[0]) lstrcpynW(g_plmLastLink, g_plmLinks[n], PLM_LINK);
+    /* the separator has to fit too, or a long result list walks off the end */
+    size_t add = wcslen(g_plmLinks[n]);
+    if (linkLen + (n ? 2 : 0) + add + 1 < 1800) {
+      if (n) {
+        links[linkLen++] = L'\r';
+        links[linkLen++] = L'\n';
+      }
+      memcpy(links + linkLen, g_plmLinks[n], (add + 1) * sizeof(wchar_t));
+      linkLen += add;
+    }
     n++;
   }
   g_plmCount = n;
@@ -788,15 +839,21 @@ static void layout_answer(void) {
     col.cx = cw - cw / 2;
     SendMessageW(g_answerList, LVM_SETCOLUMNW, 1, (LPARAM)&col);
   }
-  int bw = (rc.right - pad * 2 - gap * 3) / 4;
   HWND open = GetDlgItem(g_answer, ID_ANS_OPEN);
+  HWND show = GetDlgItem(g_answer, ID_ANS_SHOW);
   HWND copy = GetDlgItem(g_answer, ID_ANS_COPY);
   HWND notes = GetDlgItem(g_answer, ID_ANS_NOTES);
   HWND cls = GetDlgItem(g_answer, ID_ANS_CLOSE);
-  if (open) MoveWindow(open, pad, by, bw, btnH, TRUE);
-  if (copy) MoveWindow(copy, pad + bw + gap, by, bw, btnH, TRUE);
-  if (notes) MoveWindow(notes, pad + (bw + gap) * 2, by, bw, btnH, TRUE);
-  if (cls) MoveWindow(cls, pad + (bw + gap) * 3, by, bw, btnH, TRUE);
+  /* "В проводнике" only makes sense for file hits, so the row is 4 or 5 wide */
+  BOOL withShow = show && g_resultFiles;
+  int cols = withShow ? 5 : 4;
+  int bw = (rc.right - pad * 2 - gap * (cols - 1)) / cols;
+  int slot = 0;
+  if (open) MoveWindow(open, pad + (bw + gap) * slot++, by, bw, btnH, TRUE);
+  if (withShow) MoveWindow(show, pad + (bw + gap) * slot++, by, bw, btnH, TRUE);
+  if (copy) MoveWindow(copy, pad + (bw + gap) * slot++, by, bw, btnH, TRUE);
+  if (notes) MoveWindow(notes, pad + (bw + gap) * slot++, by, bw, btnH, TRUE);
+  if (cls) MoveWindow(cls, pad + (bw + gap) * slot++, by, bw, btnH, TRUE);
 }
 
 static LRESULT CALLBACK AnswerProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -807,6 +864,7 @@ static LRESULT CALLBACK AnswerProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
   case WM_COMMAND:
     if (LOWORD(wParam) == ID_ANS_CLOSE) ShowWindow(hwnd, SW_HIDE);
     if (LOWORD(wParam) == ID_ANS_OPEN) open_plm_selected();
+    if (LOWORD(wParam) == ID_ANS_SHOW) show_selected_in_explorer();
     if (LOWORD(wParam) == ID_ANS_COPY) {
       int i = plm_selected_index();
       if (i >= 0 && i < g_plmCount) {
@@ -891,6 +949,7 @@ static void create_answer(HWND owner) {
     SendMessageW(g_answerList, LVM_INSERTCOLUMNW, 1, (LPARAM)&col);
   }
   HWND open = mk_btn(g_answer, L"Открыть PLM", ID_ANS_OPEN);
+  HWND show = mk_btn(g_answer, L"В проводнике", ID_ANS_SHOW);
   HWND copy = mk_btn(g_answer, L"Копировать", ID_ANS_COPY);
   HWND notes = mk_btn(g_answer, L"В блокнот", ID_ANS_NOTES);
   HWND cls = mk_btn(g_answer, L"Закрыть", ID_ANS_CLOSE);
@@ -898,6 +957,7 @@ static void create_answer(HWND owner) {
   if (g_fontBody && g_answerList) SendMessageW(g_answerList, WM_SETFONT, (WPARAM)g_fontBody, TRUE);
   if (g_fontUi) {
     SendMessageW(open, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
+    SendMessageW(show, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
     SendMessageW(copy, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
     SendMessageW(notes, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
     SendMessageW(cls, WM_SETFONT, (WPARAM)g_fontUi, TRUE);

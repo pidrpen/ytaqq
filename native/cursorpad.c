@@ -221,10 +221,14 @@ static wchar_t g_plmPort[16] = L"4450";
 static wchar_t g_plmDatabase[96] = L"";
 static wchar_t g_sqlUser[96] = L"";
 static wchar_t g_sqlPass[128] = L"";
-static wchar_t g_plmLastLink[420];
-static wchar_t g_plmLinks[20][420];
-static wchar_t g_plmEsi[20][200];
-static wchar_t g_plmTp[20][200];
+#define PLM_ROWS 200  /* result rows held for the list view */
+#define PLM_LINK 1024 /* room for long network paths, not just MAX_PATH */
+#define PLM_COL1 260
+#define PLM_COL2 640
+static wchar_t g_plmLastLink[PLM_LINK];
+static wchar_t g_plmLinks[PLM_ROWS][PLM_LINK];
+static wchar_t g_plmEsi[PLM_ROWS][PLM_COL1];
+static wchar_t g_plmTp[PLM_ROWS][PLM_COL2];
 static int g_plmCount = 0;
 static BOOL g_autostart = FALSE;
 static void show_status(const wchar_t *text);
