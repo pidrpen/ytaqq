@@ -52,6 +52,7 @@ static volatile LONG g_filesDirs;    /* folders enumerated, for the speed line *
 static ULONGLONG g_filesT0;          /* when the current walk started */
 static ULONGLONG g_filesTook;        /* how long the last one took, ms */
 static long g_filesDirsDone;         /* folders in the finished index */
+static int g_filesWorkers;           /* how many folders were fetched at once */
 static void save_files_pref(void);
 static void files_refresh_status(void);
 
@@ -267,7 +268,8 @@ static void files_refresh_status(void) {
     ULONGLONG ms = g_filesT0 ? GetTickCount64() - g_filesT0 : 0;
     long persec = ms > 500 ? (long)(done * 1000ull / ms) : 0;
     if (persec > 0)
-      _snwprintf(t, 200, L"Обход: %ld файлов, %ld папок · %ld файл/с", done, dirs, persec);
+      _snwprintf(t, 200, L"Обход: %ld файлов, %ld папок · %ld файл/с · %d потоков", done, dirs,
+                 persec, g_filesWorkers);
     else
       _snwprintf(t, 200, L"Обход: %ld файлов, %ld папок…", done, dirs);
   }
@@ -278,11 +280,13 @@ static void files_refresh_status(void) {
   else if (g_filesN <= 0)
     lstrcpynW(t, L"JSON пуст — «Обновить JSON»", 200);
   else if (g_filesWhenOk && g_filesTook)
-    _snwprintf(t, 200, L"JSON: %d файлов · %02u.%02u %02u:%02u · обход %lu:%02lu, %ld папок",
+    _snwprintf(t, 200,
+               L"JSON: %d файлов · %02u.%02u %02u:%02u · обход %lu:%02lu (%ld папок, %d потоков)",
                g_filesN, (unsigned)g_filesWhen.wDay, (unsigned)g_filesWhen.wMonth,
                (unsigned)g_filesWhen.wHour, (unsigned)g_filesWhen.wMinute,
                (unsigned long)(g_filesTook / 60000ull),
-               (unsigned long)((g_filesTook / 1000ull) % 60ull), g_filesDirsDone);
+               (unsigned long)((g_filesTook / 1000ull) % 60ull), g_filesDirsDone,
+               g_filesWorkers);
   else if (g_filesWhenOk)
     _snwprintf(t, 200, L"JSON: %d файлов · %02u.%02u %02u:%02u", g_filesN,
                (unsigned)g_filesWhen.wDay, (unsigned)g_filesWhen.wMonth,
@@ -920,6 +924,17 @@ static DWORD WINAPI files_walk_worker(LPVOID param) {
 static int walk_worker_count(const wchar_t *root) {
   BOOL net = (root[0] == L'\\' && root[1] == L'\\') ||
              _wcsnicmp(root, L"\\\\?\\UNC\\", 8) == 0;
+  if (!net) {
+    /* a mapped network drive looks exactly like a local one until Windows is
+       asked — and treating it as local is what kept the walk slow */
+    const wchar_t *p = root;
+    if (_wcsnicmp(p, L"\\\\?\\", 4) == 0) p += 4;
+    if (p[0] && p[1] == L':') {
+      wchar_t r[4] = {p[0], L':', L'\\', 0};
+      UINT t = GetDriveTypeW(r);
+      if (t == DRIVE_REMOTE) net = TRUE;
+    }
+  }
   if (net) return 32;
   SYSTEM_INFO si;
   GetSystemInfo(&si);
@@ -947,6 +962,7 @@ static void files_walk_all(const wchar_t *root, FileIdx *out, BOOL *oom, BOOL *s
   free(p.w);
 
   int n = walk_worker_count(root);
+  g_filesWorkers = n;
   WalkWorker *w = ok ? (WalkWorker *)calloc((size_t)n, sizeof(WalkWorker)) : NULL;
   HANDLE *th = w ? (HANDLE *)calloc((size_t)n, sizeof(HANDLE)) : NULL;
   int started = 0;
