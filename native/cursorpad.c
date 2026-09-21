@@ -11,6 +11,7 @@
 #include <winhttp.h>
 #include <math.h>
 #include <stdint.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -184,6 +185,7 @@ static BOOL g_follow = TRUE;
 static BOOL g_dirty = FALSE;
 static BOOL g_notesTruncated = FALSE; /* loaded file was bigger than the box */
 static int g_ansW = 0, g_ansH = 0; /* remembered size of the results panel */
+static const wchar_t *g_ansTitle; /* set when the panel shows something other than hits */
 static BOOL g_trayAdded = FALSE;
 static BOOL g_hidden = FALSE;
 static double g_x, g_y;

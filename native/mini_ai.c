@@ -159,7 +159,7 @@ static int mini_score(const wchar_t *q, const wchar_t *keys) {
 }
 
 static void mini_generic(const wchar_t *dish, wchar_t *out, int cap) {
-  _snwprintf(out, cap,
+  ans_printf(out, cap,
              L"Рецепт: %s\r\n\r\n"
              L"Ингредиенты на 2–3 порции:\r\n"
              L"• 400–500 г основы (мясо, овощи или тесто)\r\n"
@@ -225,7 +225,7 @@ static const wchar_t *mini_ai_ask(const wchar_t *query, wchar_t *out, int cap) {
     return L"Мини-ИИ";
   }
 
-  _snwprintf(out, cap,
+  ans_printf(out, cap,
              L"Не нашёл готовую карточку по «%s».\r\n\r\n"
              L"Спросите так: «рецепт пельменей», «борщ», «блины», «оливье», "
              L"«сырники», «плов», «шашлык», «как варить рис».\r\n\r\n"

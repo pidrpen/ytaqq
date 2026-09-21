@@ -30,6 +30,19 @@
 #include <wctype.h>
 static void autostart_write(BOOL on, const wchar_t *exe);
 static void layout_answer(void);
+
+/* _snwprintf leaves the buffer unterminated when the text does not fit, and
+   the caller then hands it to Windows, which keeps reading past the end until
+   it stumbles on a zero. Every answer is built through this instead. */
+static void ans_printf(wchar_t *out, int cap, const wchar_t *fmt, ...) {
+  if (!out || cap <= 0) return;
+  va_list ap;
+  va_start(ap, fmt);
+  _vsnwprintf(out, (size_t)cap, fmt, ap);
+  va_end(ap);
+  out[cap - 1] = 0;
+}
+
 #include "files.c"
 #include "update.c"
 
@@ -389,7 +402,7 @@ static void odbc_err(SQLHANDLE h, SQLSMALLINT ht, wchar_t *out, int cap) {
     lstrcpynW(out, L"ошибка ODBC", cap);
     return;
   }
-  _snwprintf(out, cap, L"%s %s", st, msg);
+  ans_printf(out, cap, L"%s %s", st, msg);
 }
 
 static void odbc_brace(const wchar_t *in, wchar_t *out, int cap) {
@@ -518,8 +531,12 @@ static void fill_plm_list(void) {
   if (g_answerEdit) ShowWindow(g_answerEdit, g_plmCount > 0 ? SW_HIDE : SW_SHOW);
   HWND open = GetDlgItem(g_answer, ID_ANS_OPEN);
   HWND show = GetDlgItem(g_answer, ID_ANS_SHOW);
-  if (open) SetWindowTextW(open, g_resultFiles ? L"Открыть файл" : L"Открыть PLM");
-  if (show) ShowWindow(show, g_resultFiles ? SW_SHOW : SW_HIDE);
+  /* plain text (a lookup answer, an update report) has nothing to open */
+  if (open) {
+    SetWindowTextW(open, g_resultFiles ? L"Открыть файл" : L"Открыть PLM");
+    ShowWindow(open, g_plmCount > 0 ? SW_SHOW : SW_HIDE);
+  }
+  if (show) ShowWindow(show, g_resultFiles && g_plmCount > 0 ? SW_SHOW : SW_HIDE);
   layout_answer();
 }
 
@@ -639,7 +656,7 @@ static BOOL plm_lookup(const wchar_t *query, wchar_t *out, int cap) {
   SQLHDBC dbc = SQL_NULL_HDBC;
   wchar_t err[280];
   if (!plm_connect(&env, &dbc, err, 280)) {
-    _snwprintf(out, cap,
+    ans_printf(out, cap,
                L"PLM\r\n\r\nНе удалось подключиться к %s (логин SQL, не Windows).\r\n%s\r\n\r\n"
                L"В Настройках: сервер UM-SQLSRV, пользователь и пароль SQL, при необходимости база.",
                g_sqlHost, err);
@@ -650,7 +667,7 @@ static BOOL plm_lookup(const wchar_t *query, wchar_t *out, int cap) {
   SQLRETURN r = SQLExecDirectW(st, (SQLWCHAR *)sql, SQL_NTS);
   if (!SQL_SUCCEEDED(r)) {
     odbc_err(st, SQL_HANDLE_STMT, err, 280);
-    _snwprintf(out, cap, L"PLM\r\n\r\nЗапрос не выполнился.\r\n%s", err);
+    ans_printf(out, cap, L"PLM\r\n\r\nЗапрос не выполнился.\r\n%s", err);
     SQLFreeHandle(SQL_HANDLE_STMT, st);
     SQLDisconnect(dbc);
     SQLFreeHandle(SQL_HANDLE_DBC, dbc);
@@ -700,10 +717,10 @@ static BOOL plm_lookup(const wchar_t *query, wchar_t *out, int cap) {
   SQLFreeHandle(SQL_HANDLE_DBC, dbc);
   SQLFreeHandle(SQL_HANDLE_ENV, env);
   if (n == 0) {
-    _snwprintf(out, cap, L"PLM\r\n\r\nНичего не найдено по «%.120s».", query);
+    ans_printf(out, cap, L"PLM\r\n\r\nНичего не найдено по «%.120s».", query);
     return FALSE;
   }
-  _snwprintf(out, cap,
+  ans_printf(out, cap,
              L"PLM · %d  (двойной клик — в уже открытый клиент)\r\n\r\n%s", n, links);
   return TRUE;
 }
@@ -838,11 +855,11 @@ static void compose_answer(const wchar_t *query, wchar_t *out, int cap) {
     return;
   }
   if (internet_ask(query, a, 1200) && a[0]) {
-    _snwprintf(out, cap, L"Мини-ИИ\r\n\r\n%s", a);
+    ans_printf(out, cap, L"Мини-ИИ\r\n\r\n%s", a);
     return;
   }
   src = mini_ai_ask(query, a, 1200);
-  _snwprintf(out, cap, L"%s (офлайн)\r\n\r\n%s", src, a);
+  ans_printf(out, cap, L"%s (офлайн)\r\n\r\n%s", src, a);
 }
 
 typedef struct {
@@ -891,11 +908,12 @@ static void layout_answer(void) {
   HWND notes = GetDlgItem(g_answer, ID_ANS_NOTES);
   HWND cls = GetDlgItem(g_answer, ID_ANS_CLOSE);
   /* "В проводнике" only makes sense for file hits, so the row is 4 or 5 wide */
-  BOOL withShow = show && g_resultFiles;
-  int cols = withShow ? 5 : 4;
+  BOOL withOpen = open && g_plmCount > 0;
+  BOOL withShow = show && g_resultFiles && g_plmCount > 0;
+  int cols = 3 + (withOpen ? 1 : 0) + (withShow ? 1 : 0);
   int bw = (rc.right - pad * 2 - gap * (cols - 1)) / cols;
   int slot = 0;
-  if (open) MoveWindow(open, pad + (bw + gap) * slot++, by, bw, btnH, TRUE);
+  if (withOpen) MoveWindow(open, pad + (bw + gap) * slot++, by, bw, btnH, TRUE);
   if (withShow) MoveWindow(show, pad + (bw + gap) * slot++, by, bw, btnH, TRUE);
   if (copy) MoveWindow(copy, pad + (bw + gap) * slot++, by, bw, btnH, TRUE);
   if (notes) MoveWindow(notes, pad + (bw + gap) * slot++, by, bw, btnH, TRUE);
@@ -912,7 +930,9 @@ static LRESULT CALLBACK AnswerProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
     RECT rc;
     GetClientRect(hwnd, &rc);
     FillRect(hdc, &rc, g_paper);
-    draw_panel_header(hwnd, hdc, g_resultFiles ? L"Найденные файлы" : L"Находки");
+    draw_panel_header(hwnd, hdc,
+                      g_ansTitle ? g_ansTitle
+                                 : (g_resultFiles ? L"Найденные файлы" : L"Находки"));
     EndPaint(hwnd, &ps);
     return 0;
   }
@@ -1080,6 +1100,7 @@ static void show_answer_text(const wchar_t *text) {
 
 static void start_lookup(const wchar_t *q) {
   if (!q) return;
+  g_ansTitle = NULL;
   while (*q == L' ' || *q == L'\t' || *q == L'\r' || *q == L'\n') q++;
   if (!q[0]) {
     show_status(L"Нечего искать — скопируйте текст");

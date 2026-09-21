@@ -36,6 +36,43 @@ static volatile LONG g_updBusy;
 static wchar_t g_updPath[MAX_PATH];
 static wchar_t g_updRemote[40];
 static wchar_t g_updErr[240];
+static wchar_t g_updLog[3000]; /* every step, so a failure can be read and sent */
+static int g_updLogLen;
+
+/* WinHTTP numbers mean nothing to the person reading the report. */
+static const wchar_t *wh_reason(DWORD err) {
+  switch (err) {
+  case 12002: return L"истекло время ожидания";
+  case 12007: return L"адрес не разрешается — нет интернета или DNS";
+  case 12029: return L"не удалось подключиться";
+  case 12030:
+  case 12031: return L"соединение оборвалось";
+  case 12045:
+  case 12175: return L"ошибка защищённого соединения (сертификат)";
+  case 12165:
+  case 12186: return L"мешает прокси-сервер";
+  default: return NULL;
+  }
+}
+
+static void upd_log(const wchar_t *fmt, ...) {
+  if (g_updLogLen > 2800) return;
+  wchar_t line[320];
+  va_list ap;
+  va_start(ap, fmt);
+  _vsnwprintf(line, 320, fmt, ap);
+  va_end(ap);
+  line[319] = 0;
+  int n = (int)wcslen(line);
+  if (g_updLogLen + n + 3 >= 3000) return;
+  if (g_updLogLen) {
+    g_updLog[g_updLogLen++] = L'\r';
+    g_updLog[g_updLogLen++] = L'\n';
+  }
+  memcpy(g_updLog + g_updLogLen, line, (size_t)n * sizeof(wchar_t));
+  g_updLogLen += n;
+  g_updLog[g_updLogLen] = 0;
+}
 static wchar_t g_updLaunch[MAX_PATH];
 static wchar_t g_updHostUsed[80];
 
@@ -313,6 +350,12 @@ static BOOL http_get_to_file(const wchar_t *host, const wchar_t *path, const wch
   http_tune(ses);
   HINTERNET con = WinHttpConnect(ses, host, INTERNET_DEFAULT_HTTPS_PORT, 0);
   if (!con) {
+    {
+      DWORD e = GetLastError();
+      const wchar_t *why = wh_reason(e);
+      if (why) upd_log(L"  %s → %s (код %lu)", host, why, e);
+      else upd_log(L"  %s → не соединиться (код %lu)", host, e);
+    }
     upd_fail(L"Нет соединения с хостом", GetLastError());
     WinHttpCloseHandle(ses);
     CloseHandle(f);
@@ -343,6 +386,12 @@ static BOOL http_get_to_file(const wchar_t *host, const wchar_t *path, const wch
   BOOL ok = WinHttpSendRequest(req, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0);
   if (ok) ok = WinHttpReceiveResponse(req, NULL);
   if (!ok) {
+    {
+      DWORD e = GetLastError();
+      const wchar_t *why = wh_reason(e);
+      if (why) upd_log(L"  %s → %s (код %lu)", host, why, e);
+      else upd_log(L"  %s → нет ответа (код %lu)", host, e);
+    }
     upd_fail(L"Сеть: хост не ответил", GetLastError());
     WinHttpCloseHandle(req);
     WinHttpCloseHandle(con);
@@ -355,6 +404,7 @@ static BOOL http_get_to_file(const wchar_t *host, const wchar_t *path, const wch
   WinHttpQueryHeaders(req, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, NULL, &status,
                       &slen, WINHTTP_NO_HEADER_INDEX);
   if (status != 200) {
+    upd_log(L"  %s → HTTP %lu", host, status);
     _snwprintf(g_updErr, 240, L"%s → HTTP %lu", host, status);
     WinHttpCloseHandle(req);
     WinHttpCloseHandle(con);
@@ -409,6 +459,7 @@ static BOOL http_get_any(const wchar_t *kind, const wchar_t *dest, DWORD maxn) {
       _snwprintf(path, 420, L"%s?t=%lu", base, GetTickCount());
     else
       lstrcpynW(path, base, 420);
+    upd_log(L"  пробую %s", kUpdSrc[i].host);
     if (!http_get_to_file(kUpdSrc[i].host, path, dest, maxn, kUpdSrc[i].hdr)) continue;
     if (kUpdSrc[i].api && !unwrap_github_json(dest, maxn)) {
       DeleteFileW(dest);
@@ -424,6 +475,7 @@ static BOOL http_get_any(const wchar_t *kind, const wchar_t *dest, DWORD maxn) {
       free(peek);
       if (bad) {
         DeleteFileW(dest);
+        upd_log(L"  %s → пришёл не файл (HTML или сжатие)", kUpdSrc[i].host);
         upd_fail(L"Ответ не файл (HTML/сжатие)", 0);
         continue;
       }
@@ -646,8 +698,19 @@ static DWORD WINAPI update_thread(LPVOID param) {
     _snwprintf(tmpv, MAX_PATH, L"%sCursorPad-version.txt", tdir);
     _snwprintf(tmpe, MAX_PATH, L"%sCursorPad-next.bin", tdir);
   }
+  g_updLog[0] = 0;
+  g_updLogLen = 0;
+  SYSTEMTIME st;
+  GetLocalTime(&st);
+  upd_log(L"Обновление CursorPad — %02u.%02u.%04u %02u:%02u", (unsigned)st.wDay,
+          (unsigned)st.wMonth, (unsigned)st.wYear, (unsigned)st.wHour, (unsigned)st.wMinute);
+  upd_log(L"Установленная версия: %s", APP_VERSION_STR);
+  upd_log(L"");
+  upd_log(L"Шаг 1 — читаю version.txt:");
+
   int code = 0;
   if (!http_get_any(L"v", tmpv, 256 * 1024)) {
+    upd_log(L"Итог: ни один источник не отдал version.txt.");
     if (!g_updErr[0]) upd_fail(L"GitHub/CDN не отдали version.txt", 0);
     code = 0;
     goto done;
@@ -675,7 +738,9 @@ static DWORD WINAPI update_thread(LPVOID param) {
     MultiByteToWideChar(CP_UTF8, 0, vis, -1, g_updRemote, 40);
   }
   if (!g_updRemote[0]) _snwprintf(g_updRemote, 40, L"%ld", remote);
+  upd_log(L"  получено: «%s» (число %ld)", g_updRemote[0] ? g_updRemote : L"—", remote);
   if (remote <= 0) {
+    upd_log(L"Итог: version.txt не разобрался.");
     wchar_t snip[48] = {0};
     int i = 0, j = 0;
     for (; buf[i] && j < 40; i++) {
@@ -692,10 +757,14 @@ static DWORD WINAPI update_thread(LPVOID param) {
     goto done;
   }
   if (remote <= APP_VERSION) {
+    upd_log(L"Итог: на GitHub не новее установленной — обновлять нечего.");
     code = 1;
     goto done;
   }
+  upd_log(L"");
+  upd_log(L"Шаг 2 — качаю CursorPad.exe:");
   if (!http_get_any(L"e", tmpe, 16 * 1024 * 1024) || !file_is_pe(tmpe)) {
+    upd_log(L"Итог: файл не скачался или это не программа для Windows.");
     DeleteFileW(tmpe);
     if (!g_updErr[0]) upd_fail(L"Не скачался CursorPad.exe", 0);
     code = 0;
@@ -725,12 +794,22 @@ static void start_update(void) {
 
 static void on_update_done(int code) {
   if (code == 1) {
+    /* naming both versions saves the "it keeps saying latest" puzzlement */
     wchar_t m[160];
-    _snwprintf(m, 160, L"Уже последняя версия (%s)", APP_VERSION_STR);
+    _snwprintf(m, 160, L"Уже последняя: у вас %s, на GitHub %s", APP_VERSION_STR,
+               g_updRemote[0] ? g_updRemote : L"—");
     show_status(m);
     return;
   }
   if (code != 2 || !g_updPath[0]) {
+    /* a line in the status bar disappears in two seconds and cannot be
+       copied; the full trace goes where it can be read and sent on */
+    upd_log(L"");
+    upd_log(L"Причина: %s", g_updErr[0] ? g_updErr : L"GitHub недоступен");
+    g_resultFiles = FALSE;
+    g_plmCount = 0;
+    g_ansTitle = L"Отчёт об обновлении";
+    show_answer_text(g_updLog);
     show_status(g_updErr[0] ? g_updErr : L"GitHub недоступен");
     return;
   }

@@ -866,9 +866,9 @@ static BOOL files_search(const wchar_t *query, wchar_t *out, int cap) {
   if (g_filesN == 0) files_load_idx();
   if (g_filesN == 0) {
     if (g_filesNote[0])
-      _snwprintf(out, cap, L"Файлы\r\n\r\n%s", g_filesNote);
+      ans_printf(out, cap, L"Файлы\r\n\r\n%s", g_filesNote);
     else
-      _snwprintf(out, cap,
+      ans_printf(out, cap,
                  L"Файлы\r\n\r\nJSON пуст для «%.80s».\r\nНажмите «Обновить JSON».",
                  g_filesRoot);
     return FALSE;
@@ -910,14 +910,14 @@ static BOOL files_search(const wchar_t *query, wchar_t *out, int cap) {
   files_unlock();
   g_plmCount = n;
   if (n == 0) {
-    _snwprintf(out, cap, L"Файлы\r\n\r\nВ JSON нет «%.80s» (%d записей).", q, g_filesN);
+    ans_printf(out, cap, L"Файлы\r\n\r\nВ JSON нет «%.80s» (%d записей).", q, g_filesN);
     return FALSE;
   }
   if (total > n)
-    _snwprintf(out, cap, L"Файлы · %d из %d найденных (всего в JSON %d)\r\n\r\n%s", n,
+    ans_printf(out, cap, L"Файлы · %d из %d найденных (всего в JSON %d)\r\n\r\n%s", n,
                total, g_filesN, links);
   else
-    _snwprintf(out, cap, L"Файлы · %d из JSON\r\n\r\n%s", n, links);
+    ans_printf(out, cap, L"Файлы · %d из JSON\r\n\r\n%s", n, links);
   return TRUE;
 }
 
