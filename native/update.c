@@ -452,47 +452,59 @@ static BOOL http_get_to_file(const wchar_t *host, const wchar_t *path, const wch
   return TRUE;
 }
 
+/* One source, fetched and sanity-checked. Split out so the version step can
+   ask every mirror instead of trusting whichever answers first. */
+static BOOL fetch_from(int i, const wchar_t *kind, const wchar_t *dest, DWORD maxn) {
+  const wchar_t *base = (kind[0] == L'e') ? kUpdSrc[i].exe : kUpdSrc[i].ver;
+  wchar_t path[420];
+  if (kUpdSrc[i].bust)
+    _snwprintf(path, 420, L"%s?t=%lu", base, GetTickCount());
+  else
+    lstrcpynW(path, base, 420);
+  if (!http_get_to_file(kUpdSrc[i].host, path, dest, maxn, kUpdSrc[i].hdr)) return FALSE;
+  if (kUpdSrc[i].api && !unwrap_github_json(dest, maxn)) {
+    DeleteFileW(dest);
+    return FALSE;
+  }
+  char *peek = NULL;
+  DWORD pn = 0;
+  if (read_file_bytes(dest, &peek, &pn, 4096)) {
+    BOOL bad = looks_like_html(peek) || (pn >= 2 && (unsigned char)peek[0] == 0x1F &&
+                                         (unsigned char)peek[1] == 0x8B);
+    if (!bad && kind[0] != L'e' && pn >= 12 && !strncmp(peek, "version https://git-lfs", 12))
+      bad = TRUE;
+    /* keep a readable snippet before the buffer goes away: it is the
+       difference between "a proxy served a login page" and "it was gzip" */
+    wchar_t peekw[70];
+    int pk = 0;
+    for (DWORD q = 0; q < pn && pk < 60; q++) {
+      unsigned char c = (unsigned char)peek[q];
+      peekw[pk++] = (c >= 32 && c < 127) ? (wchar_t)c : L'.';
+    }
+    peekw[pk] = 0;
+    free(peek);
+    if (bad) {
+      DeleteFileW(dest);
+      upd_log(L"  %s → пришёл не файл, начало ответа: %s", kUpdSrc[i].host, peekw);
+      upd_fail(L"Ответ не файл (HTML/сжатие)", 0);
+      return FALSE;
+    }
+  }
+  lstrcpynW(g_updHostUsed, kUpdSrc[i].host, 80);
+  return TRUE;
+}
+
+static int g_updPrefer = -1; /* mirror that reported the newest version */
+
 static BOOL http_get_any(const wchar_t *kind, const wchar_t *dest, DWORD maxn) {
   int n = (int)(sizeof(kUpdSrc) / sizeof(kUpdSrc[0]));
-  for (int i = 0; i < n; i++) {
-    const wchar_t *base = (kind[0] == L'e') ? kUpdSrc[i].exe : kUpdSrc[i].ver;
-    wchar_t path[420];
-    if (kUpdSrc[i].bust)
-      _snwprintf(path, 420, L"%s?t=%lu", base, GetTickCount());
-    else
-      lstrcpynW(path, base, 420);
+  for (int k = -1; k < n; k++) {
+    /* the preferred mirror goes first, then everyone else in order */
+    int i = (k < 0) ? g_updPrefer : k;
+    if (i < 0 || i >= n) continue;
+    if (k >= 0 && i == g_updPrefer) continue;
     upd_log(L"  пробую %s", kUpdSrc[i].host);
-    if (!http_get_to_file(kUpdSrc[i].host, path, dest, maxn, kUpdSrc[i].hdr)) continue;
-    if (kUpdSrc[i].api && !unwrap_github_json(dest, maxn)) {
-      DeleteFileW(dest);
-      continue;
-    }
-    char *peek = NULL;
-    DWORD pn = 0;
-    if (read_file_bytes(dest, &peek, &pn, 4096)) {
-      BOOL bad = looks_like_html(peek) || (pn >= 2 && (unsigned char)peek[0] == 0x1F &&
-                                           (unsigned char)peek[1] == 0x8B);
-      if (!bad && kind[0] != L'e' && pn >= 12 && !strncmp(peek, "version https://git-lfs", 12))
-        bad = TRUE;
-      /* keep a readable snippet before the buffer goes away: it is the
-         difference between "a proxy served a login page" and "it was gzip" */
-      wchar_t peekw[70];
-      int pk = 0;
-      for (DWORD q = 0; q < pn && pk < 60; q++) {
-        unsigned char c = (unsigned char)peek[q];
-        peekw[pk++] = (c >= 32 && c < 127) ? (wchar_t)c : L'.';
-      }
-      peekw[pk] = 0;
-      free(peek);
-      if (bad) {
-        DeleteFileW(dest);
-        upd_log(L"  %s → пришёл не файл, начало ответа: %s", kUpdSrc[i].host, peekw);
-        upd_fail(L"Ответ не файл (HTML/сжатие)", 0);
-        continue;
-      }
-    }
-    lstrcpynW(g_updHostUsed, kUpdSrc[i].host, 80);
-    return TRUE;
+    if (fetch_from(i, kind, dest, maxn)) return TRUE;
   }
   return FALSE;
 }
@@ -711,31 +723,55 @@ static DWORD WINAPI update_thread(LPVOID param) {
   }
   g_updLog[0] = 0;
   g_updLogLen = 0;
+  g_updPrefer = -1;
   SYSTEMTIME st;
   GetLocalTime(&st);
   upd_log(L"Обновление CursorPad — %02u.%02u.%04u %02u:%02u", (unsigned)st.wDay,
           (unsigned)st.wMonth, (unsigned)st.wYear, (unsigned)st.wHour, (unsigned)st.wMinute);
   upd_log(L"Установленная версия: %s", APP_VERSION_STR);
   upd_log(L"");
-  upd_log(L"Шаг 1 — читаю version.txt:");
+  upd_log(L"Шаг 1 — читаю version.txt (спрашиваю все зеркала):");
 
   int code = 0;
-  if (!http_get_any(L"v", tmpv, 256 * 1024)) {
+  /* Mirrors of the same branch fall out of sync: one edge can still serve a
+     version from hours ago. Trusting whichever answers first then reports
+     "уже последняя". Ask everybody and believe the newest. */
+  char buf[128] = {0};
+  long remote = 0;
+  int answered = 0;
+  for (int i = 0; i < (int)(sizeof(kUpdSrc) / sizeof(kUpdSrc[0])); i++) {
+    char one[128] = {0};
+    DWORD got = 0;
+    upd_log(L"  пробую %s", kUpdSrc[i].host);
+    if (!fetch_from(i, L"v", tmpv, 256 * 1024)) continue;
+    HANDLE fh = CreateFileW(tmpv, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
+                            FILE_ATTRIBUTE_NORMAL, NULL);
+    if (fh != INVALID_HANDLE_VALUE) {
+      ReadFile(fh, one, 120, &got, NULL);
+      CloseHandle(fh);
+    }
+    DeleteFileW(tmpv);
+    long v = parse_ver_file(one);
+    if (v <= 0) {
+      upd_log(L"  %s → version.txt не разобрался", kUpdSrc[i].host);
+      continue;
+    }
+    answered++;
+    upd_log(L"  %s → %ld", kUpdSrc[i].host, v);
+    if (v > remote) {
+      remote = v;
+      g_updPrefer = i;
+      memcpy(buf, one, sizeof(buf));
+    }
+  }
+  if (!answered) {
     upd_log(L"Итог: ни один источник не отдал version.txt.");
     if (!g_updErr[0]) upd_fail(L"GitHub/CDN не отдали version.txt", 0);
     code = 0;
     goto done;
   }
-  HANDLE h = CreateFileW(tmpv, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
-                         FILE_ATTRIBUTE_NORMAL, NULL);
-  char buf[128] = {0};
-  DWORD n = 0;
-  if (h != INVALID_HANDLE_VALUE) {
-    ReadFile(h, buf, 120, &n, NULL);
-    CloseHandle(h);
-  }
-  DeleteFileW(tmpv);
-  long remote = parse_ver_file(buf);
+  if (g_updPrefer >= 0)
+    upd_log(L"  самое свежее у %s", kUpdSrc[g_updPrefer].host);
   const char *nl = strchr(buf, '\n');
   if (nl) {
     while (*nl == '\n' || *nl == '\r' || *nl == ' ') nl++;
