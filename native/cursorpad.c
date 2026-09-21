@@ -188,6 +188,18 @@ static int g_ansW = 0, g_ansH = 0; /* remembered size of the results panel */
 static const wchar_t *g_ansTitle; /* set when the panel shows something other than hits */
 static BOOL g_trayAdded = FALSE;
 static BOOL g_hidden = FALSE;
+/* Слежение за курсором опрашивалось 100 раз в секунду всегда — даже когда
+   окно закреплено, спрятано или мышь просто стоит. На ноутбуке это заметно
+   по батарее. Частота теперь подстраивается под то, что происходит. */
+static UINT g_followMs = 10;
+static int g_followIdle;
+static POINT g_lastCur;
+
+static void follow_rate(HWND h, UINT ms) {
+  if (ms == g_followMs) return;
+  g_followMs = ms;
+  SetTimer(h, TIMER_FOLLOW, ms, NULL);
+}
 static double g_x, g_y;
 static int g_ww = WND_W, g_hh = WND_H;
 static int g_offx = 22, g_offy = 28;
@@ -2249,20 +2261,37 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
       paste_line((int)(wParam - HOTKEY_SNIP_BASE + 1));
     return 0;
   case WM_TIMER:
-    if (wParam == TIMER_FOLLOW && g_follow && !g_hidden) {
-      POINT p;
-      GetCursorPos(&p);
-      int tx = p.x + g_offx;
-      int ty = p.y + g_offy;
-      clamp_to_work(&tx, &ty, p);
-      g_x += (tx - g_x) * 0.28;
-      g_y += (ty - g_y) * 0.28;
-      int nx = (int)lround(g_x);
-      int ny = (int)lround(g_y);
-      SetWindowPos(g_hwnd, HWND_TOPMOST, nx, ny, 0, 0,
-                   SWP_NOSIZE | SWP_NOACTIVATE);
-      if (g_setHwnd && IsWindowVisible(g_setHwnd)) place_settings();
-      if (g_askHwnd && IsWindowVisible(g_askHwnd)) place_ask();
+    if (wParam == TIMER_FOLLOW) {
+      if (!g_follow || g_hidden) {
+        /* двигать нечего — редкий тик только чтобы заметить, когда снова
+           включат слежение */
+        follow_rate(hwnd, 200);
+      } else {
+        POINT p;
+        GetCursorPos(&p);
+        int tx = p.x + g_offx;
+        int ty = p.y + g_offy;
+        clamp_to_work(&tx, &ty, p);
+        double dx = tx - g_x, dy = ty - g_y;
+        BOOL moved = p.x != g_lastCur.x || p.y != g_lastCur.y || fabs(dx) > 0.5 ||
+                     fabs(dy) > 0.5;
+        g_lastCur = p;
+        if (moved) {
+          g_followIdle = 0;
+          follow_rate(hwnd, 10);
+          g_x += dx * 0.28;
+          g_y += dy * 0.28;
+          int nx = (int)lround(g_x);
+          int ny = (int)lround(g_y);
+          SetWindowPos(g_hwnd, HWND_TOPMOST, nx, ny, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE);
+          if (g_setHwnd && IsWindowVisible(g_setHwnd)) place_settings();
+          if (g_askHwnd && IsWindowVisible(g_askHwnd)) place_ask();
+        } else if (++g_followIdle > 20) {
+          /* мышь стоит: 20 опросов в секунду вместо 100. Стронется — на
+             следующем тике вернёмся к плавным 10 мс */
+          follow_rate(hwnd, 50);
+        }
+      }
     }
     if (wParam == TIMER_SAVE && g_dirty) save_notes();
     if (wParam == TIMER_STATUS) {
