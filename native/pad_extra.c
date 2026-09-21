@@ -928,6 +928,7 @@ static int card_query(SQLHDBC dbc, const wchar_t *sql, CardRow *rows, int max, w
   L"WHEN 13 THEN CONVERT(NVARCHAR(64), a.IntegerNumber) "                                \
   L"WHEN 32 THEN CONVERT(NVARCHAR(64), a.LongNumber) "                                   \
   L"WHEN 4 THEN CONVERT(NVARCHAR(64), a.LongNumber) "                                    \
+  L"WHEN 5 THEN CONVERT(NVARCHAR(64), a.LongNumber) "                                    \
   L"WHEN 33 THEN CONVERT(NVARCHAR(64), a.LongNumber) "                                   \
   L"ELSE N'' END"
 
@@ -1016,16 +1017,57 @@ static BOOL card_hidden(const wchar_t *key) {
   return FALSE;
 }
 
+/* Нормы времени. Имя атрибута в каждой базе своё, поэтому узнаём их двумя
+   путями: по типу данных TIMESPAN и по приметам в имени (Tsht, Tpz, Time,
+   Norm, Labor…). Показываем часы с четырьмя знаками и рядом минуты. */
+static BOOL card_is_time(const wchar_t *key, long dataType) {
+  if (dataType == 5) return TRUE; /* TIMESPAN */
+  static const wchar_t *marks[] = {L"tsht", L"tpz",  L"tshk", L"time",
+                                   L"norm", L"labor", L"labour", L"duration"};
+  wchar_t low[64];
+  lstrcpynW(low, key, 64);
+  for (int i = 0; low[i]; i++)
+    if (low[i] >= L'A' && low[i] <= L'Z') low[i] = (wchar_t)(low[i] - L'A' + L'a');
+  for (int i = 0; i < (int)(sizeof(marks) / sizeof(marks[0])); i++)
+    if (wcsstr(low, marks[i])) return TRUE;
+  return FALSE;
+}
+
+/* В базе число лежит в часах, поэтому минуты — это оно же на шестьдесят.
+   Если окажется наоборот, правится здесь одной строкой. */
+static BOOL card_time_text(const wchar_t *val, wchar_t *out, int cap) {
+  if (!val || !val[0]) return FALSE;
+  wchar_t norm[64];
+  int j = 0;
+  for (int i = 0; val[i] && j < 62; i++) norm[j++] = val[i] == L',' ? L'.' : val[i];
+  norm[j] = 0;
+  wchar_t *stop = NULL;
+  double hours = wcstod(norm, &stop);
+  if (stop == norm) return FALSE; /* не число — пусть показывается как есть */
+  _snwprintf(out, cap, L"%.4f ч · %.1f мин", hours, hours * 60.0);
+  out[cap - 1] = 0;
+  return TRUE;
+}
+
 /* одна строка «название — значение» с выровненной колонкой */
+static void card_pair_t(CardOut *c, const wchar_t *pad, const wchar_t *key, const wchar_t *val,
+                        long link, long dataType) {
+  const wchar_t *ru = card_label(key);
+  wchar_t name[64], t[64];
+  lstrcpynW(name, ru ? ru : key, 64);
+  if (val && val[0]) {
+    if (card_is_time(key, dataType) && card_time_text(val, t, 64))
+      card_add(c, L"%s%-28s %s\r\n", pad, name, t);
+    else
+      card_add(c, L"%s%-28s %s\r\n", pad, name, val);
+  } else if (link) {
+    card_add(c, L"%s%-28s → %ld\r\n", pad, name, link);
+  }
+}
+
 static void card_pair(CardOut *c, const wchar_t *pad, const wchar_t *key, const wchar_t *val,
                       long link) {
-  const wchar_t *ru = card_label(key);
-  wchar_t name[64];
-  lstrcpynW(name, ru ? ru : key, 64);
-  if (val && val[0])
-    card_add(c, L"%s%-28s %s\r\n", pad, name, val);
-  else if (link)
-    card_add(c, L"%s%-28s → %ld\r\n", pad, name, link);
+  card_pair_t(c, pad, key, val, link, 0);
 }
 
 static const wchar_t *card_type_name(long t) {
@@ -1151,7 +1193,7 @@ static void card_operations(SQLHDBC dbc, long tpId, long verId, CardOut *c, Card
       if (rows[k].n1 != o->n1 && rows[k].n1 != o->n3) continue;
       if (card_hidden(rows[k].s1)) continue;
       if (!rows[k].s2[0] && !rows[k].n2) continue;
-      card_pair(c, L"       ", rows[k].s1, rows[k].s2, rows[k].n2);
+      card_pair_t(c, L"       ", rows[k].s1, rows[k].s2, rows[k].n2, rows[k].n3);
       printed++;
     }
     if (!printed) card_add(c, L"       (своих значений нет)\r\n");
@@ -1287,7 +1329,7 @@ static void plm_card(long id, wchar_t *out, int cap) {
       }
       if (!rows[i].s2[0] && !rows[i].n2) continue; /* пустое не показываем */
       if (!card_label(rows[i].s1)) unknown++;
-      card_pair(&c, L"  ", rows[i].s1, rows[i].s2, rows[i].n2);
+      card_pair_t(&c, L"  ", rows[i].s1, rows[i].s2, rows[i].n2, rows[i].n3);
     }
     if (skipped) card_add(&c, L"  (служебных скрыто: %d)\r\n", skipped);
     (void)unknown;
