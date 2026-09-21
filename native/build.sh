@@ -28,6 +28,8 @@ with zipfile.ZipFile(root / "CursorPad.zip", "w", zipfile.ZIP_DEFLATED) as z:
         z.write(p, f"cursors/{p.name}")
 print("wrote", root / "CursorPad.zip")
 PY
+# jsDelivr will not serve .exe, so the CDN mirrors get the same bytes as .bin
+cp -f /workspace/public/CursorPad.exe /workspace/public/CursorPad.bin
 cp -f version.txt /workspace/public/version.txt
 cp -f /workspace/public/CursorPad.exe /workspace/artifacts/CursorPad.exe
 cp -f /workspace/public/CursorPad.zip /workspace/artifacts/CursorPad.zip

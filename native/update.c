@@ -85,13 +85,15 @@ typedef struct {
   int bust; /* cache-bust query */
 } UpdSrc;
 
+/* jsDelivr refuses .exe by extension, so the same bytes are published as
+   CursorPad.bin for the CDN mirrors; the GitHub hosts keep the plain name. */
 static const UpdSrc kUpdSrc[] = {
     {L"cdn.jsdelivr.net", L"/gh/pidrpen/ytaqq@main/public/version.txt",
-     L"/gh/pidrpen/ytaqq@main/public/CursorPad.exe", NULL, 0, 1},
+     L"/gh/pidrpen/ytaqq@main/public/CursorPad.bin", NULL, 0, 1},
     {L"fastly.jsdelivr.net", L"/gh/pidrpen/ytaqq@main/public/version.txt",
-     L"/gh/pidrpen/ytaqq@main/public/CursorPad.exe", NULL, 0, 1},
+     L"/gh/pidrpen/ytaqq@main/public/CursorPad.bin", NULL, 0, 1},
     {L"gcore.jsdelivr.net", L"/gh/pidrpen/ytaqq@main/public/version.txt",
-     L"/gh/pidrpen/ytaqq@main/public/CursorPad.exe", NULL, 0, 1},
+     L"/gh/pidrpen/ytaqq@main/public/CursorPad.bin", NULL, 0, 1},
     {L"raw.githubusercontent.com", L"/pidrpen/ytaqq/main/public/version.txt",
      L"/pidrpen/ytaqq/main/public/CursorPad.exe", NULL, 0, 0},
     {L"github.com", L"/pidrpen/ytaqq/raw/main/public/version.txt",
@@ -472,10 +474,19 @@ static BOOL http_get_any(const wchar_t *kind, const wchar_t *dest, DWORD maxn) {
                                            (unsigned char)peek[1] == 0x8B);
       if (!bad && kind[0] != L'e' && pn >= 12 && !strncmp(peek, "version https://git-lfs", 12))
         bad = TRUE;
+      /* keep a readable snippet before the buffer goes away: it is the
+         difference between "a proxy served a login page" and "it was gzip" */
+      wchar_t peekw[70];
+      int pk = 0;
+      for (DWORD q = 0; q < pn && pk < 60; q++) {
+        unsigned char c = (unsigned char)peek[q];
+        peekw[pk++] = (c >= 32 && c < 127) ? (wchar_t)c : L'.';
+      }
+      peekw[pk] = 0;
       free(peek);
       if (bad) {
         DeleteFileW(dest);
-        upd_log(L"  %s → пришёл не файл (HTML или сжатие)", kUpdSrc[i].host);
+        upd_log(L"  %s → пришёл не файл, начало ответа: %s", kUpdSrc[i].host, peekw);
         upd_fail(L"Ответ не файл (HTML/сжатие)", 0);
         continue;
       }
