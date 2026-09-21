@@ -951,6 +951,69 @@ static const wchar_t *card_type_name(long t) {
 
 #define CARD_ROWS 220
 
+/* Состав техпроцесса: ТП → ActualVersion → MainVariantInVersion → дети
+   варианта. У самой операции содержательное имя часто лежит не на ней, а на
+   объекте по ссылке TSOperation, поэтому он подтягивается сразу. */
+static void card_operations(SQLHDBC dbc, long tpId, long verId, CardOut *c, CardRow *rows,
+                            wchar_t *err) {
+  wchar_t sql[3000];
+  if (!verId) {
+    card_add(c, L"У ТП %ld нет ссылки ActualVersion — состав показать неоткуда.\r\n", tpId);
+    return;
+  }
+  /* основной вариант версии; если его нет, смотрим детей самой версии */
+  _snwprintf(sql, 3000,
+             L"SELECT TOP 1 ISNULL(mv.Link,0), N'', N'', 0, 0 "
+             L"FROM InfoObjectAttributes AS mv WITH(NOLOCK) "
+             L"JOIN NameKeys AS nkm WITH(NOLOCK) ON nkm.NameKeyId=mv.NameKeyId "
+             L"WHERE mv.OwnerId=%ld AND mv.Outdated=0 AND nkm.Value=N'MainVariantInVersion'",
+             verId);
+  int k = card_query(dbc, sql, rows, CARD_ROWS, err, 280);
+  long parent = (k > 0 && rows[0].n1) ? rows[0].n1 : verId;
+  card_add(c, L"Версия %ld", verId);
+  if (parent != verId) card_add(c, L" · основной вариант %ld", parent);
+  card_add(c, L"\r\n\r\n");
+
+  _snwprintf(sql, 3000,
+             L"SELECT TOP 300 ch.InfoObjectId, ch.Name, "
+             L"ISNULL(op.NM, t.NameKey), ISNULL(num.N,0), ch.TemplateId "
+             L"FROM InfoObjects AS ch WITH(NOLOCK) "
+             L"JOIN Templates AS t WITH(NOLOCK) ON t.TemplateId=ch.TemplateId "
+             L"OUTER APPLY (SELECT TOP 1 o2.Name AS NM "
+             L"FROM InfoObjectAttributes AS ts WITH(NOLOCK) "
+             L"JOIN NameKeys AS nkt WITH(NOLOCK) ON nkt.NameKeyId=ts.NameKeyId "
+             L"AND nkt.Value=N'TSOperation' "
+             L"JOIN InfoObjects AS o2 WITH(NOLOCK) ON o2.InfoObjectId=ts.Link "
+             L"WHERE ts.OwnerId=ch.InfoObjectId AND ts.Outdated=0) AS op "
+             L"OUTER APPLY (SELECT TOP 1 ISNULL(nn.IntegerNumber,0) AS N "
+             L"FROM InfoObjectAttributes AS nn WITH(NOLOCK) "
+             L"JOIN NameKeys AS nkn WITH(NOLOCK) ON nkn.NameKeyId=nn.NameKeyId "
+             L"WHERE nn.OwnerId=ch.InfoObjectId AND nn.Outdated=0 "
+             L"AND nkn.Value IN (N'Number',N'OperationNumber',N'LocalId')) AS num "
+             L"WHERE ch.ParentId=%ld AND ch.Erased=0 "
+             L"ORDER BY num.N, ch.InfoObjectId",
+             parent);
+  int n = card_query(dbc, sql, rows, CARD_ROWS, err, 280);
+  if (n < 0) {
+    card_add(c, L"Состав не прочитался.\r\n%s\r\n", err);
+    return;
+  }
+  if (n == 0) {
+    card_add(c, L"Состав пуст: у объекта %ld нет детей.\r\n", parent);
+    return;
+  }
+  card_add(c, L"Состав (%d):\r\n", n);
+  for (int i = 0; i < n; i++) {
+    if (rows[i].n2) card_add(c, L"  %ld ", rows[i].n2);
+    else card_add(c, L"  ");
+    card_add(c, L"%s", rows[i].s1[0] ? rows[i].s1 : L"(без имени)");
+    if (rows[i].s2[0] && _wcsicmp(rows[i].s2, rows[i].s1) != 0)
+      card_add(c, L" · %s", rows[i].s2);
+    card_add(c, L" · ID %ld\r\n", rows[i].n1);
+  }
+}
+
+
 static void plm_card(long id, wchar_t *out, int cap) {
   CardOut c;
   c.w = out;
@@ -965,6 +1028,8 @@ static void plm_card(long id, wchar_t *out, int cap) {
     ans_printf(out, cap, L"Не удалось подключиться к %s.\r\n%s", g_sqlHost, err);
     return;
   }
+  long actualVer = 0, tpCard = 0;
+  BOOL mainFlag = FALSE;
   CardRow *rows = (CardRow *)malloc(sizeof(CardRow) * CARD_ROWS);
   if (!rows) {
     ans_printf(out, cap, L"Не хватило памяти");
@@ -1009,6 +1074,12 @@ static void plm_card(long id, wchar_t *out, int cap) {
   } else {
     card_add(&c, L"Что в объекте (%d):\r\n", n);
     for (int i = 0; i < n; i++) {
+      /* эти три решают, куда идти дальше, и они уже прочитаны — лишний
+         запрос к серверу за ними не нужен */
+      if (_wcsicmp(rows[i].s1, L"ActualVersion") == 0) actualVer = rows[i].n2;
+      if (_wcsicmp(rows[i].s1, L"TechnologicalProcessesCard") == 0) tpCard = rows[i].n2;
+      if (_wcsicmp(rows[i].s1, L"MainTP") == 0 || _wcsicmp(rows[i].s1, L"IsActual") == 0)
+        mainFlag = _wcsicmp(rows[i].s2, L"да") == 0;
       if (rows[i].s2[0])
         card_add(&c, L"  %s = %s\r\n", rows[i].s1, rows[i].s2);
       else if (rows[i].n2)
@@ -1019,15 +1090,27 @@ static void plm_card(long id, wchar_t *out, int cap) {
     card_add(&c, L"\r\n");
   }
 
-  /* 3. техпроцессы: изделие → карточка ТП → коллекция → сами ТП */
+  /* 3. дальше зависит от того, что это за объект.
+        Сам техпроцесс несёт ActualVersion — тогда идём прямо в его состав.
+        Изделие несёт TechnologicalProcessesCard — тогда сперва находим,
+        какой из его техпроцессов основной. */
+  if (actualVer) {
+    card_add(&c, L"Это техпроцесс%s.\r\n", mainFlag ? L" и он помечен основным" : L"");
+    card_operations(dbc, id, actualVer, &c, rows, err);
+    goto freed;
+  }
+
+  if (!tpCard) {
+    card_add(&c, L"У объекта нет ни ActualVersion, ни TechnologicalProcessesCard —\r\n"
+                 L"это не техпроцесс и не изделие, состав показывать неоткуда.\r\n");
+    goto freed;
+  }
+
   _snwprintf(
       sql, 3600,
-      L"SELECT TOP 50 tp.InfoObjectId, tp.Name, ISNULL(act.V,N''), "
-      L"ISNULL(ver.N,0), ISNULL(tp.TemplateId,0) "
-      L"FROM InfoObjectAttributes AS ca WITH(NOLOCK) "
-      L"JOIN NameKeys AS nkc WITH(NOLOCK) ON nkc.NameKeyId=ca.NameKeyId "
-      L"AND nkc.Value=N'TechnologicalProcessesCard' "
-      L"JOIN InfoObjectAttributes AS la WITH(NOLOCK) ON la.OwnerId=ca.Link AND la.Outdated=0 "
+      L"SELECT TOP 50 tp.InfoObjectId, tp.Name, ISNULL(flag.V,N'нет'), "
+      L"ISNULL(av.L,0), ISNULL(tp.TemplateId,0) "
+      L"FROM InfoObjectAttributes AS la WITH(NOLOCK) "
       L"JOIN NameKeys AS nkl WITH(NOLOCK) ON nkl.NameKeyId=la.NameKeyId "
       L"AND nkl.Value=N'TechnologicalProcesses' "
       L"JOIN InfoObjectCollectionElements AS ce WITH(NOLOCK) ON ce.AttributeId=la.AttributeId "
@@ -1038,104 +1121,59 @@ static void plm_card(long id, wchar_t *out, int cap) {
       L"OUTER APPLY (SELECT TOP 1 CASE WHEN ia.BoolValue=1 THEN N'да' ELSE N'нет' END AS V "
       L"FROM InfoObjectAttributes AS ia WITH(NOLOCK) "
       L"JOIN NameKeys AS nki WITH(NOLOCK) ON nki.NameKeyId=ia.NameKeyId "
-      L"WHERE ia.OwnerId=tp.InfoObjectId AND nki.Value=N'IsActual' AND ia.Outdated=0) AS act "
-      L"OUTER APPLY (SELECT TOP 1 iv.IntegerNumber AS N "
+      L"WHERE ia.OwnerId=tp.InfoObjectId AND ia.Outdated=0 "
+      L"AND nki.Value IN (N'MainTP',N'IsActual') AND ia.BoolValue=1) AS flag "
+      L"OUTER APPLY (SELECT TOP 1 ISNULL(iv.Link,0) AS L "
       L"FROM InfoObjectAttributes AS iv WITH(NOLOCK) "
       L"JOIN NameKeys AS nkv WITH(NOLOCK) ON nkv.NameKeyId=iv.NameKeyId "
-      L"WHERE iv.OwnerId=tp.InfoObjectId AND nkv.Value=N'VersionNumber' AND iv.Outdated=0) AS ver "
-      L"WHERE ca.OwnerId=%ld AND ca.Outdated=0",
-      id);
+      L"WHERE iv.OwnerId=tp.InfoObjectId AND nkv.Value=N'ActualVersion' AND iv.Outdated=0) AS av "
+      L"WHERE la.OwnerId=%ld AND la.Outdated=0",
+      tpCard);
   n = card_query(dbc, sql, rows, CARD_ROWS, err, 280);
   if (n < 0) {
     card_add(&c, L"Техпроцессы: запрос не выполнился.\r\n%s\r\n", err);
     goto freed;
   }
   if (n == 0) {
-    /* пусто — говорим, на каком именно шаге оборвалось */
-    card_add(&c, L"Техпроцессы не найдены. Где оборвалось:\r\n");
-    _snwprintf(sql, 3600,
-               L"SELECT TOP 1 ISNULL(a.Link,0), N'', N'', 0, 0 "
-               L"FROM InfoObjectAttributes AS a WITH(NOLOCK) "
-               L"JOIN NameKeys AS nk WITH(NOLOCK) ON nk.NameKeyId=a.NameKeyId "
-               L"WHERE a.OwnerId=%ld AND a.Outdated=0 "
-               L"AND nk.Value=N'TechnologicalProcessesCard'",
-               id);
-    int k = card_query(dbc, sql, rows, CARD_ROWS, err, 280);
-    if (k <= 0 || rows[0].n1 == 0) {
-      card_add(&c, L"  у объекта нет ссылки TechnologicalProcessesCard —\r\n"
-                   L"  похоже, это не изделие, а что-то другое\r\n");
-      goto freed;
-    }
-    long cardId = rows[0].n1;
-    card_add(&c, L"  карточка ТП: объект %ld — есть\r\n", cardId);
+    card_add(&c, L"Карточка ТП: объект %ld, но техпроцессов в ней нет.\r\n", tpCard);
     _snwprintf(sql, 3600,
                L"SELECT TOP 1 a.AttributeId, N'', N'', 0, a.DataType "
                L"FROM InfoObjectAttributes AS a WITH(NOLOCK) "
                L"JOIN NameKeys AS nk WITH(NOLOCK) ON nk.NameKeyId=a.NameKeyId "
                L"WHERE a.OwnerId=%ld AND a.Outdated=0 AND nk.Value=N'TechnologicalProcesses'",
-               cardId);
-    k = card_query(dbc, sql, rows, CARD_ROWS, err, 280);
+               tpCard);
+    int k = card_query(dbc, sql, rows, CARD_ROWS, err, 280);
     if (k <= 0) {
       card_add(&c, L"  в карточке нет списка TechnologicalProcesses\r\n");
       goto freed;
     }
-    long listAttr = rows[0].n1;
-    card_add(&c, L"  список ТП: атрибут %ld — есть\r\n", listAttr);
     _snwprintf(sql, 3600,
                L"SELECT COUNT(*), N'', N'', 0, 0 FROM InfoObjectCollectionElements WITH(NOLOCK) "
                L"WHERE AttributeId=%ld AND Outdated=0",
-               listAttr);
+               rows[0].n1);
     k = card_query(dbc, sql, rows, CARD_ROWS, err, 280);
-    card_add(&c, L"  строк в списке: %ld\r\n", k > 0 ? rows[0].n1 : 0);
-    card_add(&c, L"  дальше ссылок на сами ТП не нашлось\r\n");
+    card_add(&c, L"  строк в списке: %ld, но ссылок на сами ТП в них нет\r\n",
+             k > 0 ? rows[0].n1 : 0);
     goto freed;
   }
 
   card_add(&c, L"Техпроцессы (%d):\r\n", n);
-  long actual = 0;
+  long chosen = 0, chosenVer = 0;
   for (int i = 0; i < n; i++) {
     BOOL act = _wcsicmp(rows[i].s2, L"да") == 0;
-    if (act && !actual) actual = rows[i].n1;
-    card_add(&c, L"  %s %s · ID %ld", act ? L"[актуальный]" : L"[     —     ]",
+    if (act && !chosen) {
+      chosen = rows[i].n1;
+      chosenVer = rows[i].n2;
+    }
+    card_add(&c, L"  %s %s · ID %ld\r\n", act ? L"[основной]" : L"[    —    ]",
              rows[i].s1[0] ? rows[i].s1 : L"(без имени)", rows[i].n1);
-    if (rows[i].n2) card_add(&c, L" · версия %ld", rows[i].n2);
-    card_add(&c, L"\r\n");
   }
   card_add(&c, L"\r\n");
-
-  if (!actual) {
-    card_add(&c, L"Актуального среди них нет (атрибут IsActual нигде не стоит).\r\n");
+  if (!chosen) {
+    card_add(&c, L"Основного среди них нет: ни у одного не стоит MainTP/IsActual.\r\n");
     goto freed;
   }
-
-  /* 4. операции актуального ТП: ActualVersion → MainVariantInVersion → дети */
-  _snwprintf(sql, 3600,
-             L"SELECT TOP 200 ch.InfoObjectId, ch.Name, t.NameKey, ISNULL(ch.ParentId,0), "
-             L"ch.TemplateId "
-             L"FROM InfoObjectAttributes AS av WITH(NOLOCK) "
-             L"JOIN NameKeys AS nka WITH(NOLOCK) ON nka.NameKeyId=av.NameKeyId "
-             L"AND nka.Value=N'ActualVersion' "
-             L"JOIN InfoObjectAttributes AS mv WITH(NOLOCK) ON mv.OwnerId=av.Link AND mv.Outdated=0 "
-             L"JOIN NameKeys AS nkm WITH(NOLOCK) ON nkm.NameKeyId=mv.NameKeyId "
-             L"AND nkm.Value=N'MainVariantInVersion' "
-             L"JOIN InfoObjects AS ch WITH(NOLOCK) ON ch.ParentId=mv.Link AND ch.Erased=0 "
-             L"JOIN Templates AS t WITH(NOLOCK) ON t.TemplateId=ch.TemplateId "
-             L"WHERE av.OwnerId=%ld AND av.Outdated=0 "
-             L"ORDER BY ch.InfoObjectId",
-             actual);
-  n = card_query(dbc, sql, rows, CARD_ROWS, err, 280);
-  if (n < 0) {
-    card_add(&c, L"Состав ТП %ld не прочитался.\r\n%s\r\n", actual, err);
-  } else if (n == 0) {
-    card_add(&c, L"У актуального ТП %ld не нашлось состава\r\n"
-                 L"(нет ActualVersion → MainVariantInVersion → детей).\r\n",
-             actual);
-  } else {
-    card_add(&c, L"Состав актуального ТП %ld (%d):\r\n", actual, n);
-    for (int i = 0; i < n; i++)
-      card_add(&c, L"  %s · %s · ID %ld\r\n", rows[i].s1[0] ? rows[i].s1 : L"(без имени)",
-               rows[i].s2[0] ? rows[i].s2 : L"?", rows[i].n1);
-  }
+  card_operations(dbc, chosen, chosenVer, &c, rows, err);
 
 freed:
   free(rows);
