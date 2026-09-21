@@ -11,6 +11,7 @@
 
 #define WM_FILES_DONE (WM_APP + 11)
 #define TIMER_FILES 8
+#define TIMER_FILES_TICK 9
 #define FILES_WALK_GUARD 4096      /* runaway-recursion valve, not a feature limit */
 #define FILES_ARENA_CHUNK 262144   /* wchar_t per arena chunk */
 #define FILES_JSON_MAX (1024ull * 1024ull * 1024ull)
@@ -44,6 +45,7 @@ static ULONGLONG g_filesAt;
 static SYSTEMTIME g_filesWhen;
 static BOOL g_filesWhenOk;
 static wchar_t g_filesNote[120];   /* last problem worth telling the user about */
+static volatile LONG g_filesScanned; /* live counter for the progress line */
 static void save_files_pref(void);
 static void files_refresh_status(void);
 
@@ -181,8 +183,16 @@ static void files_stamp_from_file(void) {
 
 static void files_refresh_status(void) {
   wchar_t t[200];
-  if (InterlockedCompareExchange(&g_filesBusy, 0, 0))
-    lstrcpynW(t, L"Индекс: обновляется…", 200);
+  BOOL busy = InterlockedCompareExchange(&g_filesBusy, 0, 0) != 0;
+  if (g_filesBar) {
+    /* the walk has no total to count towards, so the bar just shows life
+       while the number next to it says how far it has got */
+    SendMessageW(g_filesBar, PBM_SETMARQUEE, (WPARAM)busy, 40);
+    ShowWindow(g_filesBar, busy ? SW_SHOW : SW_HIDE);
+  }
+  if (busy)
+    _snwprintf(t, 200, L"Обход папки: %ld файлов…",
+               (long)InterlockedCompareExchange(&g_filesScanned, 0, 0));
   else if (!g_filesRoot[0])
     lstrcpynW(t, L"Индекс: укажите папку", 200);
   else if (g_filesNote[0])
@@ -704,6 +714,7 @@ static void files_walk(WalkCtx *c, int depth) {
         c->oom = TRUE;
         break;
       }
+      InterlockedIncrement(&g_filesScanned);
     }
   } while (FindNextFileW(h, &fd));
   FindClose(h);
@@ -712,6 +723,7 @@ static void files_walk(WalkCtx *c, int depth) {
 static DWORD WINAPI files_index_thread(LPVOID param) {
   (void)param;
 again:;
+  InterlockedExchange(&g_filesScanned, 0);
   FileIdx *ix = idx_new();
   BOOL oom = FALSE;
   if (ix && g_filesRoot[0]) {
@@ -750,10 +762,13 @@ static void files_start_index(BOOL force) {
     files_refresh_status();
     return;
   }
+  InterlockedExchange(&g_filesScanned, 0);
   files_refresh_status();
   HANDLE th = CreateThread(NULL, 0, files_index_thread, NULL, 0, NULL);
-  if (th) CloseHandle(th);
-  else {
+  if (th) {
+    CloseHandle(th);
+    if (g_hwnd) SetTimer(g_hwnd, TIMER_FILES_TICK, 200, NULL);
+  } else {
     InterlockedExchange(&g_filesBusy, 0);
     files_refresh_status();
   }

@@ -164,6 +164,7 @@ static HWND g_btnFiles;
 static HWND g_filesRootEdit;
 static HWND g_btnIdx;
 static HWND g_filesStat;
+static HWND g_filesBar;
 static HWND g_chkAuto;
 static HWND g_answer;
 static HWND g_answerList;
@@ -1472,6 +1473,7 @@ static void layout_settings(void) {
   if (g_btnIdx) MoveWindow(g_btnIdx, pad, y, cw - pad, btnH, TRUE);
   y += btnH + gap;
   if (g_filesStat) MoveWindow(g_filesStat, pad, y, cw - pad, btnH, TRUE);
+  if (g_filesBar) MoveWindow(g_filesBar, pad, y + btnH - 8, cw - pad, 6, TRUE);
   y += btnH + gap;
   if (g_plmServer) MoveWindow(g_plmServer, pad, y, half, btnH, TRUE);
   if (g_plmDb) MoveWindow(g_plmDb, pad + half + gap, y, half, btnH, TRUE);
@@ -1839,6 +1841,8 @@ static void create_settings(HWND owner) {
   g_filesStat = CreateWindowExW(0, L"STATIC", L"Индекс: —",
                                 WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP, 0, 0, 200, 22, g_setHwnd,
                                 (HMENU)(INT_PTR)136, NULL, NULL);
+  g_filesBar = CreateWindowExW(0, PROGRESS_CLASSW, L"", WS_CHILD | PBS_MARQUEE, 0, 0, 200, 6,
+                               g_setHwnd, (HMENU)(INT_PTR)137, NULL, NULL);
   g_plmServer = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", g_sqlHost,
                                 WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
                                 0, 0, 120, 26, g_setHwnd, (HMENU)(INT_PTR)ID_PLM_SERVER, NULL, NULL);
@@ -2101,6 +2105,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     }
     if (wParam == TIMER_CURSOR_KEEP && g_skin > 0) apply_scheme_slots();
     if (wParam == TIMER_FILES) files_start_index(TRUE);
+    if (wParam == TIMER_FILES_TICK) files_refresh_status();
     return 0;
   case WM_SEARCH_DONE: {
     wchar_t *text = (wchar_t *)lParam;
@@ -2111,6 +2116,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     return 0;
   }
   case WM_FILES_DONE: {
+    KillTimer(hwnd, TIMER_FILES_TICK);
     files_refresh_status();
     wchar_t m[160];
     if (wParam)
@@ -2190,6 +2196,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     KillTimer(hwnd, TIMER_SAVE);
     KillTimer(hwnd, TIMER_CURSOR_KEEP);
     KillTimer(hwnd, TIMER_FILES);
+    KillTimer(hwnd, TIMER_FILES_TICK);
     save_files_pref();
     files_clear();
     UnregisterHotKey(hwnd, HOTKEY_TOGGLE);
@@ -2244,7 +2251,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
 
   INITCOMMONCONTROLSEX icc;
   icc.dwSize = sizeof(icc);
-  icc.dwICC = ICC_STANDARD_CLASSES | ICC_BAR_CLASSES | ICC_LISTVIEW_CLASSES;
+  icc.dwICC = ICC_STANDARD_CLASSES | ICC_BAR_CLASSES | ICC_LISTVIEW_CLASSES | ICC_PROGRESS_CLASS;
   InitCommonControlsEx(&icc);
 
   WNDCLASSEXW wc;
