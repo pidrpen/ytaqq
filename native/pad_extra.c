@@ -22,6 +22,8 @@
 #define ID_ANS_SHOW 151 /* 131 was already ID_CLIP */
 #define ID_ANS_CARD 152
 #define ID_ANS_DRAW 154
+#define ID_ANS_FULL 155
+
 #define TIMER_CURSOR_KEEP 6
 #define WM_SEARCH_DONE (WM_APP + 8)
 #define WM_OCR_DONE (WM_APP + 9)
@@ -495,7 +497,178 @@ static void open_plm_link(const wchar_t *link) {
 }
 
 static wchar_t g_cardDraw[PLM_LINK]; /* чертёж, найденный для карточки */
+static BOOL g_fullMode; /* показывать чертёж рядом с карточкой */
 static int g_sortCol = -1, g_sortDesc = 0; /* which column the list is ordered by */
+
+/* ---- просмотр чертежа ----------------------------------------------------
+
+   TIFF, в котором лежат сканы чертежей, Windows умеет разбирать сама — в
+   gdiplus.dll, которая есть в любой Windows. Поэтому никакой сторонней
+   библиотеки и никакого интернета: подгружаем dll по имени, берём пяток
+   нужных функций и рисуем. Если dll почему-то нет, просмотр молча
+   отключается, а кнопка «Открыть чертёж» работает как работала. */
+
+typedef struct {
+  UINT32 version;
+  void *debugCallback;
+  BOOL suppressBackgroundThread;
+  BOOL suppressExternalCodecs;
+} GdipStartInput;
+
+typedef int(WINAPI *GdipStartupFn)(ULONG_PTR *, const GdipStartInput *, void *);
+typedef int(WINAPI *GdipLoadFn)(const WCHAR *, void **);
+typedef int(WINAPI *GdipDisposeFn)(void *);
+typedef int(WINAPI *GdipFromHdcFn)(HDC, void **);
+typedef int(WINAPI *GdipDeleteGfxFn)(void *);
+typedef int(WINAPI *GdipDrawRectFn)(void *, void *, int, int, int, int);
+typedef int(WINAPI *GdipDimFn)(void *, UINT *);
+typedef int(WINAPI *GdipModeFn)(void *, int);
+typedef int(WINAPI *GdipFrameCountFn)(void *, const GUID *, UINT *);
+typedef int(WINAPI *GdipSelectFrameFn)(void *, const GUID *, UINT);
+
+static HMODULE g_gdipDll;
+static ULONG_PTR g_gdipToken;
+static GdipLoadFn p_load;
+static GdipDisposeFn p_dispose;
+static GdipFromHdcFn p_fromHdc;
+static GdipDeleteGfxFn p_delGfx;
+static GdipDrawRectFn p_drawRect;
+static GdipDimFn p_width, p_height;
+static GdipModeFn p_interp;
+static GdipFrameCountFn p_frames;
+static GdipSelectFrameFn p_selFrame;
+
+/* FrameDimensionPage — по нему листаются страницы многостраничного TIFF */
+static const GUID kFramePage = {0x7462dc86,
+                                0x6180,
+                                0x4c7e,
+                                {0x8e, 0x3f, 0xee, 0x73, 0x33, 0xa7, 0xa4, 0x83}};
+
+static BOOL gdip_ready(void) {
+  if (g_gdipToken) return TRUE;
+  if (!g_gdipDll) g_gdipDll = LoadLibraryW(L"gdiplus.dll");
+  if (!g_gdipDll) return FALSE;
+  GdipStartupFn start = (GdipStartupFn)GetProcAddress(g_gdipDll, "GdiplusStartup");
+  p_load = (GdipLoadFn)GetProcAddress(g_gdipDll, "GdipLoadImageFromFile");
+  p_dispose = (GdipDisposeFn)GetProcAddress(g_gdipDll, "GdipDisposeImage");
+  p_fromHdc = (GdipFromHdcFn)GetProcAddress(g_gdipDll, "GdipCreateFromHDC");
+  p_delGfx = (GdipDeleteGfxFn)GetProcAddress(g_gdipDll, "GdipDeleteGraphics");
+  p_drawRect = (GdipDrawRectFn)GetProcAddress(g_gdipDll, "GdipDrawImageRectI");
+  p_width = (GdipDimFn)GetProcAddress(g_gdipDll, "GdipGetImageWidth");
+  p_height = (GdipDimFn)GetProcAddress(g_gdipDll, "GdipGetImageHeight");
+  p_interp = (GdipModeFn)GetProcAddress(g_gdipDll, "GdipSetInterpolationMode");
+  p_frames = (GdipFrameCountFn)GetProcAddress(g_gdipDll, "GdipImageGetFrameCount");
+  p_selFrame = (GdipSelectFrameFn)GetProcAddress(g_gdipDll, "GdipImageSelectActiveFrame");
+  if (!start || !p_load || !p_fromHdc || !p_drawRect || !p_width || !p_height) return FALSE;
+  GdipStartInput in;
+  memset(&in, 0, sizeof(in));
+  in.version = 1;
+  if (start(&g_gdipToken, &in, NULL) != 0) {
+    g_gdipToken = 0;
+    return FALSE;
+  }
+  return TRUE;
+}
+
+static void *g_drawImg;        /* открытый чертёж */
+static UINT g_drawPages = 1;   /* сколько в нём страниц */
+static UINT g_drawPage;        /* какая показана */
+static HWND g_drawPane;
+
+static void draw_close(void) {
+  if (g_drawImg && p_dispose) p_dispose(g_drawImg);
+  g_drawImg = NULL;
+  g_drawPages = 1;
+  g_drawPage = 0;
+}
+
+static BOOL draw_open(const wchar_t *path) {
+  draw_close();
+  if (!path || !path[0] || !gdip_ready()) return FALSE;
+  if (p_load(path, &g_drawImg) != 0 || !g_drawImg) {
+    g_drawImg = NULL;
+    return FALSE;
+  }
+  if (p_frames) {
+    UINT n = 0;
+    if (p_frames(g_drawImg, &kFramePage, &n) == 0 && n > 0) g_drawPages = n;
+  }
+  g_drawPage = 0;
+  return TRUE;
+}
+
+static void draw_page(int delta) {
+  if (!g_drawImg || g_drawPages < 2 || !p_selFrame) return;
+  int p = (int)g_drawPage + delta;
+  if (p < 0) p = (int)g_drawPages - 1;
+  if (p >= (int)g_drawPages) p = 0;
+  if (p_selFrame(g_drawImg, &kFramePage, (UINT)p) == 0) g_drawPage = (UINT)p;
+  if (g_drawPane) InvalidateRect(g_drawPane, NULL, TRUE);
+}
+
+static void draw_paint(HWND pane) {
+  PAINTSTRUCT ps;
+  HDC dc = BeginPaint(pane, &ps);
+  RECT rc;
+  GetClientRect(pane, &rc);
+  FillRect(dc, &rc, g_paperDark ? g_paperDark : g_paper);
+  if (g_drawImg) {
+    UINT iw = 0, ih = 0;
+    p_width(g_drawImg, &iw);
+    p_height(g_drawImg, &ih);
+    if (iw && ih) {
+      int pw = rc.right - 8, ph = rc.bottom - 8;
+      if (pw > 0 && ph > 0) {
+        /* вписываем целиком, пропорции не трогаем — чертёж нельзя растягивать */
+        double k = (double)pw / iw;
+        double k2 = (double)ph / ih;
+        if (k2 < k) k = k2;
+        int w = (int)(iw * k), h = (int)(ih * k);
+        if (w < 1) w = 1;
+        if (h < 1) h = 1;
+        void *gfx = NULL;
+        if (p_fromHdc(dc, &gfx) == 0 && gfx) {
+          if (p_interp) p_interp(gfx, 7 /* HighQualityBicubic */);
+          p_drawRect(gfx, g_drawImg, 4 + (pw - w) / 2, 4 + (ph - h) / 2, w, h);
+          if (p_delGfx) p_delGfx(gfx);
+        }
+      }
+    }
+  } else {
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, COL_MUTED);
+    DrawTextW(dc, L"чертёж не открылся", -1, &rc,
+              DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+  }
+  if (g_drawImg && g_drawPages > 1) {
+    wchar_t t[64];
+    _snwprintf(t, 64, L"страница %u из %u  ·  колесо мыши", g_drawPage + 1, g_drawPages);
+    RECT tr = rc;
+    tr.top = rc.bottom - 20;
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, COL_MUTED);
+    DrawTextW(dc, t, -1, &tr, DT_CENTER | DT_SINGLELINE);
+  }
+  EndPaint(pane, &ps);
+}
+
+static LRESULT CALLBACK DrawPaneProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+  if (msg == WM_PAINT) {
+    draw_paint(hwnd);
+    return 0;
+  }
+  if (msg == WM_ERASEBKGND) return 1;
+  if (msg == WM_MOUSEWHEEL) {
+    draw_page(GET_WHEEL_DELTA_WPARAM(wParam) > 0 ? -1 : 1);
+    return 0;
+  }
+  if (msg == WM_LBUTTONDBLCLK && g_cardDraw[0]) {
+    ShellExecuteW(NULL, L"open", g_cardDraw, NULL, NULL, SW_SHOWNORMAL);
+    return 0;
+  }
+  return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
 
 static void fill_plm_list(void) {
   if (!g_answerList) return;
@@ -544,6 +717,8 @@ static void fill_plm_list(void) {
   if (card) ShowWindow(card, !g_resultFiles && g_plmCount > 0 ? SW_SHOW : SW_HIDE);
   HWND draw = GetDlgItem(g_answer, ID_ANS_DRAW);
   if (draw) ShowWindow(draw, g_cardDraw[0] ? SW_SHOW : SW_HIDE);
+  HWND full = GetDlgItem(g_answer, ID_ANS_FULL);
+  if (full) ShowWindow(full, !g_resultFiles && g_plmCount > 0 ? SW_SHOW : SW_HIDE);
   layout_answer();
 }
 
@@ -1626,6 +1801,7 @@ typedef struct {
 
 static void show_answer_text(const wchar_t *text);
 static void show_card_selected(void);
+static void show_card_full(void);
 
 static DWORD WINAPI search_thread(LPVOID param) {
   SearchJob *job = (SearchJob *)param;
@@ -1647,8 +1823,17 @@ static void layout_answer(void) {
   int pad = 12, btnH = 28, gap = 7;
   int top = PANEL_TITLE_H + 6;
   int by = rc.bottom - pad - btnH;
+  BOOL withPane = g_fullMode && g_drawPane && g_drawImg;
+  int textLeft = pad, textRight = rc.right - pad;
+  if (withPane) {
+    int split = (rc.right - pad * 2) * 55 / 100;
+    if (split < 120) split = 120;
+    MoveWindow(g_drawPane, pad, top, split, by - top - 6, TRUE);
+    textLeft = pad + split + 8;
+  }
+  if (g_drawPane) ShowWindow(g_drawPane, withPane ? SW_SHOW : SW_HIDE);
   if (g_answerEdit)
-    MoveWindow(g_answerEdit, pad, top, rc.right - pad * 2, by - top - 6, TRUE);
+    MoveWindow(g_answerEdit, textLeft, top, textRight - textLeft, by - top - 6, TRUE);
   if (g_answerList) {
     MoveWindow(g_answerList, pad, top, rc.right - pad * 2, by - top - 6, TRUE);
     int cw = rc.right - pad * 2 - 24;
@@ -1669,17 +1854,20 @@ static void layout_answer(void) {
   /* "В проводнике" only makes sense for file hits, so the row is 4 or 5 wide */
   HWND card = GetDlgItem(g_answer, ID_ANS_CARD);
   HWND draw = GetDlgItem(g_answer, ID_ANS_DRAW);
+  HWND full = GetDlgItem(g_answer, ID_ANS_FULL);
   BOOL withDraw = draw && g_cardDraw[0] != 0;
+  BOOL withFull = full && !g_resultFiles && g_plmCount > 0;
   BOOL withOpen = open && g_plmCount > 0;
   BOOL withShow = show && g_resultFiles && g_plmCount > 0;
   BOOL withCard = card && !g_resultFiles && g_plmCount > 0;
   int cols = 3 + (withOpen ? 1 : 0) + (withShow ? 1 : 0) + (withCard ? 1 : 0) +
-             (withDraw ? 1 : 0);
+             (withDraw ? 1 : 0) + (withFull ? 1 : 0);
   int bw = (rc.right - pad * 2 - gap * (cols - 1)) / cols;
   int slot = 0;
   if (withOpen) MoveWindow(open, pad + (bw + gap) * slot++, by, bw, btnH, TRUE);
   if (withShow) MoveWindow(show, pad + (bw + gap) * slot++, by, bw, btnH, TRUE);
   if (withCard) MoveWindow(card, pad + (bw + gap) * slot++, by, bw, btnH, TRUE);
+  if (withFull) MoveWindow(full, pad + (bw + gap) * slot++, by, bw, btnH, TRUE);
   if (withDraw) MoveWindow(draw, pad + (bw + gap) * slot++, by, bw, btnH, TRUE);
   if (copy) MoveWindow(copy, pad + (bw + gap) * slot++, by, bw, btnH, TRUE);
   if (notes) MoveWindow(notes, pad + (bw + gap) * slot++, by, bw, btnH, TRUE);
@@ -1712,6 +1900,7 @@ static LRESULT CALLBACK AnswerProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
     if (LOWORD(wParam) == ID_ANS_OPEN) open_plm_selected();
     if (LOWORD(wParam) == ID_ANS_SHOW) show_selected_in_explorer();
     if (LOWORD(wParam) == ID_ANS_CARD) show_card_selected();
+    if (LOWORD(wParam) == ID_ANS_FULL) show_card_full();
     if (LOWORD(wParam) == ID_ANS_DRAW && g_cardDraw[0])
       ShellExecuteW(NULL, L"open", g_cardDraw, NULL, NULL, SW_SHOWNORMAL);
     if (LOWORD(wParam) == ID_ANS_COPY) {
@@ -1805,6 +1994,19 @@ static void create_answer(HWND owner) {
       0, L"EDIT", L"",
       WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL,
       0, 0, 100, 100, g_answer, NULL, NULL, NULL);
+  {
+    WNDCLASSEXW pc;
+    memset(&pc, 0, sizeof(pc));
+    pc.cbSize = sizeof(pc);
+    pc.style = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;
+    pc.lpfnWndProc = DrawPaneProc;
+    pc.hInstance = g_inst;
+    pc.hCursor = LoadCursorW(NULL, IDC_ARROW);
+    pc.lpszClassName = L"CursorPadDraw";
+    RegisterClassExW(&pc);
+    g_drawPane = CreateWindowExW(0, L"CursorPadDraw", L"", WS_CHILD, 0, 0, 10, 10, g_answer,
+                                 NULL, g_inst, NULL);
+  }
   g_answerList = CreateWindowExW(
       0, WC_LISTVIEWW, L"",
       WS_CHILD | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | WS_TABSTOP,
@@ -1831,6 +2033,7 @@ static void create_answer(HWND owner) {
   HWND show = mk_btn(g_answer, L"В проводнике", ID_ANS_SHOW);
   HWND card = mk_btn(g_answer, L"Что внутри", ID_ANS_CARD);
   HWND draw = mk_btn(g_answer, L"Открыть чертёж", ID_ANS_DRAW);
+  HWND full = mk_btn(g_answer, L"Открыть всё", ID_ANS_FULL);
   HWND copy = mk_btn(g_answer, L"Копировать", ID_ANS_COPY);
   HWND notes = mk_btn(g_answer, L"В блокнот", ID_ANS_NOTES);
   HWND cls = mk_btn(g_answer, L"Закрыть", ID_ANS_CLOSE);
@@ -1841,6 +2044,7 @@ static void create_answer(HWND owner) {
     SendMessageW(show, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
     SendMessageW(card, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
     SendMessageW(draw, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
+    SendMessageW(full, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
     SendMessageW(copy, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
     SendMessageW(notes, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
     SendMessageW(cls, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
@@ -1856,13 +2060,26 @@ static DWORD WINAPI card_thread(LPVOID param) {
   if (out) {
     out[0] = 0;
     plm_card(id, out, 160000);
+    /* чертёж грузится здесь же: распаковка большого TIFF не должна
+       подвешивать окно */
+    if (g_fullMode && g_cardDraw[0]) draw_open(g_cardDraw);
     if (!PostMessageW(g_hwnd, WM_SEARCH_DONE, 0, (LPARAM)out)) free(out);
   }
   InterlockedExchange(&g_netBusy, 0);
   return 0;
 }
 
+static void show_card_selected_mode(BOOL full);
+
 static void show_card_selected(void) {
+  show_card_selected_mode(FALSE);
+}
+
+static void show_card_full(void) {
+  show_card_selected_mode(TRUE);
+}
+
+static void show_card_selected_mode(BOOL full) {
   int i = plm_selected_index();
   if (i < 0 || i >= g_plmCount || !g_plmIds[i]) {
     show_status(L"Выберите строку");
@@ -1872,9 +2089,11 @@ static void show_card_selected(void) {
     show_status(L"Запрос уже идёт");
     return;
   }
-  g_ansTitle = L"Что внутри";
+  g_ansTitle = full ? L"Всё об объекте" : L"Что внутри";
   g_ansMono = TRUE;
   g_cardDraw[0] = 0;
+  g_fullMode = full;
+  draw_close();
   g_plmCount = 0; /* текст вместо списка */
   wchar_t wait[120];
   _snwprintf(wait, 120, L"Смотрю объект %ld в PLM…", g_plmIds[i]);
@@ -1916,6 +2135,8 @@ static void start_lookup(const wchar_t *q) {
   g_ansTitle = NULL;
   g_ansMono = FALSE;
   g_cardDraw[0] = 0;
+  g_fullMode = FALSE;
+  draw_close();
   while (*q == L' ' || *q == L'\t' || *q == L'\r' || *q == L'\n') q++;
   if (!q[0]) {
     show_status(L"Нечего искать — скопируйте текст");
