@@ -75,6 +75,8 @@ static void upd_log(const wchar_t *fmt, ...) {
 }
 static wchar_t g_updLaunch[MAX_PATH];
 static wchar_t g_updHostUsed[80];
+static wchar_t g_updPin[96]; /* immutable ref (tag or commit) the CDN can't stale */
+static BOOL g_updPinned;
 
 typedef struct {
   const wchar_t *host;
@@ -546,6 +548,76 @@ static long parse_ver_file(const char *s) {
   return digits >= 8 ? v : 0;
 }
 
+/* jsDelivr caches @main separately on every edge, so minutes after a release
+   one mirror still serves yesterday's file while another is current — and
+   version.txt and the binary expire independently, so a mirror can even
+   promise a version it cannot hand over. A path pinned to a tag or a commit
+   is immutable: each edge fetches it once and can never be stale. This finds
+   that pin, and does it without raw.githubusercontent.com. */
+static const wchar_t *kUpdCdn[] = {L"cdn.jsdelivr.net", L"fastly.jsdelivr.net",
+                                   L"gcore.jsdelivr.net"};
+
+static void pin_from_json(const char *body, const char *key, int minlen) {
+  const char *p = json_find_string(body, key);
+  if (!p) return;
+  char v[64];
+  int i = 0;
+  while (p[i] && p[i] != '"' && i < 60) {
+    v[i] = p[i];
+    i++;
+  }
+  v[i] = 0;
+  if (i >= minlen) MultiByteToWideChar(CP_UTF8, 0, v, -1, g_updPin, 96);
+}
+
+static void upd_resolve_pin(const wchar_t *tmp) {
+  char *body = NULL;
+  DWORD n = 0;
+  g_updPin[0] = 0;
+  /* jsDelivr's own metadata API knows the newest git tag of the repo. */
+  if (http_get_to_file(L"data.jsdelivr.com", L"/v1/packages/gh/pidrpen/ytaqq/resolved", tmp,
+                       64 * 1024, NULL) &&
+      read_file_bytes(tmp, &body, &n, 64 * 1024)) {
+    pin_from_json(body, "version", 3);
+    free(body);
+    body = NULL;
+  }
+  DeleteFileW(tmp);
+  if (g_updPin[0]) {
+    upd_log(L"  метка выпуска: %s", g_updPin);
+    return;
+  }
+  /* No tag published yet, or that API is unreachable — pin to the newest
+     commit instead. api.github.com is a different host from the blocked raw. */
+  if (http_get_to_file(L"api.github.com", L"/repos/pidrpen/ytaqq/commits/main", tmp, 512 * 1024,
+                       L"Accept: application/vnd.github+json\r\n"
+                       L"X-GitHub-Api-Version: 2022-11-28") &&
+      read_file_bytes(tmp, &body, &n, 512 * 1024)) {
+    pin_from_json(body, "sha", 7);
+    free(body);
+  }
+  DeleteFileW(tmp);
+  if (g_updPin[0])
+    upd_log(L"  метка коммита: %s", g_updPin);
+  else
+    upd_log(L"  метку получить не удалось");
+}
+
+static BOOL fetch_pinned(const wchar_t *file, const wchar_t *dest, DWORD maxn) {
+  if (!g_updPin[0]) return FALSE;
+  wchar_t path[320];
+  _snwprintf(path, 320, L"/gh/pidrpen/ytaqq@%s/public/%s", g_updPin, file);
+  path[319] = 0;
+  for (int i = 0; i < (int)(sizeof(kUpdCdn) / sizeof(kUpdCdn[0])); i++) {
+    upd_log(L"  пробую %s по метке", kUpdCdn[i]);
+    if (http_get_to_file(kUpdCdn[i], path, dest, maxn, NULL)) {
+      lstrcpynW(g_updHostUsed, kUpdCdn[i], 80);
+      return TRUE;
+    }
+  }
+  return FALSE;
+}
+
 static BOOL file_is_pe(const wchar_t *path) {
   HANDLE f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
                          FILE_ATTRIBUTE_NORMAL, NULL);
@@ -724,13 +796,16 @@ static DWORD WINAPI update_thread(LPVOID param) {
   g_updLog[0] = 0;
   g_updLogLen = 0;
   g_updPrefer = -1;
+  g_updPin[0] = 0;
+  g_updPinned = FALSE;
   SYSTEMTIME st;
   GetLocalTime(&st);
   upd_log(L"Обновление CursorPad — %02u.%02u.%04u %02u:%02u", (unsigned)st.wDay,
           (unsigned)st.wMonth, (unsigned)st.wYear, (unsigned)st.wHour, (unsigned)st.wMinute);
   upd_log(L"Установленная версия: %s", APP_VERSION_STR);
   upd_log(L"");
-  upd_log(L"Шаг 1 — читаю version.txt (спрашиваю все зеркала):");
+  upd_log(L"Шаг 1 — ищу неизменяемую метку выпуска:");
+  upd_resolve_pin(tmpv);
 
   int code = 0;
   /* Mirrors of the same branch fall out of sync: one edge can still serve a
@@ -739,7 +814,33 @@ static DWORD WINAPI update_thread(LPVOID param) {
   char buf[128] = {0};
   long remote = 0;
   int answered = 0;
-  for (int i = 0; i < (int)(sizeof(kUpdSrc) / sizeof(kUpdSrc[0])); i++) {
+  if (g_updPin[0]) {
+    upd_log(L"");
+    upd_log(L"Шаг 2 — читаю version.txt по метке:");
+    if (fetch_pinned(L"version.txt", tmpv, 256 * 1024)) {
+      char one[128] = {0};
+      DWORD got = 0;
+      HANDLE fh = CreateFileW(tmpv, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
+                              FILE_ATTRIBUTE_NORMAL, NULL);
+      if (fh != INVALID_HANDLE_VALUE) {
+        ReadFile(fh, one, 120, &got, NULL);
+        CloseHandle(fh);
+      }
+      long v = parse_ver_file(one);
+      if (v > 0) {
+        remote = v;
+        answered = 1;
+        g_updPinned = TRUE;
+        memcpy(buf, one, sizeof(buf));
+        upd_log(L"  %s → %ld (кэш тут ни при чём)", g_updHostUsed, v);
+      }
+    }
+    DeleteFileW(tmpv);
+    if (!g_updPinned) upd_log(L"  по метке не вышло — спрашиваю зеркала по очереди");
+  }
+  upd_log(L"");
+  if (!g_updPinned) upd_log(L"Шаг 2 — читаю version.txt (спрашиваю все зеркала):");
+  for (int i = 0; !g_updPinned && i < (int)(sizeof(kUpdSrc) / sizeof(kUpdSrc[0])); i++) {
     char one[128] = {0};
     DWORD got = 0;
     upd_log(L"  пробую %s", kUpdSrc[i].host);
@@ -809,8 +910,12 @@ static DWORD WINAPI update_thread(LPVOID param) {
     goto done;
   }
   upd_log(L"");
-  upd_log(L"Шаг 2 — качаю CursorPad.exe:");
-  if (!http_get_any(L"e", tmpe, 16 * 1024 * 1024) || !file_is_pe(tmpe)) {
+  upd_log(L"Шаг 3 — качаю программу:");
+  BOOL got_exe = FALSE;
+  if (g_updPinned) got_exe = fetch_pinned(L"CursorPad.bin", tmpe, 16 * 1024 * 1024) &&
+                             file_is_pe(tmpe);
+  if (!got_exe) got_exe = http_get_any(L"e", tmpe, 16 * 1024 * 1024) && file_is_pe(tmpe);
+  if (!got_exe) {
     upd_log(L"Итог: файл не скачался или это не программа для Windows.");
     DeleteFileW(tmpe);
     if (!g_updErr[0]) upd_fail(L"Не скачался CursorPad.exe", 0);
