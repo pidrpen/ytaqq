@@ -1033,8 +1033,9 @@ static BOOL card_is_time(const wchar_t *key, long dataType) {
   return FALSE;
 }
 
-/* В базе число лежит в часах, поэтому минуты — это оно же на шестьдесят.
-   Если окажется наоборот, правится здесь одной строкой. */
+/* В базе норма лежит в минутах, поэтому часы — это оно же на шестьдесят
+   делённое. Единицу подтвердил заказчик; если где-то окажется иначе,
+   правится здесь одной строкой. */
 static BOOL card_time_text(const wchar_t *val, wchar_t *out, int cap) {
   if (!val || !val[0]) return FALSE;
   wchar_t norm[64];
@@ -1042,9 +1043,9 @@ static BOOL card_time_text(const wchar_t *val, wchar_t *out, int cap) {
   for (int i = 0; val[i] && j < 62; i++) norm[j++] = val[i] == L',' ? L'.' : val[i];
   norm[j] = 0;
   wchar_t *stop = NULL;
-  double hours = wcstod(norm, &stop);
+  double mins = wcstod(norm, &stop);
   if (stop == norm) return FALSE; /* не число — пусть показывается как есть */
-  _snwprintf(out, cap, L"%.4f ч · %.1f мин", hours, hours * 60.0);
+  _snwprintf(out, cap, L"%.4f ч · %g мин", mins / 60.0, mins);
   out[cap - 1] = 0;
   return TRUE;
 }
