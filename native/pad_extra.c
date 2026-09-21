@@ -1365,6 +1365,51 @@ static void card_drawings(const wchar_t *designation, CardOut *c) {
   if (o) card_add(c, L"  — и ещё %d файлов рядом\r\n", o);
 }
 
+/* От ЭСИ к его техпроцессам путь прямой: TechnologicalProcessesCard →
+   коллекция → ТП. Обратно — той же дорогой задом наперёд: находим строку
+   коллекции, которая ссылается на этот ТП, поднимаемся к карточке, и ищем,
+   у кого эта карточка указана. Отдельной ссылки «ТП → изделие» в базе нет,
+   поэтому иначе их и не связать. Заодно забираем обозначение ЭСИ — чертёж
+   назван по нему, а не по обозначению техпроцесса. */
+static long card_owner_of_tp(SQLHDBC dbc, long tpId, CardOut *c, CardRow *rows, wchar_t *err,
+                             wchar_t *desOut, int desCap) {
+  wchar_t *sql = (wchar_t *)malloc(3000 * sizeof(wchar_t));
+  if (!sql) return 0;
+  _snwprintf(
+      sql, 3000,
+      L"SELECT TOP 5 own.InfoObjectId, own.Name, ISNULL(des.V,N''), 0, own.TemplateId "
+      L"FROM InfoObjectAttributes AS ea WITH(NOLOCK) "
+      L"JOIN InfoObjectCollectionElements AS ce WITH(NOLOCK) "
+      L"ON ce.CollectionElementId=ea.CollectionElementId AND ce.Outdated=0 "
+      L"JOIN InfoObjectAttributes AS la WITH(NOLOCK) ON la.AttributeId=ce.AttributeId "
+      L"JOIN NameKeys AS nkl WITH(NOLOCK) ON nkl.NameKeyId=la.NameKeyId "
+      L"AND nkl.Value=N'TechnologicalProcesses' "
+      L"JOIN InfoObjectAttributes AS ca WITH(NOLOCK) ON ca.Link=la.OwnerId AND ca.Outdated=0 "
+      L"JOIN NameKeys AS nkc WITH(NOLOCK) ON nkc.NameKeyId=ca.NameKeyId "
+      L"AND nkc.Value=N'TechnologicalProcessesCard' "
+      L"JOIN InfoObjects AS own WITH(NOLOCK) ON own.InfoObjectId=ca.OwnerId AND own.Erased=0 "
+      L"OUTER APPLY (SELECT TOP 1 ad.ShortText AS V FROM InfoObjectAttributes AS ad WITH(NOLOCK) "
+      L"JOIN NameKeys AS nkd WITH(NOLOCK) ON nkd.NameKeyId=ad.NameKeyId "
+      L"AND nkd.Value=N'Designation' "
+      L"WHERE ad.OwnerId=own.InfoObjectId AND ad.Outdated=0) AS des "
+      L"WHERE ea.Link=%ld AND ea.Outdated=0",
+      tpId);
+  int n = card_query(dbc, sql, rows, CARD_ROWS, err, 280);
+  free(sql);
+  if (n <= 0) {
+    card_add(c, L"ЭСИ: не нашёлся — ни одна карточка техпроцессов на этот ТП не ссылается.\r\n\r\n");
+    return 0;
+  }
+  card_add(c, L"ЭСИ, которому принадлежит этот техпроцесс%s\r\n", n > 1 ? L" (несколько)" : L":");
+  for (int i = 0; i < n; i++) {
+    card_add(c, L"  %-40s %ld\r\n", rows[i].s1[0] ? rows[i].s1 : L"(без имени)", rows[i].n1);
+    if (rows[i].s2[0]) card_add(c, L"       %s\r\n", rows[i].s2);
+  }
+  card_add(c, L"\r\n");
+  if (desOut && desCap > 0 && rows[0].s2[0]) lstrcpynW(desOut, rows[0].s2, desCap);
+  return rows[0].n1;
+}
+
 static void plm_card(long id, wchar_t *out, int cap) {
   CardOut c;
   c.w = out;
@@ -1457,6 +1502,8 @@ static void plm_card(long id, wchar_t *out, int cap) {
   if (actualVer) {
     card_add(&c, L"Это сам техпроцесс%s.\r\n\r\n",
               mainFlag ? L", помечен основным" : L"");
+    /* чертёж назван по обозначению детали, а не техпроцесса — берём его отсюда */
+    card_owner_of_tp(dbc, id, &c, rows, err, designation, 200);
     card_operations(dbc, id, actualVer, &c, rows, err);
     card_where_used(dbc, id, &c, rows, err);
     goto freed;
