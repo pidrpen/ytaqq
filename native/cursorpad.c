@@ -1567,11 +1567,11 @@ static void draw_slot_marks(HWND ed) {
   GetTextMetricsW(dc, &tm);
   int lh = tm.tmHeight;
   int gutter = 16;
-  HPEN pen = CreatePen(PS_SOLID, 1, blend_rgb(COL_SAGE, COL_PAPER, 150));
+  HPEN pen = CreatePen(PS_SOLID, 1, blend_rgb(COL_SAGE, COL_PAPER, 205));
   HGDIOBJ prevPen = SelectObject(dc, pen);
   HGDIOBJ prevBrush = SelectObject(dc, GetStockObject(NULL_BRUSH));
   int prevBk = SetBkMode(dc, TRANSPARENT);
-  COLORREF prevCol = SetTextColor(dc, blend_rgb(COL_SAGE, COL_PAPER, 70));
+  COLORREF prevCol = SetTextColor(dc, blend_rgb(COL_SAGE, COL_PAPER, 140));
 
   int slot = 0, i = 0;
   while (i < len && slot < 9) {
@@ -1587,7 +1587,8 @@ static void draw_slot_marks(HWND ed) {
     if (p1 == -1 || p2 == -1) continue; /* строка прокручена за край */
     int x1 = (short)LOWORD(p1), y1 = (short)HIWORD(p1);
     int y2 = (short)HIWORD(p2);
-    if (y2 + lh < 0 || y1 > cl.bottom) continue;
+    /* только целиком видимые: обрезанная снизу рамка налезает на кнопки */
+    if (y1 < 0 || y2 + lh + 2 > cl.bottom) continue;
     int right;
     if (y1 == y2) {
       SIZE sz;
@@ -1841,7 +1842,6 @@ static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
     if (LOWORD(wParam) == ID_CUR_K2) set_skin(1);
     if (LOWORD(wParam) == ID_CUR_K3) set_skin(2);
     if (LOWORD(wParam) == ID_SYS_CUR) set_skin(0);
-    if (LOWORD(wParam) == ID_CLIPCLR) clear_copied();
     if (LOWORD(wParam) == ID_OCR) run_ocr_test();
     if (LOWORD(wParam) == ID_UPDATE) start_update();
     if (LOWORD(wParam) >= ID_THEME_BASE && LOWORD(wParam) < ID_THEME_BASE + THEME_COUNT)
@@ -2357,6 +2357,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
   }
   case WM_COMMAND:
     if (LOWORD(wParam) == ID_PIN) toggle_follow();
+    if (LOWORD(wParam) == ID_CLIPCLR) clear_copied();
     if (LOWORD(wParam) == ID_CLOSE) DestroyWindow(hwnd);
     if (LOWORD(wParam) == ID_MIN) toggle_hidden();
     if (LOWORD(wParam) == ID_SETTINGS) toggle_settings();
