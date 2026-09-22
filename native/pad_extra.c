@@ -1354,13 +1354,12 @@ static int card_norms(SQLHDBC dbc, const wchar_t *ids, CardRow *rows, wchar_t *e
       L"FROM InfoObjectAttributes AS a WITH(NOLOCK) "
       L"JOIN NameKeys AS nk WITH(NOLOCK) ON nk.NameKeyId=a.NameKeyId "
       L"AND nk.Value IN (N'SetupTime',N'TimePerPiece') "
-      /* Строки составного атрибута привязаны к его собственному номеру.
-         Ссылку проверяем только когда она ненулевая: у этих атрибутов она
-         равна нулю, а строк с AttributeId=0 в базе тысячи — они забивали
-         выдачу целиком, и настоящие значения до неё не доходили.
-         Отбора по устаревшим здесь нет намеренно. */
+      /* Строки составного атрибута привязаны к его собственному номеру —
+         это проверено дампом. Никаких «а вдруг ещё по ссылке»: ссылка у этих
+         атрибутов нулевая, и такое условие однажды уже притащило тысячи
+         чужих строк. Отбора по устаревшим здесь нет намеренно. */
       L"JOIN InfoObjectCollectionElements AS ce WITH(NOLOCK) "
-      L"ON (ce.AttributeId=a.AttributeId OR (a.Link>0 AND ce.AttributeId=a.Link)) "
+      L"ON ce.AttributeId=a.AttributeId "
       L"JOIN InfoObjectAttributes AS ea WITH(NOLOCK) "
       L"ON ea.CollectionElementId=ce.CollectionElementId "
       L"JOIN NameKeys AS nk2 WITH(NOLOCK) ON nk2.NameKeyId=ea.NameKeyId "
@@ -1564,10 +1563,12 @@ static void card_operations(SQLHDBC dbc, long tpId, long verId, CardOut *c, Card
     card_add(c, L"  %-4s %-40s %ld\r\n", num, nm, o->n1);
     if (o->s2[0] && o->s1[0] && _wcsicmp(o->s2, o->s1) != 0)
       card_add(c, L"       %s\r\n", o->s2);
-    if (!ops || na <= 0 || i >= shown) continue;
+    if (!ops || i >= shown) continue;
     int printed = 0;
     double opMins = 0.0;
-    for (int k = 0; k < na && printed < 40; k++) {
+    /* атрибуты операции могут и не прийти — нормы приходят отдельным
+       запросом и от них не зависят. Раньше это условие глушило и нормы. */
+    for (int k = 0; k < na && printed < 40 && g_cardVerbose; k++) {
       if (rows[k].n1 != o->n1 && rows[k].n1 != o->n3) continue;
       if (!g_cardVerbose) break; /* в обычном виде под операцией только время */
       if (card_hidden(rows[k].s1) || card_op_hidden(rows[k].s1)) continue;
@@ -1640,7 +1641,9 @@ static void card_operations(SQLHDBC dbc, long tpId, long verId, CardOut *c, Card
       card_add(c, L"  (сложено по %d операциям из %d)\r\n", counted, n);
   } else if (ops && n > 0) {
     card_add(c, L"  ────────────────────────────────────────\r\n");
-    card_add(c, L"  Нормы времени у этих операций не заполнены.\r\n");
+    card_add(c, L"  Нормы времени не подхватились (строк из базы: %d).\r\n", nn);
+    for (int k = 0; k < nn && k < 4; k++)
+      card_add(c, L"     %ld · %s · %s\r\n", nr[k].n1, nr[k].s1, nr[k].s2);
     if (g_cardVerbose) card_probe_time(dbc, list, c, rows, err);
   }
   if (n > shown)
