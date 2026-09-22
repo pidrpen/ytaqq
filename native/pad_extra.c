@@ -28,7 +28,9 @@
 #define WM_SEARCH_DONE (WM_APP + 8)
 #define WM_OCR_DONE (WM_APP + 9)
 #define WM_SHOW_PAD (WM_APP + 10)
-#define ANS_W 560
+#define WM_SEL_DRAW (WM_APP + 13) /* чертёж для выбранной строки найдён */
+/* нижний ряд теперь из четырёх именованных кнопок и «Закрыть»: уже не влезал */
+#define ANS_W 640
 #define ANS_H 340
 
 #include <wctype.h>
@@ -510,6 +512,15 @@ static LRESULT CALLBACK AnsEditProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
 static RECT g_ansPrev;
 static BOOL g_ansBig; /* окно находок развёрнуто на весь экран */
 static wchar_t g_cardDraw[PLM_LINK]; /* чертёж, найденный для карточки */
+/* Чертёж выбранной строки находок. Ищется в индексе файлов сразу,
+   без отдельного поиска «Файлы»: иначе кнопка «Открыть чертёж» не знает,
+   гореть ей или быть потухшей. */
+static wchar_t g_selDraw[PLM_LINK];
+static volatile LONG g_drawGen;
+/* объект, на который открыта карточка: списка уже нет, а «в СОЮЗ» живо */
+static wchar_t g_ansObj[PLM_LINK];
+static void ans_sync_buttons(void);
+static void request_row_draw(void);
 /* Поиск уже показал список находок, и техпроцесс обычно в нём есть. Снимаем
    его перед тем, как список сменится карточкой: искать по базе то, что уже
    найдено, — это те самые тридцать семь секунд. */
@@ -734,21 +745,9 @@ static void fill_plm_list(void) {
   InvalidateRect(g_answer, NULL, TRUE);
   ShowWindow(g_answerList, g_plmCount > 0 ? SW_SHOW : SW_HIDE);
   if (g_answerEdit) ShowWindow(g_answerEdit, g_plmCount > 0 ? SW_HIDE : SW_SHOW);
-  HWND open = GetDlgItem(g_answer, ID_ANS_OPEN);
-  HWND show = GetDlgItem(g_answer, ID_ANS_SHOW);
-  /* plain text (a lookup answer, an update report) has nothing to open */
-  if (open) {
-    SetWindowTextW(open, g_resultFiles ? L"Открыть файл" : L"Открыть PLM");
-    ShowWindow(open, g_plmCount > 0 ? SW_SHOW : SW_HIDE);
-  }
-  if (show) ShowWindow(show, g_resultFiles && g_plmCount > 0 ? SW_SHOW : SW_HIDE);
-  HWND card = GetDlgItem(g_answer, ID_ANS_CARD);
-  if (card) ShowWindow(card, !g_resultFiles && g_plmCount > 0 ? SW_SHOW : SW_HIDE);
-  HWND draw = GetDlgItem(g_answer, ID_ANS_DRAW);
-  if (draw) ShowWindow(draw, g_cardDraw[0] ? SW_SHOW : SW_HIDE);
-  HWND full = GetDlgItem(g_answer, ID_ANS_FULL);
-  if (full) ShowWindow(full, !g_resultFiles && g_plmCount > 0 ? SW_SHOW : SW_HIDE);
-  layout_answer();
+  /* чертёж для первой строки ищется сразу: его кнопка должна быть
+     живой или потухшей ещё до того, как на неё потянутся */
+  request_row_draw();
 }
 
 /* Rows are three parallel arrays; with at most PLM_ROWS of them an insertion
@@ -1944,6 +1943,101 @@ static void card_scan_files(const wchar_t *key, CardFiles *f) {
   files_unlock();
 }
 
+/* Чертёж для строки находок ищется не в потоке окна: на двухстах
+   тысячах файлов проход занимает долю секунды, а список должен
+   прокручиваться без рывков. Номер запроса нужен, чтобы ответ на давно
+   уже другую строку не пришёл к текущей. */
+typedef struct {
+  LONG gen;
+  wchar_t key[PLM_COL1];
+} DrawJob;
+
+static DWORD WINAPI sel_draw_thread(LPVOID param) {
+  DrawJob *job = (DrawJob *)param;
+  wchar_t *res = (wchar_t *)calloc(PLM_LINK, sizeof(wchar_t));
+  if (res) {
+    /* индекс может читать и карточка в своём потоке; замок повторный,
+       так что вложенные захваты внутри загрузки ничего не ломают */
+    files_lock_init();
+    files_lock();
+    if (g_filesN == 0) files_load_idx();
+    files_unlock();
+    wchar_t key[PLM_COL1];
+    lstrcpynW(key, job->key, PLM_COL1);
+    CardFiles *f = (CardFiles *)malloc(sizeof(CardFiles));
+    if (f) {
+      memset(f, 0, sizeof(*f));
+      /* чертёж назван по самой детали; не нашли — отрезаем хвост */
+      for (int attempt = 0; attempt < 3; attempt++) {
+        if (attempt) {
+          wchar_t *cut = wcsrchr(key, L'-');
+          if (!cut || cut == key) break;
+          *cut = 0;
+        }
+        card_scan_files(key, f);
+        if (f->nd) break;
+      }
+      if (f->nd) lstrcpynW(res, f->draw[0], PLM_LINK);
+      free(f);
+    }
+    if (!g_answer || !PostMessageW(g_answer, WM_SEL_DRAW, (WPARAM)job->gen, (LPARAM)res))
+      free(res);
+  }
+  free(job);
+  return 0;
+}
+
+static void request_row_draw(void) {
+  g_selDraw[0] = 0;
+  LONG gen = InterlockedIncrement(&g_drawGen);
+  ans_sync_buttons();
+  if (g_resultFiles || g_plmCount <= 0) return;
+  int i = plm_selected_index();
+  if (i < 0 || i >= g_plmCount) return;
+  DrawJob *job = (DrawJob *)calloc(1, sizeof(DrawJob));
+  if (!job) return;
+  job->gen = gen;
+  plm_core_des(g_plmEsi[i], job->key, PLM_COL1);
+  if (wcslen(job->key) < 4) {
+    free(job);
+    return;
+  }
+  HANDLE th = CreateThread(NULL, 0, sel_draw_thread, job, 0, NULL);
+  if (th) CloseHandle(th);
+  else free(job);
+}
+
+/* Что сейчас можно открыть как файл: в карточке — её чертёж,
+   в списке находок — чертёж выбранной строки. */
+static const wchar_t *ans_draw_file(void) {
+  if (g_cardDraw[0]) return g_cardDraw;
+  if (g_selDraw[0]) return g_selDraw;
+  return NULL;
+}
+
+/* Нижний ряд находок всегда один и тот же. Чего сейчас нет — то потухшее,
+   а не исчезнувшее: раньше кнопки прятались, ряд съезжал, и мышь
+   попадала не туда, куда целилась. */
+static void ans_sync_buttons(void) {
+  if (!g_answer) return;
+  HWND open = GetDlgItem(g_answer, ID_ANS_OPEN);
+  HWND card = GetDlgItem(g_answer, ID_ANS_CARD);
+  HWND draw = GetDlgItem(g_answer, ID_ANS_DRAW);
+  HWND show = GetDlgItem(g_answer, ID_ANS_SHOW);
+  int i = plm_selected_index();
+  BOOL row = i >= 0 && i < g_plmCount;
+  const wchar_t *file = ans_draw_file();
+  BOOL haveFile = file && file[0];
+  if (open) {
+    SetWindowTextW(open, g_resultFiles ? L"Открыть файл" : L"Открыть в СОЮЗ");
+    EnableWindow(open, row || (!g_resultFiles && g_ansObj[0] != 0));
+  }
+  if (card) EnableWindow(card, row && !g_resultFiles && g_plmIds[i] != 0);
+  if (draw) EnableWindow(draw, haveFile && !g_resultFiles);
+  if (show) EnableWindow(show, (g_resultFiles && row) || (!g_resultFiles && haveFile));
+  layout_answer();
+}
+
 static void card_show_file(CardOut *c, const wchar_t *full) {
   const wchar_t *slash = wcsrchr(full, L'\\');
   if (slash) {
@@ -2505,32 +2599,48 @@ static void layout_answer(void) {
     col.cx = cw - cw / 2;
     SendMessageW(g_answerList, LVM_SETCOLUMNW, 1, (LPARAM)&col);
   }
-  HWND open = GetDlgItem(g_answer, ID_ANS_OPEN);
-  HWND show = GetDlgItem(g_answer, ID_ANS_SHOW);
-  HWND copy = GetDlgItem(g_answer, ID_ANS_COPY);
-  HWND notes = GetDlgItem(g_answer, ID_ANS_NOTES);
-  HWND cls = GetDlgItem(g_answer, ID_ANS_CLOSE);
-  /* "В проводнике" only makes sense for file hits, so the row is 4 or 5 wide */
-  HWND card = GetDlgItem(g_answer, ID_ANS_CARD);
-  HWND draw = GetDlgItem(g_answer, ID_ANS_DRAW);
-  HWND full = GetDlgItem(g_answer, ID_ANS_FULL);
-  BOOL withDraw = draw && g_cardDraw[0] != 0;
-  BOOL withFull = full && !g_resultFiles && g_plmCount > 0;
-  BOOL withOpen = open && g_plmCount > 0;
-  BOOL withShow = show && g_resultFiles && g_plmCount > 0;
-  BOOL withCard = card && !g_resultFiles && g_plmCount > 0;
-  int cols = 3 + (withOpen ? 1 : 0) + (withShow ? 1 : 0) + (withCard ? 1 : 0) +
-             (withDraw ? 1 : 0) + (withFull ? 1 : 0);
-  int bw = (rc.right - pad * 2 - gap * (cols - 1)) / cols;
-  int slot = 0;
-  if (withOpen) MoveWindow(open, pad + (bw + gap) * slot++, by, bw, btnH, TRUE);
-  if (withShow) MoveWindow(show, pad + (bw + gap) * slot++, by, bw, btnH, TRUE);
-  if (withCard) MoveWindow(card, pad + (bw + gap) * slot++, by, bw, btnH, TRUE);
-  if (withFull) MoveWindow(full, pad + (bw + gap) * slot++, by, bw, btnH, TRUE);
-  if (withDraw) MoveWindow(draw, pad + (bw + gap) * slot++, by, bw, btnH, TRUE);
-  if (copy) MoveWindow(copy, pad + (bw + gap) * slot++, by, bw, btnH, TRUE);
-  if (notes) MoveWindow(notes, pad + (bw + gap) * slot++, by, bw, btnH, TRUE);
-  if (cls) MoveWindow(cls, pad + (bw + gap) * slot++, by, bw, btnH, TRUE);
+  /* У кнопок разная длина надписи, и делить ряд поровну нельзя:
+     «Закрыть» болталась бы пустой, а «Открыть файл в проводнике»
+     обрезалось многоточием. Мерим надписи и раздаём место по ним. */
+  HWND btns[5];
+  btns[0] = GetDlgItem(g_answer, ID_ANS_OPEN);
+  btns[1] = GetDlgItem(g_answer, ID_ANS_CARD);
+  btns[2] = GetDlgItem(g_answer, ID_ANS_DRAW);
+  btns[3] = GetDlgItem(g_answer, ID_ANS_SHOW);
+  btns[4] = GetDlgItem(g_answer, ID_ANS_CLOSE);
+  int bwid[5] = {0, 0, 0, 0, 0};
+  int total = 0, vis = 0;
+  HDC dc = GetDC(g_answer);
+  HGDIOBJ oldFont = (dc && g_fontUi) ? SelectObject(dc, g_fontUi) : NULL;
+  for (int k = 0; k < 5; k++) {
+    if (!btns[k]) continue;
+    wchar_t t[96];
+    t[0] = 0;
+    GetWindowTextW(btns[k], t, 96);
+    SIZE sz;
+    sz.cx = 60;
+    sz.cy = 0;
+    if (dc) GetTextExtentPoint32W(dc, t, (int)wcslen(t), &sz);
+    bwid[k] = sz.cx + 24;
+    if (bwid[k] < 56) bwid[k] = 56;
+    total += bwid[k];
+    vis++;
+  }
+  if (oldFont) SelectObject(dc, oldFont);
+  if (dc) ReleaseDC(g_answer, dc);
+  if (vis > 0) {
+    int avail = rc.right - pad * 2 - gap * (vis - 1);
+    if (avail < vis * 40) avail = vis * 40;
+    if (total > avail && total > 0)
+      for (int k = 0; k < 5; k++) bwid[k] = bwid[k] * avail / total;
+    int bx = pad;
+    for (int k = 0; k < 5; k++) {
+      if (!btns[k]) continue;
+      MoveWindow(btns[k], bx, by, bwid[k], btnH, TRUE);
+      ShowWindow(btns[k], SW_SHOW);
+      bx += bwid[k] + gap;
+    }
+  }
 }
 
 static LRESULT CALLBACK AnswerProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -2566,45 +2676,62 @@ static LRESULT CALLBACK AnswerProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
     return TRUE;
   case WM_COMMAND:
     if (LOWORD(wParam) == ID_ANS_CLOSE) ShowWindow(hwnd, SW_HIDE);
-    if (LOWORD(wParam) == ID_ANS_OPEN) open_plm_selected();
-    if (LOWORD(wParam) == ID_ANS_SHOW) show_selected_in_explorer();
-    if (LOWORD(wParam) == ID_ANS_CARD) show_card_selected();
-    if (LOWORD(wParam) == ID_ANS_FULL) show_card_full();
-    if (LOWORD(wParam) == ID_ANS_DRAW && g_cardDraw[0])
-      ShellExecuteW(NULL, L"open", g_cardDraw, NULL, NULL, SW_SHOWNORMAL);
-    if (LOWORD(wParam) == ID_ANS_COPY) {
-      int i = plm_selected_index();
-      if (i >= 0 && i < g_plmCount) {
-        clipboard_set(g_plmLinks[i]);
-        show_status(L"Ссылка скопирована");
-      } else if (g_answerEdit) {
-        int len = GetWindowTextLengthW(g_answerEdit);
-        wchar_t *w = (wchar_t *)malloc((len + 1) * sizeof(wchar_t));
-        if (w) {
-          GetWindowTextW(g_answerEdit, w, len + 1);
-          clipboard_set(w);
-          free(w);
-          show_status(L"Выжимка скопирована");
-        }
+    if (LOWORD(wParam) == ID_ANS_OPEN) {
+      if (g_plmCount > 0 || !g_ansObj[0]) open_plm_selected();
+      else {
+        /* карточка заняла место списка, но сам объект никуда не делся */
+        lstrcpynW(g_plmLastLink, g_ansObj, PLM_LINK);
+        open_plm_link(g_ansObj);
+        show_status(L"В текущий клиент СОЮЗ");
       }
     }
-    if (LOWORD(wParam) == ID_ANS_NOTES && g_answerEdit) {
-      int len = GetWindowTextLengthW(g_answerEdit);
-      wchar_t *w = (wchar_t *)malloc((len + 1) * sizeof(wchar_t));
-      if (w) {
-        GetWindowTextW(g_answerEdit, w, len + 1);
-        append_notes(w);
-        free(w);
-        show_status(L"Выжимка в блокноте");
+    if (LOWORD(wParam) == ID_ANS_SHOW) {
+      /* в находках PLM строка — это ссылка в СОЮЗ, показывать в
+         проводнике нужно найденный файл чертежа, а не её */
+      if (g_resultFiles) {
+        show_selected_in_explorer();
+      } else {
+        const wchar_t *f = ans_draw_file();
+        if (f && f[0]) show_in_explorer(f);
+        else show_status(L"Файла для этой строки нет");
       }
+    }
+    /* «Все данные» — карточка по делу. С шифтом туда же попадает
+       сырой список атрибутов: отдельная кнопка под него убрана */
+    if (LOWORD(wParam) == ID_ANS_CARD) {
+      if (GetKeyState(VK_SHIFT) & 0x8000) show_card_full();
+      else show_card_selected();
+    }
+    if (LOWORD(wParam) == ID_ANS_DRAW) {
+      const wchar_t *f = ans_draw_file();
+      if (f && f[0]) ShellExecuteW(NULL, L"open", f, NULL, NULL, SW_SHOWNORMAL);
+      else show_status(L"Чертежа для этой строки в индексе нет");
     }
     return 0;
+  case WM_SEL_DRAW: {
+    wchar_t *res = (wchar_t *)lParam;
+    if (res) {
+      /* ответ на уже другую строку просто выбрасываем */
+      if ((LONG)wParam == g_drawGen) lstrcpynW(g_selDraw, res, PLM_LINK);
+      free(res);
+    }
+    ans_sync_buttons();
+    return 0;
+  }
   case WM_NOTIFY: {
     NMHDR *nm = (NMHDR *)lParam;
     if (nm && nm->idFrom == ID_ANS_LIST &&
         (nm->code == NM_DBLCLK || nm->code == NM_RETURN || nm->code == LVN_ITEMACTIVATE)) {
       open_plm_selected();
       return 0;
+    }
+    /* сменилась строка — ищем чертёж для неё и пересчитываем кнопки */
+    if (nm && nm->idFrom == ID_ANS_LIST && nm->code == LVN_ITEMCHANGED) {
+      const NMLISTVIEW *lv = (const NMLISTVIEW *)lParam;
+      if ((lv->uChanged & LVIF_STATE) && (lv->uNewState & LVIS_SELECTED) &&
+          !(lv->uOldState & LVIS_SELECTED))
+        request_row_draw();
+      break;
     }
     if (nm && nm->idFrom == ID_ANS_LIST && nm->code == LVN_COLUMNCLICK) {
       int col = ((NMLISTVIEW *)lParam)->iSubItem;
@@ -2710,27 +2837,21 @@ static void create_answer(HWND owner) {
     col.pszText = L"2 ТП";
     SendMessageW(g_answerList, LVM_INSERTCOLUMNW, 1, (LPARAM)&col);
   }
-  HWND open = mk_btn(g_answer, L"Открыть PLM", ID_ANS_OPEN);
-  HWND show = mk_btn(g_answer, L"В проводнике", ID_ANS_SHOW);
-  HWND card = mk_btn(g_answer, L"Карточка", ID_ANS_CARD);
+  HWND open = mk_btn(g_answer, L"Открыть в СОЮЗ", ID_ANS_OPEN);
+  HWND card = mk_btn(g_answer, L"Все данные", ID_ANS_CARD);
   HWND draw = mk_btn(g_answer, L"Открыть чертёж", ID_ANS_DRAW);
-  HWND full = mk_btn(g_answer, L"Атрибуты", ID_ANS_FULL);
-  HWND copy = mk_btn(g_answer, L"Копировать", ID_ANS_COPY);
-  HWND notes = mk_btn(g_answer, L"В блокнот", ID_ANS_NOTES);
+  HWND show = mk_btn(g_answer, L"Открыть файл в проводнике", ID_ANS_SHOW);
   HWND cls = mk_btn(g_answer, L"Закрыть", ID_ANS_CLOSE);
   if (g_fontBody) SendMessageW(g_answerEdit, WM_SETFONT, (WPARAM)g_fontBody, TRUE);
   if (g_fontBody && g_answerList) SendMessageW(g_answerList, WM_SETFONT, (WPARAM)g_fontBody, TRUE);
   if (g_fontUi) {
     SendMessageW(open, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
-    SendMessageW(show, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
     SendMessageW(card, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
     SendMessageW(draw, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
-    SendMessageW(full, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
-    SendMessageW(copy, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
-    SendMessageW(notes, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
+    SendMessageW(show, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
     SendMessageW(cls, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
   }
-  layout_answer();
+  ans_sync_buttons();
 }
 
 /* The card can take a few seconds on a loaded server, so it runs off the UI
@@ -2784,6 +2905,8 @@ static void show_card_selected_mode(BOOL full) {
       g_snapN++;
     }
   }
+  /* список сейчас сменится карточкой — запомним, на что она открыта */
+  lstrcpynW(g_ansObj, g_plmLinks[i], PLM_LINK);
   g_ansTitle = g_cardVerbose ? L"Атрибуты объекта" : L"Карточка";
   g_ansMono = TRUE;
   g_cardDraw[0] = 0;
@@ -2940,13 +3063,17 @@ static void show_answer_text(const wchar_t *text) {
     aw = g_ansW > 0 ? g_ansW : ANS_W;
     ah = g_ansH > 0 ? g_ansH : ANS_H;
   }
+  /* запомненная с прошлых версий ширина бывает такой, что надписи
+     на кнопках обрезаются многоточием — ниже этого не опускаемся */
+  if (aw < ANS_W) aw = ANS_W;
+  if (aw > wa.right - wa.left) aw = wa.right - wa.left;
   if (x + aw > wa.right) x = wa.right - aw - 8;
   if (y + ah > wa.bottom) y = wa.bottom - ah - 8;
   if (x < wa.left) x = wa.left + 8;
   if (y < wa.top) y = wa.top + 8;
   g_ansBig = FALSE;
   SetWindowPos(g_answer, HWND_TOPMOST, x, y, aw, ah, SWP_SHOWWINDOW);
-  layout_answer();
+  ans_sync_buttons();
   if (g_plmCount > 0 && g_answerList) SetFocus(g_answerList);
 }
 
@@ -2955,6 +3082,9 @@ static void start_lookup(const wchar_t *q) {
   g_ansTitle = NULL;
   g_ansMono = FALSE;
   g_cardDraw[0] = 0;
+  g_selDraw[0] = 0;
+  g_ansObj[0] = 0;
+  InterlockedIncrement(&g_drawGen);
   g_fullMode = FALSE;
   draw_close();
   while (*q == L' ' || *q == L'\t' || *q == L'\r' || *q == L'\n') q++;
