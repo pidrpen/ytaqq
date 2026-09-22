@@ -1497,6 +1497,21 @@ static int card_find_files(const wchar_t *key, CardOut *c, int wantDrawings) {
   return shown;
 }
 
+/* У конфигурации изделия своего атрибута Designation нет, а обозначение
+   при этом стоит первым словом в имени: «АДЕ 3422-682.01.01.00 [Шаблон]:1».
+   Берём всё до первой скобки, двоеточия или угловой скобки. */
+static void card_des_from_name(const wchar_t *name, wchar_t *out, int cap) {
+  int i = 0;
+  while (name[i] && i < cap - 1) {
+    wchar_t ch = name[i];
+    if (ch == L'[' || ch == L'<' || ch == L'(' || ch == L':') break;
+    out[i] = ch;
+    i++;
+  }
+  while (i > 0 && (out[i - 1] == L' ' || out[i - 1] == L'\t')) i--;
+  out[i] = 0;
+}
+
 static void card_drawings(const wchar_t *designation, CardOut *c) {
   card_add(c, L"\r\nЧЕРТЁЖ И ФАЙЛЫ");
   if (!designation || !designation[0]) {
@@ -1546,6 +1561,60 @@ static void card_drawings(const wchar_t *designation, CardOut *c) {
    у кого эта карточка указана. Отдельной ссылки «ТП → изделие» в базе нет,
    поэтому иначе их и не связать. Заодно забираем обозначение ЭСИ — чертёж
    назван по нему, а не по обозначению техпроцесса. */
+/* Найденный объект бывает не изделием и не техпроцессом, а конфигурацией
+   версии изделия: у неё нет ни ActualVersion, ни карточки техпроцессов.
+   Но техпроцесс на эту деталь существует и зовётся по тому же обозначению —
+   именно так его находит обычный поиск. Ищем так же: объекты с ActualVersion,
+   чьё имя начинается с нашего обозначения, основной первым. */
+static long card_tp_by_designation(SQLHDBC dbc, const wchar_t *des, CardOut *c, CardRow *rows,
+                                   wchar_t *err, long *verOut) {
+  if (!des || !des[0]) return 0;
+  wchar_t pat[260];
+  like_escape(des, pat, 240);
+  int n = (int)wcslen(pat);
+  if (n < 250) {
+    pat[n] = L'%';
+    pat[n + 1] = 0;
+  }
+  wchar_t *sql = (wchar_t *)malloc(3000 * sizeof(wchar_t));
+  if (!sql) return 0;
+  _snwprintf(
+      sql, 3000,
+      L"SELECT TOP 20 tp.InfoObjectId, tp.Name, ISNULL(flag.V,N'нет'), av.L, tp.TemplateId "
+      L"FROM InfoObjects AS tp WITH(NOLOCK) "
+      L"CROSS APPLY (SELECT TOP 1 ISNULL(iv.Link,0) AS L "
+      L"FROM InfoObjectAttributes AS iv WITH(NOLOCK) "
+      L"JOIN NameKeys AS nkv WITH(NOLOCK) ON nkv.NameKeyId=iv.NameKeyId "
+      L"AND nkv.Value=N'ActualVersion' "
+      L"WHERE iv.OwnerId=tp.InfoObjectId AND iv.Outdated=0) AS av "
+      L"OUTER APPLY (SELECT TOP 1 CASE WHEN ia.BoolValue=1 THEN N'да' ELSE N'нет' END AS V "
+      L"FROM InfoObjectAttributes AS ia WITH(NOLOCK) "
+      L"JOIN NameKeys AS nki WITH(NOLOCK) ON nki.NameKeyId=ia.NameKeyId "
+      L"WHERE ia.OwnerId=tp.InfoObjectId AND ia.Outdated=0 "
+      L"AND nki.Value IN (N'MainTP',N'IsActual') AND ia.BoolValue=1) AS flag "
+      L"WHERE tp.Erased=0 AND av.L>0 "
+      L"AND tp.Name LIKE N'%s' ESCAPE '\\' COLLATE Cyrillic_General_CI_AS "
+      L"ORDER BY CASE WHEN flag.V=N'да' THEN 0 ELSE 1 END, tp.InfoObjectId",
+      pat);
+  int k = card_query(dbc, sql, rows, CARD_ROWS, err, 280);
+  free(sql);
+  if (k < 0) {
+    card_add(c, L"Поиск техпроцесса по обозначению не выполнился.\r\n%s\r\n", err);
+    return 0;
+  }
+  if (k == 0) {
+    card_add(c, L"Техпроцессов с обозначением «%s» в базе нет.\r\n", des);
+    return 0;
+  }
+  card_add(c, L"ТЕХПРОЦЕССЫ ПО ОБОЗНАЧЕНИЮ «%s» (%d)\r\n", des, k);
+  for (int i = 0; i < k; i++)
+    card_add(c, L"  %s %-40s %ld\r\n", _wcsicmp(rows[i].s2, L"да") == 0 ? L"●" : L"○",
+             rows[i].s1[0] ? rows[i].s1 : L"(без имени)", rows[i].n1);
+  card_add(c, L"\r\n");
+  if (verOut) *verOut = rows[0].n2;
+  return rows[0].n1;
+}
+
 static long card_owner_of_tp(SQLHDBC dbc, long tpId, CardOut *c, CardRow *rows, wchar_t *err,
                              wchar_t *desOut, int desCap) {
   wchar_t *sql = (wchar_t *)malloc(3000 * sizeof(wchar_t));
@@ -1600,7 +1669,7 @@ static void plm_card(long id, wchar_t *out, int cap) {
     return;
   }
   long actualVer = 0, tpCard = 0;
-  wchar_t designation[200] = {0};
+  wchar_t designation[200] = {0}, objName[260] = {0};
   BOOL mainFlag = FALSE;
   g_cardDraw[0] = 0;
   CardRow *rows = (CardRow *)malloc(sizeof(CardRow) * CARD_ROWS);
@@ -1627,6 +1696,7 @@ static void plm_card(long id, wchar_t *out, int cap) {
     goto freed;
   }
   card_add(&c, L"┌──────────────────────────────────────────────────────────┐\r\n");
+  lstrcpynW(objName, rows[0].s1, 260);
   card_add(&c, L"  %s\r\n", rows[0].s1[0] ? rows[0].s1 : L"(без имени)");
   card_add(&c, L"  %s · ID %ld", rows[0].s2[0] ? rows[0].s2 : L"?", id);
   if (rows[0].n2) card_add(&c, L" · внутри %ld", rows[0].n2);
@@ -1670,6 +1740,8 @@ static void plm_card(long id, wchar_t *out, int cap) {
     card_add(&c, L"\r\n");
   }
 
+  if (!designation[0] && objName[0]) card_des_from_name(objName, designation, 200);
+
   /* 3. дальше зависит от того, что это за объект.
         Сам техпроцесс несёт ActualVersion — тогда идём прямо в его состав.
         Изделие несёт TechnologicalProcessesCard — тогда сперва находим,
@@ -1685,8 +1757,12 @@ static void plm_card(long id, wchar_t *out, int cap) {
   }
 
   if (!tpCard) {
-    card_add(&c, L"У объекта нет ни ActualVersion, ни TechnologicalProcessesCard —\r\n"
-                 L"техпроцесса на него нет.\r\n");
+    /* это не изделие и не техпроцесс — скорее всего конфигурация версии.
+       Техпроцесс на деталь всё равно существует, ищем его по обозначению */
+    card_add(&c, L"Своего техпроцесса у объекта нет — ищу по обозначению.\r\n\r\n");
+    long ver = 0;
+    long tp = card_tp_by_designation(dbc, designation, &c, rows, err, &ver);
+    if (tp) card_operations(dbc, tp, ver, &c, rows, err);
     card_where_used(dbc, id, &c, rows, err);
     goto freed;
   }
@@ -1739,8 +1815,11 @@ static void plm_card(long id, wchar_t *out, int cap) {
                L"WHERE AttributeId=%ld AND Outdated=0",
                rows[0].n1);
     k = card_query(dbc, sql, rows, CARD_ROWS, err, 280);
-    card_add(&c, L"  строк в списке: %ld, но ссылок на сами ТП в них нет\r\n",
+    card_add(&c, L"  строк в списке: %ld, но ссылок на сами ТП в них нет\r\n\r\n",
              k > 0 ? rows[0].n1 : 0);
+    long ver2 = 0;
+    long tp2 = card_tp_by_designation(dbc, designation, &c, rows, err, &ver2);
+    if (tp2) card_operations(dbc, tp2, ver2, &c, rows, err);
     card_where_used(dbc, id, &c, rows, err);
     goto freed;
   }
@@ -1758,7 +1837,10 @@ static void plm_card(long id, wchar_t *out, int cap) {
   }
   card_add(&c, L"\r\n");
   if (!chosen) {
-    card_add(&c, L"Основного среди них нет: ни у одного не стоит MainTP/IsActual.\r\n");
+    card_add(&c, L"Основного среди них нет: ни у одного не стоит MainTP/IsActual.\r\n\r\n");
+    long ver3 = 0;
+    long tp3 = card_tp_by_designation(dbc, designation, &c, rows, err, &ver3);
+    if (tp3) card_operations(dbc, tp3, ver3, &c, rows, err);
     card_where_used(dbc, id, &c, rows, err);
     goto freed;
   }
