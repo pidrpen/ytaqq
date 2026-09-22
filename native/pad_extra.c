@@ -218,20 +218,6 @@ static BOOL json_field_string(const char *json, const char *key, wchar_t *out, i
   return FALSE;
 }
 
-static BOOL opensearch_title(const char *json, wchar_t *out, int cap) {
-  const char *p = strchr(json, '[');
-  if (!p) return FALSE;
-  p++;
-  wchar_t tmp[256];
-  if (!parse_json_string(&p, tmp, 256)) return FALSE;
-  p = skip_ws(p);
-  if (*p == ',') p++;
-  p = skip_ws(p);
-  if (*p != '[') return FALSE;
-  p++;
-  return parse_json_string(&p, out, cap);
-}
-
 static BOOL http_get(const wchar_t *host, const wchar_t *path, char **out, DWORD *outlen) {
   *out = NULL;
   *outlen = 0;
@@ -323,69 +309,8 @@ static BOOL http_get_url(const char *url, char **out, DWORD *outlen) {
   return http_get(host, path, out, outlen);
 }
 
-static void trim_extract(wchar_t *s, int maxc) {
-  int n = (int)wcslen(s);
-  if (n > maxc && maxc > 2) {
-    s[maxc] = 0;
-    wchar_t *dot = wcsrchr(s, L'.');
-    if (dot && (dot - s) > 80) {
-      dot[1] = 0;
-    } else {
-      s[maxc - 1] = 0x2026; /* … */
-      s[maxc] = 0;
-    }
-  }
-}
-
-static BOOL wiki_summary(const wchar_t *host, const wchar_t *query, wchar_t *out, int cap) {
-  char enc[2400];
-  url_encode_utf8(query, enc, (int)sizeof(enc));
-  wchar_t wenc[2400], path[2800];
-  MultiByteToWideChar(CP_UTF8, 0, enc, -1, wenc, 2400);
-  _snwprintf(path, 2800,
-             L"/w/api.php?action=opensearch&search=%s&limit=1&namespace=0&format=json",
-             wenc);
-  char *body = NULL;
-  DWORD n = 0;
-  if (!http_get(host, path, &body, &n) || !body) return FALSE;
-  wchar_t title[256] = {0};
-  BOOL ok = opensearch_title(body, title, 256);
-  free(body);
-  if (!ok || !title[0]) return FALSE;
-  for (wchar_t *p = title; *p; p++) {
-    if (*p == L' ') *p = L'_';
-  }
-  char tenc[1200];
-  url_encode_utf8(title, tenc, (int)sizeof(tenc));
-  wchar_t wt[1200], path2[1600];
-  MultiByteToWideChar(CP_UTF8, 0, tenc, -1, wt, 1200);
-  _snwprintf(path2, 1600, L"/api/rest_v1/page/summary/%s", wt);
-  if (!http_get(host, path2, &body, &n) || !body) return FALSE;
-  ok = json_field_string(body, "extract", out, cap);
-  if (!ok || !out[0]) ok = json_field_string(body, "description", out, cap);
-  free(body);
-  return ok && out[0];
-}
-
 #include "mini_ai.c"
 #include "web_lookup.c"
-
-static BOOL ddg_summary(const wchar_t *query, wchar_t *out, int cap) {
-  char enc[2400];
-  url_encode_utf8(query, enc, (int)sizeof(enc));
-  wchar_t wenc[2400], path[2800];
-  MultiByteToWideChar(CP_UTF8, 0, enc, -1, wenc, 2400);
-  _snwprintf(path, 2800, L"/?q=%s&format=json&no_html=1&skip_disambig=1&t=cursorpad", wenc);
-  char *body = NULL;
-  DWORD n = 0;
-  if (!http_get(L"api.duckduckgo.com", path, &body, &n) || !body) return FALSE;
-  BOOL ok = json_field_string(body, "AbstractText", out, cap);
-  if (!ok || !out[0]) ok = json_field_string(body, "Answer", out, cap);
-  if (!ok || !out[0]) ok = json_field_string(body, "Definition", out, cap);
-  if (!ok || !out[0]) ok = json_field_string(body, "Text", out, cap);
-  free(body);
-  return ok && out[0];
-}
 
 static void like_escape(const wchar_t *in, wchar_t *out, int cap) {
   int o = 0;
@@ -713,7 +638,6 @@ static LRESULT CALLBACK DrawPaneProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
   }
   return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
-
 
 static void fill_plm_list(void) {
   if (!g_answerList) return;
@@ -1292,7 +1216,6 @@ static void save_plm_pref(void) {
   LocalFree(out.pbData);
 }
 
-
 /* ---- PLM: карточка объекта и его техпроцессы ------------------------------
 
    Схема PLM разобрана по сервису PlmApi (репозиторий wowdroch): значения
@@ -1546,32 +1469,9 @@ static void card_pair_t(CardOut *c, const wchar_t *pad, const wchar_t *key, cons
   card_pair_s(c, pad, key, val, link, dataType, NULL);
 }
 
-static void card_pair(CardOut *c, const wchar_t *pad, const wchar_t *key, const wchar_t *val,
-                      long link) {
-  card_pair_s(c, pad, key, val, link, 0, NULL);
-}
-
 /* «0.7083 ч · 42.5 мин» одной строкой — для итогов */
 static void card_total(CardOut *c, const wchar_t *pad, const wchar_t *title, double mins) {
   card_add(c, L"%s%-28s %.4f ч · %g мин\r\n", pad, title, mins / 60.0, mins);
-}
-
-static const wchar_t *card_type_name(long t) {
-  switch (t) {
-  case 1: return L"число";
-  case 2: return L"текст";
-  case 3: return L"да/нет";
-  case 4: return L"время";
-  case 6: return L"ссылка";
-  case 8: return L"коллекция";
-  case 11: return L"перечисление";
-  case 13: return L"целое";
-  case 23: return L"составной";
-  case 24: return L"текст";
-  case 32: return L"длинное целое";
-  case 33: return L"дата";
-  default: return L"—";
-  }
 }
 
 #define CARD_ROWS 900
@@ -1856,7 +1756,6 @@ static void card_operations(SQLHDBC dbc, long tpId, long verId, CardOut *c, Card
   free(ops);
   free(nr);
 }
-
 
 /* Куда этот объект входит по техсоставу. Прямой путь — изделие → TechCompCard
    → ActualVersionTechComp → строка с нужной конфигурацией → коллекция
@@ -3718,6 +3617,8 @@ static void show_ocr_text(const wchar_t *text) {
 
 static void start_lookup(const wchar_t *q) {
   if (!q) return;
+  /* пароль ввели и сразу ищут, не уходя из поля, — берём его и так */
+  if (g_engine == 4) save_plm_pref();
   g_ansTitle = NULL;
   g_selDraw[0] = 0;
   InterlockedIncrement(&g_drawGen);

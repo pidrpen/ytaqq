@@ -157,9 +157,6 @@ static HWND g_searchGo;
 static BOOL g_askOpen = FALSE;
 static WNDPROC g_oldSearch;
 static HWND g_btnAi;
-static HWND g_btnWiki;
-static HWND g_btnDdg;
-static HWND g_btnYa;
 static HWND g_btnPlm;
 static HWND g_plmServer;
 static HWND g_plmDb;
@@ -1265,61 +1262,6 @@ static void toggle_hidden(void) {
   else hide_to_tray();
 }
 
-static BOOL save_screen_bmp(const wchar_t *path, int bw, int bh) {
-  POINT p;
-  GetCursorPos(&p);
-  int x = p.x - bw / 2;
-  int y = p.y - bh / 2;
-  HDC screen = GetDC(NULL);
-  HDC mem = CreateCompatibleDC(screen);
-  HBITMAP bm = CreateCompatibleBitmap(screen, bw, bh);
-  HGDIOBJ old = SelectObject(mem, bm);
-  BitBlt(mem, 0, 0, bw, bh, screen, x, y, SRCCOPY);
-  BITMAPINFOHEADER ih;
-  memset(&ih, 0, sizeof(ih));
-  ih.biSize = sizeof(ih);
-  ih.biWidth = bw;
-  ih.biHeight = bh;
-  ih.biPlanes = 1;
-  ih.biBitCount = 24;
-  int row = (bw * 3 + 3) & ~3;
-  int img = row * bh;
-  char *bits = (char *)malloc((size_t)img);
-  if (!bits) {
-    SelectObject(mem, old);
-    DeleteObject(bm);
-    DeleteDC(mem);
-    ReleaseDC(NULL, screen);
-    return FALSE;
-  }
-  BITMAPINFO info;
-  memset(&info, 0, sizeof(info));
-  info.bmiHeader = ih;
-  GetDIBits(mem, bm, 0, (UINT)bh, bits, &info, DIB_RGB_COLORS);
-  BITMAPFILEHEADER fh;
-  memset(&fh, 0, sizeof(fh));
-  fh.bfType = 0x4D42;
-  fh.bfOffBits = (DWORD)(sizeof(fh) + sizeof(ih));
-  fh.bfSize = fh.bfOffBits + (DWORD)img;
-  HANDLE f = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
-                         FILE_ATTRIBUTE_NORMAL, NULL);
-  BOOL ok = FALSE;
-  if (f != INVALID_HANDLE_VALUE) {
-    DWORD wri = 0;
-    WriteFile(f, &fh, sizeof(fh), &wri, NULL);
-    WriteFile(f, &ih, sizeof(ih), &wri, NULL);
-    WriteFile(f, bits, (DWORD)img, &wri, NULL);
-    CloseHandle(f);
-    ok = TRUE;
-  }
-  free(bits);
-  SelectObject(mem, old);
-  DeleteObject(bm);
-  DeleteDC(mem);
-  ReleaseDC(NULL, screen);
-  return ok;
-}
-
 static void append_notes(const wchar_t *text) {
   if (!g_edit || !text || !text[0]) return;
   int len = GetWindowTextLengthW(g_edit);
@@ -1933,6 +1875,13 @@ static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
     }
     if (LOWORD(wParam) == ID_FILES_ROOT && HIWORD(wParam) == EN_KILLFOCUS)
       files_apply_root(FALSE);
+    /* С 2026.09.19.11 эти поля никто не читал: сервер, логин и пароль
+       брались из plm.txt, оставшегося от старой версии, а введённое
+       в Настройках пропадало. На новом компьютере войти было нельзя вообще. */
+    if ((LOWORD(wParam) == ID_PLM_SERVER || LOWORD(wParam) == ID_PLM_DB ||
+         LOWORD(wParam) == ID_PLM_USER || LOWORD(wParam) == ID_PLM_PASS) &&
+        HIWORD(wParam) == EN_KILLFOCUS)
+      save_plm_pref();
     return 0;
   case WM_HSCROLL:
     if ((HWND)lParam == g_tbBg) {

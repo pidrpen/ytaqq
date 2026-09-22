@@ -821,23 +821,6 @@ static BOOL files_load_idx(void) {
   return g_filesN > 0;
 }
 
-static BOOL files_idx_fresh(void) {
-  wchar_t path[MAX_PATH];
-  files_idx_path(path, MAX_PATH);
-  WIN32_FILE_ATTRIBUTE_DATA ad;
-  if (!GetFileAttributesExW(path, GetFileExInfoStandard, &ad)) return FALSE;
-  ULARGE_INTEGER ft;
-  ft.LowPart = ad.ftLastWriteTime.dwLowDateTime;
-  ft.HighPart = ad.ftLastWriteTime.dwHighDateTime;
-  FILETIME now;
-  GetSystemTimeAsFileTime(&now);
-  ULARGE_INTEGER n;
-  n.LowPart = now.dwLowDateTime;
-  n.HighPart = now.dwHighDateTime;
-  ULONGLONG hour = 10000000ULL * 3600ULL;
-  return n.QuadPart > ft.QuadPart && (n.QuadPart - ft.QuadPart) < hour;
-}
-
 /* ---- the walk ------------------------------------------------------------ */
 
 /* Growable path buffer: nesting is limited by disk, not by MAX_PATH. */
@@ -859,40 +842,6 @@ static BOOL wp_reserve(WalkPath *p, size_t need) {
   return TRUE;
 }
 
-static BOOL wp_push(WalkPath *p, const wchar_t *part) {
-  size_t add = wcslen(part);
-  if (!wp_reserve(p, p->len + add + 2)) return FALSE;
-  p->w[p->len++] = L'\\';
-  memcpy(p->w + p->len, part, add * sizeof(wchar_t));
-  p->len += add;
-  p->w[p->len] = 0;
-  return TRUE;
-}
-
-static void wp_pop(WalkPath *p, size_t mark) {
-  p->len = mark;
-  if (p->w) p->w[p->len] = 0;
-}
-
-/* Build the display form of the current folder: \\?\C:\x → C:\x,
-   \\?\UNC\srv\share\x → \\srv\share\x. */
-static BOOL wp_display(const WalkPath *p, wchar_t **out, size_t *cap) {
-  size_t shown = wcslen(p->shown);
-  size_t need = shown + (p->len - p->skip) + 1;
-  if (*cap < need) {
-    size_t c = *cap ? *cap : 1024;
-    while (c < need) c *= 2;
-    wchar_t *grown = (wchar_t *)realloc(*out, c * sizeof(wchar_t));
-    if (!grown) return FALSE;
-    *out = grown;
-    *cap = c;
-  }
-  memcpy(*out, p->shown, shown * sizeof(wchar_t));
-  memcpy(*out + shown, p->w + p->skip, (p->len - p->skip) * sizeof(wchar_t));
-  (*out)[need - 1] = 0;
-  return TRUE;
-}
-
 static BOOL wp_init(WalkPath *p, const wchar_t *root) {
   /* \\?\ отключает кэш метаданных SMB — на 40 тысячах папок это минуты.
      Обычный путь, пока он короткий; длинный префикс только если уже дан. */
@@ -900,6 +849,9 @@ static BOOL wp_init(WalkPath *p, const wchar_t *root) {
   p->shown = L"";
   p->skip = 0;
   size_t n = wcslen(root);
+  /* длиннее 32767 знаков путей в Windows не бывает; без этой границы
+     компилятор считает, что размер копирования может переполниться */
+  if (n > 32767) return FALSE;
   if (!wp_reserve(p, n + 2)) return FALSE;
   memcpy(p->w, root, (n + 1) * sizeof(wchar_t));
   p->len = n;
@@ -1227,7 +1179,6 @@ static int walk_worker_count(const wchar_t *root) {
   return n;
 }
 
-
 static void files_walk_all(const wchar_t *root, FileIdx *out, BOOL *oom, BOOL *stopped) {
   WalkPath p;
   if (!wp_init(&p, root)) {
@@ -1440,13 +1391,6 @@ static BOOL wcs_istr(const wchar_t *hay, const wchar_t *needle) {
     if (!*n) return TRUE;
   }
   return FALSE;
-}
-
-static const wchar_t *files_name(const wchar_t *rel) {
-  const wchar_t *s = rel, *last = rel;
-  for (; *s; s++)
-    if (*s == L'\\' || *s == L'/') last = s + 1;
-  return last;
 }
 
 static BOOL files_search(const wchar_t *query, wchar_t *out, int cap) {
