@@ -1402,6 +1402,31 @@ static void card_probe_time(SQLHDBC dbc, const wchar_t *ids, CardOut *c, CardRow
   for (int i = 0; i < n; i++)
     card_add(c, L"     %ld  %-28s %-12s тип %ld%s\r\n", rows[i].n1, rows[i].s1, rows[i].s2,
              rows[i].n3, rows[i].n2 ? L" (в строке коллекции)" : L"");
+
+  /* Составной атрибут найден, а его содержимое — нет. Значит строки привязаны
+     не к тому, что я перебрал. Спрашиваем базу прямо: вот номер атрибута, вот
+     его ссылка, сколько строк висит на каждом из них. */
+  sql = (wchar_t *)malloc(3000 * sizeof(wchar_t));
+  if (!sql) return;
+  _snwprintf(sql, 3000,
+             L"SELECT TOP 20 a.OwnerId, nk.Value, "
+             L"CONVERT(NVARCHAR(32), a.AttributeId) + N' / ссылка ' + "
+             L"CONVERT(NVARCHAR(32), ISNULL(a.Link,0)), "
+             L"(SELECT COUNT(*) FROM InfoObjectCollectionElements AS c1 WITH(NOLOCK) "
+             L"WHERE c1.AttributeId=a.AttributeId), "
+             L"(SELECT COUNT(*) FROM InfoObjectCollectionElements AS c2 WITH(NOLOCK) "
+             L"WHERE c2.AttributeId=ISNULL(a.Link,0)) "
+             L"FROM InfoObjectAttributes AS a WITH(NOLOCK) "
+             L"JOIN NameKeys AS nk WITH(NOLOCK) ON nk.NameKeyId=a.NameKeyId "
+             L"WHERE a.OwnerId IN (%s) AND a.DataType=23",
+             ids);
+  n = card_query(dbc, sql, rows, CARD_ROWS, err, 280);
+  free(sql);
+  if (n <= 0) return;
+  card_add(c, L"  ── где строки составного атрибута ──\r\n");
+  for (int i = 0; i < n; i++)
+    card_add(c, L"     %ld  %-16s атрибут %s · строк по атрибуту %ld, по ссылке %ld\r\n",
+             rows[i].n1, rows[i].s1, rows[i].s2, rows[i].n2, rows[i].n3);
 }
 
 static void card_operations(SQLHDBC dbc, long tpId, long verId, CardOut *c, CardRow *rows,
@@ -1880,7 +1905,31 @@ static long card_owner_of_tp(SQLHDBC dbc, long tpId, CardOut *c, CardRow *rows, 
   int n = card_query(dbc, sql, rows, CARD_ROWS, err, 280);
   free(sql);
   if (n <= 0) {
-    card_add(c, L"ЭСИ: у техпроцесса нет ссылки ManufacturedProducts.\r\n\r\n");
+    card_add(c, L"ЭСИ: ссылки ManufacturedProducts у техпроцесса нет.\r\n");
+    /* Ищем, как она вообще зовётся и на чём висит: на самом техпроцессе,
+       на его версии или на варианте. */
+    sql = (wchar_t *)malloc(2600 * sizeof(wchar_t));
+    if (sql) {
+      _snwprintf(sql, 2600,
+                 L"SELECT TOP 30 a.OwnerId, nk.Value, "
+                 L"COALESCE(a.ShortText, CONVERT(NVARCHAR(32), a.Link), N'—'), "
+                 L"ISNULL(a.Link,0), a.DataType "
+                 L"FROM InfoObjectAttributes AS a WITH(NOLOCK) "
+                 L"JOIN NameKeys AS nk WITH(NOLOCK) ON nk.NameKeyId=a.NameKeyId "
+                 L"WHERE a.OwnerId=%ld AND (nk.Value LIKE N'%%Manufactur%%' "
+                 L"OR nk.Value LIKE N'%%Product%%' OR nk.Value LIKE N'%%Part%%')",
+                 tpId);
+      int k = card_query(dbc, sql, rows, CARD_ROWS, err, 280);
+      free(sql);
+      if (k > 0) {
+        card_add(c, L"  ── что есть про изделие у техпроцесса ──\r\n");
+        for (int i = 0; i < k; i++)
+          card_add(c, L"     %-30s %-12s тип %ld\r\n", rows[i].s1, rows[i].s2, rows[i].n3);
+      } else {
+        card_add(c, L"  у техпроцесса нет ни одного атрибута со словом Product\r\n");
+      }
+    }
+    card_add(c, L"\r\n");
     return 0;
   }
   card_add(c, L"ИЗДЕЛИЕ%s\r\n", n > 1 ? L" (несколько)" : L"");
@@ -1981,7 +2030,15 @@ static void plm_card(long id, wchar_t *out, int cap) {
         skipped++;
         continue;
       }
-      if (!rows[i].s2[0] && !rows[i].n2) continue; /* пустое не показываем */
+      if (!rows[i].s2[0] && !rows[i].n2) {
+        /* коллекции и составные атрибуты своего значения не имеют, но знать
+           об их существовании надо: раньше они просто исчезали из списка */
+        if (g_cardVerbose && (rows[i].n3 == 8 || rows[i].n3 == 23))
+          card_add(&c, L"  %-28s (%s)\r\n",
+                   card_label(rows[i].s1) ? card_label(rows[i].s1) : rows[i].s1,
+                   rows[i].n3 == 8 ? L"коллекция" : L"составной");
+        continue;
+      }
       if (!card_label(rows[i].s1)) unknown++;
       if (g_cardVerbose) card_pair_t(&c, L"  ", rows[i].s1, rows[i].s2, rows[i].n2, rows[i].n3);
     }
