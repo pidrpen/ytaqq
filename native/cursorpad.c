@@ -54,6 +54,7 @@
 #define ID_ASK_TAB 114
 #define ID_CLIP 131
 #define ID_CLIPCLR 153
+#define ID_ANSPIN 154
 #define TIMER_FOLLOW 1
 #define TIMER_SAVE 2
 #define TIMER_PASTE 3
@@ -93,7 +94,7 @@
 #define PAD 12
 #define GUTTER 26
 #define SET_W 312
-#define SET_H 780
+#define SET_H 812  /* +32 на строку «оставлять на месте» */
 #define ASK_W 312
 #define ASK_H 224 /* room for the drawn header */
 #define ID_THEME_BASE 140
@@ -172,6 +173,7 @@ static HFONT g_fontMono;
 static BOOL g_ansMono; /* ответ показывается колонками */
 static HWND g_filesBar;
 static HWND g_chkAuto;
+static HWND g_chkAnsPin;
 static HWND g_answer;
 static HWND g_answerList;
 static HWND g_pick;
@@ -191,6 +193,8 @@ static BOOL g_notesTruncated = FALSE; /* loaded file was bigger than the box */
 static int g_ansW = 0, g_ansH = 0;   /* запомненный размер окна находок */
 static int g_cardW = 0, g_cardH = 0; /* у карточки он свой: она длиннее списка */
 static int g_ansPt = 10;             /* масштаб текста ответа, Ctrl+колесо */
+static BOOL g_ansKeepPos;            /* окно ответа: держать на месте, а не у курсора */
+static int g_ansX = 0, g_ansY = 0;   /* где его оставили */
 static const wchar_t *g_ansTitle; /* set when the panel shows something other than hits */
 static BOOL g_trayAdded = FALSE;
 static BOOL g_hidden = FALSE;
@@ -255,6 +259,7 @@ static wchar_t g_plmLinks[PLM_ROWS][PLM_LINK];
 static wchar_t g_plmEsi[PLM_ROWS][PLM_COL1];
 static wchar_t g_plmTp[PLM_ROWS][PLM_COL2];
 static long g_plmIds[PLM_ROWS];  /* InfoObjectId каждой строки — для карточки */
+static int g_plmTmpl[PLM_ROWS];  /* шаблон строки: по нему видно, где ТП */
 static int g_plmCount = 0;
 static BOOL g_autostart = FALSE;
 static void show_status(const wchar_t *text);
@@ -515,17 +520,20 @@ static void load_cursor_pref(void) {
   HANDLE h = CreateFileW(g_prefPath, GENERIC_READ, FILE_SHARE_READ, NULL,
                          OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
   if (h == INVALID_HANDLE_VALUE) return;
-  char buf[128];
+  char buf[192];
   DWORD n = 0;
-  ReadFile(h, buf, 127, &n, NULL);
+  ReadFile(h, buf, 191, &n, NULL);
   CloseHandle(h);
   buf[n] = 0;
   char skin[16] = {0};
   char eng[16] = {0};
   int bg = g_alphaFollow, fg = g_alphaPinned, autoOn = -1, theme = 0, aw = 0, ah = 0;
-  int cw = 0, ch = 0, pt = 0;
-  sscanf(buf, "%15s %d %d %15s %d %d %d %d %d %d %d", skin, &bg, &fg, eng, &autoOn, &theme, &aw,
-         &ah, &cw, &ch, &pt);
+  int cw = 0, ch = 0, pt = 0, keep = 0, ax = 0, ay = 0;
+  sscanf(buf, "%15s %d %d %15s %d %d %d %d %d %d %d %d %d %d", skin, &bg, &fg, eng, &autoOn,
+         &theme, &aw, &ah, &cw, &ch, &pt, &keep, &ax, &ay);
+  g_ansKeepPos = keep == 1;
+  g_ansX = ax;
+  g_ansY = ay;
   if (aw >= 320 && aw <= 4000) g_ansW = aw;
   if (ah >= 200 && ah <= 3000) g_ansH = ah;
   if (cw >= 320 && cw <= 4000) g_cardW = cw;
@@ -547,10 +555,10 @@ static void load_cursor_pref(void) {
 static void save_cursor_pref(void) {
   const char *v = g_skin == 2 ? "k3" : (g_skin == 0 ? "system" : "k2");
   const char *e = g_engine == 4 ? "plm" : (g_engine == 5 ? "files" : "ai");
-  char buf[128];
-  snprintf(buf, sizeof(buf), "%s %d %d %s %d %d %d %d %d %d %d\n", v, g_alphaFollow,
+  char buf[160];
+  snprintf(buf, sizeof(buf), "%s %d %d %s %d %d %d %d %d %d %d %d %d %d\n", v, g_alphaFollow,
            g_alphaPinned, e, g_autostart ? 1 : 0, g_theme, g_ansW, g_ansH, g_cardW, g_cardH,
-           g_ansPt);
+           g_ansPt, g_ansKeepPos ? 1 : 0, g_ansX, g_ansY);
   HANDLE h = CreateFileW(g_prefPath, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
                          FILE_ATTRIBUTE_NORMAL, NULL);
   if (h == INVALID_HANDLE_VALUE) return;
@@ -803,6 +811,7 @@ static void apply_follow_state(void) {
   if (g_plmUser) EnableWindow(g_plmUser, !g_follow);
   if (g_plmPass) EnableWindow(g_plmPass, !g_follow);
   if (g_chkAuto) EnableWindow(g_chkAuto, !g_follow);
+  if (g_chkAnsPin) EnableWindow(g_chkAnsPin, !g_follow);
   update_pin_label();
   if (g_follow && g_setHwnd) ShowWindow(g_setHwnd, SW_HIDE);
   if (g_follow && g_askHwnd) ShowWindow(g_askHwnd, SW_HIDE);
@@ -1741,6 +1750,8 @@ static void layout_settings(void) {
   if (g_btnSys) MoveWindow(g_btnSys, pad, y, cw - pad, btnH, TRUE);
   y += btnH + gap;
   if (g_chkAuto) MoveWindow(g_chkAuto, pad, y, cw - pad, btnH, TRUE);
+  y += btnH + gap;
+  if (g_chkAnsPin) MoveWindow(g_chkAnsPin, pad, y, cw - pad, btnH, TRUE);
   y += btnH + gap + 22;
   if (g_tbBg) MoveWindow(g_tbBg, pad, y, cw - pad, btnH, TRUE);
   y += btnH + 24;
@@ -1868,6 +1879,12 @@ static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
       /* the same button stops a walk that is already running */
       if (InterlockedCompareExchange(&g_filesBusy, 0, 0)) files_stop_index();
       else files_apply_root(TRUE);
+    }
+    if (LOWORD(wParam) == ID_ANSPIN) {
+      g_ansKeepPos = (SendMessageW(g_chkAnsPin, BM_GETCHECK, 0, 0) == BST_CHECKED);
+      save_cursor_pref();
+      show_status(g_ansKeepPos ? L"Окно находок остаётся на месте"
+                               : L"Окно находок у курсора");
     }
     if (LOWORD(wParam) == ID_AUTOSTART) {
       g_autostart = (SendMessageW(g_chkAuto, BM_GETCHECK, 0, 0) == BST_CHECKED);
@@ -2157,6 +2174,9 @@ static void create_settings(HWND owner) {
   g_chkAuto = CreateWindowExW(0, L"BUTTON", L"Автозапуск с Windows",
                               WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 0, 0, 200, 26,
                               g_setHwnd, (HMENU)(INT_PTR)ID_AUTOSTART, NULL, NULL);
+  g_chkAnsPin = CreateWindowExW(0, L"BUTTON", L"Окно находок оставлять на месте",
+                                WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 0, 0, 240, 26,
+                                g_setHwnd, (HMENU)(INT_PTR)ID_ANSPIN, NULL, NULL);
   g_ocr = mk_btn(g_setHwnd, L"Выделить и прочитать (F6)", ID_OCR);
   g_btnUp = mk_btn(g_setHwnd, L"Обновить с GitHub", ID_UPDATE);
   for (int i = 0; i < THEME_COUNT; i++)
@@ -2194,6 +2214,8 @@ static void create_settings(HWND owner) {
   if (g_sqlPass[0] && g_plmPass) SetWindowTextW(g_plmPass, L"********");
   if (g_chkAuto) SendMessageW(g_chkAuto, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
   if (g_chkAuto) SendMessageW(g_chkAuto, BM_SETCHECK, g_autostart ? BST_CHECKED : BST_UNCHECKED, 0);
+  if (g_chkAnsPin)
+    SendMessageW(g_chkAnsPin, BM_SETCHECK, g_ansKeepPos ? BST_CHECKED : BST_UNCHECKED, 0);
   update_engine_buttons();
   layout_settings();
 }

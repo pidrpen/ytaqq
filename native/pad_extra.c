@@ -829,6 +829,19 @@ static void show_selected_in_explorer(void) {
   show_in_explorer(g_plmLinks[i]);
 }
 
+/* Обозначение — всё до первой скобки или двоеточия в имени объекта. */
+static void plm_designation(const wchar_t *name, wchar_t *out, int cap) {
+  int i = 0;
+  while (name[i] && i < cap - 1) {
+    wchar_t ch = name[i];
+    if (ch == L'[' || ch == L'<' || ch == L'(' || ch == L':') break;
+    out[i] = ch;
+    i++;
+  }
+  while (i > 0 && out[i - 1] == L' ') i--;
+  out[i] = 0;
+}
+
 static BOOL plm_lookup(const wchar_t *query, wchar_t *out, int cap) {
   g_plmLastLink[0] = 0;
   g_plmCount = 0;
@@ -890,10 +903,12 @@ static BOOL plm_lookup(const wchar_t *query, wchar_t *out, int cap) {
   int n = 0;
   wchar_t links[1800] = {0};
   size_t linkLen = 0;
-  while (SQLFetch(st) == SQL_SUCCESS && n < 20) {
+  /* та же беда, что и в карточке: SQL_SUCCESS_WITH_INFO обрывал выдачу */
+  while (SQL_SUCCEEDED(SQLFetch(st)) && n < 20) {
     long oid = (idInd == SQL_NULL_DATA || openId == 0) ? 0 : (long)openId;
     make_plm_link(g_plmLinks[n], PLM_LINK, oid);
     g_plmIds[n] = oid;
+    g_plmTmpl[n] = (int)tmpl;
     g_plmEsi[n][0] = 0;
     g_plmTp[n][0] = 0;
     if (tmpl == 1794) {
@@ -917,6 +932,41 @@ static BOOL plm_lookup(const wchar_t *query, wchar_t *out, int cap) {
       linkLen += add;
     }
     n++;
+  }
+  /* ЭСИ и его техпроцесс приходят из поиска двумя отдельными строками, хотя
+     это одно и то же изделие. Сводим их в одну: обозначение у них общее,
+     у техпроцесса на конце лишнее «ТП». Запросов для этого не нужно. */
+  for (int i = 0; i < n; i++) {
+    if (g_plmTmpl[i] != 1794 || !g_plmTp[i][0]) continue;
+    wchar_t dtp[PLM_COL1];
+    plm_designation(g_plmTp[i], dtp, PLM_COL1);
+    size_t dl = wcslen(dtp);
+    if (dl > 2 && _wcsicmp(dtp + dl - 2, L"ТП") == 0) dtp[dl - 2] = 0;
+    if (!dtp[0]) continue;
+    for (int j = 0; j < n; j++) {
+      if (j == i || g_plmTmpl[j] == 1794 || g_plmTp[j][0] || !g_plmEsi[j][0]) continue;
+      wchar_t des[PLM_COL1];
+      plm_designation(g_plmEsi[j], des, PLM_COL1);
+      if (_wcsicmp(des, dtp) != 0) continue;
+      lstrcpynW(g_plmTp[j], g_plmTp[i], PLM_COL2);
+      g_plmTmpl[i] = -1; /* строка техпроцесса больше не нужна отдельно */
+      break;
+    }
+  }
+  {
+    int w = 0;
+    for (int i = 0; i < n; i++) {
+      if (g_plmTmpl[i] == -1) continue;
+      if (w != i) {
+        lstrcpynW(g_plmEsi[w], g_plmEsi[i], PLM_COL1);
+        lstrcpynW(g_plmTp[w], g_plmTp[i], PLM_COL2);
+        lstrcpynW(g_plmLinks[w], g_plmLinks[i], PLM_LINK);
+        g_plmIds[w] = g_plmIds[i];
+        g_plmTmpl[w] = g_plmTmpl[i];
+      }
+      w++;
+    }
+    n = w;
   }
   g_plmCount = n;
   SQLFreeHandle(SQL_HANDLE_STMT, st);
@@ -2393,6 +2443,8 @@ static LRESULT CALLBACK AnswerProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
     if (wParam != SIZE_MINIMIZED) {
       RECT wr;
       GetWindowRect(hwnd, &wr);
+      g_ansX = wr.left;
+      g_ansY = wr.top;
       if (g_ansMono) {
         g_cardW = wr.right - wr.left;
         g_cardH = wr.bottom - wr.top;
@@ -2662,6 +2714,13 @@ static void show_answer_text(const wchar_t *text) {
   int x = pt.x + 18, y = pt.y + 22;
   RECT wa;
   get_work_area(pt, &wa);
+  /* по умолчанию окно выходит у курсора — в этом смысл программы. Но для
+     карточки это мешает: открыл в удобном месте, а она снова прыгает.
+     Галочка в Настройках оставляет её там, где её положили. */
+  if (g_ansKeepPos && (g_ansX || g_ansY)) {
+    x = g_ansX;
+    y = g_ansY;
+  }
   if (x + ANS_W > wa.right) x = wa.right - ANS_W - 8;
   if (y + ANS_H > wa.bottom) y = wa.bottom - ANS_H - 8;
   if (x < wa.left) x = wa.left + 8;
