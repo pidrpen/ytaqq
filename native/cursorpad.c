@@ -227,6 +227,13 @@ static wchar_t g_dataDir[MAX_PATH];
 static wchar_t g_imgDir[MAX_PATH];
 static wchar_t g_status[160];
 static wchar_t g_ocrNote[160]; /* why recognition produced nothing */
+/* Распознанный текст показывался в окне находок и затирал выжимку.
+   Теперь у него своё окно — и текст в нём можно править перед поиском:
+   распознавание путает «О» с нулём чаще, чем хотелось бы. */
+static HWND g_ocrWnd, g_ocrEdit;
+static int g_ocrX, g_ocrY, g_ocrW, g_ocrH;
+static int g_ocrPt = 11;
+static HFONT g_ocrFontZoom;
 static BOOL g_statusOn = FALSE;
 static HINSTANCE g_inst;
 static int g_skin = 1; /* 0 system, 1 sword, 2 gauntlet */
@@ -288,6 +295,8 @@ static BOOL autostart_get(void);
 static void autostart_set(BOOL on);
 static void create_answer(HWND owner);
 static void create_card(HWND owner);
+static void create_ocr(HWND owner);
+static void show_ocr_text(const wchar_t *text);
 static void show_answer_text(const wchar_t *text);
 
 static void apply_dpi(HWND hwnd) {
@@ -510,6 +519,10 @@ static void apply_theme(void) {
     SetClassLongPtrW(g_card, GCLP_HBRBACKGROUND, (LONG_PTR)g_paper);
     InvalidateRect(g_card, NULL, TRUE);
   }
+  if (g_ocrWnd) {
+    SetClassLongPtrW(g_ocrWnd, GCLP_HBRBACKGROUND, (LONG_PTR)g_paper);
+    InvalidateRect(g_ocrWnd, NULL, TRUE);
+  }
   if (g_edit) InvalidateRect(g_edit, NULL, TRUE);
   if (g_clipEdit) InvalidateRect(g_clipEdit, NULL, TRUE);
   update_theme_buttons();
@@ -533,9 +546,9 @@ static void load_cursor_pref(void) {
   HANDLE h = CreateFileW(g_prefPath, GENERIC_READ, FILE_SHARE_READ, NULL,
                          OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
   if (h == INVALID_HANDLE_VALUE) return;
-  char buf[240];
+  char buf[320];
   DWORD n = 0;
-  ReadFile(h, buf, 239, &n, NULL);
+  ReadFile(h, buf, 319, &n, NULL);
   CloseHandle(h);
   buf[n] = 0;
   char skin[16] = {0};
@@ -545,11 +558,18 @@ static void load_cursor_pref(void) {
   /* три последних — про окно карточки; в старых файлах их нет,
      sscanf просто их не заполнит и останутся нули */
   int cx = 0, cy = 0, cpt = 0;
-  sscanf(buf, "%15s %d %d %15s %d %d %d %d %d %d %d %d %d %d %d %d %d", skin, &bg, &fg, eng,
-         &autoOn, &theme, &aw, &ah, &cw, &ch, &pt, &keep, &ax, &ay, &cx, &cy, &cpt);
+  int ox = 0, oy = 0, ow = 0, oh = 0, opt = 0;
+  sscanf(buf, "%15s %d %d %15s %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d", skin, &bg,
+         &fg, eng, &autoOn, &theme, &aw, &ah, &cw, &ch, &pt, &keep, &ax, &ay, &cx, &cy, &cpt, &ox,
+         &oy, &ow, &oh, &opt);
   g_cardX = cx;
   g_cardY = cy;
   if (cpt >= 7 && cpt <= 22) g_cardPt = cpt;
+  g_ocrX = ox;
+  g_ocrY = oy;
+  if (ow >= 320 && ow <= 4000) g_ocrW = ow;
+  if (oh >= 160 && oh <= 3000) g_ocrH = oh;
+  if (opt >= 7 && opt <= 22) g_ocrPt = opt;
   g_ansKeepPos = keep == 1;
   g_ansX = ax;
   g_ansY = ay;
@@ -574,10 +594,11 @@ static void load_cursor_pref(void) {
 static void save_cursor_pref(void) {
   const char *v = g_skin == 2 ? "k3" : (g_skin == 0 ? "system" : "k2");
   const char *e = g_engine == 4 ? "plm" : (g_engine == 5 ? "files" : "ai");
-  char buf[200];
-  snprintf(buf, sizeof(buf), "%s %d %d %s %d %d %d %d %d %d %d %d %d %d %d %d %d\n", v,
-           g_alphaFollow, g_alphaPinned, e, g_autostart ? 1 : 0, g_theme, g_ansW, g_ansH, g_cardW,
-           g_cardH, g_ansPt, g_ansKeepPos ? 1 : 0, g_ansX, g_ansY, g_cardX, g_cardY, g_cardPt);
+  char buf[280];
+  snprintf(buf, sizeof(buf), "%s %d %d %s %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d\n",
+           v, g_alphaFollow, g_alphaPinned, e, g_autostart ? 1 : 0, g_theme, g_ansW, g_ansH,
+           g_cardW, g_cardH, g_ansPt, g_ansKeepPos ? 1 : 0, g_ansX, g_ansY, g_cardX, g_cardY,
+           g_cardPt, g_ocrX, g_ocrY, g_ocrW, g_ocrH, g_ocrPt);
   HANDLE h = CreateFileW(g_prefPath, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
                          FILE_ATTRIBUTE_NORMAL, NULL);
   if (h == INVALID_HANDLE_VALUE) return;
@@ -2299,6 +2320,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     create_ask(hwnd);
     create_answer(hwnd);
     create_card(hwnd);
+    create_ocr(hwnd);
     apply_theme();
     SendMessageW(g_tbBg, TBM_SETPOS, TRUE, g_alphaFollow);
     SendMessageW(g_tbFg, TBM_SETPOS, TRUE, g_alphaPinned);
@@ -2508,7 +2530,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     wchar_t *text = (wchar_t *)lParam;
     if (text && text[0]) {
       append_notes(text);
-      show_answer_text(text);
+      show_ocr_text(text);
       show_status(L"OCR: текст добавлен в блокнот");
     } else {
       show_status(g_ocrNote[0] ? g_ocrNote : L"Текст не распознан");
@@ -2567,6 +2589,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     if (g_askHwnd) DestroyWindow(g_askHwnd);
     if (g_answer) DestroyWindow(g_answer);
     if (g_card) DestroyWindow(g_card);
+    if (g_ocrWnd) DestroyWindow(g_ocrWnd);
     if (g_pick) DestroyWindow(g_pick);
     restore_system_cursor();
     KillTimer(hwnd, TIMER_FOLLOW);

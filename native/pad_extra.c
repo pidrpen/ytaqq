@@ -25,6 +25,10 @@
 #define ID_CARD_SHOW 162
 #define ID_CARD_CLOSE 163
 #define WM_CARD_DONE (WM_APP + 14)
+#define ID_OCR_COPY 164
+#define ID_OCR_FIND 165
+#define ID_OCR_AGAIN 166
+#define ID_OCR_CLOSE 167
 
 #define TIMER_CURSOR_KEEP 6
 #define WM_SEARCH_DONE (WM_APP + 8)
@@ -3338,6 +3342,293 @@ static void show_card_text(const wchar_t *text) {
   SetWindowPos(g_card, HWND_TOPMOST, x, y, aw, ah, SWP_SHOWWINDOW);
   card_sync_buttons();
   InvalidateRect(g_card, NULL, TRUE);
+}
+
+/* ---- распознанный текст: своё окно ------------------------------------ */
+/* Раньше результат падал в окно находок и затирал выжимку. Теперь
+   окно своё, и текст в нём можно править: распознавание путает «О» с нулём,
+   а искать потом по испорченному обозначению бесполезно. */
+static void layout_ocr(void);
+static void start_ocr_pick(void);
+
+static HFONT ocr_font(void) {
+  if (g_ocrFontZoom) return g_ocrFontZoom;
+  g_ocrFontZoom = make_font(L"Segoe UI Variable Text", g_ocrPt, FW_NORMAL);
+  if (!g_ocrFontZoom) g_ocrFontZoom = make_font(L"Segoe UI", g_ocrPt, FW_NORMAL);
+  return g_ocrFontZoom;
+}
+
+static void ocr_zoom(int delta) {
+  int pt = g_ocrPt + delta;
+  if (pt < 7) pt = 7;
+  if (pt > 22) pt = 22;
+  if (pt == g_ocrPt) return;
+  g_ocrPt = pt;
+  if (g_ocrFontZoom) {
+    DeleteObject(g_ocrFontZoom);
+    g_ocrFontZoom = NULL;
+  }
+  if (g_ocrEdit) {
+    SendMessageW(g_ocrEdit, WM_SETFONT, (WPARAM)ocr_font(), TRUE);
+    InvalidateRect(g_ocrEdit, NULL, TRUE);
+  }
+  save_cursor_pref();
+}
+
+static WNDPROC g_oldOcrEdit;
+
+static LRESULT CALLBACK OcrEditProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+  if (msg == WM_MOUSEWHEEL && (GetKeyState(VK_CONTROL) & 0x8000)) {
+    ocr_zoom(GET_WHEEL_DELTA_WPARAM(wParam) > 0 ? 1 : -1);
+    return 0;
+  }
+  return CallWindowProcW(g_oldOcrEdit, hwnd, msg, wParam, lParam);
+}
+
+static void layout_ocr(void) {
+  if (!g_ocrWnd) return;
+  RECT rc;
+  GetClientRect(g_ocrWnd, &rc);
+  int pad = 12, btnH = 28, gap = 7;
+  int top = PANEL_TITLE_H + 6;
+  int by = rc.bottom - pad - btnH;
+  if (g_ocrEdit) MoveWindow(g_ocrEdit, pad, top, rc.right - pad * 2, by - top - 6, TRUE);
+  HWND btns[4];
+  btns[0] = GetDlgItem(g_ocrWnd, ID_OCR_COPY);
+  btns[1] = GetDlgItem(g_ocrWnd, ID_OCR_FIND);
+  btns[2] = GetDlgItem(g_ocrWnd, ID_OCR_AGAIN);
+  btns[3] = GetDlgItem(g_ocrWnd, ID_OCR_CLOSE);
+  int bwid[4] = {0, 0, 0, 0};
+  int total = 0, vis = 0;
+  HDC dc = GetDC(g_ocrWnd);
+  HGDIOBJ oldFont = (dc && g_fontUi) ? SelectObject(dc, g_fontUi) : NULL;
+  for (int k = 0; k < 4; k++) {
+    if (!btns[k]) continue;
+    wchar_t t[96];
+    t[0] = 0;
+    GetWindowTextW(btns[k], t, 96);
+    SIZE sz;
+    sz.cx = 60;
+    sz.cy = 0;
+    if (dc) GetTextExtentPoint32W(dc, t, (int)wcslen(t), &sz);
+    bwid[k] = sz.cx + 24;
+    if (bwid[k] < 56) bwid[k] = 56;
+    total += bwid[k];
+    vis++;
+  }
+  if (oldFont) SelectObject(dc, oldFont);
+  if (dc) ReleaseDC(g_ocrWnd, dc);
+  if (vis > 0) {
+    int avail = rc.right - pad * 2 - gap * (vis - 1);
+    if (avail < vis * 40) avail = vis * 40;
+    if (total > avail && total > 0)
+      for (int k = 0; k < 4; k++) bwid[k] = bwid[k] * avail / total;
+    int bx = pad;
+    for (int k = 0; k < 4; k++) {
+      if (!btns[k]) continue;
+      MoveWindow(btns[k], bx, by, bwid[k], btnH, TRUE);
+      ShowWindow(btns[k], SW_SHOW);
+      bx += bwid[k] + gap;
+    }
+  }
+}
+
+/* Что искать: выделенное в окне, а если ничего не выделено — первая
+   непустая строка. Целиком распознанный лист в поиск отправлять бессмысленно. */
+static void ocr_find_selected(void) {
+  if (!g_ocrEdit) return;
+  DWORD a = 0, b = 0;
+  SendMessageW(g_ocrEdit, EM_GETSEL, (WPARAM)&a, (LPARAM)&b);
+  int len = GetWindowTextLengthW(g_ocrEdit);
+  wchar_t *all = (wchar_t *)malloc((size_t)(len + 1) * sizeof(wchar_t));
+  if (!all) return;
+  GetWindowTextW(g_ocrEdit, all, len + 1);
+  wchar_t q[400];
+  q[0] = 0;
+  if (b > a && b - a < 399) {
+    lstrcpynW(q, all + a, (int)(b - a) + 1);
+  } else {
+    const wchar_t *p = all;
+    while (*p == L'\r' || *p == L'\n' || *p == L' ' || *p == L'\t') p++;
+    int i = 0;
+    while (p[i] && p[i] != L'\r' && p[i] != L'\n' && i < 399) {
+      q[i] = p[i];
+      i++;
+    }
+    q[i] = 0;
+  }
+  free(all);
+  int n = (int)wcslen(q);
+  while (n > 0 && (q[n - 1] == L' ' || q[n - 1] == L'\t')) q[--n] = 0;
+  if (!q[0]) {
+    show_status(L"Нечего искать — выделите текст");
+    return;
+  }
+  start_lookup(q);
+}
+
+static RECT g_ocrPrev;
+static BOOL g_ocrBig;
+
+static void ocr_toggle_big(HWND hwnd) {
+  POINT pt;
+  RECT wa, wr;
+  GetWindowRect(hwnd, &wr);
+  pt.x = (wr.left + wr.right) / 2;
+  pt.y = (wr.top + wr.bottom) / 2;
+  get_work_area(pt, &wa);
+  if (!g_ocrBig) {
+    g_ocrPrev = wr;
+    g_ocrBig = TRUE;
+    SetWindowPos(hwnd, HWND_TOPMOST, wa.left + 8, wa.top + 8, wa.right - wa.left - 16,
+                 wa.bottom - wa.top - 16, SWP_SHOWWINDOW);
+  } else {
+    g_ocrBig = FALSE;
+    SetWindowPos(hwnd, HWND_TOPMOST, g_ocrPrev.left, g_ocrPrev.top,
+                 g_ocrPrev.right - g_ocrPrev.left, g_ocrPrev.bottom - g_ocrPrev.top,
+                 SWP_SHOWWINDOW);
+  }
+  layout_ocr();
+}
+
+static LRESULT CALLBACK OcrProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+  switch (msg) {
+  case WM_ERASEBKGND:
+    return 1;
+  case WM_PAINT: {
+    PAINTSTRUCT ps;
+    HDC hdc = BeginPaint(hwnd, &ps);
+    RECT rc;
+    GetClientRect(hwnd, &rc);
+    FillRect(hdc, &rc, g_paper);
+    draw_panel_header(hwnd, hdc, L"Распознанный текст");
+    EndPaint(hwnd, &ps);
+    return 0;
+  }
+  case WM_NCHITTEST:
+    return panel_hittest(hwnd, lParam);
+  case WM_MOUSEWHEEL:
+    if (GetKeyState(VK_CONTROL) & 0x8000) {
+      ocr_zoom(GET_WHEEL_DELTA_WPARAM(wParam) > 0 ? 1 : -1);
+      return 0;
+    }
+    break;
+  case WM_NCLBUTTONDBLCLK:
+    ocr_toggle_big(hwnd);
+    return 0;
+  case WM_DRAWITEM:
+    draw_pad_button((const DRAWITEMSTRUCT *)lParam);
+    return TRUE;
+  case WM_COMMAND:
+    if (LOWORD(wParam) == ID_OCR_CLOSE) ShowWindow(hwnd, SW_HIDE);
+    if (LOWORD(wParam) == ID_OCR_COPY && g_ocrEdit) {
+      int len = GetWindowTextLengthW(g_ocrEdit);
+      wchar_t *w = (wchar_t *)malloc((size_t)(len + 1) * sizeof(wchar_t));
+      if (w) {
+        GetWindowTextW(g_ocrEdit, w, len + 1);
+        clipboard_set(w);
+        free(w);
+        show_status(L"Распознанное скопировано");
+      }
+    }
+    if (LOWORD(wParam) == ID_OCR_FIND) ocr_find_selected();
+    if (LOWORD(wParam) == ID_OCR_AGAIN) start_ocr_pick();
+    return 0;
+  case WM_CLOSE:
+    ShowWindow(hwnd, SW_HIDE);
+    return 0;
+  case WM_EXITSIZEMOVE:
+    layout_ocr();
+    InvalidateRect(hwnd, NULL, TRUE);
+    return 0;
+  case WM_MOVE:
+    if (!g_ocrBig && IsWindowVisible(hwnd)) {
+      RECT wr;
+      GetWindowRect(hwnd, &wr);
+      g_ocrX = wr.left;
+      g_ocrY = wr.top;
+    }
+    return 0;
+  case WM_SIZE:
+    layout_ocr();
+    InvalidateRect(hwnd, NULL, TRUE);
+    if (wParam != SIZE_MINIMIZED && !g_ocrBig) {
+      RECT wr;
+      GetWindowRect(hwnd, &wr);
+      g_ocrX = wr.left;
+      g_ocrY = wr.top;
+      g_ocrW = wr.right - wr.left;
+      g_ocrH = wr.bottom - wr.top;
+    }
+    return 0;
+  }
+  return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+static void create_ocr(HWND owner) {
+  WNDCLASSEXW wc;
+  memset(&wc, 0, sizeof(wc));
+  wc.cbSize = sizeof(wc);
+  wc.style = CS_HREDRAW | CS_VREDRAW;
+  wc.lpfnWndProc = OcrProc;
+  wc.hInstance = g_inst;
+  wc.hCursor = LoadCursorW(NULL, IDC_ARROW);
+  wc.hbrBackground = g_paper;
+  wc.lpszClassName = L"CursorPadOcrWnd";
+  RegisterClassExW(&wc);
+  g_ocrWnd = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, L"CursorPadOcrWnd",
+                             L"Распознанный текст",
+                             WS_POPUP | WS_THICKFRAME | WS_CLIPCHILDREN, 0, 0, ANS_W, 300, owner,
+                             NULL, g_inst, NULL);
+  round_corners(g_ocrWnd);
+  /* поле не только для чтения: одну букву поправить бывает нужнее всего */
+  g_ocrEdit = CreateWindowExW(0, L"EDIT", L"",
+                              WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL,
+                              0, 0, 100, 100, g_ocrWnd, NULL, NULL, NULL);
+  g_oldOcrEdit = (WNDPROC)SetWindowLongPtrW(g_ocrEdit, GWLP_WNDPROC, (LONG_PTR)OcrEditProc);
+  HWND copy = mk_btn(g_ocrWnd, L"Копировать", ID_OCR_COPY);
+  HWND find = mk_btn(g_ocrWnd, L"Найти это", ID_OCR_FIND);
+  HWND again = mk_btn(g_ocrWnd, L"Распознать ещё", ID_OCR_AGAIN);
+  HWND cls = mk_btn(g_ocrWnd, L"Закрыть", ID_OCR_CLOSE);
+  SendMessageW(g_ocrEdit, WM_SETFONT, (WPARAM)ocr_font(), TRUE);
+  if (g_fontUi) {
+    SendMessageW(copy, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
+    SendMessageW(find, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
+    SendMessageW(again, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
+    SendMessageW(cls, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
+  }
+  layout_ocr();
+}
+
+static void show_ocr_text(const wchar_t *text) {
+  if (!g_ocrWnd) return;
+  if (g_ocrEdit) {
+    SendMessageW(g_ocrEdit, WM_SETFONT, (WPARAM)ocr_font(), TRUE);
+    SetWindowTextW(g_ocrEdit, text ? text : L"");
+  }
+  POINT pt;
+  RECT wa;
+  GetCursorPos(&pt);
+  get_work_area(pt, &wa);
+  int aw = g_ocrW > 0 ? g_ocrW : ANS_W;
+  int ah = g_ocrH > 0 ? g_ocrH : 300;
+  if (aw < 420) aw = 420;
+  if (aw > wa.right - wa.left) aw = wa.right - wa.left;
+  /* где окно оставили — там и откроется: читают и правят его долго */
+  int x = g_ocrX, y = g_ocrY;
+  if (!x && !y) {
+    x = pt.x + 18;
+    y = pt.y + 22;
+  }
+  if (x + aw > wa.right) x = wa.right - aw - 8;
+  if (y + ah > wa.bottom) y = wa.bottom - ah - 8;
+  if (x < wa.left) x = wa.left + 8;
+  if (y < wa.top) y = wa.top + 8;
+  g_ocrBig = FALSE;
+  SetWindowPos(g_ocrWnd, HWND_TOPMOST, x, y, aw, ah, SWP_SHOWWINDOW);
+  layout_ocr();
+  InvalidateRect(g_ocrWnd, NULL, TRUE);
+  if (g_ocrEdit) SetFocus(g_ocrEdit);
 }
 
 static void start_lookup(const wchar_t *q) {
