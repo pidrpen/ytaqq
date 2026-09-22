@@ -48,6 +48,7 @@ static BOOL g_filesWhenOk;
 static wchar_t g_filesNote[120];   /* last problem worth telling the user about */
 static volatile LONG g_filesScanned; /* live counter for the progress line */
 static volatile LONG g_filesCancel;  /* set to abandon a walk in progress */
+static volatile LONG g_filesRestart; /* обход брошен из-за смены папки, а не кнопкой */
 static volatile LONG g_filesDirs;    /* folders enumerated, for the speed line */
 static ULONGLONG g_filesT0;          /* when the current walk started */
 static ULONGLONG g_filesTook;        /* how long the last one took, ms */
@@ -1032,6 +1033,7 @@ static void files_walk_all(const wchar_t *root, FileIdx *out, BOOL *oom, BOOL *s
 static DWORD WINAPI files_index_thread(LPVOID param) {
   (void)param;
 again:;
+  InterlockedExchange(&g_filesCancel, 0); /* иначе повтор оборвётся сразу же */
   InterlockedExchange(&g_filesScanned, 0);
   InterlockedExchange(&g_filesDirs, 0);
   InterlockedExchange(&g_filesIdle, 0);
@@ -1045,8 +1047,14 @@ again:;
     /* a half-finished walk is worse than the index already on disk, so the
        partial result is thrown away and the previous one left alone */
     idx_free(ix);
-    lstrcpynW(g_filesNote, L"Обход прерван — прежний индекс сохранён", 120);
-    InterlockedExchange(&g_filesAgain, 0);
+    if (InterlockedExchange(&g_filesRestart, 0)) {
+      /* оборвали не кнопкой, а сменой папки — надо пройти новую */
+      g_filesNote[0] = 0;
+      InterlockedExchange(&g_filesAgain, 1);
+    } else {
+      lstrcpynW(g_filesNote, L"Обход прерван — прежний индекс сохранён", 120);
+      InterlockedExchange(&g_filesAgain, 0);
+    }
   } else if (ix) {
     BOOL saved = files_save_idx(ix);
     g_filesNote[0] = 0;
@@ -1107,6 +1115,12 @@ static void files_apply_root(BOOL force) {
   save_files_pref();
   BOOL changed = _wcsicmp(old, g_filesRoot) != 0;
   if (changed) {
+    /* обход уже идёт и ходит по прежней папке. Если его не оборвать, он
+       допишет json, где Path уже новый, а файлы ещё старые. */
+    if (InterlockedCompareExchange(&g_filesBusy, 0, 0) != 0) {
+      InterlockedExchange(&g_filesRestart, 1);
+      InterlockedExchange(&g_filesCancel, 1);
+    }
     files_clear();
     wchar_t jp[MAX_PATH];
     files_idx_path(jp, MAX_PATH);

@@ -27,6 +27,8 @@ print("wrote", root / "CursorPad.zip")
 PY
 # jsDelivr will not serve .exe, so the CDN mirrors get the same bytes as .bin
 cp -f /workspace/public/CursorPad.exe /workspace/public/CursorPad.bin
+# CursorPad.exe в public не публикуется: это байт в байт копия .bin,
+# а jsDelivr считает размер всего репозитория, и дубль в нём весит полностью
 cp -f version.txt /workspace/public/version.txt
 cp -f /workspace/public/CursorPad.exe /workspace/artifacts/CursorPad.exe
 cp -f /workspace/public/CursorPad.zip /workspace/artifacts/CursorPad.zip

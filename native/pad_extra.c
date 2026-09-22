@@ -496,6 +496,19 @@ static void open_plm_link(const wchar_t *link) {
   ShellExecuteW(NULL, L"open", link, NULL, NULL, SW_SHOWNORMAL);
 }
 
+static void ans_zoom(int delta);
+static WNDPROC g_oldAnsEdit;
+
+static LRESULT CALLBACK AnsEditProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+  if (msg == WM_MOUSEWHEEL && (GetKeyState(VK_CONTROL) & 0x8000)) {
+    ans_zoom(GET_WHEEL_DELTA_WPARAM(wParam) > 0 ? 1 : -1);
+    return 0;
+  }
+  return CallWindowProcW(g_oldAnsEdit, hwnd, msg, wParam, lParam);
+}
+
+static RECT g_ansPrev;
+static BOOL g_ansBig; /* окно находок развёрнуто на весь экран */
 static wchar_t g_cardDraw[PLM_LINK]; /* чертёж, найденный для карточки */
 /* Поиск уже показал список находок, и техпроцесс обычно в нём есть. Снимаем
    его перед тем, как список сменится карточкой: искать по базе то, что уже
@@ -941,15 +954,22 @@ static BOOL plm_lookup(const wchar_t *query, wchar_t *out, int cap) {
     wchar_t dtp[PLM_COL1];
     plm_designation(g_plmTp[i], dtp, PLM_COL1);
     size_t dl = wcslen(dtp);
-    if (dl > 2 && _wcsicmp(dtp + dl - 2, L"ТП") == 0) dtp[dl - 2] = 0;
-    if (!dtp[0]) continue;
+    /* у техпроцесса на конце обычно «ТП», но не всегда: если суффикса нет,
+       сравниваем как есть, иначе такие строки вообще не сводились */
+    wchar_t bare[PLM_COL1];
+    lstrcpynW(bare, dtp, PLM_COL1);
+    if (dl > 2 && _wcsicmp(dtp + dl - 2, L"ТП") == 0) bare[dl - 2] = 0;
+    if (!bare[0]) continue;
     for (int j = 0; j < n; j++) {
       if (j == i || g_plmTmpl[j] == 1794 || g_plmTp[j][0] || !g_plmEsi[j][0]) continue;
       wchar_t des[PLM_COL1];
       plm_designation(g_plmEsi[j], des, PLM_COL1);
-      if (_wcsicmp(des, dtp) != 0) continue;
+      if (_wcsicmp(des, bare) != 0 && _wcsicmp(des, dtp) != 0) continue;
       lstrcpynW(g_plmTp[j], g_plmTp[i], PLM_COL2);
-      g_plmTmpl[i] = -1; /* строка техпроцесса больше не нужна отдельно */
+      /* номер техпроцесса не теряем: карточка находит его сразу, а не
+         ищет заново по обозначению */
+      g_plmTpId[j] = g_plmIds[i];
+      g_plmTmpl[i] = -1;
       break;
     }
   }
@@ -962,11 +982,28 @@ static BOOL plm_lookup(const wchar_t *query, wchar_t *out, int cap) {
         lstrcpynW(g_plmTp[w], g_plmTp[i], PLM_COL2);
         lstrcpynW(g_plmLinks[w], g_plmLinks[i], PLM_LINK);
         g_plmIds[w] = g_plmIds[i];
+        g_plmTpId[w] = g_plmTpId[i];
         g_plmTmpl[w] = g_plmTmpl[i];
       }
       w++;
     }
     n = w;
+    /* текстовый список ссылок собирался до сведения и остался бы с уже
+       убранными строками. Пересобираем по тому, что видно на экране. */
+    linkLen = 0;
+    links[0] = 0;
+    for (int i = 0; i < n; i++) {
+      size_t add = wcslen(g_plmLinks[i]);
+      if (linkLen + (i ? 2 : 0) + add + 1 >= 1800) break;
+      if (i) {
+        links[linkLen++] = L'\r';
+        links[linkLen++] = L'\n';
+      }
+      memcpy(links + linkLen, g_plmLinks[i], (add + 1) * sizeof(wchar_t));
+      linkLen += add;
+    }
+    g_plmLastLink[0] = 0;
+    if (n > 0) lstrcpynW(g_plmLastLink, g_plmLinks[0], PLM_LINK);
   }
   g_plmCount = n;
   SQLFreeHandle(SQL_HANDLE_STMT, st);
@@ -2440,7 +2477,9 @@ static LRESULT CALLBACK AnswerProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
        repainted too, or the list is left drawn at its old offset */
     InvalidateRect(hwnd, NULL, TRUE);
     if (g_answerList) InvalidateRect(g_answerList, NULL, TRUE);
-    if (wParam != SIZE_MINIMIZED) {
+    /* пока окно развёрнуто, его размер и место временные: запоминать их
+       нельзя, иначе оно навсегда останется во весь экран */
+    if (wParam != SIZE_MINIMIZED && !g_ansBig) {
       RECT wr;
       GetWindowRect(hwnd, &wr);
       g_ansX = wr.left;
@@ -2480,6 +2519,9 @@ static void create_answer(HWND owner) {
       0, L"EDIT", L"",
       WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL,
       0, 0, 100, 100, g_answer, NULL, NULL, NULL);
+  /* колесо достаётся самому полю, а не окну: без этого Ctrl+колесо
+     работало только если крутить по рамке */
+  g_oldAnsEdit = (WNDPROC)SetWindowLongPtrW(g_answerEdit, GWLP_WNDPROC, (LONG_PTR)AnsEditProc);
   {
     WNDCLASSEXW pc;
     memset(&pc, 0, sizeof(pc));
@@ -2546,9 +2588,8 @@ static DWORD WINAPI card_thread(LPVOID param) {
   if (out) {
     out[0] = 0;
     plm_card(id, out, 160000);
-    /* чертёж грузится здесь же: распаковка большого TIFF не должна
-       подвешивать окно */
-    if (g_fullMode && g_cardDraw[0]) draw_open(g_cardDraw);
+    /* сам чертёж здесь не открываем: GDI+ не терпит, когда картинку готовит
+       один поток, а рисует другой. Его откроет окно, когда получит текст. */
     if (!PostMessageW(g_hwnd, WM_SEARCH_DONE, 0, (LPARAM)out)) free(out);
   }
   InterlockedExchange(&g_netBusy, 0);
@@ -2577,11 +2618,18 @@ static void show_card_selected_mode(BOOL full) {
     show_status(L"Запрос уже идёт");
     return;
   }
+  draw_close();
   g_snapN = 0;
   for (int k = 0; k < g_plmCount && k < PLM_ROWS; k++) {
     lstrcpynW(g_snapName[g_snapN], g_plmEsi[k], PLM_COL1);
     g_snapId[g_snapN] = g_plmIds[k];
     g_snapN++;
+    /* техпроцесс, сведённый в эту же строку, — отдельной записью снимка */
+    if (g_plmTpId[k] && g_plmTp[k][0] && g_snapN < PLM_ROWS) {
+      lstrcpynW(g_snapName[g_snapN], g_plmTp[k], PLM_COL1);
+      g_snapId[g_snapN] = g_plmTpId[k];
+      g_snapN++;
+    }
   }
   g_ansTitle = g_cardVerbose ? L"Атрибуты объекта" : L"Карточка";
   g_ansMono = TRUE;
@@ -2624,6 +2672,7 @@ static void ans_zoom(int delta) {
     DeleteObject(g_ansFontZoom);
     g_ansFontZoom = NULL;
   }
+  if (g_fullMode && g_cardDraw[0] && !g_drawImg) draw_open(g_cardDraw);
   if (g_answerEdit) {
     SendMessageW(g_answerEdit, WM_SETFONT, (WPARAM)ans_font(), TRUE);
     InvalidateRect(g_answerEdit, NULL, TRUE);
@@ -2678,9 +2727,6 @@ static void ans_fit(const wchar_t *text, const RECT *wa, int *outW, int *outH) {
 
 /* Разворот на всю рабочую область и возврат к прежнему размеру. Окно без
    обычной рамки, поэтому штатной кнопки у него нет — делаем сами. */
-static RECT g_ansPrev;
-static BOOL g_ansBig;
-
 static void ans_toggle_big(HWND hwnd) {
   POINT pt;
   RECT wa, wr;

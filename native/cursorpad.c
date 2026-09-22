@@ -251,7 +251,7 @@ static wchar_t g_plmDatabase[96] = L"";
 static wchar_t g_sqlUser[96] = L"";
 static wchar_t g_sqlPass[128] = L"";
 #define PLM_ROWS 200  /* result rows held for the list view */
-#define PLM_LINK 1024 /* room for long network paths, not just MAX_PATH */
+#define PLM_LINK 4096 /* сетевые пути бывают длиннее тысячи знаков */
 #define PLM_COL1 260
 #define PLM_COL2 640
 static wchar_t g_plmLastLink[PLM_LINK];
@@ -260,6 +260,7 @@ static wchar_t g_plmEsi[PLM_ROWS][PLM_COL1];
 static wchar_t g_plmTp[PLM_ROWS][PLM_COL2];
 static long g_plmIds[PLM_ROWS];  /* InfoObjectId каждой строки — для карточки */
 static int g_plmTmpl[PLM_ROWS];  /* шаблон строки: по нему видно, где ТП */
+static long g_plmTpId[PLM_ROWS];  /* id техпроцесса, сведённого в эту строку */
 static int g_plmCount = 0;
 static BOOL g_autostart = FALSE;
 static void show_status(const wchar_t *text);

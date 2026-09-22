@@ -17,3 +17,4 @@ screenshots/
 *.res
 __pycache__/
 native/CursorPadOcr.exe
+public/CursorPad.exe
