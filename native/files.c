@@ -3,8 +3,8 @@
    No depth limit, no file-count limit, no index-size limit:
    - the walk uses \\?\ extended paths and a work queue instead of recursion,
      so it is bound neither by MAX_PATH nor by nesting depth nor by the stack;
-   - 8 workers on a network share (32 made Samba slower), depth-first so the
-     server disk stays in one subtree, child paths allocated off the lock;
+   - 16 workers on a network share, depth-first; each child is queued as
+     soon as it is seen so nested folders do not stall the other workers;
    - entries live in an arena with de-duplicated folder names, so a million
      files cost tens of megabytes instead of hundreds;
    - the JSON is written compactly through a buffered writer into a temp file
@@ -267,13 +267,30 @@ static void files_refresh_status(void) {
   if (busy) {
     long done = (long)InterlockedCompareExchange(&g_filesScanned, 0, 0);
     long dirs = (long)InterlockedCompareExchange(&g_filesDirs, 0, 0);
-    ULONGLONG ms = g_filesT0 ? GetTickCount64() - g_filesT0 : 0;
-    long persec = ms > 500 ? (long)(done * 1000ull / ms) : 0;
-    long dsec = ms > 500 ? (long)(dirs * 1000ull / ms) : 0;
+    ULONGLONG now = GetTickCount64();
+    /* средняя с начала обхода всегда падает: первые жирные папки быстрые,
+       мелкие вложенные — нет. В строке — скорость за последнюю полсекунды. */
+    static ULONGLONG s_t0, s_prevT;
+    static long s_prevDone, s_prevDirs, s_rateF, s_rateD;
+    if (g_filesT0 != s_t0) {
+      s_t0 = g_filesT0;
+      s_prevT = now;
+      s_prevDone = done;
+      s_prevDirs = dirs;
+      s_rateF = s_rateD = 0;
+    }
+    if (now > s_prevT + 300) {
+      ULONGLONG dt = now - s_prevT;
+      s_rateF = (long)((done - s_prevDone) * 1000ull / dt);
+      s_rateD = (long)((dirs - s_prevDirs) * 1000ull / dt);
+      s_prevT = now;
+      s_prevDone = done;
+      s_prevDirs = dirs;
+    }
     long idle = (long)InterlockedCompareExchange(&g_filesIdle, 0, 0);
-    if (persec > 0)
+    if (s_rateF > 0 || s_rateD > 0)
       _snwprintf(t, 200, L"Обход: %ld файлов / %ld папок · %ld ф/с · %ld п/с · %d потоков, ждут %ld",
-                 done, dirs, persec, dsec, g_filesWorkers, idle);
+                 done, dirs, s_rateF, s_rateD, g_filesWorkers, idle);
     else
       _snwprintf(t, 200, L"Обход: %ld файлов, %ld папок…", done, dirs);
   }
@@ -876,30 +893,6 @@ static wchar_t *wq_pop(WalkQ *q) {
   return dir;
 }
 
-static BOOL wq_flush_kids(WalkQ *q, wchar_t **kids, int *kidsN) {
-  int n = *kidsN;
-  if (n <= 0) return TRUE;
-  *kidsN = 0;
-  EnterCriticalSection(&q->cs);
-  BOOL ok = TRUE;
-  for (int i = 0; i < n; i++) {
-    if (!ok) {
-      free(kids[i]);
-      kids[i] = NULL;
-      continue;
-    }
-    if (!wq_push_owned(q, kids[i])) {
-      q->oom = TRUE;
-      ok = FALSE;
-      /* wq_push_owned freed this one */
-    }
-    kids[i] = NULL;
-  }
-  if (ok) WakeAllConditionVariable(&q->cv);
-  LeaveCriticalSection(&q->cs);
-  return ok;
-}
-
 typedef struct {
   WalkQ *q;
   FileIdx *ix;
@@ -912,8 +905,6 @@ static DWORD WINAPI files_walk_worker(LPVOID param) {
   WalkQ *q = w->q;
   wchar_t *pat = NULL, *disp = NULL;
   size_t patCap = 0, dispCap = 0;
-  wchar_t **kids = NULL;
-  int kidsN = 0, kidsCap = 0;
   for (;;) {
     EnterCriticalSection(&q->cs);
     if (q->n == 0 && q->active > 0) {
@@ -949,6 +940,9 @@ static DWORD WINAPI files_walk_worker(LPVOID param) {
               continue;
             if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) continue;
             if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+              /* сразу в очередь: иначе при «папка в папке» остальные потоки
+                 ждут, пока родитель дочитает всех детей — отсюда провалы
+                 скорости и редкие всплески, когда пачка наконец вываливается */
               size_t nl = wcslen(fd.cFileName);
               wchar_t *owned = (wchar_t *)malloc((dl + nl + 2) * sizeof(wchar_t));
               if (!owned) {
@@ -958,18 +952,15 @@ static DWORD WINAPI files_walk_worker(LPVOID param) {
               memcpy(owned, dir, dl * sizeof(wchar_t));
               owned[dl] = L'\\';
               memcpy(owned + dl + 1, fd.cFileName, (nl + 1) * sizeof(wchar_t));
-              if (kidsN >= kidsCap) {
-                int cap = kidsCap ? kidsCap * 2 : 64;
-                wchar_t **grown = (wchar_t **)realloc(kids, (size_t)cap * sizeof(wchar_t *));
-                if (!grown) {
-                  free(owned);
-                  w->oom = TRUE;
-                  break;
-                }
-                kids = grown;
-                kidsCap = cap;
+              EnterCriticalSection(&q->cs);
+              BOOL pushed = wq_push_owned(q, owned);
+              if (pushed) WakeConditionVariable(&q->cv);
+              else q->oom = TRUE;
+              LeaveCriticalSection(&q->cs);
+              if (!pushed) {
+                w->oom = TRUE;
+                break;
               }
-              kids[kidsN++] = owned;
             } else {
               if (dirIdx < 0) {
                 if (!wq_display(q, dir, &disp, &dispCap)) {
@@ -1002,29 +993,20 @@ static DWORD WINAPI files_walk_worker(LPVOID param) {
     }
     free(dir);
 
-    if (w->stopped || w->oom || files_cancelled()) {
-      for (int i = 0; i < kidsN; i++) free(kids[i]);
-      kidsN = 0;
-    } else if (!wq_flush_kids(q, kids, &kidsN)) {
-      w->oom = TRUE;
-    }
-
     EnterCriticalSection(&q->cs);
     q->active--;
     if (q->n == 0 && q->active == 0) WakeAllConditionVariable(&q->cv);
     LeaveCriticalSection(&q->cs);
     if (w->oom || w->stopped) break;
   }
-  for (int i = 0; i < kidsN; i++) free(kids[i]);
-  free(kids);
   free(pat);
   free(disp);
   return 0;
 }
 
-/* A network share is waiting on round trips. More than ~8 listings at once
-   makes a Linux Samba box slower: the extra workers just fight over the
-   same disk. A local disk is limited by itself, so it gets fewer still. */
+/* Nested folders are one round-trip each. 8 workers left most of them
+   waiting; 32 scattered across the tree and Samba choked. 16 + depth-first
+   + children queued as soon as they are seen is the middle. */
 static int walk_worker_count(const wchar_t *root) {
   BOOL net = (root[0] == L'\\' && root[1] == L'\\') ||
              _wcsnicmp(root, L"\\\\?\\UNC\\", 8) == 0;
@@ -1037,7 +1019,7 @@ static int walk_worker_count(const wchar_t *root) {
       if (t == DRIVE_REMOTE) net = TRUE;
     }
   }
-  if (net) return 8;
+  if (net) return 16;
   SYSTEM_INFO si;
   GetSystemInfo(&si);
   int cpus = (int)si.dwNumberOfProcessors;
