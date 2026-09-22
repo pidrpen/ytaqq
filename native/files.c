@@ -268,31 +268,26 @@ static void files_refresh_status(void) {
     long done = (long)InterlockedCompareExchange(&g_filesScanned, 0, 0);
     long dirs = (long)InterlockedCompareExchange(&g_filesDirs, 0, 0);
     ULONGLONG now = GetTickCount64();
-    /* средняя с начала обхода всегда падает: первые жирные папки быстрые,
-       мелкие вложенные — нет. В строке — скорость за последнюю полсекунды. */
+    /* окно узкое — одна скорость, сглаженная, без «потоков/ждут/п/с» */
     static ULONGLONG s_t0, s_prevT;
-    static long s_prevDone, s_prevDirs, s_rateF, s_rateD;
+    static long s_prevDone, s_rateF;
     if (g_filesT0 != s_t0) {
       s_t0 = g_filesT0;
       s_prevT = now;
       s_prevDone = done;
-      s_prevDirs = dirs;
-      s_rateF = s_rateD = 0;
+      s_rateF = 0;
     }
-    if (now > s_prevT + 300) {
+    if (now > s_prevT + 800) {
       ULONGLONG dt = now - s_prevT;
-      s_rateF = (long)((done - s_prevDone) * 1000ull / dt);
-      s_rateD = (long)((dirs - s_prevDirs) * 1000ull / dt);
+      long inst = (long)((done - s_prevDone) * 1000ull / dt);
+      s_rateF = s_rateF > 0 ? (s_rateF * 3 + inst) / 4 : inst;
       s_prevT = now;
       s_prevDone = done;
-      s_prevDirs = dirs;
     }
-    long idle = (long)InterlockedCompareExchange(&g_filesIdle, 0, 0);
-    if (s_rateF > 0 || s_rateD > 0)
-      _snwprintf(t, 200, L"Обход: %ld файлов / %ld папок · %ld ф/с · %ld п/с · %d потоков, ждут %ld",
-                 done, dirs, s_rateF, s_rateD, g_filesWorkers, idle);
+    if (s_rateF > 0)
+      _snwprintf(t, 200, L"%ld файлов, %ld папок · %ld/с", done, dirs, s_rateF);
     else
-      _snwprintf(t, 200, L"Обход: %ld файлов, %ld папок…", done, dirs);
+      _snwprintf(t, 200, L"%ld файлов, %ld папок…", done, dirs);
   }
   else if (!g_filesRoot[0])
     lstrcpynW(t, L"Индекс: укажите папку", 200);
@@ -301,13 +296,10 @@ static void files_refresh_status(void) {
   else if (g_filesN <= 0)
     lstrcpynW(t, L"JSON пуст — «Обновить JSON»", 200);
   else if (g_filesWhenOk && g_filesTook)
-    _snwprintf(t, 200,
-               L"JSON: %d файлов · %02u.%02u %02u:%02u · обход %lu:%02lu (%ld папок, %d потоков)",
-               g_filesN, (unsigned)g_filesWhen.wDay, (unsigned)g_filesWhen.wMonth,
-               (unsigned)g_filesWhen.wHour, (unsigned)g_filesWhen.wMinute,
+    _snwprintf(t, 200, L"%d файлов, %ld папок · %lu:%02lu",
+               g_filesN, g_filesDirsDone,
                (unsigned long)(g_filesTook / 60000ull),
-               (unsigned long)((g_filesTook / 1000ull) % 60ull), g_filesDirsDone,
-               g_filesWorkers);
+               (unsigned long)((g_filesTook / 1000ull) % 60ull));
   else if (g_filesWhenOk)
     _snwprintf(t, 200, L"JSON: %d файлов · %02u.%02u %02u:%02u", g_filesN,
                (unsigned)g_filesWhen.wDay, (unsigned)g_filesWhen.wMonth,

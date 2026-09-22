@@ -2154,7 +2154,7 @@ static void create_settings(HWND owner) {
   mk_btn(g_setHwnd, L"Обзор…", ID_FILES_BROWSE);
   g_btnIdx = mk_btn(g_setHwnd, L"Обновить JSON", ID_FILES_REFRESH);
   g_filesStat = CreateWindowExW(0, L"STATIC", L"Индекс: —",
-                                WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP, 0, 0, 200, 22, g_setHwnd,
+                                WS_CHILD | WS_VISIBLE | SS_LEFT | SS_ENDELLIPSIS, 0, 0, 200, 22, g_setHwnd,
                                 (HMENU)(INT_PTR)136, NULL, NULL);
   g_filesBar = CreateWindowExW(0, PROGRESS_CLASSW, L"", WS_CHILD | PBS_MARQUEE, 0, 0, 200, 6,
                                g_setHwnd, (HMENU)(INT_PTR)137, NULL, NULL);
