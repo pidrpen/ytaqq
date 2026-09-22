@@ -3,8 +3,8 @@
    No depth limit, no file-count limit, no index-size limit:
    - the walk uses \\?\ extended paths and a work queue instead of recursion,
      so it is bound neither by MAX_PATH nor by nesting depth nor by the stack;
-   - 16 workers on a network share, depth-first; each child is queued as
-     soon as it is seen so nested folders do not stall the other workers;
+   - 32 workers on a network share; a busy one stays in the subtree, an idle
+     one takes a sibling, so nested folders do not pile everyone into one branch;
    - entries live in an arena with de-duplicated folder names, so a million
      files cost tens of megabytes instead of hundreds;
    - the JSON is written compactly through a buffered writer into a temp file
@@ -806,24 +806,20 @@ static BOOL wp_init(WalkPath *p, const wchar_t *root) {
   return TRUE;
 }
 
-/* A network share is waiting on round trips, not on this computer.
-   32 workers in breadth-first order made Samba slower, not faster: they
-   jumped between distant folders, the disk on the Linux box sought all
-   over, and every subdirectory malloc'd its path while holding the one
-   queue lock. Now:
-   - LIFO (depth-first) so workers stay in one subtree — the server cache
-     and the disk stay hot;
-   - 8 workers on a share, not 32 — Samba serialises more than that;
-   - child paths are allocated off the lock and pushed in one batch. */
+/* Nested share: busy worker pops newest (stay in subtree), idle worker
+   pops oldest (take a sibling). 32 listings at once. Fat folders come
+   in 64 KB chunks, not one FindNext per file. */
 typedef struct {
   wchar_t **item;
   int head, n, cap;
   int active;
   BOOL oom;
+  volatile LONG noDirInfo; /* server rejected FileFullDirectoryInfo */
+  volatile LONG createFail;
   CRITICAL_SECTION cs;
   CONDITION_VARIABLE cv;
-  size_t skip;          /* chars of \\?\ prefix to hide from the user */
-  const wchar_t *shown; /* what to show in their place */
+  size_t skip;
+  const wchar_t *shown;
 } WalkQ;
 
 static BOOL files_cancelled(void) {
@@ -841,7 +837,6 @@ static BOOL wq_grow(wchar_t **buf, size_t *cap, size_t need) {
   return TRUE;
 }
 
-/* \\?\C:\x → C:\x, \\?\UNC\srv\share\x → \\srv\share\x */
 static BOOL wq_display(const WalkQ *q, const wchar_t *full, wchar_t **out, size_t *cap) {
   size_t shown = wcslen(q->shown), body = wcslen(full);
   if (body < q->skip) return FALSE;
@@ -852,8 +847,6 @@ static BOOL wq_display(const WalkQ *q, const wchar_t *full, wchar_t **out, size_
   return TRUE;
 }
 
-/* caller holds q->cs, or no other thread is running yet. takes ownership of
-   `owned`. LIFO: append at tail. */
 static BOOL wq_push_owned(WalkQ *q, wchar_t *owned) {
   if (!owned) return FALSE;
   if (q->head && q->head + q->n >= q->cap) {
@@ -875,8 +868,7 @@ static BOOL wq_push_owned(WalkQ *q, wchar_t *owned) {
   return TRUE;
 }
 
-static wchar_t *wq_pop(WalkQ *q) {
-  /* caller holds cs. newest folder first — stay in the same subtree. */
+static wchar_t *wq_pop_tail(WalkQ *q) {
   if (q->n <= 0) return NULL;
   q->n--;
   wchar_t *dir = q->item[q->head + q->n];
@@ -885,21 +877,198 @@ static wchar_t *wq_pop(WalkQ *q) {
   return dir;
 }
 
+static wchar_t *wq_pop_head(WalkQ *q) {
+  if (q->n <= 0) return NULL;
+  wchar_t *dir = q->item[q->head];
+  q->item[q->head] = NULL;
+  q->head++;
+  q->n--;
+  if (q->n == 0) q->head = 0;
+  return dir;
+}
+
+#ifndef FileFullDirectoryInfo
+#define FileFullDirectoryInfo ((FILE_INFO_BY_HANDLE_CLASS)14)
+#endif
+#define WALK_INFO_BUF 65536
+
+typedef struct {
+  ULONG NextEntryOffset;
+  ULONG FileIndex;
+  LARGE_INTEGER CreationTime;
+  LARGE_INTEGER LastAccessTime;
+  LARGE_INTEGER LastWriteTime;
+  LARGE_INTEGER ChangeTime;
+  LARGE_INTEGER EndOfFile;
+  LARGE_INTEGER AllocationSize;
+  ULONG FileAttributes;
+  ULONG FileNameLength;
+  ULONG EaSize;
+  WCHAR FileName[1];
+} WalkDirInfo;
+
 typedef struct {
   WalkQ *q;
   FileIdx *ix;
   BOOL oom;
   BOOL stopped;
+  BYTE *infoBuf;
+  wchar_t *disp;
+  size_t dispCap;
 } WalkWorker;
+
+static BOOL walk_entry(WalkWorker *w, const wchar_t *dir, size_t dl, const wchar_t *name,
+                       size_t nl, DWORD attr, int *dirIdx) {
+  WalkQ *q = w->q;
+  if (nl == 0) return TRUE;
+  if (name[0] == L'.' && (nl == 1 || (nl == 2 && name[1] == L'.'))) return TRUE;
+  if (attr & FILE_ATTRIBUTE_REPARSE_POINT) return TRUE;
+
+  wchar_t stackn[280];
+  wchar_t *nm = stackn;
+  if (nl >= 280) {
+    nm = (wchar_t *)malloc((nl + 1) * sizeof(wchar_t));
+    if (!nm) {
+      w->oom = TRUE;
+      return FALSE;
+    }
+  }
+  memcpy(nm, name, nl * sizeof(wchar_t));
+  nm[nl] = 0;
+
+  BOOL ok = TRUE;
+  if (attr & FILE_ATTRIBUTE_DIRECTORY) {
+    wchar_t *owned = (wchar_t *)malloc((dl + nl + 2) * sizeof(wchar_t));
+    if (!owned) {
+      w->oom = TRUE;
+      ok = FALSE;
+    } else {
+      memcpy(owned, dir, dl * sizeof(wchar_t));
+      owned[dl] = L'\\';
+      memcpy(owned + dl + 1, nm, (nl + 1) * sizeof(wchar_t));
+      EnterCriticalSection(&q->cs);
+      BOOL pushed = wq_push_owned(q, owned);
+      if (pushed) WakeConditionVariable(&q->cv);
+      else q->oom = TRUE;
+      LeaveCriticalSection(&q->cs);
+      if (!pushed) {
+        w->oom = TRUE;
+        ok = FALSE;
+      }
+    }
+  } else {
+    if (*dirIdx < 0) {
+      if (!wq_display(q, dir, &w->disp, &w->dispCap)) {
+        w->oom = TRUE;
+        ok = FALSE;
+      } else {
+        *dirIdx = idx_dir(w->ix, w->disp);
+        if (*dirIdx < 0) {
+          w->oom = TRUE;
+          ok = FALSE;
+        }
+      }
+    }
+    if (ok && !idx_add(w->ix, *dirIdx, nm)) {
+      w->oom = TRUE;
+      ok = FALSE;
+    }
+    if (ok && (InterlockedIncrement(&g_filesScanned) & 255) == 0 && files_cancelled()) {
+      w->stopped = TRUE;
+      ok = FALSE;
+    }
+  }
+  if (nm != stackn) free(nm);
+  return ok;
+}
+
+static BOOL walk_dir_info(WalkWorker *w, const wchar_t *dir, size_t dl) {
+  WalkQ *q = w->q;
+  if (InterlockedCompareExchange(&q->noDirInfo, 0, 0)) return FALSE;
+  HANDLE h = CreateFileW(dir, GENERIC_READ,
+                         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+                         OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_SEQUENTIAL_SCAN,
+                         NULL);
+  if (h == INVALID_HANDLE_VALUE) {
+    if (InterlockedIncrement(&q->createFail) >= 4) InterlockedExchange(&q->noDirInfo, 1);
+    return FALSE;
+  }
+  InterlockedExchange(&q->createFail, 0);
+  if (!w->infoBuf) {
+    w->infoBuf = (BYTE *)malloc(WALK_INFO_BUF);
+    if (!w->infoBuf) {
+      CloseHandle(h);
+      w->oom = TRUE;
+      return TRUE;
+    }
+  }
+  InterlockedIncrement(&g_filesDirs);
+  int dirIdx = -1;
+  BOOL any = FALSE;
+  for (;;) {
+    if (!GetFileInformationByHandleEx(h, FileFullDirectoryInfo, w->infoBuf, WALK_INFO_BUF)) {
+      DWORD e = GetLastError();
+      if (e == ERROR_NO_MORE_FILES || e == ERROR_FILE_NOT_FOUND)
+        break;
+      if (!any && (e == ERROR_INVALID_PARAMETER || e == ERROR_NOT_SUPPORTED ||
+                   e == ERROR_INVALID_LEVEL || e == ERROR_CALL_NOT_IMPLEMENTED)) {
+        InterlockedExchange(&q->noDirInfo, 1);
+        InterlockedDecrement(&g_filesDirs);
+        CloseHandle(h);
+        return FALSE;
+      }
+      break;
+    }
+    any = TRUE;
+    WalkDirInfo *info = (WalkDirInfo *)w->infoBuf;
+    for (;;) {
+      size_t nl = info->FileNameLength / sizeof(WCHAR);
+      if (!walk_entry(w, dir, dl, info->FileName, nl, info->FileAttributes, &dirIdx)) {
+        CloseHandle(h);
+        return TRUE;
+      }
+      if (!info->NextEntryOffset) break;
+      info = (WalkDirInfo *)((BYTE *)info + info->NextEntryOffset);
+    }
+  }
+  CloseHandle(h);
+  return TRUE;
+}
+
+static void walk_dir_find(WalkWorker *w, const wchar_t *dir, size_t dl) {
+  wchar_t *pat = NULL;
+  size_t patCap = 0;
+  if (!wq_grow(&pat, &patCap, dl + 3)) {
+    w->oom = TRUE;
+    return;
+  }
+  memcpy(pat, dir, dl * sizeof(wchar_t));
+  pat[dl] = L'\\';
+  pat[dl + 1] = L'*';
+  pat[dl + 2] = 0;
+  WIN32_FIND_DATAW fd;
+  HANDLE h = FindFirstFileExW(pat, FindExInfoBasic, &fd, FindExSearchNameMatch, NULL,
+                              FIND_FIRST_EX_LARGE_FETCH);
+  if (h == INVALID_HANDLE_VALUE) h = FindFirstFileW(pat, &fd);
+  free(pat);
+  if (h == INVALID_HANDLE_VALUE) return;
+  InterlockedIncrement(&g_filesDirs);
+  int dirIdx = -1;
+  do {
+    size_t nl = wcslen(fd.cFileName);
+    if (!walk_entry(w, dir, dl, fd.cFileName, nl, fd.dwFileAttributes, &dirIdx)) break;
+  } while (FindNextFileW(h, &fd));
+  FindClose(h);
+}
 
 static DWORD WINAPI files_walk_worker(LPVOID param) {
   WalkWorker *w = (WalkWorker *)param;
   WalkQ *q = w->q;
-  wchar_t *pat = NULL, *disp = NULL;
-  size_t patCap = 0, dispCap = 0;
   for (;;) {
+    BOOL stole = FALSE;
     EnterCriticalSection(&q->cs);
     if (q->n == 0 && q->active > 0) {
+      stole = TRUE;
       InterlockedIncrement(&g_filesIdle);
       while (q->n == 0 && q->active > 0) SleepConditionVariableCS(&q->cv, &q->cs, 50);
       InterlockedDecrement(&g_filesIdle);
@@ -908,78 +1077,14 @@ static DWORD WINAPI files_walk_worker(LPVOID param) {
       LeaveCriticalSection(&q->cs);
       break;
     }
-    wchar_t *dir = wq_pop(q);
+    /* idle → oldest sibling (fill the width); busy → newest child (stay hot) */
+    wchar_t *dir = stole ? wq_pop_head(q) : wq_pop_tail(q);
     q->active++;
     LeaveCriticalSection(&q->cs);
 
     if (dir && !files_cancelled()) {
       size_t dl = wcslen(dir);
-      if (wq_grow(&pat, &patCap, dl + 3)) {
-        memcpy(pat, dir, dl * sizeof(wchar_t));
-        pat[dl] = L'\\';
-        pat[dl + 1] = L'*';
-        pat[dl + 2] = 0;
-        WIN32_FIND_DATAW fd;
-        HANDLE h = FindFirstFileExW(pat, FindExInfoBasic, &fd, FindExSearchNameMatch, NULL,
-                                    FIND_FIRST_EX_LARGE_FETCH);
-        if (h == INVALID_HANDLE_VALUE) h = FindFirstFileW(pat, &fd);
-        if (h != INVALID_HANDLE_VALUE) {
-          InterlockedIncrement(&g_filesDirs);
-          int dirIdx = -1;
-          do {
-            if (fd.cFileName[0] == L'.' &&
-                (fd.cFileName[1] == 0 || (fd.cFileName[1] == L'.' && fd.cFileName[2] == 0)))
-              continue;
-            if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) continue;
-            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-              /* сразу в очередь: иначе при «папка в папке» остальные потоки
-                 ждут, пока родитель дочитает всех детей — отсюда провалы
-                 скорости и редкие всплески, когда пачка наконец вываливается */
-              size_t nl = wcslen(fd.cFileName);
-              wchar_t *owned = (wchar_t *)malloc((dl + nl + 2) * sizeof(wchar_t));
-              if (!owned) {
-                w->oom = TRUE;
-                break;
-              }
-              memcpy(owned, dir, dl * sizeof(wchar_t));
-              owned[dl] = L'\\';
-              memcpy(owned + dl + 1, fd.cFileName, (nl + 1) * sizeof(wchar_t));
-              EnterCriticalSection(&q->cs);
-              BOOL pushed = wq_push_owned(q, owned);
-              if (pushed) WakeConditionVariable(&q->cv);
-              else q->oom = TRUE;
-              LeaveCriticalSection(&q->cs);
-              if (!pushed) {
-                w->oom = TRUE;
-                break;
-              }
-            } else {
-              if (dirIdx < 0) {
-                if (!wq_display(q, dir, &disp, &dispCap)) {
-                  w->oom = TRUE;
-                  break;
-                }
-                dirIdx = idx_dir(w->ix, disp);
-                if (dirIdx < 0) {
-                  w->oom = TRUE;
-                  break;
-                }
-              }
-              if (!idx_add(w->ix, dirIdx, fd.cFileName)) {
-                w->oom = TRUE;
-                break;
-              }
-              if ((InterlockedIncrement(&g_filesScanned) & 255) == 0 && files_cancelled()) {
-                w->stopped = TRUE;
-                break;
-              }
-            }
-          } while (FindNextFileW(h, &fd));
-          FindClose(h);
-        }
-      } else {
-        w->oom = TRUE;
-      }
+      if (!walk_dir_info(w, dir, dl)) walk_dir_find(w, dir, dl);
     } else if (files_cancelled()) {
       w->stopped = TRUE;
     }
@@ -991,14 +1096,13 @@ static DWORD WINAPI files_walk_worker(LPVOID param) {
     LeaveCriticalSection(&q->cs);
     if (w->oom || w->stopped) break;
   }
-  free(pat);
-  free(disp);
+  free(w->infoBuf);
+  w->infoBuf = NULL;
+  free(w->disp);
+  w->disp = NULL;
   return 0;
 }
 
-/* Nested folders are one round-trip each. 8 workers left most of them
-   waiting; 32 scattered across the tree and Samba choked. 16 + depth-first
-   + children queued as soon as they are seen is the middle. */
 static int walk_worker_count(const wchar_t *root) {
   BOOL net = (root[0] == L'\\' && root[1] == L'\\') ||
              _wcsnicmp(root, L"\\\\?\\UNC\\", 8) == 0;
@@ -1011,7 +1115,7 @@ static int walk_worker_count(const wchar_t *root) {
       if (t == DRIVE_REMOTE) net = TRUE;
     }
   }
-  if (net) return 16;
+  if (net) return 32;
   SYSTEM_INFO si;
   GetSystemInfo(&si);
   int cpus = (int)si.dwNumberOfProcessors;

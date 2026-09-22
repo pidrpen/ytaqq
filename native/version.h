@@ -1,6 +1,6 @@
-#define APP_VERSION 2026092224
-#define APP_VERSION_STR L"2026.09.22.24"
-#define APP_VERSION_A "2026.09.22.24"
+#define APP_VERSION 2026092225
+#define APP_VERSION_STR L"2026.09.22.25"
+#define APP_VERSION_A "2026.09.22.25"
 #define UPDATE_HOST L"raw.githubusercontent.com"
 #define UPDATE_VER_PATH L"/pidrpen/ytaqq/main/public/version.txt"
 #define UPDATE_EXE_PATH L"/pidrpen/ytaqq/main/public/CursorPad.exe"
