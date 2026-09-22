@@ -497,6 +497,12 @@ static void open_plm_link(const wchar_t *link) {
 }
 
 static wchar_t g_cardDraw[PLM_LINK]; /* чертёж, найденный для карточки */
+/* Поиск уже показал список находок, и техпроцесс обычно в нём есть. Снимаем
+   его перед тем, как список сменится карточкой: искать по базе то, что уже
+   найдено, — это те самые тридцать семь секунд. */
+static wchar_t g_snapName[PLM_ROWS][PLM_COL1];
+static long g_snapId[PLM_ROWS];
+static int g_snapN;
 /* Сколько заняли шаги карточки. Без этого непонятно, что именно медленное:
    база, обратный поиск по ссылкам или обход индекса файлов. */
 static ULONGLONG g_cardT0, g_cardTAttrs, g_cardTTp, g_cardTOps, g_cardTUsed, g_cardTFiles;
@@ -1331,24 +1337,51 @@ static const wchar_t *card_type_name(long t) {
    сразу по всем операциям — один запрос вместо похода в каждую. */
 static int card_norms(SQLHDBC dbc, const wchar_t *ids, CardRow *rows, wchar_t *err) {
   if (!ids || !ids[0]) return 0;
-  wchar_t *sql = (wchar_t *)malloc(3000 * sizeof(wchar_t));
+  wchar_t *sql = (wchar_t *)malloc(6000 * sizeof(wchar_t));
   if (!sql) return 0;
-  _snwprintf(sql, 3000,
-             L"SELECT TOP 400 a.OwnerId, nk.Value, "
-             L"CASE ea.DataType WHEN 1 THEN CONVERT(NVARCHAR(64), ea.FloatNumber) "
-             L"WHEN 13 THEN CONVERT(NVARCHAR(64), ea.IntegerNumber) "
-             L"WHEN 32 THEN CONVERT(NVARCHAR(64), ea.LongNumber) "
-             L"WHEN 2 THEN ea.ShortText ELSE N'' END, 0, ea.DataType "
-             L"FROM InfoObjectAttributes AS a WITH(NOLOCK) "
-             L"JOIN InfoObjectCollectionElements AS ce WITH(NOLOCK) "
-             L"ON ce.AttributeId=a.AttributeId AND ce.Outdated=0 "
-             L"JOIN InfoObjectAttributes AS ea WITH(NOLOCK) "
-             L"ON ea.CollectionElementId=ce.CollectionElementId "
-             L"JOIN NameKeys AS nk WITH(NOLOCK) ON nk.NameKeyId=ea.NameKeyId "
-             L"AND nk.Value IN (N'SetupTime',N'TimePerPiece') "
-             L"WHERE a.OwnerId IN (%s) AND a.Outdated=0 AND a.DataType=8 "
-             L"ORDER BY a.OwnerId",
-             ids);
+  /* Где именно лежат Тпз и Тшт, в базе по-разному: у самой операции, в
+     строках её коллекции или у её детей-переходов. Смотрим во всех трёх
+     местах сразу — один запрос вместо трёх походов. */
+  _snwprintf(
+      sql, 6000,
+      L"SELECT TOP 400 src.Op, src.K, src.V, 0, src.T FROM ("
+      L"SELECT a.OwnerId AS Op, nk.Value AS K, CASE a.DataType "
+      L"WHEN 1 THEN CONVERT(NVARCHAR(64), a.FloatNumber) "
+      L"WHEN 13 THEN CONVERT(NVARCHAR(64), a.IntegerNumber) "
+      L"WHEN 32 THEN CONVERT(NVARCHAR(64), a.LongNumber) "
+      L"WHEN 2 THEN a.ShortText ELSE N'' END AS V, a.DataType AS T "
+      L"FROM InfoObjectAttributes AS a WITH(NOLOCK) "
+      L"JOIN NameKeys AS nk WITH(NOLOCK) ON nk.NameKeyId=a.NameKeyId "
+      L"AND nk.Value IN (N'SetupTime',N'TimePerPiece') "
+      L"WHERE a.OwnerId IN (%s) AND a.Outdated=0 "
+      L"UNION ALL "
+      L"SELECT col.OwnerId, nk2.Value, CASE ea.DataType "
+      L"WHEN 1 THEN CONVERT(NVARCHAR(64), ea.FloatNumber) "
+      L"WHEN 13 THEN CONVERT(NVARCHAR(64), ea.IntegerNumber) "
+      L"WHEN 32 THEN CONVERT(NVARCHAR(64), ea.LongNumber) "
+      L"WHEN 2 THEN ea.ShortText ELSE N'' END, ea.DataType "
+      L"FROM InfoObjectAttributes AS col WITH(NOLOCK) "
+      L"JOIN InfoObjectCollectionElements AS ce WITH(NOLOCK) "
+      L"ON ce.AttributeId=col.AttributeId AND ce.Outdated=0 "
+      L"JOIN InfoObjectAttributes AS ea WITH(NOLOCK) "
+      L"ON ea.CollectionElementId=ce.CollectionElementId "
+      L"JOIN NameKeys AS nk2 WITH(NOLOCK) ON nk2.NameKeyId=ea.NameKeyId "
+      L"AND nk2.Value IN (N'SetupTime',N'TimePerPiece') "
+      L"WHERE col.OwnerId IN (%s) AND col.Outdated=0 "
+      L"UNION ALL "
+      L"SELECT ch.ParentId, nk3.Value, CASE ca.DataType "
+      L"WHEN 1 THEN CONVERT(NVARCHAR(64), ca.FloatNumber) "
+      L"WHEN 13 THEN CONVERT(NVARCHAR(64), ca.IntegerNumber) "
+      L"WHEN 32 THEN CONVERT(NVARCHAR(64), ca.LongNumber) "
+      L"WHEN 2 THEN ca.ShortText ELSE N'' END, ca.DataType "
+      L"FROM InfoObjects AS ch WITH(NOLOCK) "
+      L"JOIN InfoObjectAttributes AS ca WITH(NOLOCK) "
+      L"ON ca.OwnerId=ch.InfoObjectId AND ca.Outdated=0 "
+      L"JOIN NameKeys AS nk3 WITH(NOLOCK) ON nk3.NameKeyId=ca.NameKeyId "
+      L"AND nk3.Value IN (N'SetupTime',N'TimePerPiece') "
+      L"WHERE ch.ParentId IN (%s) AND ch.Erased=0"
+      L") AS src ORDER BY src.Op",
+      ids, ids, ids);
   int n = card_query(dbc, sql, rows, CARD_ROWS, err, 280);
   free(sql);
   return n < 0 ? 0 : n;
@@ -1488,7 +1521,8 @@ static void card_operations(SQLHDBC dbc, long tpId, long verId, CardOut *c, Card
       card_add(c, L"  (сложено по %d операциям из %d)\r\n", counted, n);
   } else if (ops && n > 0) {
     card_add(c, L"  ────────────────────────────────────────\r\n");
-    card_add(c, L"  Тпз и Тшт у этих операций не заполнены.\r\n");
+    card_add(c, L"  Тпз и Тшт не нашлись: ни у самих операций, ни в строках\r\n"
+                 L"  их коллекций, ни у переходов. Пришлите эту строку — поищу глубже.\r\n");
   }
   if (n > shown)
     card_add(c, L"  показано подробно первых %d операций из %d\r\n", shown, n);
@@ -1620,6 +1654,51 @@ static void card_des_from_name(const wchar_t *name, wchar_t *out, int cap) {
 static long card_tp_by_designation(SQLHDBC dbc, const wchar_t *des, CardOut *c, CardRow *rows,
                                    wchar_t *err, long *verOut) {
   if (!des || !des[0]) return 0;
+  size_t dlen = wcslen(des);
+  /* 1. среди того, что уже нашёл поиск: одна проверка по номерам вместо
+        перебора всей базы */
+  wchar_t cand[PLM_ROWS * 12];
+  int cp = 0, ncand = 0;
+  for (int i = 0; i < g_snapN && ncand < 40; i++) {
+    if (_wcsnicmp(g_snapName[i], des, dlen) != 0) continue;
+    if (!g_snapId[i]) continue;
+    if (cp > (int)(sizeof(cand) / sizeof(cand[0])) - 14) break;
+    cp += _snwprintf(cand + cp, 13, ncand ? L",%ld" : L"%ld", g_snapId[i]);
+    ncand++;
+  }
+  cand[cp] = 0;
+  if (ncand) {
+    wchar_t *q = (wchar_t *)malloc(2200 * sizeof(wchar_t));
+    if (q) {
+      _snwprintf(q, 2200,
+                 L"SELECT TOP 20 o.InfoObjectId, o.Name, ISNULL(flag.V,N'нет'), av.L, o.TemplateId "
+                 L"FROM InfoObjects AS o WITH(NOLOCK) "
+                 L"CROSS APPLY (SELECT TOP 1 ISNULL(iv.Link,0) AS L "
+                 L"FROM InfoObjectAttributes AS iv WITH(NOLOCK) "
+                 L"JOIN NameKeys AS nkv WITH(NOLOCK) ON nkv.NameKeyId=iv.NameKeyId "
+                 L"AND nkv.Value=N'ActualVersion' "
+                 L"WHERE iv.OwnerId=o.InfoObjectId AND iv.Outdated=0) AS av "
+                 L"OUTER APPLY (SELECT TOP 1 N'да' AS V FROM InfoObjectAttributes AS ia "
+                 L"WITH(NOLOCK) JOIN NameKeys AS nki WITH(NOLOCK) ON nki.NameKeyId=ia.NameKeyId "
+                 L"WHERE ia.OwnerId=o.InfoObjectId AND ia.Outdated=0 "
+                 L"AND nki.Value IN (N'MainTP',N'IsActual') AND ia.BoolValue=1) AS flag "
+                 L"WHERE o.InfoObjectId IN (%s) AND av.L>0 "
+                 L"ORDER BY CASE WHEN flag.V=N'да' THEN 0 ELSE 1 END, o.InfoObjectId",
+                 cand);
+      int m = card_query(dbc, q, rows, CARD_ROWS, err, 280);
+      free(q);
+      if (m > 0) {
+        card_add(c, L"ТЕХПРОЦЕССЫ ИЗ НАХОДОК (%d)\r\n", m);
+        for (int i = 0; i < m; i++)
+          card_add(c, L"  %s %-40s %ld\r\n", _wcsicmp(rows[i].s2, L"да") == 0 ? L"●" : L"○",
+                   rows[i].s1[0] ? rows[i].s1 : L"(без имени)", rows[i].n1);
+        card_add(c, L"\r\n");
+        if (verOut) *verOut = rows[0].n2;
+        return rows[0].n1;
+      }
+    }
+  }
+  /* 2. в находках не оказалось — ищем по базе, но только среди техпроцессов */
   wchar_t pat[260];
   like_escape(des, pat, 240);
   int n = (int)wcslen(pat);
@@ -1635,7 +1714,9 @@ static long card_tp_by_designation(SQLHDBC dbc, const wchar_t *des, CardOut *c, 
       /* сперва сужаем по имени, и только потом лезем в атрибуты: иначе
          сервер обходит атрибуты каждого объекта базы */
       L"FROM (SELECT TOP 200 InfoObjectId, Name, TemplateId FROM InfoObjects WITH(NOLOCK) "
-      L"WHERE Erased=0 AND Name LIKE N'%s' ESCAPE '\\' COLLATE Cyrillic_General_CI_AS) AS tp "
+      L"WHERE Erased=0 AND TemplateId IN (SELECT TemplateId FROM Templates WITH(NOLOCK) "
+      L"WHERE NameKey=N'TechnologicalStructure') "
+      L"AND Name LIKE N'%s' ESCAPE '\\' COLLATE Cyrillic_General_CI_AS) AS tp "
       L"CROSS APPLY (SELECT TOP 1 ISNULL(iv.Link,0) AS L "
       L"FROM InfoObjectAttributes AS iv WITH(NOLOCK) "
       L"JOIN NameKeys AS nkv WITH(NOLOCK) ON nkv.NameKeyId=iv.NameKeyId "
@@ -2280,6 +2361,12 @@ static void show_card_selected_mode(BOOL full) {
   if (InterlockedCompareExchange(&g_netBusy, 1, 0) != 0) {
     show_status(L"Запрос уже идёт");
     return;
+  }
+  g_snapN = 0;
+  for (int k = 0; k < g_plmCount && k < PLM_ROWS; k++) {
+    lstrcpynW(g_snapName[g_snapN], g_plmEsi[k], PLM_COL1);
+    g_snapId[g_snapN] = g_plmIds[k];
+    g_snapN++;
   }
   g_ansTitle = full ? L"Всё об объекте" : L"Что внутри";
   g_ansMono = TRUE;
