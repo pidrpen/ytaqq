@@ -1354,8 +1354,11 @@ static int card_norms(SQLHDBC dbc, const wchar_t *ids, CardRow *rows, wchar_t *e
       L"FROM InfoObjectAttributes AS a WITH(NOLOCK) "
       L"JOIN NameKeys AS nk WITH(NOLOCK) ON nk.NameKeyId=a.NameKeyId "
       L"AND nk.Value IN (N'SetupTime',N'TimePerPiece') "
+      /* у составного атрибута собственное значение пустое, а в
+         InfoObjectCollectionElements его строки привязаны к тому, на что
+         он ссылается. Пробуем и ссылку, и сам атрибут. */
       L"JOIN InfoObjectCollectionElements AS ce WITH(NOLOCK) "
-      L"ON ce.AttributeId=a.AttributeId AND ce.Outdated=0 "
+      L"ON ce.AttributeId IN (a.Link, a.AttributeId) AND ce.Outdated=0 "
       L"JOIN InfoObjectAttributes AS ea WITH(NOLOCK) "
       L"ON ea.CollectionElementId=ce.CollectionElementId "
       L"JOIN NameKeys AS nk2 WITH(NOLOCK) ON nk2.NameKeyId=ea.NameKeyId "
@@ -1525,9 +1528,10 @@ static void card_operations(SQLHDBC dbc, long tpId, long verId, CardOut *c, Card
       wchar_t *stop = NULL;
       wcstod(val, &stop);
       BOOL numeric = stop && stop != val;
-      /* в составном атрибуте числовых полей может быть несколько — например
-         само время и коэффициент. Берём первое и не складываем остальные,
-         иначе итог снова окажется выдуманным. */
+      /* Внутри составного атрибута само число лежит в поле Value, рядом
+         с ним бывают коэффициенты и ссылки. Берём именно Value, а не первое
+         попавшееся число. */
+      if (numeric && _wcsicmp(field, L"Value") != 0) numeric = FALSE;
       if (numeric && !g_cardVerbose && _wcsicmp(lastNorm, nr[k].s1) == 0) numeric = FALSE;
       if (numeric) {
         lstrcpynW(lastNorm, nr[k].s1, 80);
@@ -1846,42 +1850,49 @@ static void card_drawings(const wchar_t *designation, CardOut *c) {
   for (int i = 0; i < f.no; i++) card_show_file(c, f.other[i]);
 }
 
+/* У техпроцесса есть прямая ссылка на изделие — ManufacturedProducts.
+   Раньше я шёл к нему окольным путём, через коллекцию техпроцессов и её
+   карточку; эта ссылка короче и надёжнее. Она бывает и одиночной, и
+   коллекцией, поэтому смотрим оба вида. Обозначение изделия забираем
+   заодно: чертёж назван по нему, а не по техпроцессу. */
 static long card_owner_of_tp(SQLHDBC dbc, long tpId, CardOut *c, CardRow *rows, wchar_t *err,
                              wchar_t *desOut, int desCap) {
   wchar_t *sql = (wchar_t *)malloc(3000 * sizeof(wchar_t));
   if (!sql) return 0;
   _snwprintf(
       sql, 3000,
-      L"SELECT TOP 5 own.InfoObjectId, own.Name, ISNULL(des.V,N''), 0, own.TemplateId "
-      L"FROM InfoObjectAttributes AS ea WITH(NOLOCK) "
-      L"JOIN InfoObjectCollectionElements AS ce WITH(NOLOCK) "
-      L"ON ce.CollectionElementId=ea.CollectionElementId AND ce.Outdated=0 "
-      L"JOIN InfoObjectAttributes AS la WITH(NOLOCK) ON la.AttributeId=ce.AttributeId "
-      L"JOIN NameKeys AS nkl WITH(NOLOCK) ON nkl.NameKeyId=la.NameKeyId "
-      L"AND nkl.Value=N'TechnologicalProcesses' "
-      L"JOIN InfoObjectAttributes AS ca WITH(NOLOCK) ON ca.Link=la.OwnerId AND ca.Outdated=0 "
-      L"JOIN NameKeys AS nkc WITH(NOLOCK) ON nkc.NameKeyId=ca.NameKeyId "
-      L"AND nkc.Value=N'TechnologicalProcessesCard' "
-      L"JOIN InfoObjects AS own WITH(NOLOCK) ON own.InfoObjectId=ca.OwnerId AND own.Erased=0 "
+      L"SELECT TOP 20 o.InfoObjectId, o.Name, ISNULL(des.V,N''), 0, o.TemplateId "
+      L"FROM InfoObjectAttributes AS a WITH(NOLOCK) "
+      L"JOIN NameKeys AS nk WITH(NOLOCK) ON nk.NameKeyId=a.NameKeyId "
+      L"AND nk.Value=N'ManufacturedProducts' "
+      L"OUTER APPLY (SELECT ea.Link AS L FROM InfoObjectCollectionElements AS ce WITH(NOLOCK) "
+      L"JOIN InfoObjectAttributes AS ea WITH(NOLOCK) "
+      L"ON ea.CollectionElementId=ce.CollectionElementId AND ea.DataType=6 "
+      L"WHERE ce.AttributeId IN (a.Link, a.AttributeId) AND ce.Outdated=0) AS el "
+      L"JOIN InfoObjects AS o WITH(NOLOCK) "
+      L"ON o.InfoObjectId=COALESCE(el.L, a.Link) AND o.Erased=0 "
       L"OUTER APPLY (SELECT TOP 1 ad.ShortText AS V FROM InfoObjectAttributes AS ad WITH(NOLOCK) "
       L"JOIN NameKeys AS nkd WITH(NOLOCK) ON nkd.NameKeyId=ad.NameKeyId "
       L"AND nkd.Value=N'Designation' "
-      L"WHERE ad.OwnerId=own.InfoObjectId AND ad.Outdated=0) AS des "
-      L"WHERE ea.Link=%ld AND ea.Outdated=0",
+      L"WHERE ad.OwnerId=o.InfoObjectId AND ad.Outdated=0) AS des "
+      L"WHERE a.OwnerId=%ld AND a.Outdated=0",
       tpId);
   int n = card_query(dbc, sql, rows, CARD_ROWS, err, 280);
   free(sql);
   if (n <= 0) {
-    card_add(c, L"ЭСИ: не нашёлся — ни одна карточка техпроцессов на этот ТП не ссылается.\r\n\r\n");
+    card_add(c, L"ЭСИ: у техпроцесса нет ссылки ManufacturedProducts.\r\n\r\n");
     return 0;
   }
-  card_add(c, L"ЭСИ, которому принадлежит этот техпроцесс%s\r\n", n > 1 ? L" (несколько)" : L":");
+  card_add(c, L"ИЗДЕЛИЕ%s\r\n", n > 1 ? L" (несколько)" : L"");
   for (int i = 0; i < n; i++) {
     card_add(c, L"  %-40s %ld\r\n", rows[i].s1[0] ? rows[i].s1 : L"(без имени)", rows[i].n1);
     if (rows[i].s2[0]) card_add(c, L"       %s\r\n", rows[i].s2);
   }
   card_add(c, L"\r\n");
-  if (desOut && desCap > 0 && rows[0].s2[0]) lstrcpynW(desOut, rows[0].s2, desCap);
+  if (desOut && desCap > 0) {
+    if (rows[0].s2[0]) lstrcpynW(desOut, rows[0].s2, desCap);
+    else if (rows[0].s1[0]) card_des_from_name(rows[0].s1, desOut, desCap);
+  }
   return rows[0].n1;
 }
 
