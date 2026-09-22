@@ -1180,9 +1180,30 @@ static const CardLabel kCardLabels[] = {
     {L"ComponentOfTheTooling", L"Составляющая оснастки"},
     {L"ManufacturingSign", L"Признак изготовления"},
     {L"MainPVC", L"Основной ПВС"},
+    {L"UnitOfNormalization", L"Единица нормирования"},
+    {L"ZUM_TempCraftName", L"Профессия"},
+    {L"ZUM_TempEquipmentName", L"Оборудование"},
+    {L"WorkShop", L"Цех"},
+    {L"Area", L"Участок"},
 };
 
 /* Служебное: счётчики, флаги интерфейса, история. В карточке только мешают. */
+/* В операции почти всё — внутренние счётчики и виды отображения. Человеку
+   нужны профессия, оборудование и норма; остальное только мешает читать. */
+static const wchar_t *kOpHidden[] = {
+    L"ActualOperation", L"Area",         L"BlankPages",   L"Operation",
+    L"OperationId",     L"OperationInVariantView",        L"OperationView",
+    L"StepView",        L"UniquenessOperationNumber",     L"WorkShop",
+    L"KOID",            L"WhoAuthor",    L"Number",       L"Name",
+    L"ShortFormForOperationContent",      L"TSOperation",  L"OperationNumber",
+};
+
+static BOOL card_op_hidden(const wchar_t *key) {
+  for (int i = 0; i < (int)(sizeof(kOpHidden) / sizeof(kOpHidden[0])); i++)
+    if (_wcsicmp(key, kOpHidden[i]) == 0) return TRUE;
+  return FALSE;
+}
+
 static const wchar_t *kCardHidden[] = {
     L"BlockInit",      L"CommandSaveOnly",  L"IgnoreStructure", L"SortedManual",
     L"ShowAgreements", L"IndexView",        L"LocalIdCounter",  L"OperationIdCounter",
@@ -1206,8 +1227,11 @@ static BOOL card_hidden(const wchar_t *key) {
    Norm, Labor…). Показываем часы с четырьмя знаками и рядом минуты. */
 static BOOL card_is_time(const wchar_t *key, long dataType) {
   if (dataType == 5) return TRUE; /* TIMESPAN */
-  static const wchar_t *marks[] = {L"tsht", L"tpz",  L"tshk", L"time",
-                                   L"norm", L"labor", L"labour", L"duration"};
+  /* UnitOfNormalization — это в чём меряют («1 минута»), а не сколько.
+     Раньше он попадал в приметы по слову norm и складывался в итог. */
+  if (_wcsicmp(key, L"UnitOfNormalization") == 0) return FALSE;
+  static const wchar_t *marks[] = {L"tsht", L"tpz",  L"tshk",  L"time",
+                                   L"normtime", L"labor", L"labour", L"duration"};
   wchar_t low[64];
   lstrcpynW(low, key, 64);
   for (int i = 0; low[i]; i++)
@@ -1290,6 +1314,55 @@ static const wchar_t *card_type_name(long t) {
 /* Состав техпроцесса: ТП → ActualVersion → MainVariantInVersion → дети
    варианта. У самой операции содержательное имя часто лежит не на ней, а на
    объекте по ссылке TSOperation, поэтому он подтягивается сразу. */
+/* Норма времени на операции не нашлась среди её собственных атрибутов.
+   Значит она, скорее всего, лежит в коллекции — в переходах или в строках
+   нормирования. Их значения видны только через InfoObjectCollectionElements,
+   поэтому для первой операции показываем, что там есть: по именам сразу
+   станет ясно, что брать. */
+static void card_probe_collections(SQLHDBC dbc, long opId, CardOut *c, CardRow *rows,
+                                   wchar_t *err) {
+  wchar_t *sql = (wchar_t *)malloc(3200 * sizeof(wchar_t));
+  if (!sql) return;
+  _snwprintf(
+      sql, 3200,
+      L"SELECT TOP 60 ce.CollectionElementId, nk2.Value, "
+      L"CASE ea.DataType "
+      L"WHEN 3 THEN CASE WHEN ea.BoolValue=1 THEN N'да' ELSE N'нет' END "
+      L"WHEN 2 THEN ea.ShortText "
+      L"WHEN 24 THEN CAST(ea.LargeText AS NVARCHAR(200)) "
+      L"WHEN 1 THEN CONVERT(NVARCHAR(64), ea.FloatNumber) "
+      L"WHEN 13 THEN CONVERT(NVARCHAR(64), ea.IntegerNumber) "
+      L"WHEN 32 THEN CONVERT(NVARCHAR(64), ea.LongNumber) "
+      L"WHEN 5 THEN CONVERT(NVARCHAR(64), ea.LongNumber) "
+      L"ELSE N'' END, "
+      L"ISNULL(ea.Link,0), ea.DataType "
+      L"FROM InfoObjectAttributes AS a WITH(NOLOCK) "
+      L"JOIN InfoObjectCollectionElements AS ce WITH(NOLOCK) "
+      L"ON ce.AttributeId=a.AttributeId AND ce.Outdated=0 "
+      L"JOIN InfoObjectAttributes AS ea WITH(NOLOCK) "
+      L"ON ea.CollectionElementId=ce.CollectionElementId "
+      L"JOIN NameKeys AS nk2 WITH(NOLOCK) ON nk2.NameKeyId=ea.NameKeyId "
+      L"WHERE a.OwnerId=%ld AND a.Outdated=0 AND a.DataType=8 "
+      L"ORDER BY ce.CollectionElementId, nk2.Value",
+      opId);
+  int n = card_query(dbc, sql, rows, CARD_ROWS, err, 280);
+  free(sql);
+  if (n <= 0) return;
+  card_add(c, L"  ── что лежит в строках первой операции (ищем норму) ──\r\n");
+  long lastEl = 0;
+  int shown = 0;
+  for (int i = 0; i < n && shown < 40; i++) {
+    if (!rows[i].s2[0]) continue;
+    if (rows[i].n1 != lastEl) {
+      lastEl = rows[i].n1;
+      card_add(c, L"     строка %ld\r\n", lastEl);
+    }
+    card_add(c, L"       %-26s %s\r\n", rows[i].s1, rows[i].s2);
+    shown++;
+  }
+  card_add(c, L"\r\n");
+}
+
 static void card_operations(SQLHDBC dbc, long tpId, long verId, CardOut *c, CardRow *rows,
                             wchar_t *err) {
   wchar_t sql[3000];
@@ -1390,8 +1463,9 @@ static void card_operations(SQLHDBC dbc, long tpId, long verId, CardOut *c, Card
     double opMins = 0.0;
     for (int k = 0; k < na && printed < 40; k++) {
       if (rows[k].n1 != o->n1 && rows[k].n1 != o->n3) continue;
-      if (card_hidden(rows[k].s1)) continue;
-      if (!rows[k].s2[0] && !rows[k].n2) continue;
+      if (card_hidden(rows[k].s1) || card_op_hidden(rows[k].s1)) continue;
+      /* голая ссылка в операции — это номер справочника, читать его незачем */
+      if (!rows[k].s2[0]) continue;
       card_pair_s(c, L"       ", rows[k].s1, rows[k].s2, rows[k].n2, rows[k].n3, &opMins);
       printed++;
     }
@@ -1408,6 +1482,10 @@ static void card_operations(SQLHDBC dbc, long tpId, long verId, CardOut *c, Card
     card_total(c, L"  ", L"ИТОГО НА ДЕТАЛЬ", totalMins);
     if (counted < n)
       card_add(c, L"  (сложено по %d операциям из %d)\r\n", counted, n);
+  } else if (ops && n > 0) {
+    card_add(c, L"  ────────────────────────────────────────\r\n");
+    card_add(c, L"  Нормы времени среди атрибутов операций нет.\r\n");
+    card_probe_collections(dbc, ops[0].n1, c, rows, err);
   }
   if (n > shown)
     card_add(c, L"  показано подробно первых %d операций из %d\r\n", shown, n);
@@ -2154,7 +2232,9 @@ static DWORD WINAPI card_thread(LPVOID param) {
 static void show_card_selected_mode(BOOL full);
 
 static void show_card_selected(void) {
-  show_card_selected_mode(FALSE);
+  /* обе кнопки показывают чертёж: разбираться, какая из них «с картинкой»,
+     человеку незачем */
+  show_card_selected_mode(TRUE);
 }
 
 static void show_card_full(void) {
