@@ -3433,6 +3433,81 @@ static void layout_ocr(void) {
   }
 }
 
+static BOOL ocr_is_digit(wchar_t c) {
+  return c >= L'0' && c <= L'9';
+}
+
+/* В обозначении буквам взяться неоткуда: где вокруг цифры, «О» — это ноль,
+   «З» — тройка, «б» — шестёрка, «l» — единица. Правим только в цифровом
+   окружении, иначе испортим буквенный код вроде «АДЕ» или «ГОСТ». */
+static wchar_t ocr_digitize(wchar_t c) {
+  switch (c) {
+  case L'\u041e':
+  case L'\u043e':
+  case L'O':
+  case L'o':
+    return L'0';
+  case L'\u0417':
+  case L'\u0437':
+    return L'3';
+  case L'\u0431':
+    return L'6';
+  case L'l':
+  case L'I':
+  case L'|':
+    return L'1';
+  default:
+    return c;
+  }
+}
+
+static BOOL ocr_joiner(wchar_t c) {
+  return c == L'.' || c == L'-';
+}
+
+/* Строка из распознавания — в то, что имеет смысл искать. Сначала убираем
+   пробел, придуманный возле точки или дефиса («3422 -682» в базе не найдётся
+   никогда), потом разбираем на куски из цифр, точек, дефисов и похожих
+   на цифры букв. Если в куске есть хоть одна настоящая цифра — это число,
+   и все буквы в нём тоже цифры. Смотреть только на соседей нельзя: в «.Ol.» у
+   каждой буквы сосед — такая же буква, и ни одна так не исправляется. */
+static void ocr_fix_query(const wchar_t *in, wchar_t *out, int cap) {
+  int n = 0;
+  for (int i = 0; in[i] && n < cap - 1; i++) {
+    wchar_t c = in[i];
+    if (c == L' ') {
+      const wchar_t *p = in + i;
+      while (*p == L' ') p++;
+      wchar_t prev = n > 0 ? out[n - 1] : 0;
+      wchar_t next = *p;
+      BOOL prevOk = ocr_is_digit(prev) || ocr_joiner(prev);
+      BOOL nextOk = ocr_is_digit(next) || ocr_joiner(next);
+      if (prevOk && nextOk && (ocr_joiner(prev) || ocr_joiner(next))) {
+        i = (int)(p - in) - 1;
+        continue;
+      }
+    }
+    out[n++] = c;
+  }
+  out[n] = 0;
+  for (int i = 0; out[i];) {
+    if (!ocr_is_digit(out[i]) && !ocr_joiner(out[i]) && ocr_digitize(out[i]) == out[i]) {
+      i++;
+      continue;
+    }
+    int j = i;
+    BOOL hasDigit = FALSE;
+    while (out[j] && (ocr_is_digit(out[j]) || ocr_joiner(out[j]) ||
+                      ocr_digitize(out[j]) != out[j])) {
+      if (ocr_is_digit(out[j])) hasDigit = TRUE;
+      j++;
+    }
+    if (hasDigit)
+      for (int k = i; k < j; k++) out[k] = ocr_digitize(out[k]);
+    i = j;
+  }
+}
+
 /* Что искать: выделенное в окне, а если ничего не выделено — первая
    непустая строка. Целиком распознанный лист в поиск отправлять бессмысленно. */
 static void ocr_find_selected(void) {
@@ -3462,6 +3537,16 @@ static void ocr_find_selected(void) {
   while (n > 0 && (q[n - 1] == L' ' || q[n - 1] == L'\t')) q[--n] = 0;
   if (!q[0]) {
     show_status(L"Нечего искать — выделите текст");
+    return;
+  }
+  wchar_t fixed[400];
+  ocr_fix_query(q, fixed, 400);
+  if (fixed[0] && wcscmp(fixed, q) != 0) {
+    /* поправку не прячем: видно, что именно ушло в поиск */
+    wchar_t m[440];
+    _snwprintf(m, 440, L"Ищу с поправкой: %.200s", fixed);
+    show_status(m);
+    start_lookup(fixed);
     return;
   }
   start_lookup(q);
@@ -3665,32 +3750,131 @@ static void start_lookup(const wchar_t *q) {
   }
 }
 
+/* Распознаванию Windows нужна буква высотой от двадцати пяти точек, а на
+   чертеже в окне просмотра она раза в два мельче. Растягиваем вырезку со
+   сглаживанием: мелкое тянем втрое, среднее вдвое, крупное оставляем. */
+static int ocr_scale_for(int bw, int bh) {
+  int big = bw > bh ? bw : bh;
+  int k = 1;
+  if (big < 500) k = 3;
+  else if (big < 1200) k = 2;
+  while (k > 1 && ((long)bw * k > 4000 || (long)bh * k > 4000)) k--;
+  return k;
+}
+
+/* Чертёж — чёрные линии на белом, но на экране это серое на сероватом.
+   Переводим в серое, растягиваем контраст по крайним процентам и, если фон
+   тёмный (бывает в просмотрщиках с чёрным полем), обращаем: распознавание
+   ждёт тёмный текст на светлом. */
+static void ocr_clean_bits(unsigned char *bits, int w, int h, int row) {
+  long hist[256];
+  memset(hist, 0, sizeof(hist));
+  long total = 0;
+  for (int yy = 0; yy < h; yy++) {
+    unsigned char *p = bits + (size_t)yy * row;
+    for (int xx = 0; xx < w; xx++, p += 3) {
+      int v = (p[0] * 29 + p[1] * 150 + p[2] * 77) >> 8;
+      if (v > 255) v = 255;
+      p[0] = p[1] = p[2] = (unsigned char)v;
+      hist[v]++;
+      total++;
+    }
+  }
+  if (total <= 0) return;
+  long cut = total / 50; /* по два процента с краёв — единичный блик не решает */
+  int lo = 0, hi = 255;
+  long acc = 0;
+  for (int i = 0; i < 256; i++) {
+    acc += hist[i];
+    if (acc > cut) {
+      lo = i;
+      break;
+    }
+  }
+  acc = 0;
+  for (int i = 255; i >= 0; i--) {
+    acc += hist[i];
+    if (acc > cut) {
+      hi = i;
+      break;
+    }
+  }
+  if (hi - lo < 12) return; /* ровный фон — тянуть нечего, только шум поднимем */
+  double mean = 0;
+  for (int i = 0; i < 256; i++) mean += (double)hist[i] * i;
+  mean /= (double)total;
+  BOOL invert = mean < 110.0;
+  unsigned char map[256];
+  for (int i = 0; i < 256; i++) {
+    int v = i;
+    if (v < lo) v = lo;
+    if (v > hi) v = hi;
+    v = (v - lo) * 255 / (hi - lo);
+    if (invert) v = 255 - v;
+    map[i] = (unsigned char)v;
+  }
+  for (int yy = 0; yy < h; yy++) {
+    unsigned char *p = bits + (size_t)yy * row;
+    for (int xx = 0; xx < w; xx++, p += 3) {
+      unsigned char v = map[p[0]];
+      p[0] = p[1] = p[2] = v;
+    }
+  }
+}
+
 static BOOL save_rect_bmp(int x, int y, int bw, int bh, const wchar_t *path) {
   if (bw < 8) bw = 8;
   if (bh < 8) bh = 8;
   if (bw > 2400) bw = 2400;
   if (bh > 1600) bh = 1600;
+  int k = ocr_scale_for(bw, bh);
+  int ow = bw * k, oh = bh * k;
   HDC screen = GetDC(NULL);
   HDC mem = CreateCompatibleDC(screen);
   HBITMAP bm = CreateCompatibleBitmap(screen, bw, bh);
   HGDIOBJ old = SelectObject(mem, bm);
   BitBlt(mem, 0, 0, bw, bh, screen, x, y, SRCCOPY);
+  HDC big = NULL;
+  HBITMAP bigBm = NULL;
+  HGDIOBJ oldBig = NULL;
+  if (k > 1) {
+    big = CreateCompatibleDC(screen);
+    bigBm = CreateCompatibleBitmap(screen, ow, oh);
+    if (big && bigBm) {
+      oldBig = SelectObject(big, bigBm);
+      /* HALFTONE даёт сглаживание; без SetBrushOrgEx он мусорит по краям */
+      SetStretchBltMode(big, HALFTONE);
+      SetBrushOrgEx(big, 0, 0, NULL);
+      StretchBlt(big, 0, 0, ow, oh, mem, 0, 0, bw, bh, SRCCOPY);
+    } else {
+      if (bigBm) DeleteObject(bigBm);
+      if (big) DeleteDC(big);
+      big = NULL;
+      bigBm = NULL;
+      k = 1;
+      ow = bw;
+      oh = bh;
+    }
+  }
+  HDC srcDc = big ? big : mem;
+  HBITMAP srcBm = bigBm ? bigBm : bm;
   BITMAPINFOHEADER ih;
   memset(&ih, 0, sizeof(ih));
   ih.biSize = sizeof(ih);
-  ih.biWidth = bw;
-  ih.biHeight = bh;
+  ih.biWidth = ow;
+  ih.biHeight = oh;
   ih.biPlanes = 1;
   ih.biBitCount = 24;
-  int row = (bw * 3 + 3) & ~3;
-  int img = row * bh;
+  int row = (ow * 3 + 3) & ~3;
+  int img = row * oh;
   char *bits = (char *)malloc((size_t)img);
   BOOL ok = FALSE;
   if (bits) {
     BITMAPINFO info;
     memset(&info, 0, sizeof(info));
     info.bmiHeader = ih;
-    GetDIBits(mem, bm, 0, (UINT)bh, bits, &info, DIB_RGB_COLORS);
+    GetDIBits(srcDc, srcBm, 0, (UINT)oh, bits, &info, DIB_RGB_COLORS);
+    ocr_clean_bits((unsigned char *)bits, ow, oh, row);
     BITMAPFILEHEADER fh;
     memset(&fh, 0, sizeof(fh));
     fh.bfType = 0x4D42;
@@ -3707,6 +3891,11 @@ static BOOL save_rect_bmp(int x, int y, int bw, int bh, const wchar_t *path) {
       ok = TRUE;
     }
     free(bits);
+  }
+  if (big) {
+    if (oldBig) SelectObject(big, oldBig);
+    DeleteObject(bigBm);
+    DeleteDC(big);
   }
   SelectObject(mem, old);
   DeleteObject(bm);
