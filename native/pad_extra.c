@@ -1104,7 +1104,10 @@ static int card_query(SQLHDBC dbc, const wchar_t *sql, CardRow *rows, int max, w
   SQLBindCol(st, 4, SQL_C_SLONG, &v2, sizeof(v2), &i4);
   SQLBindCol(st, 5, SQL_C_SLONG, &v3, sizeof(v3), &i5);
   int n = 0;
-  while (n < max && SQLFetch(st) == SQL_SUCCESS) {
+  /* SQL_SUCCESS_WITH_INFO — это «получилось, но есть замечание», например
+     значение подрезано по ширине колонки. Сравнение ровно с SQL_SUCCESS
+     обрывало чтение на первой же такой строке, и запрос выглядел пустым. */
+  while (n < max && SQL_SUCCEEDED(SQLFetch(st))) {
     rows[n].n1 = (i1 == SQL_NULL_DATA) ? 0 : (long)v1;
     rows[n].n2 = (i4 == SQL_NULL_DATA) ? 0 : (long)v2;
     rows[n].n3 = (i5 == SQL_NULL_DATA) ? 0 : (long)v3;
@@ -1342,30 +1345,28 @@ static const wchar_t *card_type_name(long t) {
    операцию возвращаем «имя нормы» и «поле=значение» из её строк. */
 static int card_norms(SQLHDBC dbc, const wchar_t *ids, CardRow *rows, wchar_t *err) {
   if (!ids || !ids[0]) return 0;
-  wchar_t *sql = (wchar_t *)malloc(4000 * sizeof(wchar_t));
+  wchar_t *sql = (wchar_t *)malloc(3000 * sizeof(wchar_t));
   if (!sql) return 0;
-  _snwprintf(
-      sql, 4000,
-      L"SELECT TOP 400 a.OwnerId, nk.Value, "
-      L"nk2.Value + N'=' + COALESCE(CONVERT(NVARCHAR(64), ea.FloatNumber), "
-      L"CONVERT(NVARCHAR(64), ea.IntegerNumber), "
-      L"CONVERT(NVARCHAR(64), ea.LongNumber), ea.ShortText, N''), "
-      L"0, ea.DataType "
-      L"FROM InfoObjectAttributes AS a WITH(NOLOCK) "
-      L"JOIN NameKeys AS nk WITH(NOLOCK) ON nk.NameKeyId=a.NameKeyId "
-      L"AND nk.Value IN (N'SetupTime',N'TimePerPiece') "
-      /* Строки составного атрибута привязаны к его собственному номеру —
-         это проверено дампом. Никаких «а вдруг ещё по ссылке»: ссылка у этих
-         атрибутов нулевая, и такое условие однажды уже притащило тысячи
-         чужих строк. Отбора по устаревшим здесь нет намеренно. */
-      L"JOIN InfoObjectCollectionElements AS ce WITH(NOLOCK) "
-      L"ON ce.AttributeId=a.AttributeId "
-      L"JOIN InfoObjectAttributes AS ea WITH(NOLOCK) "
-      L"ON ea.CollectionElementId=ce.CollectionElementId "
-      L"JOIN NameKeys AS nk2 WITH(NOLOCK) ON nk2.NameKeyId=ea.NameKeyId "
-      L"WHERE a.OwnerId IN (%s) "
-      L"ORDER BY a.OwnerId, nk.Value, nk2.Value",
-      ids);
+  /* Слепок с того запроса, который заведомо работает: отдельные колонки,
+     без склейки имени со значением, и отбор поля Value прямо в запросе —
+     остальные поля строки (единица измерения и прочее) не нужны. */
+  _snwprintf(sql, 3000,
+             L"SELECT TOP 200 a.OwnerId, nk.Value, "
+             L"COALESCE(CONVERT(NVARCHAR(64), ea.FloatNumber), "
+             L"CONVERT(NVARCHAR(64), ea.IntegerNumber), "
+             L"CONVERT(NVARCHAR(64), ea.LongNumber), ea.ShortText, N''), "
+             L"0, ea.DataType "
+             L"FROM InfoObjectAttributes AS a WITH(NOLOCK) "
+             L"JOIN NameKeys AS nk WITH(NOLOCK) ON nk.NameKeyId=a.NameKeyId "
+             L"AND nk.Value IN (N'SetupTime',N'TimePerPiece') "
+             L"JOIN InfoObjectCollectionElements AS ce WITH(NOLOCK) "
+             L"ON ce.AttributeId=a.AttributeId "
+             L"JOIN InfoObjectAttributes AS ea WITH(NOLOCK) "
+             L"ON ea.CollectionElementId=ce.CollectionElementId "
+             L"JOIN NameKeys AS nk2 WITH(NOLOCK) ON nk2.NameKeyId=ea.NameKeyId "
+             L"AND nk2.Value=N'Value' "
+             L"WHERE a.OwnerId IN (%s) ORDER BY a.OwnerId",
+             ids);
   int n = card_query(dbc, sql, rows, CARD_ROWS, err, 280);
   free(sql);
   return n < 0 ? 0 : n;
@@ -1577,54 +1578,14 @@ static void card_operations(SQLHDBC dbc, long tpId, long verId, CardOut *c, Card
       card_pair_s(c, L"       ", rows[k].s1, rows[k].s2, rows[k].n2, rows[k].n3, &opMins);
       printed++;
     }
-    /* Поле с числом зовётся Value — но если его в строке нет, лучше показать
-       первое числовое, чем промолчать. Поэтому сперва смотрим, есть ли Value
-       вообще, и только потом печатаем. */
-    BOOL haveValue = FALSE;
     for (int k = 0; k < nn; k++) {
       if (nr[k].n1 != o->n1 && nr[k].n1 != o->n3) continue;
-      wchar_t *e2 = wcschr(nr[k].s2, L'=');
-      if (!e2) continue;
-      *e2 = 0;
-      if (_wcsicmp(nr[k].s2, L"Value") == 0) haveValue = TRUE;
-      *e2 = L'=';
-      if (haveValue) break;
-    }
-    wchar_t lastNorm[80] = {0};
-    for (int k = 0; k < nn; k++) {
-      if (nr[k].n1 != o->n1 && nr[k].n1 != o->n3) continue;
-      wchar_t *eq = wcschr(nr[k].s2, L'=');
-      if (!eq || !eq[1]) continue;
-      *eq = 0;
-      const wchar_t *field = nr[k].s2, *val = eq + 1;
-      wchar_t *stop = NULL;
-      wcstod(val, &stop);
-      BOOL numeric = stop && stop != val;
-      /* Внутри составного атрибута само число лежит в поле Value, рядом
-         с ним бывают коэффициенты и ссылки. Берём именно Value, а не первое
-         попавшееся число. */
-      if (numeric && haveValue && _wcsicmp(field, L"Value") != 0) numeric = FALSE;
-      if (numeric && !g_cardVerbose && _wcsicmp(lastNorm, nr[k].s1) == 0) numeric = FALSE;
-      if (numeric) {
-        lstrcpynW(lastNorm, nr[k].s1, 80);
-        /* поле внутри составного атрибута зовётся по-своему, человеку нужна
-           сама норма — Тпз или Тшт */
-        wchar_t label[80];
-        if (g_cardVerbose)
-          _snwprintf(label, 80, L"%s · %s", card_label(nr[k].s1) ? card_label(nr[k].s1) : nr[k].s1,
-                     field);
-        else
-          lstrcpynW(label, card_label(nr[k].s1) ? card_label(nr[k].s1) : nr[k].s1, 80);
-        wchar_t t[64];
-        if (card_time_text(val, t, 64, &opMins)) {
-          card_add(c, L"       %-28s %s\r\n", label, t);
-          printed++;
-        }
-      } else if (g_cardVerbose && val[0]) {
-        card_add(c, L"       %-28s %s\r\n", field, val);
-        printed++;
-      }
-      *eq = L'=';
+      if (!nr[k].s2[0]) continue;
+      wchar_t t[64];
+      if (!card_time_text(nr[k].s2, t, 64, &opMins)) continue;
+      const wchar_t *ru = card_label(nr[k].s1);
+      card_add(c, L"       %-28s %s\r\n", ru ? ru : nr[k].s1, t);
+      printed++;
     }
     if (!printed && g_cardVerbose) card_add(c, L"       (своих значений нет)\r\n");
     if (opMins > 0.0) {
