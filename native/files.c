@@ -3,8 +3,8 @@
    No depth limit, no file-count limit, no index-size limit:
    - the walk uses \\?\ extended paths and a work queue instead of recursion,
      so it is bound neither by MAX_PATH nor by nesting depth nor by the stack;
-   - 8 workers on a network share; busy one stays in the subtree, idle one
-     takes a sibling. Paths stay ordinary (not \\?\) so Windows can cache SMB;
+   - 8 workers; leaf folders (TIFF without subfolders) whose date has not
+     changed are taken from the previous JSON and not opened again;
    - entries live in an arena with de-duplicated folder names, so a million
      files cost tens of megabytes instead of hundreds;
    - the JSON is written compactly through a buffered writer into a temp file
@@ -31,6 +31,10 @@ typedef struct {
 typedef struct {
   FileArena *arena;
   const wchar_t **dirs;
+  ULONGLONG *mtime; /* LastWrite of that folder; 0 = unknown */
+  int *subs;        /* how many child folders it had when indexed */
+  int *begin;       /* first FileEnt of this dir, if grouped */
+  int *count;
   int dirsN, dirsCap;
   FileEnt *ent;
   int n, cap;
@@ -54,7 +58,8 @@ static ULONGLONG g_filesT0;          /* when the current walk started */
 static ULONGLONG g_filesTook;        /* how long the last one took, ms */
 static long g_filesDirsDone;         /* folders in the finished index */
 static int g_filesWorkers;           /* how many folders were fetched at once */
-static volatile LONG g_filesIdle;    /* workers with nothing to do right now */
+static volatile LONG g_filesIdle;
+static volatile LONG g_filesCached; /* files reused from the previous JSON */
 static void save_files_pref(void);
 static void files_refresh_status(void);
 
@@ -88,6 +93,10 @@ static void idx_free(FileIdx *ix) {
     a = next;
   }
   free(ix->dirs);
+  free(ix->mtime);
+  free(ix->subs);
+  free(ix->begin);
+  free(ix->count);
   free(ix->ent);
   free(ix);
 }
@@ -126,13 +135,23 @@ static int idx_dir(FileIdx *ix, const wchar_t *dir) {
   if (ix->dirsN >= ix->dirsCap) {
     int cap = ix->dirsCap ? ix->dirsCap * 2 : 256;
     const wchar_t **grown = (const wchar_t **)realloc((void *)ix->dirs, (size_t)cap * sizeof(wchar_t *));
-    if (!grown) return -1;
+    ULONGLONG *mt = (ULONGLONG *)realloc(ix->mtime, (size_t)cap * sizeof(ULONGLONG));
+    int *su = (int *)realloc(ix->subs, (size_t)cap * sizeof(int));
+    if (!grown || !mt || !su) return -1;
+    if (cap > ix->dirsCap) {
+      memset(mt + ix->dirsCap, 0, (size_t)(cap - ix->dirsCap) * sizeof(ULONGLONG));
+      memset(su + ix->dirsCap, 0, (size_t)(cap - ix->dirsCap) * sizeof(int));
+    }
     ix->dirs = grown;
+    ix->mtime = mt;
+    ix->subs = su;
     ix->dirsCap = cap;
   }
   const wchar_t *copy = idx_intern(ix, dir);
   if (!copy) return -1;
   ix->dirs[ix->dirsN] = copy;
+  ix->mtime[ix->dirsN] = 0;
+  ix->subs[ix->dirsN] = 0;
   return ix->dirsN++;
 }
 
@@ -187,8 +206,16 @@ static BOOL idx_merge(FileIdx *dst, FileIdx *src) {
     while (cap < dst->dirsN + src->dirsN) cap *= 2;
     const wchar_t **grown =
         (const wchar_t **)realloc((void *)dst->dirs, (size_t)cap * sizeof(wchar_t *));
-    if (!grown) return FALSE;
+    ULONGLONG *mt = (ULONGLONG *)realloc(dst->mtime, (size_t)cap * sizeof(ULONGLONG));
+    int *su = (int *)realloc(dst->subs, (size_t)cap * sizeof(int));
+    if (!grown || !mt || !su) return FALSE;
+    if (cap > dst->dirsCap) {
+      memset(mt + dst->dirsCap, 0, (size_t)(cap - dst->dirsCap) * sizeof(ULONGLONG));
+      memset(su + dst->dirsCap, 0, (size_t)(cap - dst->dirsCap) * sizeof(int));
+    }
     dst->dirs = grown;
+    dst->mtime = mt;
+    dst->subs = su;
     dst->dirsCap = cap;
   }
   if (dst->n + src->n > dst->cap) {
@@ -207,7 +234,11 @@ static BOOL idx_merge(FileIdx *dst, FileIdx *src) {
     src->arena = NULL;
   }
   int base = dst->dirsN;
-  for (int i = 0; i < src->dirsN; i++) dst->dirs[base + i] = src->dirs[i];
+  for (int i = 0; i < src->dirsN; i++) {
+    dst->dirs[base + i] = src->dirs[i];
+    dst->mtime[base + i] = src->mtime ? src->mtime[i] : 0;
+    dst->subs[base + i] = src->subs ? src->subs[i] : 0;
+  }
   dst->dirsN = base + src->dirsN;
   for (int i = 0; i < src->n; i++) {
     dst->ent[dst->n].dir = base + src->ent[i].dir;
@@ -215,6 +246,27 @@ static BOOL idx_merge(FileIdx *dst, FileIdx *src) {
     dst->n++;
   }
   return TRUE;
+}
+
+static void idx_index_ents(FileIdx *ix) {
+  if (!ix || ix->dirsN <= 0) return;
+  free(ix->begin);
+  free(ix->count);
+  ix->begin = (int *)malloc((size_t)ix->dirsN * sizeof(int));
+  ix->count = (int *)calloc((size_t)ix->dirsN, sizeof(int));
+  if (!ix->begin || !ix->count) {
+    free(ix->begin);
+    free(ix->count);
+    ix->begin = ix->count = NULL;
+    return;
+  }
+  for (int i = 0; i < ix->dirsN; i++) ix->begin[i] = -1;
+  for (int i = 0; i < ix->n; i++) {
+    int d = ix->ent[i].dir;
+    if (d < 0 || d >= ix->dirsN) continue;
+    if (ix->begin[d] < 0) ix->begin[d] = i;
+    ix->count[d]++;
+  }
 }
 
 /* Publish a freshly built index and retire the old one. */
@@ -284,7 +336,10 @@ static void files_refresh_status(void) {
       s_prevT = now;
       s_prevDone = done;
     }
-    if (s_rateF > 0)
+    long cached = (long)InterlockedCompareExchange(&g_filesCached, 0, 0);
+    if (s_rateF > 0 && cached)
+      _snwprintf(t, 200, L"%ld файлов, %ld папок · %ld/с · кэш %ld", done, dirs, s_rateF, cached);
+    else if (s_rateF > 0)
       _snwprintf(t, 200, L"%ld файлов, %ld папок · %ld/с", done, dirs, s_rateF);
     else
       _snwprintf(t, 200, L"%ld файлов, %ld папок…", done, dirs);
@@ -452,6 +507,26 @@ static BOOL files_save_idx(FileIdx *ix) {
     if (i) json_put(&o, ",");
     json_put_w(&o, ix->dirs[i]);
   }
+  json_put(&o, "],\"S\":[");
+  for (int i = 0; i < ix->dirsN; i++) {
+    char b[32];
+    snprintf(b, sizeof(b), "%s%d", i ? "," : "", ix->subs ? ix->subs[i] : 0);
+    json_put(&o, b);
+  }
+  json_put(&o, "],\"Th\":[");
+  for (int i = 0; i < ix->dirsN; i++) {
+    char b[32];
+    unsigned hi = ix->mtime ? (unsigned)(ix->mtime[i] >> 32) : 0;
+    snprintf(b, sizeof(b), "%s%u", i ? "," : "", hi);
+    json_put(&o, b);
+  }
+  json_put(&o, "],\"Tl\":[");
+  for (int i = 0; i < ix->dirsN; i++) {
+    char b[32];
+    unsigned lo = ix->mtime ? (unsigned)ix->mtime[i] : 0;
+    snprintf(b, sizeof(b), "%s%u", i ? "," : "", lo);
+    json_put(&o, b);
+  }
   json_put(&o, "],\"Data\":[");
   for (int i = 0; i < ix->n; i++) {
     char head[32];
@@ -563,7 +638,29 @@ static const char *json_key(const char *from, const char *lim, const char *key) 
   return NULL;
 }
 
-/* Compact form: {"Path":…,"Dirs":[…],"Data":[{"D":n,"F":"name"}…]} */
+/* Compact form: {"Path":…,"Dirs":[…],"S":[…],"Th":[…],"Tl":[…],"Data":[…]} */
+static BOOL json_u32_list(const char *buf, const char *key, unsigned *out, int n) {
+  char pat[16];
+  snprintf(pat, sizeof(pat), "\"%s\"", key);
+  const char *p = strstr(buf, pat);
+  if (!p) return FALSE;
+  p = strchr(p, '[');
+  if (!p) return FALSE;
+  p++;
+  for (int i = 0; i < n; i++) {
+    p = json_skip(p);
+    if (*p < '0' || *p > '9') return i > 0;
+    unsigned v = 0;
+    while (*p >= '0' && *p <= '9') {
+      v = v * 10u + (unsigned)(*p - '0');
+      p++;
+    }
+    out[i] = v;
+    p = json_skip(p);
+  }
+  return TRUE;
+}
+
 static BOOL files_parse_compact(const char *buf, FileIdx *ix, wchar_t *idxRoot) {
   const char *dirs = strstr(buf, "\"Dirs\"");
   if (!dirs) return FALSE;
@@ -579,6 +676,22 @@ static BOOL files_parse_compact(const char *buf, FileIdx *ix, wchar_t *idxRoot) 
     if (idx_dir(ix, dir) < 0) break;
   }
   free(dir);
+  if (ix->dirsN > 0 && ix->mtime && ix->subs) {
+    unsigned *hi = (unsigned *)calloc((size_t)ix->dirsN, sizeof(unsigned));
+    unsigned *lo = (unsigned *)calloc((size_t)ix->dirsN, sizeof(unsigned));
+    unsigned *su = (unsigned *)calloc((size_t)ix->dirsN, sizeof(unsigned));
+    if (hi && lo && su && json_u32_list(buf, "Th", hi, ix->dirsN) &&
+        json_u32_list(buf, "Tl", lo, ix->dirsN)) {
+      json_u32_list(buf, "S", su, ix->dirsN);
+      for (int i = 0; i < ix->dirsN; i++) {
+        ix->mtime[i] = ((ULONGLONG)hi[i] << 32) | (ULONGLONG)lo[i];
+        ix->subs[i] = (int)su[i];
+      }
+    }
+    free(hi);
+    free(lo);
+    free(su);
+  }
   const char *data = strstr(buf, "\"Data\"");
   if (!data) return FALSE;
   data = strchr(data, '[');
@@ -601,6 +714,7 @@ static BOOL files_parse_compact(const char *buf, FileIdx *ix, wchar_t *idxRoot) 
     data = end + 1;
   }
   (void)idxRoot;
+  idx_index_ents(ix);
   return TRUE;
 }
 
@@ -799,6 +913,7 @@ static BOOL wp_init(WalkPath *p, const wchar_t *root) {
    свежую папку (вглубь), простаивающий — старую (соседа). */
 typedef struct {
   wchar_t **item;
+  ULONGLONG *time;
   int head, n, cap;
   int active;
   BOOL oom;
@@ -806,6 +921,9 @@ typedef struct {
   CONDITION_VARIABLE cv;
   size_t skip;
   const wchar_t *shown;
+  FileIdx *old; /* previous JSON, borrowed for the walk */
+  int *map;
+  int mapCap;
 } WalkQ;
 
 static BOOL files_cancelled(void) {
@@ -823,39 +941,45 @@ static BOOL wq_grow(wchar_t **buf, size_t *cap, size_t need) {
   return TRUE;
 }
 
-static BOOL wq_push_owned(WalkQ *q, wchar_t *owned) {
+static BOOL wq_push_owned(WalkQ *q, wchar_t *owned, ULONGLONG mtime) {
   if (!owned) return FALSE;
   if (q->head && q->head + q->n >= q->cap) {
     memmove(q->item, q->item + q->head, (size_t)q->n * sizeof(wchar_t *));
+    memmove(q->time, q->time + q->head, (size_t)q->n * sizeof(ULONGLONG));
     q->head = 0;
   }
   if (q->head + q->n >= q->cap) {
     int cap = q->cap ? q->cap * 2 : 4096;
     wchar_t **grown = (wchar_t **)realloc(q->item, (size_t)cap * sizeof(wchar_t *));
-    if (!grown) {
+    ULONGLONG *tm = (ULONGLONG *)realloc(q->time, (size_t)cap * sizeof(ULONGLONG));
+    if (!grown || !tm) {
       free(owned);
       return FALSE;
     }
     q->item = grown;
+    q->time = tm;
     q->cap = cap;
   }
   q->item[q->head + q->n] = owned;
+  q->time[q->head + q->n] = mtime;
   q->n++;
   return TRUE;
 }
 
-static wchar_t *wq_pop_tail(WalkQ *q) {
+static wchar_t *wq_pop_tail(WalkQ *q, ULONGLONG *mtime) {
   if (q->n <= 0) return NULL;
   q->n--;
   wchar_t *dir = q->item[q->head + q->n];
+  if (mtime) *mtime = q->time[q->head + q->n];
   q->item[q->head + q->n] = NULL;
   if (q->n == 0) q->head = 0;
   return dir;
 }
 
-static wchar_t *wq_pop_head(WalkQ *q) {
+static wchar_t *wq_pop_head(WalkQ *q, ULONGLONG *mtime) {
   if (q->n <= 0) return NULL;
   wchar_t *dir = q->item[q->head];
+  if (mtime) *mtime = q->time[q->head];
   q->item[q->head] = NULL;
   q->head++;
   q->n--;
@@ -873,7 +997,7 @@ typedef struct {
 } WalkWorker;
 
 static BOOL walk_entry(WalkWorker *w, const wchar_t *dir, size_t dl, const wchar_t *name,
-                       size_t nl, DWORD attr, int *dirIdx) {
+                       size_t nl, DWORD attr, ULONGLONG childTime, int *dirIdx) {
   WalkQ *q = w->q;
   if (nl == 0) return TRUE;
   if (name[0] == L'.' && (nl == 1 || (nl == 2 && name[1] == L'.'))) return TRUE;
@@ -902,7 +1026,7 @@ static BOOL walk_entry(WalkWorker *w, const wchar_t *dir, size_t dl, const wchar
       owned[dl] = L'\\';
       memcpy(owned + dl + 1, nm, (nl + 1) * sizeof(wchar_t));
       EnterCriticalSection(&q->cs);
-      BOOL pushed = wq_push_owned(q, owned);
+      BOOL pushed = wq_push_owned(q, owned, childTime);
       if (pushed) WakeConditionVariable(&q->cv);
       else q->oom = TRUE;
       LeaveCriticalSection(&q->cs);
@@ -932,6 +1056,60 @@ static BOOL walk_entry(WalkWorker *w, const wchar_t *dir, size_t dl, const wchar
   return ok;
 }
 
+static unsigned walk_hash(const wchar_t *s) {
+  unsigned h = 2166136261u;
+  for (; *s; s++) {
+    wchar_t c = *s;
+    if (c >= L'A' && c <= L'Z') c += 32;
+    h ^= (unsigned)c;
+    h *= 16777619u;
+  }
+  return h;
+}
+
+static int walk_lookup(WalkQ *q, const wchar_t *path) {
+  if (!q->old || !q->map || q->mapCap <= 0) return -1;
+  unsigned m = (unsigned)q->mapCap - 1u;
+  unsigned h = walk_hash(path) & m;
+  for (int i = 0; i < q->mapCap; i++) {
+    int d = q->map[h];
+    if (d < 0) return -1;
+    if (!_wcsicmp(q->old->dirs[d], path)) return d;
+    h = (h + 1u) & m;
+  }
+  return -1;
+}
+
+/* TIFF-папка без подпапок: если дата та же, имена уже в JSON — не открываем. */
+static BOOL walk_reuse(WalkWorker *w, const wchar_t *dir, ULONGLONG mt) {
+  if (!mt) return FALSE;
+  WalkQ *q = w->q;
+  FileIdx *old = q->old;
+  if (!old || !old->mtime || !old->subs || !old->begin || !old->count) return FALSE;
+  int od = walk_lookup(q, dir);
+  if (od < 0 || old->mtime[od] != mt || old->subs[od] != 0) return FALSE;
+  int nd = idx_dir(w->ix, dir);
+  if (nd < 0) {
+    w->oom = TRUE;
+    return TRUE;
+  }
+  w->ix->mtime[nd] = mt;
+  w->ix->subs[nd] = 0;
+  int b = old->begin[od], c = old->count[od];
+  if (b >= 0 && c > 0) {
+    for (int i = 0; i < c; i++) {
+      if (!idx_add(w->ix, nd, old->ent[b + i].name)) {
+        w->oom = TRUE;
+        return TRUE;
+      }
+    }
+    InterlockedExchangeAdd(&g_filesScanned, c);
+    InterlockedExchangeAdd(&g_filesCached, c);
+  }
+  InterlockedIncrement(&g_filesDirs);
+  return TRUE;
+}
+
 /* FindFirst path: обычный, \\?\ только если путь длиннее 240. */
 static BOOL walk_pat(WalkWorker *w, const wchar_t *dir, size_t dl) {
   BOOL already = dl >= 4 && dir[0] == L'\\' && dir[1] == L'\\' && dir[2] == L'?' && dir[3] == L'\\';
@@ -959,7 +1137,8 @@ static BOOL walk_pat(WalkWorker *w, const wchar_t *dir, size_t dl) {
   return TRUE;
 }
 
-static void walk_dir_find(WalkWorker *w, const wchar_t *dir, size_t dl) {
+static void walk_dir_find(WalkWorker *w, const wchar_t *dir, size_t dl, ULONGLONG mt) {
+  if (walk_reuse(w, dir, mt)) return;
   if (!walk_pat(w, dir, dl)) {
     w->oom = TRUE;
     return;
@@ -970,12 +1149,23 @@ static void walk_dir_find(WalkWorker *w, const wchar_t *dir, size_t dl) {
   if (h == INVALID_HANDLE_VALUE) h = FindFirstFileW(w->pat, &fd);
   if (h == INVALID_HANDLE_VALUE) return;
   InterlockedIncrement(&g_filesDirs);
-  int dirIdx = -1;
+  int dirIdx = -1, subs = 0;
   do {
     size_t nl = wcslen(fd.cFileName);
-    if (!walk_entry(w, dir, dl, fd.cFileName, nl, fd.dwFileAttributes, &dirIdx)) break;
+    DWORD attr = fd.dwFileAttributes;
+    ULONGLONG child = ((ULONGLONG)fd.ftLastWriteTime.dwHighDateTime << 32) |
+                      (ULONGLONG)fd.ftLastWriteTime.dwLowDateTime;
+    if ((attr & FILE_ATTRIBUTE_DIRECTORY) &&
+        !(fd.cFileName[0] == L'.' &&
+          (fd.cFileName[1] == 0 || (fd.cFileName[1] == L'.' && fd.cFileName[2] == 0))))
+      subs++;
+    if (!walk_entry(w, dir, dl, fd.cFileName, nl, attr, child, &dirIdx)) break;
   } while (FindNextFileW(h, &fd));
   FindClose(h);
+  if (dirIdx >= 0) {
+    w->ix->mtime[dirIdx] = mt;
+    w->ix->subs[dirIdx] = subs;
+  }
 }
 
 static DWORD WINAPI files_walk_worker(LPVOID param) {
@@ -983,6 +1173,7 @@ static DWORD WINAPI files_walk_worker(LPVOID param) {
   WalkQ *q = w->q;
   for (;;) {
     BOOL stole = FALSE;
+    ULONGLONG mt = 0;
     EnterCriticalSection(&q->cs);
     if (q->n == 0 && q->active > 0) {
       stole = TRUE;
@@ -994,11 +1185,11 @@ static DWORD WINAPI files_walk_worker(LPVOID param) {
       LeaveCriticalSection(&q->cs);
       break;
     }
-    wchar_t *dir = stole ? wq_pop_head(q) : wq_pop_tail(q);
+    wchar_t *dir = stole ? wq_pop_head(q, &mt) : wq_pop_tail(q, &mt);
     q->active++;
     LeaveCriticalSection(&q->cs);
 
-    if (dir && !files_cancelled()) walk_dir_find(w, dir, wcslen(dir));
+    if (dir && !files_cancelled()) walk_dir_find(w, dir, wcslen(dir), mt);
     else if (files_cancelled()) w->stopped = TRUE;
     free(dir);
 
@@ -1049,13 +1240,32 @@ static void files_walk_all(const wchar_t *root, FileIdx *out, BOOL *oom, BOOL *s
   InitializeConditionVariable(&q.cv);
   q.skip = p.skip;
   q.shown = p.shown;
+  files_lock();
+  q.old = g_idx;
+  if (q.old && q.old->mtime && q.old->dirsN > 0) {
+    if (!q.old->begin) idx_index_ents(q.old);
+    int cap = 1;
+    while (cap < q.old->dirsN * 2) cap *= 2;
+    q.map = (int *)malloc((size_t)cap * sizeof(int));
+    if (q.map) {
+      q.mapCap = cap;
+      for (int i = 0; i < cap; i++) q.map[i] = -1;
+      unsigned mask = (unsigned)cap - 1u;
+      for (int d = 0; d < q.old->dirsN; d++) {
+        unsigned h = walk_hash(q.old->dirs[d]) & mask;
+        while (q.map[h] >= 0) h = (h + 1u) & mask;
+        q.map[h] = d;
+      }
+    }
+  }
+  files_unlock();
   BOOL ok = FALSE;
   {
     size_t need = wcslen(p.w) + 1;
     wchar_t *rootCopy = (wchar_t *)malloc(need * sizeof(wchar_t));
     if (rootCopy) {
       memcpy(rootCopy, p.w, need * sizeof(wchar_t));
-      ok = wq_push_owned(&q, rootCopy);
+      ok = wq_push_owned(&q, rootCopy, 0);
     }
   }
   free(p.w);
@@ -1104,6 +1314,8 @@ static void files_walk_all(const wchar_t *root, FileIdx *out, BOOL *oom, BOOL *s
   if (q.oom || !ok) *oom = TRUE;
   for (int i = 0; i < q.n; i++) free(q.item[q.head + i]);
   free(q.item);
+  free(q.time);
+  free(q.map);
   free(w);
   free(th);
   DeleteCriticalSection(&q.cs);
@@ -1114,6 +1326,7 @@ static DWORD WINAPI files_index_thread(LPVOID param) {
 again:;
   InterlockedExchange(&g_filesCancel, 0); /* иначе повтор оборвётся сразу же */
   InterlockedExchange(&g_filesScanned, 0);
+  InterlockedExchange(&g_filesCached, 0);
   InterlockedExchange(&g_filesDirs, 0);
   InterlockedExchange(&g_filesIdle, 0);
   g_filesT0 = GetTickCount64();
@@ -1127,7 +1340,7 @@ again:;
        partial result is thrown away and the previous one left alone */
     idx_free(ix);
     if (InterlockedExchange(&g_filesRestart, 0)) {
-      /* оборвали не кнопкой, а сменой папки — надо пройти новую */
+      files_clear();
       g_filesNote[0] = 0;
       InterlockedExchange(&g_filesAgain, 1);
     } else {
@@ -1199,11 +1412,12 @@ static void files_apply_root(BOOL force) {
     if (InterlockedCompareExchange(&g_filesBusy, 0, 0) != 0) {
       InterlockedExchange(&g_filesRestart, 1);
       InterlockedExchange(&g_filesCancel, 1);
+    } else {
+      files_clear();
+      wchar_t jp[MAX_PATH];
+      files_idx_path(jp, MAX_PATH);
+      DeleteFileW(jp);
     }
-    files_clear();
-    wchar_t jp[MAX_PATH];
-    files_idx_path(jp, MAX_PATH);
-    DeleteFileW(jp);
     g_filesWhenOk = FALSE;
     g_filesAt = 0;
     g_filesNote[0] = 0;
