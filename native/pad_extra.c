@@ -29,6 +29,8 @@
 #define ID_OCR_FIND 165
 #define ID_OCR_AGAIN 166
 #define ID_OCR_CLOSE 167
+#define ID_CARD_1C 168
+#define TIMER_1C 21
 
 #define TIMER_CURSOR_KEEP 6
 #define WM_SEARCH_DONE (WM_APP + 8)
@@ -1476,6 +1478,39 @@ static void card_total(CardOut *c, const wchar_t *pad, const wchar_t *title, dou
 
 #define CARD_ROWS 900
 #define CARD_OPS 40 /* для скольких операций тянем все атрибуты */
+/* Названия операций ТП по порядку — для режима «Для 1С». Карточка собирается
+   в фоновом потоке, поэтому список два: поток пишет в черновой, а окно
+   перекладывает его в готовый, когда получает текст карточки. */
+#define OPS_1C 120
+static wchar_t g_opsPend[OPS_1C][PLM_COL1];
+static int g_opsPendN;
+static wchar_t g_ops1c[OPS_1C][PLM_COL1];
+static int g_ops1cN;
+
+/* Для 1С нужно название из справочника операций (TSOperation), а не имя строки в
+   ТП: имя строки бывает с номером или своим текстом. Нет ссылки на справочник —
+   берём имя строки и срезаем с него ведущий номер вроде «005 ». */
+static void ops_1c_add(const wchar_t *dirName, BOOL hasDir, const wchar_t *rowName) {
+  if (g_opsPendN >= OPS_1C) return;
+  const wchar_t *src = (hasDir && dirName && dirName[0]) ? dirName : rowName;
+  if (!src || !src[0]) return;
+  while (*src == L' ') src++;
+  const wchar_t *p = src;
+  int digits = 0;
+  while (*p >= L'0' && *p <= L'9') {
+    p++;
+    digits++;
+  }
+  if (digits >= 2 && digits <= 4 && (*p == L' ' || *p == L'.' || *p == L'-')) {
+    while (*p == L' ' || *p == L'.' || *p == L'-') p++;
+    if (*p) src = p;
+  }
+  wchar_t *dst = g_opsPend[g_opsPendN];
+  lstrcpynW(dst, src, PLM_COL1);
+  int n = (int)wcslen(dst);
+  while (n > 0 && dst[n - 1] == L' ') dst[--n] = 0;
+  if (n) g_opsPendN++;
+}
 
 /* Состав техпроцесса: ТП → ActualVersion → MainVariantInVersion → дети
    варианта. У самой операции содержательное имя часто лежит не на ней, а на
@@ -1705,6 +1740,7 @@ static void card_operations(SQLHDBC dbc, long tpId, long verId, CardOut *c, Card
     if (o->n2) _snwprintf(num, 16, L"%ld", o->n2);
     else lstrcpynW(num, L"—", 16);
     const wchar_t *nm = o->s1[0] ? o->s1 : (o->s2[0] ? o->s2 : L"(без имени)");
+    ops_1c_add(o->s2, o->n3 != 0, o->s1);
     card_add(c, L"  %-4s %-40s %ld\r\n", num, nm, o->n1);
     if (o->s2[0] && o->s1[0] && _wcsicmp(o->s2, o->s1) != 0)
       card_add(c, L"       %s\r\n", o->s2);
@@ -2192,6 +2228,7 @@ static long card_owner_of_tp(SQLHDBC dbc, long tpId, CardOut *c, CardRow *rows, 
 }
 
 static void plm_card(long id, wchar_t *out, int cap) {
+  g_opsPendN = 0;
   CardOut c;
   c.w = out;
   c.cap = cap;
@@ -2949,6 +2986,145 @@ static void show_answer_text(const wchar_t *text) {
   if (g_plmCount > 0 && g_answerList) SetFocus(g_answerList);
 }
 
+/* ---- режим «Для 1С» ------------------------------------------------ */
+/* Операции ТП надо перенести в 1С по одной, в порядке ТП. Никаких особых
+   клавиш: в буфере лежит очередная операция, человек жмёт обычный Ctrl+V в 1С,
+   и после вставки в буфер сама ложится следующая.
+
+   Как понять, что вставили: следим за нажатием Ctrl+V и Shift+Insert. Спросить
+   сам буфер «тебя уже забрали?» нельзя: журнал буфера Windows читает его сразу
+   после каждого копирования, и очередь убегала бы вперёд сама. Следующая
+   операция кладётся с паузой — 1С должна успеть забрать текущую. */
+static wchar_t g_q1c[OPS_1C][PLM_COL1];
+static int g_q1cN, g_q1cIdx, g_q1cRetry;
+static BOOL g_1cOn, g_1cPending, g_1cVDown, g_1cInsDown;
+static HHOOK g_1cHook;
+
+static BOOL onec_ours(HWND fg) {
+  if (!fg) return FALSE;
+  HWND r = GetAncestor(fg, GA_ROOT);
+  HWND mine[6] = {g_hwnd, g_setHwnd, g_askHwnd, g_answer, g_card, g_ocrWnd};
+  for (int i = 0; i < 6; i++)
+    if (mine[i] && (fg == mine[i] || r == mine[i])) return TRUE;
+  return FALSE;
+}
+
+/* Строка состояния держится, пока режим включён: сразу видно, что идёт
+   перенос в 1С и какая по счёту операция сейчас в буфере. */
+static void onec_show(void) {
+  if (!g_1cOn) return;
+  wchar_t m[160];
+  _snwprintf(m, 160, L"Для 1С · %d из %d · %.90s", g_q1cIdx + 1, g_q1cN, g_q1c[g_q1cIdx]);
+  show_status(m);
+  if (g_clipEdit) SetWindowTextW(g_clipEdit, g_q1c[g_q1cIdx]);
+}
+
+static void onec_stop(const wchar_t *why) {
+  if (g_1cHook) {
+    UnhookWindowsHookEx(g_1cHook);
+    g_1cHook = NULL;
+  }
+  KillTimer(g_hwnd, TIMER_1C);
+  BOOL was = g_1cOn;
+  g_1cOn = FALSE;
+  g_1cPending = FALSE;
+  if (was && why) show_status(why);
+}
+
+static void CALLBACK onec_tick(HWND h, UINT m, UINT_PTR id, DWORD t) {
+  (void)h;
+  (void)m;
+  (void)t;
+  KillTimer(g_hwnd, id);
+  if (!g_1cOn) return;
+  int next = g_q1cIdx + 1;
+  if (next >= g_q1cN) {
+    wchar_t done[96];
+    _snwprintf(done, 96, L"Для 1С: все %d операций вставлены", g_q1cN);
+    onec_stop(done);
+    return;
+  }
+  /* 1С может ещё держать буфер открытым — тогда пробуем чуть позже */
+  if (!clipboard_set(g_q1c[next])) {
+    if (++g_q1cRetry < 20) {
+      SetTimer(g_hwnd, TIMER_1C, 100, onec_tick);
+      return;
+    }
+    onec_stop(L"Для 1С: буфер занят другой программой, перенос остановлен");
+    return;
+  }
+  g_q1cRetry = 0;
+  g_q1cIdx = next;
+  g_1cPending = FALSE;
+  onec_show();
+}
+
+static LRESULT CALLBACK onec_kbd(int code, WPARAM wp, LPARAM lp) {
+  if (code == HC_ACTION && g_1cOn) {
+    const KBDLLHOOKSTRUCT *k = (const KBDLLHOOKSTRUCT *)lp;
+    BOOL down = (wp == WM_KEYDOWN || wp == WM_SYSKEYDOWN);
+    BOOL up = (wp == WM_KEYUP || wp == WM_SYSKEYUP);
+    BOOL ctrl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
+    BOOL shift = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+    BOOL alt = (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
+    BOOL paste = FALSE;
+    if (k->vkCode == 'V') {
+      /* зажатая клавиша повторяется — считаем только первое нажатие */
+      if (down && !g_1cVDown && ctrl && !alt) paste = TRUE;
+      if (down) g_1cVDown = TRUE;
+      if (up) g_1cVDown = FALSE;
+    } else if (k->vkCode == VK_INSERT) {
+      if (down && !g_1cInsDown && shift && !ctrl) paste = TRUE;
+      if (down) g_1cInsDown = TRUE;
+      if (up) g_1cInsDown = FALSE;
+    }
+    /* два Ctrl+V подряд до смены буфера вставляют одно и то же — и сдвиг
+       должен быть один, иначе операция проскочит */
+    if (paste && !g_1cPending && !onec_ours(GetForegroundWindow())) {
+      g_1cPending = TRUE;
+      g_q1cRetry = 0;
+      SetTimer(g_hwnd, TIMER_1C, 450, onec_tick);
+    }
+  }
+  return CallNextHookEx(g_1cHook, code, wp, lp);
+}
+
+static void onec_start(void) {
+  if (g_ops1cN <= 0) {
+    show_status(L"В карточке нет операций — переносить нечего");
+    return;
+  }
+  onec_stop(NULL);
+  /* своя копия списка: откроют другую карточку — идущий перенос не собьётся */
+  memcpy(g_q1c, g_ops1c, sizeof(g_q1c));
+  g_q1cN = g_ops1cN;
+  g_q1cIdx = 0;
+  if (!clipboard_set(g_q1c[0])) {
+    show_status(L"Буфер занят другой программой — попробуйте ещё раз");
+    return;
+  }
+  g_1cHook = SetWindowsHookExW(WH_KEYBOARD_LL, onec_kbd, g_inst, 0);
+  if (!g_1cHook) {
+    show_status(L"Для 1С: Windows не дала следить за вставкой");
+    return;
+  }
+  g_1cVDown = g_1cInsDown = FALSE;
+  g_1cPending = FALSE;
+  g_1cOn = TRUE;
+  onec_show();
+}
+
+/* Человек скопировал что-то своё — очередь больше не в буфере, и следующий
+   Ctrl+V вставит его текст, а не операцию. Двигать очередь дальше нельзя. */
+static void onec_foreign_copy(void) {
+  if (g_1cOn) onec_stop(L"Для 1С: скопировано другое — перенос остановлен");
+}
+
+static void card_ops_commit(void) {
+  memcpy(g_ops1c, g_opsPend, sizeof(g_ops1c));
+  g_ops1cN = g_opsPendN;
+}
+
 /* ---- карточка: второе окно ------------------------------------------ */
 /* Раньше карточка занимала то же окно, и список находок пропадал:
    посмотрел одну деталь — ищи заново. Теперь окна два: слева список,
@@ -2991,9 +3167,11 @@ static void card_sync_buttons(void) {
   HWND draw = GetDlgItem(g_card, ID_CARD_DRAW);
   HWND show = GetDlgItem(g_card, ID_CARD_SHOW);
   BOOL haveFile = g_cardDraw[0] != 0;
+  HWND onec = GetDlgItem(g_card, ID_CARD_1C);
   if (open) EnableWindow(open, g_ansObj[0] != 0);
   if (draw) EnableWindow(draw, haveFile);
   if (show) EnableWindow(show, haveFile);
+  if (onec) EnableWindow(onec, g_ops1cN > 0);
   layout_card();
 }
 
@@ -3014,16 +3192,17 @@ static void layout_card(void) {
   }
   if (g_drawPane) ShowWindow(g_drawPane, withPane ? SW_SHOW : SW_HIDE);
   if (g_cardEdit) MoveWindow(g_cardEdit, textLeft, top, textRight - textLeft, by - top - 6, TRUE);
-  HWND btns[4];
+  HWND btns[5];
   btns[0] = GetDlgItem(g_card, ID_CARD_OPEN);
   btns[1] = GetDlgItem(g_card, ID_CARD_DRAW);
   btns[2] = GetDlgItem(g_card, ID_CARD_SHOW);
-  btns[3] = GetDlgItem(g_card, ID_CARD_CLOSE);
-  int bwid[4] = {0, 0, 0, 0};
+  btns[3] = GetDlgItem(g_card, ID_CARD_1C);
+  btns[4] = GetDlgItem(g_card, ID_CARD_CLOSE);
+  int bwid[5] = {0, 0, 0, 0, 0};
   int total = 0, vis = 0;
   HDC dc = GetDC(g_card);
   HGDIOBJ oldFont = (dc && g_fontUi) ? SelectObject(dc, g_fontUi) : NULL;
-  for (int k = 0; k < 4; k++) {
+  for (int k = 0; k < 5; k++) {
     if (!btns[k]) continue;
     wchar_t t[96];
     t[0] = 0;
@@ -3043,9 +3222,9 @@ static void layout_card(void) {
     int avail = rc.right - pad * 2 - gap * (vis - 1);
     if (avail < vis * 40) avail = vis * 40;
     if (total > avail && total > 0)
-      for (int k = 0; k < 4; k++) bwid[k] = bwid[k] * avail / total;
+      for (int k = 0; k < 5; k++) bwid[k] = bwid[k] * avail / total;
     int bx = pad;
-    for (int k = 0; k < 4; k++) {
+    for (int k = 0; k < 5; k++) {
       if (!btns[k]) continue;
       MoveWindow(btns[k], bx, by, bwid[k], btnH, TRUE);
       ShowWindow(btns[k], SW_SHOW);
@@ -3116,6 +3295,7 @@ static LRESULT CALLBACK CardProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
     if (LOWORD(wParam) == ID_CARD_DRAW && g_cardDraw[0])
       ShellExecuteW(NULL, L"open", g_cardDraw, NULL, NULL, SW_SHOWNORMAL);
     if (LOWORD(wParam) == ID_CARD_SHOW && g_cardDraw[0]) show_in_explorer(g_cardDraw);
+    if (LOWORD(wParam) == ID_CARD_1C) onec_start();
     return 0;
   case WM_CLOSE:
     ShowWindow(hwnd, SW_HIDE);
@@ -3188,12 +3368,15 @@ static void create_card(HWND owner) {
   HWND open = mk_btn(g_card, L"Открыть в СОЮЗ", ID_CARD_OPEN);
   HWND draw = mk_btn(g_card, L"Открыть чертёж", ID_CARD_DRAW);
   HWND show = mk_btn(g_card, L"Открыть файл в проводнике", ID_CARD_SHOW);
+  /* перенос операций в 1С: после каждой вставки в буфере следующая */
+  HWND onec = mk_btn(g_card, L"В 1С", ID_CARD_1C);
   HWND cls = mk_btn(g_card, L"Закрыть", ID_CARD_CLOSE);
   SendMessageW(g_cardEdit, WM_SETFONT, (WPARAM)card_font(), TRUE);
   if (g_fontUi) {
     SendMessageW(open, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
     SendMessageW(draw, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
     SendMessageW(show, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
+    SendMessageW(onec, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
     SendMessageW(cls, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
   }
   card_sync_buttons();

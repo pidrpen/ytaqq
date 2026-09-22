@@ -1425,6 +1425,8 @@ static void clear_copied(void) {
     }
   }
   if (g_clipEdit) SetWindowTextW(g_clipEdit, L"");
+  /* «Сброс» заодно останавливает перенос в 1С — отдельная кнопка не нужна */
+  onec_stop(NULL);
   show_status(ok ? L"Буфер очищен" : L"Буфер занят другой программой");
 }
 
@@ -2435,6 +2437,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
       KillTimer(hwnd, TIMER_STATUS);
       g_statusOn = FALSE;
       InvalidateRect(hwnd, NULL, FALSE);
+      /* пока идёт перенос в 1С, строка про него не гаснет */
+      if (g_1cOn) onec_show();
     }
     if (wParam == TIMER_PASTE) {
       KillTimer(hwnd, TIMER_PASTE);
@@ -2456,6 +2460,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
   case WM_CARD_DONE: {
     wchar_t *text = (wchar_t *)lParam;
     if (text) {
+      card_ops_commit();
       show_card_text(text);
       free(text);
     }
@@ -2496,6 +2501,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     if (g_skin > 0) apply_scheme_slots();
     return 0;
   case WM_CLIPBOARDUPDATE:
+    /* своё мы помечаем флажком; без него — скопировал человек */
+    if (!g_ownClip) onec_foreign_copy();
     grab_last_copy();
     return 0;
   case WM_NCHITTEST: {
