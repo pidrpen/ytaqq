@@ -1346,21 +1346,20 @@ static int card_norms(SQLHDBC dbc, const wchar_t *ids, CardRow *rows, wchar_t *e
   _snwprintf(
       sql, 6000,
       L"SELECT TOP 400 src.Op, src.K, src.V, 0, src.T FROM ("
-      L"SELECT a.OwnerId AS Op, nk.Value AS K, CASE a.DataType "
-      L"WHEN 1 THEN CONVERT(NVARCHAR(64), a.FloatNumber) "
-      L"WHEN 13 THEN CONVERT(NVARCHAR(64), a.IntegerNumber) "
-      L"WHEN 32 THEN CONVERT(NVARCHAR(64), a.LongNumber) "
-      L"WHEN 2 THEN a.ShortText ELSE N'' END AS V, a.DataType AS T "
+      /* не полагаемся на DataType: берём первую непустую числовую колонку */
+      L"SELECT a.OwnerId AS Op, nk.Value AS K, "
+      L"COALESCE(CONVERT(NVARCHAR(64), a.FloatNumber), "
+      L"CONVERT(NVARCHAR(64), a.IntegerNumber), "
+      L"CONVERT(NVARCHAR(64), a.LongNumber), a.ShortText, N'') AS V, a.DataType AS T "
       L"FROM InfoObjectAttributes AS a WITH(NOLOCK) "
       L"JOIN NameKeys AS nk WITH(NOLOCK) ON nk.NameKeyId=a.NameKeyId "
       L"AND nk.Value IN (N'SetupTime',N'TimePerPiece') "
-      L"WHERE a.OwnerId IN (%s) AND a.Outdated=0 "
+      L"WHERE a.OwnerId IN (%s) "
       L"UNION ALL "
-      L"SELECT col.OwnerId, nk2.Value, CASE ea.DataType "
-      L"WHEN 1 THEN CONVERT(NVARCHAR(64), ea.FloatNumber) "
-      L"WHEN 13 THEN CONVERT(NVARCHAR(64), ea.IntegerNumber) "
-      L"WHEN 32 THEN CONVERT(NVARCHAR(64), ea.LongNumber) "
-      L"WHEN 2 THEN ea.ShortText ELSE N'' END, ea.DataType "
+      L"SELECT col.OwnerId, nk2.Value, "
+      L"COALESCE(CONVERT(NVARCHAR(64), ea.FloatNumber), "
+      L"CONVERT(NVARCHAR(64), ea.IntegerNumber), "
+      L"CONVERT(NVARCHAR(64), ea.LongNumber), ea.ShortText, N''), ea.DataType "
       L"FROM InfoObjectAttributes AS col WITH(NOLOCK) "
       L"JOIN InfoObjectCollectionElements AS ce WITH(NOLOCK) "
       L"ON ce.AttributeId=col.AttributeId AND ce.Outdated=0 "
@@ -1370,11 +1369,10 @@ static int card_norms(SQLHDBC dbc, const wchar_t *ids, CardRow *rows, wchar_t *e
       L"AND nk2.Value IN (N'SetupTime',N'TimePerPiece') "
       L"WHERE col.OwnerId IN (%s) AND col.Outdated=0 "
       L"UNION ALL "
-      L"SELECT ch.ParentId, nk3.Value, CASE ca.DataType "
-      L"WHEN 1 THEN CONVERT(NVARCHAR(64), ca.FloatNumber) "
-      L"WHEN 13 THEN CONVERT(NVARCHAR(64), ca.IntegerNumber) "
-      L"WHEN 32 THEN CONVERT(NVARCHAR(64), ca.LongNumber) "
-      L"WHEN 2 THEN ca.ShortText ELSE N'' END, ca.DataType "
+      L"SELECT ch.ParentId, nk3.Value, "
+      L"COALESCE(CONVERT(NVARCHAR(64), ca.FloatNumber), "
+      L"CONVERT(NVARCHAR(64), ca.IntegerNumber), "
+      L"CONVERT(NVARCHAR(64), ca.LongNumber), ca.ShortText, N''), ca.DataType "
       L"FROM InfoObjects AS ch WITH(NOLOCK) "
       L"JOIN InfoObjectAttributes AS ca WITH(NOLOCK) "
       L"ON ca.OwnerId=ch.InfoObjectId AND ca.Outdated=0 "
@@ -1386,6 +1384,40 @@ static int card_norms(SQLHDBC dbc, const wchar_t *ids, CardRow *rows, wchar_t *e
   int n = card_query(dbc, sql, rows, CARD_ROWS, err, 280);
   free(sql);
   return n < 0 ? 0 : n;
+}
+
+/* Три попытки угадать, где лежит норма, прошли мимо. Вместо четвёртой
+   догадки показываем, какие вообще атрибуты со словами Time, Setup, Piece
+   или Norm есть у первой операции — без отбора по устаревшим и по
+   коллекциям. По списку сразу видно и настоящее имя, и где оно лежит. */
+static void card_probe_time(SQLHDBC dbc, const wchar_t *ids, CardOut *c, CardRow *rows,
+                            wchar_t *err) {
+  if (!ids || !ids[0]) return;
+  wchar_t *sql = (wchar_t *)malloc(3000 * sizeof(wchar_t));
+  if (!sql) return;
+  _snwprintf(sql, 3000,
+             L"SELECT TOP 40 a.OwnerId, nk.Value, "
+             L"COALESCE(CONVERT(NVARCHAR(64), a.FloatNumber), "
+             L"CONVERT(NVARCHAR(64), a.IntegerNumber), "
+             L"CONVERT(NVARCHAR(64), a.LongNumber), a.ShortText, N'—'), "
+             L"ISNULL(a.CollectionElementId,0), a.DataType "
+             L"FROM InfoObjectAttributes AS a WITH(NOLOCK) "
+             L"JOIN NameKeys AS nk WITH(NOLOCK) ON nk.NameKeyId=a.NameKeyId "
+             L"WHERE a.OwnerId IN (%s) AND (nk.Value LIKE N'%%Time%%' "
+             L"OR nk.Value LIKE N'%%Setup%%' OR nk.Value LIKE N'%%Piece%%' "
+             L"OR nk.Value LIKE N'%%Norm%%') "
+             L"ORDER BY a.OwnerId, nk.Value",
+             ids);
+  int n = card_query(dbc, sql, rows, CARD_ROWS, err, 280);
+  free(sql);
+  if (n <= 0) {
+    card_add(c, L"  Атрибутов со словами Time, Setup, Piece или Norm у операций нет вовсе.\r\n");
+    return;
+  }
+  card_add(c, L"  ── что похоже на время (объект · имя · значение · тип) ──\r\n");
+  for (int i = 0; i < n; i++)
+    card_add(c, L"     %ld  %-28s %-12s тип %ld%s\r\n", rows[i].n1, rows[i].s1, rows[i].s2,
+             rows[i].n3, rows[i].n2 ? L" (в строке коллекции)" : L"");
 }
 
 static void card_operations(SQLHDBC dbc, long tpId, long verId, CardOut *c, CardRow *rows,
@@ -1523,8 +1555,8 @@ static void card_operations(SQLHDBC dbc, long tpId, long verId, CardOut *c, Card
       card_add(c, L"  (сложено по %d операциям из %d)\r\n", counted, n);
   } else if (ops && n > 0) {
     card_add(c, L"  ────────────────────────────────────────\r\n");
-    card_add(c, L"  Тпз и Тшт не нашлись: ни у самих операций, ни в строках\r\n"
-                 L"  их коллекций, ни у переходов. Пришлите эту строку — поищу глубже.\r\n");
+    card_add(c, L"  Тпз и Тшт под этими именами не нашлись.\r\n");
+    card_probe_time(dbc, list, c, rows, err);
   }
   if (n > shown)
     card_add(c, L"  показано подробно первых %d операций из %d\r\n", shown, n);
