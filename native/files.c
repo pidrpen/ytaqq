@@ -2,9 +2,9 @@
 
    No depth limit, no file-count limit, no index-size limit:
    - the walk uses \\?\ extended paths and a work queue instead of recursion,
-     so it is bound neither by MAX_PATH nor by nesting depth nor by the stack,
-     and several folders are fetched at once — which is what makes a network
-     share bearable;
+     so it is bound neither by MAX_PATH nor by nesting depth nor by the stack;
+   - 8 workers on a network share (32 made Samba slower), depth-first so the
+     server disk stays in one subtree, child paths allocated off the lock;
    - entries live in an arena with de-duplicated folder names, so a million
      files cost tens of megabytes instead of hundreds;
    - the JSON is written compactly through a buffered writer into a temp file
@@ -162,7 +162,7 @@ static BOOL idx_add(FileIdx *ix, int dirIdx, const wchar_t *name) {
   /* не ошибка, а «этот файл нам не нужен» — вызывающий считает FALSE сбоем */
   if (files_junk(name)) return TRUE;
   if (ix->n >= ix->cap) {
-    int cap = ix->cap ? ix->cap * 2 : 4096;
+    int cap = ix->cap ? ix->cap * 2 : 16384;
     FileEnt *grown = (FileEnt *)realloc(ix->ent, (size_t)cap * sizeof(FileEnt));
     if (!grown) return FALSE;
     ix->ent = grown;
@@ -332,31 +332,71 @@ static void json_put(JsonOut *o, const char *s) {
 }
 
 static void json_put_esc(JsonOut *o, const char *s) {
-  json_put(o, "\"");
-  for (; s && *s; s++) {
-    unsigned char c = (unsigned char)*s;
-    char buf[8];
+  if (!o->ok) return;
+  if (!s) s = "";
+  int n = (int)strlen(s);
+  /* worst case every byte becomes \u00xx plus quotes */
+  int worst = n * 6 + 2;
+  if (worst >= o->cap) {
+    json_put(o, "\"");
+    for (; *s; s++) {
+      unsigned char c = (unsigned char)*s;
+      char buf[8];
+      if (c == '"' || c == '\\') {
+        buf[0] = '\\';
+        buf[1] = (char)c;
+        buf[2] = 0;
+        json_put(o, buf);
+      } else if (c == '\n')
+        json_put(o, "\\n");
+      else if (c == '\r')
+        json_put(o, "\\r");
+      else if (c == '\t')
+        json_put(o, "\\t");
+      else if (c < 32) {
+        snprintf(buf, sizeof(buf), "\\u%04x", c);
+        json_put(o, buf);
+      } else {
+        buf[0] = (char)c;
+        buf[1] = 0;
+        json_put(o, buf);
+      }
+    }
+    json_put(o, "\"");
+    return;
+  }
+  if (o->used + worst > o->cap && !json_flush(o)) return;
+  char *d = o->buf + o->used;
+  *d++ = '"';
+  for (int i = 0; i < n; i++) {
+    unsigned char c = (unsigned char)s[i];
     if (c == '"' || c == '\\') {
-      buf[0] = '\\';
-      buf[1] = (char)c;
-      buf[2] = 0;
-      json_put(o, buf);
-    } else if (c == '\n')
-      json_put(o, "\\n");
-    else if (c == '\r')
-      json_put(o, "\\r");
-    else if (c == '\t')
-      json_put(o, "\\t");
-    else if (c < 32) {
-      snprintf(buf, sizeof(buf), "\\u%04x", c);
-      json_put(o, buf);
+      *d++ = '\\';
+      *d++ = (char)c;
+    } else if (c == '\n') {
+      *d++ = '\\';
+      *d++ = 'n';
+    } else if (c == '\r') {
+      *d++ = '\\';
+      *d++ = 'r';
+    } else if (c == '\t') {
+      *d++ = '\\';
+      *d++ = 't';
+    } else if (c < 32) {
+      static const char hx[] = "0123456789abcdef";
+      d[0] = '\\';
+      d[1] = 'u';
+      d[2] = '0';
+      d[3] = '0';
+      d[4] = hx[c >> 4];
+      d[5] = hx[c & 15];
+      d += 6;
     } else {
-      buf[0] = (char)c;
-      buf[1] = 0;
-      json_put(o, buf);
+      *d++ = (char)c;
     }
   }
-  json_put(o, "\"");
+  *d++ = '"';
+  o->used = (int)(d - o->buf);
 }
 
 static void json_put_w(JsonOut *o, const wchar_t *ws) {
@@ -387,7 +427,7 @@ static BOOL files_save_idx(FileIdx *ix) {
   if (h == INVALID_HANDLE_VALUE) return FALSE;
   JsonOut o;
   o.h = h;
-  o.cap = 1 << 16;
+  o.cap = 256 * 1024;
   o.used = 0;
   o.ok = TRUE;
   o.buf = (char *)malloc((size_t)o.cap);
@@ -757,12 +797,15 @@ static BOOL wp_init(WalkPath *p, const wchar_t *root) {
   return TRUE;
 }
 
-/* A folder on a network share answers in milliseconds, not microseconds, and
-   the old walk asked for one folder at a time — so the whole refresh ran at
-   the speed of a single round trip repeated thousands of times. Folders are
-   now handed out from a shared queue to several workers at once. Each worker
-   fills its own index, so nothing is locked per file; the pieces are spliced
-   together at the end. */
+/* A network share is waiting on round trips, not on this computer.
+   32 workers in breadth-first order made Samba slower, not faster: they
+   jumped between distant folders, the disk on the Linux box sought all
+   over, and every subdirectory malloc'd its path while holding the one
+   queue lock. Now:
+   - LIFO (depth-first) so workers stay in one subtree — the server cache
+     and the disk stay hot;
+   - 8 workers on a share, not 32 — Samba serialises more than that;
+   - child paths are allocated off the lock and pushed in one batch. */
 typedef struct {
   wchar_t **item;
   int head, n, cap;
@@ -776,29 +819,6 @@ typedef struct {
 
 static BOOL files_cancelled(void) {
   return InterlockedCompareExchange(&g_filesCancel, 0, 0) != 0;
-}
-
-/* caller holds q->cs */
-static BOOL wq_push(WalkQ *q, const wchar_t *full) {
-  if (q->head && q->head + q->n >= q->cap) {
-    /* slide the live part back to the front before growing */
-    memmove(q->item, q->item + q->head, (size_t)q->n * sizeof(wchar_t *));
-    q->head = 0;
-  }
-  if (q->head + q->n >= q->cap) {
-    int cap = q->cap ? q->cap * 2 : 256;
-    wchar_t **grown = (wchar_t **)realloc(q->item, (size_t)cap * sizeof(wchar_t *));
-    if (!grown) return FALSE;
-    q->item = grown;
-    q->cap = cap;
-  }
-  size_t need = wcslen(full) + 1;
-  wchar_t *copy = (wchar_t *)malloc(need * sizeof(wchar_t));
-  if (!copy) return FALSE;
-  memcpy(copy, full, need * sizeof(wchar_t));
-  q->item[q->head + q->n] = copy;
-  q->n++;
-  return TRUE;
 }
 
 static BOOL wq_grow(wchar_t **buf, size_t *cap, size_t need) {
@@ -823,6 +843,63 @@ static BOOL wq_display(const WalkQ *q, const wchar_t *full, wchar_t **out, size_
   return TRUE;
 }
 
+/* caller holds q->cs, or no other thread is running yet. takes ownership of
+   `owned`. LIFO: append at tail. */
+static BOOL wq_push_owned(WalkQ *q, wchar_t *owned) {
+  if (!owned) return FALSE;
+  if (q->head && q->head + q->n >= q->cap) {
+    memmove(q->item, q->item + q->head, (size_t)q->n * sizeof(wchar_t *));
+    q->head = 0;
+  }
+  if (q->head + q->n >= q->cap) {
+    int cap = q->cap ? q->cap * 2 : 4096;
+    wchar_t **grown = (wchar_t **)realloc(q->item, (size_t)cap * sizeof(wchar_t *));
+    if (!grown) {
+      free(owned);
+      return FALSE;
+    }
+    q->item = grown;
+    q->cap = cap;
+  }
+  q->item[q->head + q->n] = owned;
+  q->n++;
+  return TRUE;
+}
+
+static wchar_t *wq_pop(WalkQ *q) {
+  /* caller holds cs. newest folder first — stay in the same subtree. */
+  if (q->n <= 0) return NULL;
+  q->n--;
+  wchar_t *dir = q->item[q->head + q->n];
+  q->item[q->head + q->n] = NULL;
+  if (q->n == 0) q->head = 0;
+  return dir;
+}
+
+static BOOL wq_flush_kids(WalkQ *q, wchar_t **kids, int *kidsN) {
+  int n = *kidsN;
+  if (n <= 0) return TRUE;
+  *kidsN = 0;
+  EnterCriticalSection(&q->cs);
+  BOOL ok = TRUE;
+  for (int i = 0; i < n; i++) {
+    if (!ok) {
+      free(kids[i]);
+      kids[i] = NULL;
+      continue;
+    }
+    if (!wq_push_owned(q, kids[i])) {
+      q->oom = TRUE;
+      ok = FALSE;
+      /* wq_push_owned freed this one */
+    }
+    kids[i] = NULL;
+  }
+  if (ok) WakeAllConditionVariable(&q->cv);
+  LeaveCriticalSection(&q->cs);
+  return ok;
+}
+
 typedef struct {
   WalkQ *q;
   FileIdx *ix;
@@ -833,30 +910,26 @@ typedef struct {
 static DWORD WINAPI files_walk_worker(LPVOID param) {
   WalkWorker *w = (WalkWorker *)param;
   WalkQ *q = w->q;
-  wchar_t *pat = NULL, *child = NULL, *disp = NULL;
-  size_t patCap = 0, childCap = 0, dispCap = 0;
+  wchar_t *pat = NULL, *disp = NULL;
+  size_t patCap = 0, dispCap = 0;
+  wchar_t **kids = NULL;
+  int kidsN = 0, kidsCap = 0;
   for (;;) {
     EnterCriticalSection(&q->cs);
     if (q->n == 0 && q->active > 0) {
-      /* counted, because a worker waiting for folders is the difference
-         between "the server is slow" and "we are not asking it enough" */
       InterlockedIncrement(&g_filesIdle);
-      while (q->n == 0 && q->active > 0) SleepConditionVariableCS(&q->cv, &q->cs, 100);
+      while (q->n == 0 && q->active > 0) SleepConditionVariableCS(&q->cv, &q->cs, 50);
       InterlockedDecrement(&g_filesIdle);
     }
     if (q->n == 0) {
       LeaveCriticalSection(&q->cs);
       break;
     }
-    /* oldest folder first: a depth-first queue keeps only a handful of
-       folders in flight, and workers sit idle waiting for the next level */
-    wchar_t *dir = q->item[q->head++];
-    q->n--;
-    if (q->n == 0) q->head = 0;
+    wchar_t *dir = wq_pop(q);
     q->active++;
     LeaveCriticalSection(&q->cs);
 
-    if (!files_cancelled()) {
+    if (dir && !files_cancelled()) {
       size_t dl = wcslen(dir);
       if (wq_grow(&pat, &patCap, dl + 3)) {
         memcpy(pat, dir, dl * sizeof(wchar_t));
@@ -864,13 +937,9 @@ static DWORD WINAPI files_walk_worker(LPVOID param) {
         pat[dl + 1] = L'*';
         pat[dl + 2] = 0;
         WIN32_FIND_DATAW fd;
-        /* FindExInfoBasic skips the 8.3 short name, which a server has to
-           look up separately; LARGE_FETCH asks for entries in big batches
-           instead of small ones. Both only matter over the network — which
-           is exactly where the time goes. */
         HANDLE h = FindFirstFileExW(pat, FindExInfoBasic, &fd, FindExSearchNameMatch, NULL,
                                     FIND_FIRST_EX_LARGE_FETCH);
-        if (h == INVALID_HANDLE_VALUE) h = FindFirstFileW(pat, &fd); /* very old server */
+        if (h == INVALID_HANDLE_VALUE) h = FindFirstFileW(pat, &fd);
         if (h != INVALID_HANDLE_VALUE) {
           InterlockedIncrement(&g_filesDirs);
           int dirIdx = -1;
@@ -881,17 +950,26 @@ static DWORD WINAPI files_walk_worker(LPVOID param) {
             if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) continue;
             if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
               size_t nl = wcslen(fd.cFileName);
-              if (!wq_grow(&child, &childCap, dl + nl + 2)) {
+              wchar_t *owned = (wchar_t *)malloc((dl + nl + 2) * sizeof(wchar_t));
+              if (!owned) {
                 w->oom = TRUE;
                 break;
               }
-              memcpy(child, dir, dl * sizeof(wchar_t));
-              child[dl] = L'\\';
-              memcpy(child + dl + 1, fd.cFileName, (nl + 1) * sizeof(wchar_t));
-              EnterCriticalSection(&q->cs);
-              if (!wq_push(q, child)) q->oom = TRUE;
-              WakeConditionVariable(&q->cv);
-              LeaveCriticalSection(&q->cs);
+              memcpy(owned, dir, dl * sizeof(wchar_t));
+              owned[dl] = L'\\';
+              memcpy(owned + dl + 1, fd.cFileName, (nl + 1) * sizeof(wchar_t));
+              if (kidsN >= kidsCap) {
+                int cap = kidsCap ? kidsCap * 2 : 64;
+                wchar_t **grown = (wchar_t **)realloc(kids, (size_t)cap * sizeof(wchar_t *));
+                if (!grown) {
+                  free(owned);
+                  w->oom = TRUE;
+                  break;
+                }
+                kids = grown;
+                kidsCap = cap;
+              }
+              kids[kidsN++] = owned;
             } else {
               if (dirIdx < 0) {
                 if (!wq_display(q, dir, &disp, &dispCap)) {
@@ -908,8 +986,6 @@ static DWORD WINAPI files_walk_worker(LPVOID param) {
                 w->oom = TRUE;
                 break;
               }
-              /* checked in batches: a folder full of files should not pay for
-                 an interlocked read on every entry */
               if ((InterlockedIncrement(&g_filesScanned) & 255) == 0 && files_cancelled()) {
                 w->stopped = TRUE;
                 break;
@@ -921,10 +997,17 @@ static DWORD WINAPI files_walk_worker(LPVOID param) {
       } else {
         w->oom = TRUE;
       }
-    } else {
+    } else if (files_cancelled()) {
       w->stopped = TRUE;
     }
     free(dir);
+
+    if (w->stopped || w->oom || files_cancelled()) {
+      for (int i = 0; i < kidsN; i++) free(kids[i]);
+      kidsN = 0;
+    } else if (!wq_flush_kids(q, kids, &kidsN)) {
+      w->oom = TRUE;
+    }
 
     EnterCriticalSection(&q->cs);
     q->active--;
@@ -932,21 +1015,20 @@ static DWORD WINAPI files_walk_worker(LPVOID param) {
     LeaveCriticalSection(&q->cs);
     if (w->oom || w->stopped) break;
   }
+  for (int i = 0; i < kidsN; i++) free(kids[i]);
+  free(kids);
   free(pat);
-  free(child);
   free(disp);
   return 0;
 }
 
-/* A network share is waiting on round trips, not on this computer, so it can
-   take far more workers than there are cores. A local disk is limited by the
-   disk itself, so it gets fewer. */
+/* A network share is waiting on round trips. More than ~8 listings at once
+   makes a Linux Samba box slower: the extra workers just fight over the
+   same disk. A local disk is limited by itself, so it gets fewer still. */
 static int walk_worker_count(const wchar_t *root) {
   BOOL net = (root[0] == L'\\' && root[1] == L'\\') ||
              _wcsnicmp(root, L"\\\\?\\UNC\\", 8) == 0;
   if (!net) {
-    /* a mapped network drive looks exactly like a local one until Windows is
-       asked — and treating it as local is what kept the walk slow */
     const wchar_t *p = root;
     if (_wcsnicmp(p, L"\\\\?\\", 4) == 0) p += 4;
     if (p[0] && p[1] == L':') {
@@ -955,16 +1037,17 @@ static int walk_worker_count(const wchar_t *root) {
       if (t == DRIVE_REMOTE) net = TRUE;
     }
   }
-  if (net) return 32;
+  if (net) return 8;
   SYSTEM_INFO si;
   GetSystemInfo(&si);
   int cpus = (int)si.dwNumberOfProcessors;
   if (cpus < 1) cpus = 1;
-  int n = cpus * 2;
-  if (n > 16) n = 16;
+  int n = cpus;
+  if (n > 8) n = 8;
   if (n < 2) n = 2;
   return n;
 }
+
 
 static void files_walk_all(const wchar_t *root, FileIdx *out, BOOL *oom, BOOL *stopped) {
   WalkPath p;
@@ -978,7 +1061,15 @@ static void files_walk_all(const wchar_t *root, FileIdx *out, BOOL *oom, BOOL *s
   InitializeConditionVariable(&q.cv);
   q.skip = p.skip;
   q.shown = p.shown;
-  BOOL ok = wq_push(&q, p.w);
+  BOOL ok = FALSE;
+  {
+    size_t need = wcslen(p.w) + 1;
+    wchar_t *rootCopy = (wchar_t *)malloc(need * sizeof(wchar_t));
+    if (rootCopy) {
+      memcpy(rootCopy, p.w, need * sizeof(wchar_t));
+      ok = wq_push_owned(&q, rootCopy);
+    }
+  }
   free(p.w);
 
   int n = walk_worker_count(root);
