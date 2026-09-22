@@ -16,13 +16,15 @@
 #define ID_ANS_OPEN 127
 #define ID_ANS_LIST 130
 #define ID_AUTOSTART 119
-#define ID_ANS_COPY 120
-#define ID_ANS_NOTES 121
 #define ID_ANS_CLOSE 122
 #define ID_ANS_SHOW 151 /* 131 was already ID_CLIP */
 #define ID_ANS_CARD 152
 #define ID_ANS_DRAW 154
-#define ID_ANS_FULL 155
+#define ID_CARD_OPEN 160
+#define ID_CARD_DRAW 161
+#define ID_CARD_SHOW 162
+#define ID_CARD_CLOSE 163
+#define WM_CARD_DONE (WM_APP + 14)
 
 #define TIMER_CURSOR_KEEP 6
 #define WM_SEARCH_DONE (WM_APP + 8)
@@ -536,7 +538,6 @@ static ULONGLONG card_lap(void) {
   g_cardT0 = now;
   return d;
 }
-static BOOL g_fullMode;     /* показывать чертёж рядом с карточкой */
 static BOOL g_cardVerbose;  /* показывать ещё и все атрибуты */
 static int g_sortCol = -1, g_sortDesc = 0; /* which column the list is ordered by */
 
@@ -2007,12 +2008,10 @@ static void request_row_draw(void) {
   else free(job);
 }
 
-/* Что сейчас можно открыть как файл: в карточке — её чертёж,
-   в списке находок — чертёж выбранной строки. */
+/* Чертёж выбранной строки находок. У карточки своё окно и свой
+   чертёж — они больше не перепутываются. */
 static const wchar_t *ans_draw_file(void) {
-  if (g_cardDraw[0]) return g_cardDraw;
-  if (g_selDraw[0]) return g_selDraw;
-  return NULL;
+  return g_selDraw[0] ? g_selDraw : NULL;
 }
 
 /* Нижний ряд находок всегда один и тот же. Чего сейчас нет — то потухшее,
@@ -2576,17 +2575,8 @@ static void layout_answer(void) {
   int pad = 12, btnH = 28, gap = 7;
   int top = PANEL_TITLE_H + 6;
   int by = rc.bottom - pad - btnH;
-  BOOL withPane = g_fullMode && g_drawPane && g_drawImg;
-  int textLeft = pad, textRight = rc.right - pad;
-  if (withPane) {
-    int split = (rc.right - pad * 2) * 55 / 100;
-    if (split < 120) split = 120;
-    MoveWindow(g_drawPane, pad, top, split, by - top - 6, TRUE);
-    textLeft = pad + split + 8;
-  }
-  if (g_drawPane) ShowWindow(g_drawPane, withPane ? SW_SHOW : SW_HIDE);
-  if (g_answerEdit)
-    MoveWindow(g_answerEdit, textLeft, top, textRight - textLeft, by - top - 6, TRUE);
+  /* чертёж переехал в окно карточки — здесь остался только текст и список */
+  if (g_answerEdit) MoveWindow(g_answerEdit, pad, top, rc.right - pad * 2, by - top - 6, TRUE);
   if (g_answerList) {
     MoveWindow(g_answerList, pad, top, rc.right - pad * 2, by - top - 6, TRUE);
     int cw = rc.right - pad * 2 - 24;
@@ -2751,6 +2741,16 @@ static LRESULT CALLBACK AnswerProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
     InvalidateRect(hwnd, NULL, TRUE);
     if (g_answerList) InvalidateRect(g_answerList, NULL, TRUE);
     return 0;
+  /* та же беда, что и у карточки: окно перетащили, а галочка
+     «оставлять на месте» возвращала его на прежнее */
+  case WM_MOVE:
+    if (!g_ansBig && IsWindowVisible(hwnd)) {
+      RECT wr;
+      GetWindowRect(hwnd, &wr);
+      g_ansX = wr.left;
+      g_ansY = wr.top;
+    }
+    return 0;
   case WM_SIZE:
     layout_answer();
     /* moving the children is not enough: the uncovered strip has to be
@@ -2764,13 +2764,8 @@ static LRESULT CALLBACK AnswerProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
       GetWindowRect(hwnd, &wr);
       g_ansX = wr.left;
       g_ansY = wr.top;
-      if (g_ansMono) {
-        g_cardW = wr.right - wr.left;
-        g_cardH = wr.bottom - wr.top;
-      } else {
-        g_ansW = wr.right - wr.left;
-        g_ansH = wr.bottom - wr.top;
-      }
+      g_ansW = wr.right - wr.left;
+      g_ansH = wr.bottom - wr.top;
     }
     return 0;
   }
@@ -2802,19 +2797,6 @@ static void create_answer(HWND owner) {
   /* колесо достаётся самому полю, а не окну: без этого Ctrl+колесо
      работало только если крутить по рамке */
   g_oldAnsEdit = (WNDPROC)SetWindowLongPtrW(g_answerEdit, GWLP_WNDPROC, (LONG_PTR)AnsEditProc);
-  {
-    WNDCLASSEXW pc;
-    memset(&pc, 0, sizeof(pc));
-    pc.cbSize = sizeof(pc);
-    pc.style = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;
-    pc.lpfnWndProc = DrawPaneProc;
-    pc.hInstance = g_inst;
-    pc.hCursor = LoadCursorW(NULL, IDC_ARROW);
-    pc.lpszClassName = L"CursorPadDraw";
-    RegisterClassExW(&pc);
-    g_drawPane = CreateWindowExW(0, L"CursorPadDraw", L"", WS_CHILD, 0, 0, 10, 10, g_answer,
-                                 NULL, g_inst, NULL);
-  }
   g_answerList = CreateWindowExW(
       0, WC_LISTVIEWW, L"",
       WS_CHILD | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | WS_TABSTOP,
@@ -2864,25 +2846,26 @@ static DWORD WINAPI card_thread(LPVOID param) {
     plm_card(id, out, 160000);
     /* сам чертёж здесь не открываем: GDI+ не терпит, когда картинку готовит
        один поток, а рисует другой. Его откроет окно, когда получит текст. */
-    if (!PostMessageW(g_hwnd, WM_SEARCH_DONE, 0, (LPARAM)out)) free(out);
+    if (!PostMessageW(g_hwnd, WM_CARD_DONE, 0, (LPARAM)out)) free(out);
   }
   InterlockedExchange(&g_netBusy, 0);
   return 0;
 }
 
-static void show_card_selected_mode(BOOL full);
+static void show_card_selected_mode(void);
+static void show_card_text(const wchar_t *text);
 
 static void show_card_selected(void) {
   g_cardVerbose = FALSE; /* «Карточка»: обозначение, ТП с операциями, входимость */
-  show_card_selected_mode(TRUE);
+  show_card_selected_mode();
 }
 
 static void show_card_full(void) {
   g_cardVerbose = TRUE; /* «Атрибуты»: то же плюс всё содержимое объекта */
-  show_card_selected_mode(TRUE);
+  show_card_selected_mode();
 }
 
-static void show_card_selected_mode(BOOL full) {
+static void show_card_selected_mode(void) {
   int i = plm_selected_index();
   if (i < 0 || i >= g_plmCount || !g_plmIds[i]) {
     show_status(L"Выберите строку");
@@ -2905,17 +2888,13 @@ static void show_card_selected_mode(BOOL full) {
       g_snapN++;
     }
   }
-  /* список сейчас сменится карточкой — запомним, на что она открыта */
+  /* карточка уходит в своё окно — список находок остаётся как был */
   lstrcpynW(g_ansObj, g_plmLinks[i], PLM_LINK);
-  g_ansTitle = g_cardVerbose ? L"Атрибуты объекта" : L"Карточка";
-  g_ansMono = TRUE;
   g_cardDraw[0] = 0;
-  g_fullMode = full;
   draw_close();
-  g_plmCount = 0; /* текст вместо списка */
   wchar_t wait[120];
   _snwprintf(wait, 120, L"Смотрю объект %ld в PLM…", g_plmIds[i]);
-  show_answer_text(wait);
+  show_card_text(wait);
   HANDLE th = CreateThread(NULL, 0, card_thread, (LPVOID)(LONG_PTR)g_plmIds[i], 0, NULL);
   if (th) CloseHandle(th);
   else InterlockedExchange(&g_netBusy, 0);
@@ -2925,17 +2904,21 @@ static void show_card_selected_mode(BOOL full) {
    каждый раз утомительно — проще уменьшить текст. Ctrl+колесо. */
 static HFONT make_font(const wchar_t *face, int pt, int weight);
 static HFONT g_ansFontZoom;
-static BOOL g_ansZoomMono;
 
 static HFONT ans_font(void) {
-  if (g_ansFontZoom && g_ansZoomMono == (g_ansMono != 0)) return g_ansFontZoom;
-  if (g_ansFontZoom) DeleteObject(g_ansFontZoom);
-  g_ansZoomMono = g_ansMono != 0;
-  g_ansFontZoom = make_font(g_ansMono ? L"Consolas" : L"Segoe UI Variable Text", g_ansPt,
-                            FW_NORMAL);
-  if (!g_ansFontZoom)
-    g_ansFontZoom = make_font(g_ansMono ? L"Courier New" : L"Segoe UI", g_ansPt, FW_NORMAL);
+  if (g_ansFontZoom) return g_ansFontZoom;
+  g_ansFontZoom = make_font(L"Segoe UI Variable Text", g_ansPt, FW_NORMAL);
+  if (!g_ansFontZoom) g_ansFontZoom = make_font(L"Segoe UI", g_ansPt, FW_NORMAL);
   return g_ansFontZoom;
+}
+
+/* Карточка стоит колонками, ей нужен ровный шрифт и свой масштаб:
+   окна теперь два и одно на другое не должно влиять. */
+static HFONT card_font(void) {
+  if (g_cardFontZoom) return g_cardFontZoom;
+  g_cardFontZoom = make_font(L"Consolas", g_cardPt, FW_NORMAL);
+  if (!g_cardFontZoom) g_cardFontZoom = make_font(L"Courier New", g_cardPt, FW_NORMAL);
+  return g_cardFontZoom;
 }
 
 static void ans_zoom(int delta) {
@@ -2960,14 +2943,15 @@ static void ans_zoom(int delta) {
 
 /* Подобрать размер окна под текст: длина самой длинной строки и число строк.
    Больше рабочей области не делаем, меньше разумного — тоже. */
-static void ans_fit(const wchar_t *text, const RECT *wa, int *outW, int *outH) {
+static void ans_fit(const wchar_t *text, const RECT *wa, int *outW, int *outH, HWND edit,
+                    HFONT font) {
   int minW = ANS_W, minH = ANS_H;
   *outW = minW;
   *outH = minH;
-  if (!text || !text[0] || !g_answerEdit) return;
-  HDC dc = GetDC(g_answerEdit);
+  if (!text || !text[0] || !edit) return;
+  HDC dc = GetDC(edit);
   if (!dc) return;
-  HFONT prev = (HFONT)SelectObject(dc, ans_font());
+  HFONT prev = (HFONT)SelectObject(dc, font);
   TEXTMETRICW tm;
   GetTextMetricsW(dc, &tm);
   int maxw = 0, lines = 1;
@@ -2988,7 +2972,7 @@ static void ans_fit(const wchar_t *text, const RECT *wa, int *outW, int *outH) {
     }
   }
   if (prev) SelectObject(dc, prev);
-  ReleaseDC(g_answerEdit, dc);
+  ReleaseDC(edit, dc);
   int w = maxw + 64;  /* поля и полоса прокрутки */
   int h = lines * tm.tmHeight + PANEL_TITLE_H + 70;
   int maxW = wa->right - wa->left - 48, maxH = wa->bottom - wa->top - 48;
@@ -3025,9 +3009,6 @@ static void ans_toggle_big(HWND hwnd) {
 
 static void show_answer_text(const wchar_t *text) {
   if (!g_answer) return;
-  /* чертёж открывает то же окно, которое его рисует: GDI+ не терпит, когда
-     картинку готовит один поток, а показывает другой */
-  if (g_fullMode && g_cardDraw[0] && !g_drawImg) draw_open(g_cardDraw);
   if (g_answerEdit) {
     SendMessageW(g_answerEdit, WM_SETFONT, (WPARAM)ans_font(), TRUE);
     SetWindowTextW(g_answerEdit, text ? text : L"");
@@ -3049,20 +3030,8 @@ static void show_answer_text(const wchar_t *text) {
   if (y + ANS_H > wa.bottom) y = wa.bottom - ANS_H - 8;
   if (x < wa.left) x = wa.left + 8;
   if (y < wa.top) y = wa.top + 8;
-  /* у карточки свой запомненный размер; пока его нет — подгоняем под текст,
-     чтобы не тянуть окно мышью каждый раз */
-  int aw, ah;
-  if (g_ansMono) {
-    if (g_cardW > 0 && g_cardH > 0) {
-      aw = g_cardW;
-      ah = g_cardH;
-    } else {
-      ans_fit(text, &wa, &aw, &ah);
-    }
-  } else {
-    aw = g_ansW > 0 ? g_ansW : ANS_W;
-    ah = g_ansH > 0 ? g_ansH : ANS_H;
-  }
+  int aw = g_ansW > 0 ? g_ansW : ANS_W;
+  int ah = g_ansH > 0 ? g_ansH : ANS_H;
   /* запомненная с прошлых версий ширина бывает такой, что надписи
      на кнопках обрезаются многоточием — ниже этого не опускаемся */
   if (aw < ANS_W) aw = ANS_W;
@@ -3077,16 +3046,306 @@ static void show_answer_text(const wchar_t *text) {
   if (g_plmCount > 0 && g_answerList) SetFocus(g_answerList);
 }
 
+/* ---- карточка: второе окно ------------------------------------------ */
+/* Раньше карточка занимала то же окно, и список находок пропадал:
+   посмотрел одну деталь — ищи заново. Теперь окна два: слева список,
+   справа карточка, и чертёж живёт в карточке. */
+static void layout_card(void);
+
+static void card_zoom(int delta) {
+  int pt = g_cardPt + delta;
+  if (pt < 7) pt = 7;
+  if (pt > 22) pt = 22;
+  if (pt == g_cardPt) return;
+  g_cardPt = pt;
+  if (g_cardFontZoom) {
+    DeleteObject(g_cardFontZoom);
+    g_cardFontZoom = NULL;
+  }
+  if (g_cardEdit) {
+    SendMessageW(g_cardEdit, WM_SETFONT, (WPARAM)card_font(), TRUE);
+    InvalidateRect(g_cardEdit, NULL, TRUE);
+  }
+  save_cursor_pref();
+  wchar_t m[64];
+  _snwprintf(m, 64, L"Масштаб карточки: %d", g_cardPt);
+  show_status(m);
+}
+
+static WNDPROC g_oldCardEdit;
+
+static LRESULT CALLBACK CardEditProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+  if (msg == WM_MOUSEWHEEL && (GetKeyState(VK_CONTROL) & 0x8000)) {
+    card_zoom(GET_WHEEL_DELTA_WPARAM(wParam) > 0 ? 1 : -1);
+    return 0;
+  }
+  return CallWindowProcW(g_oldCardEdit, hwnd, msg, wParam, lParam);
+}
+
+static void card_sync_buttons(void) {
+  if (!g_card) return;
+  HWND open = GetDlgItem(g_card, ID_CARD_OPEN);
+  HWND draw = GetDlgItem(g_card, ID_CARD_DRAW);
+  HWND show = GetDlgItem(g_card, ID_CARD_SHOW);
+  BOOL haveFile = g_cardDraw[0] != 0;
+  if (open) EnableWindow(open, g_ansObj[0] != 0);
+  if (draw) EnableWindow(draw, haveFile);
+  if (show) EnableWindow(show, haveFile);
+  layout_card();
+}
+
+static void layout_card(void) {
+  if (!g_card) return;
+  RECT rc;
+  GetClientRect(g_card, &rc);
+  int pad = 12, btnH = 28, gap = 7;
+  int top = PANEL_TITLE_H + 6;
+  int by = rc.bottom - pad - btnH;
+  BOOL withPane = g_drawPane && g_drawImg;
+  int textLeft = pad, textRight = rc.right - pad;
+  if (withPane) {
+    int split = (rc.right - pad * 2) * 55 / 100;
+    if (split < 120) split = 120;
+    MoveWindow(g_drawPane, pad, top, split, by - top - 6, TRUE);
+    textLeft = pad + split + 8;
+  }
+  if (g_drawPane) ShowWindow(g_drawPane, withPane ? SW_SHOW : SW_HIDE);
+  if (g_cardEdit) MoveWindow(g_cardEdit, textLeft, top, textRight - textLeft, by - top - 6, TRUE);
+  HWND btns[4];
+  btns[0] = GetDlgItem(g_card, ID_CARD_OPEN);
+  btns[1] = GetDlgItem(g_card, ID_CARD_DRAW);
+  btns[2] = GetDlgItem(g_card, ID_CARD_SHOW);
+  btns[3] = GetDlgItem(g_card, ID_CARD_CLOSE);
+  int bwid[4] = {0, 0, 0, 0};
+  int total = 0, vis = 0;
+  HDC dc = GetDC(g_card);
+  HGDIOBJ oldFont = (dc && g_fontUi) ? SelectObject(dc, g_fontUi) : NULL;
+  for (int k = 0; k < 4; k++) {
+    if (!btns[k]) continue;
+    wchar_t t[96];
+    t[0] = 0;
+    GetWindowTextW(btns[k], t, 96);
+    SIZE sz;
+    sz.cx = 60;
+    sz.cy = 0;
+    if (dc) GetTextExtentPoint32W(dc, t, (int)wcslen(t), &sz);
+    bwid[k] = sz.cx + 24;
+    if (bwid[k] < 56) bwid[k] = 56;
+    total += bwid[k];
+    vis++;
+  }
+  if (oldFont) SelectObject(dc, oldFont);
+  if (dc) ReleaseDC(g_card, dc);
+  if (vis > 0) {
+    int avail = rc.right - pad * 2 - gap * (vis - 1);
+    if (avail < vis * 40) avail = vis * 40;
+    if (total > avail && total > 0)
+      for (int k = 0; k < 4; k++) bwid[k] = bwid[k] * avail / total;
+    int bx = pad;
+    for (int k = 0; k < 4; k++) {
+      if (!btns[k]) continue;
+      MoveWindow(btns[k], bx, by, bwid[k], btnH, TRUE);
+      ShowWindow(btns[k], SW_SHOW);
+      bx += bwid[k] + gap;
+    }
+  }
+}
+
+static RECT g_cardPrev;
+static BOOL g_cardBig;
+
+static void card_toggle_big(HWND hwnd) {
+  POINT pt;
+  RECT wa, wr;
+  GetWindowRect(hwnd, &wr);
+  pt.x = (wr.left + wr.right) / 2;
+  pt.y = (wr.top + wr.bottom) / 2;
+  get_work_area(pt, &wa);
+  if (!g_cardBig) {
+    g_cardPrev = wr;
+    g_cardBig = TRUE;
+    SetWindowPos(hwnd, HWND_TOPMOST, wa.left + 8, wa.top + 8, wa.right - wa.left - 16,
+                 wa.bottom - wa.top - 16, SWP_SHOWWINDOW);
+  } else {
+    g_cardBig = FALSE;
+    SetWindowPos(hwnd, HWND_TOPMOST, g_cardPrev.left, g_cardPrev.top,
+                 g_cardPrev.right - g_cardPrev.left, g_cardPrev.bottom - g_cardPrev.top,
+                 SWP_SHOWWINDOW);
+  }
+  layout_card();
+}
+
+static LRESULT CALLBACK CardProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+  switch (msg) {
+  case WM_ERASEBKGND:
+    return 1;
+  case WM_PAINT: {
+    PAINTSTRUCT ps;
+    HDC hdc = BeginPaint(hwnd, &ps);
+    RECT rc;
+    GetClientRect(hwnd, &rc);
+    FillRect(hdc, &rc, g_paper);
+    draw_panel_header(hwnd, hdc, g_cardVerbose ? L"Атрибуты объекта" : L"Карточка");
+    EndPaint(hwnd, &ps);
+    return 0;
+  }
+  case WM_NCHITTEST:
+    return panel_hittest(hwnd, lParam);
+  case WM_MOUSEWHEEL:
+    if (GetKeyState(VK_CONTROL) & 0x8000) {
+      card_zoom(GET_WHEEL_DELTA_WPARAM(wParam) > 0 ? 1 : -1);
+      return 0;
+    }
+    break;
+  case WM_NCLBUTTONDBLCLK:
+    card_toggle_big(hwnd);
+    return 0;
+  case WM_DRAWITEM:
+    draw_pad_button((const DRAWITEMSTRUCT *)lParam);
+    return TRUE;
+  case WM_COMMAND:
+    if (LOWORD(wParam) == ID_CARD_CLOSE) ShowWindow(hwnd, SW_HIDE);
+    if (LOWORD(wParam) == ID_CARD_OPEN && g_ansObj[0]) {
+      lstrcpynW(g_plmLastLink, g_ansObj, PLM_LINK);
+      open_plm_link(g_ansObj);
+      show_status(L"В текущий клиент СОЮЗ");
+    }
+    if (LOWORD(wParam) == ID_CARD_DRAW && g_cardDraw[0])
+      ShellExecuteW(NULL, L"open", g_cardDraw, NULL, NULL, SW_SHOWNORMAL);
+    if (LOWORD(wParam) == ID_CARD_SHOW && g_cardDraw[0]) show_in_explorer(g_cardDraw);
+    return 0;
+  case WM_CLOSE:
+    ShowWindow(hwnd, SW_HIDE);
+    return 0;
+  case WM_EXITSIZEMOVE:
+    layout_card();
+    InvalidateRect(hwnd, NULL, TRUE);
+    return 0;
+  /* простой перетаскиванием WM_SIZE не приходит, и место не запоминалось:
+     карточка возвращалась туда, откуда её увели */
+  case WM_MOVE:
+    if (!g_cardBig && IsWindowVisible(hwnd)) {
+      RECT wr;
+      GetWindowRect(hwnd, &wr);
+      g_cardX = wr.left;
+      g_cardY = wr.top;
+    }
+    return 0;
+  case WM_SIZE:
+    layout_card();
+    InvalidateRect(hwnd, NULL, TRUE);
+    if (wParam != SIZE_MINIMIZED && !g_cardBig) {
+      RECT wr;
+      GetWindowRect(hwnd, &wr);
+      g_cardX = wr.left;
+      g_cardY = wr.top;
+      g_cardW = wr.right - wr.left;
+      g_cardH = wr.bottom - wr.top;
+    }
+    return 0;
+  }
+  return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+static void create_card(HWND owner) {
+  WNDCLASSEXW wc;
+  memset(&wc, 0, sizeof(wc));
+  wc.cbSize = sizeof(wc);
+  wc.style = CS_HREDRAW | CS_VREDRAW;
+  wc.lpfnWndProc = CardProc;
+  wc.hInstance = g_inst;
+  wc.hCursor = LoadCursorW(NULL, IDC_ARROW);
+  wc.hbrBackground = g_paper;
+  wc.lpszClassName = L"CursorPadCard";
+  RegisterClassExW(&wc);
+  g_card = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, L"CursorPadCard", L"Карточка",
+                           WS_POPUP | WS_THICKFRAME | WS_CLIPCHILDREN, 0, 0, ANS_W, ANS_H, owner,
+                           NULL, g_inst, NULL);
+  round_corners(g_card);
+  g_cardEdit = CreateWindowExW(
+      0, L"EDIT", L"",
+      WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL, 0, 0, 100,
+      100, g_card, NULL, NULL, NULL);
+  g_oldCardEdit = (WNDPROC)SetWindowLongPtrW(g_cardEdit, GWLP_WNDPROC, (LONG_PTR)CardEditProc);
+  /* чертёж показывается рядом с карточкой, значит и живёт в её окне */
+  {
+    WNDCLASSEXW pc;
+    memset(&pc, 0, sizeof(pc));
+    pc.cbSize = sizeof(pc);
+    pc.style = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;
+    pc.lpfnWndProc = DrawPaneProc;
+    pc.hInstance = g_inst;
+    pc.hCursor = LoadCursorW(NULL, IDC_ARROW);
+    pc.lpszClassName = L"CursorPadDraw";
+    RegisterClassExW(&pc);
+    g_drawPane =
+        CreateWindowExW(0, L"CursorPadDraw", L"", WS_CHILD, 0, 0, 10, 10, g_card, NULL, g_inst,
+                        NULL);
+  }
+  HWND open = mk_btn(g_card, L"Открыть в СОЮЗ", ID_CARD_OPEN);
+  HWND draw = mk_btn(g_card, L"Открыть чертёж", ID_CARD_DRAW);
+  HWND show = mk_btn(g_card, L"Открыть файл в проводнике", ID_CARD_SHOW);
+  HWND cls = mk_btn(g_card, L"Закрыть", ID_CARD_CLOSE);
+  SendMessageW(g_cardEdit, WM_SETFONT, (WPARAM)card_font(), TRUE);
+  if (g_fontUi) {
+    SendMessageW(open, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
+    SendMessageW(draw, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
+    SendMessageW(show, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
+    SendMessageW(cls, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
+  }
+  card_sync_buttons();
+}
+
+static void show_card_text(const wchar_t *text) {
+  if (!g_card) return;
+  /* картинку открывает то же окно, которое её рисует: GDI+ не терпит,
+     когда готовит один поток, а показывает другой */
+  if (g_cardDraw[0] && !g_drawImg) draw_open(g_cardDraw);
+  if (g_cardEdit) {
+    SendMessageW(g_cardEdit, WM_SETFONT, (WPARAM)card_font(), TRUE);
+    SetWindowTextW(g_cardEdit, text ? text : L"");
+  }
+  RECT wa;
+  POINT pt;
+  GetCursorPos(&pt);
+  get_work_area(pt, &wa);
+  int aw = g_cardW, ah = g_cardH;
+  if (aw <= 0 || ah <= 0) ans_fit(text, &wa, &aw, &ah, g_cardEdit, card_font());
+  if (aw < ANS_W) aw = ANS_W;
+  if (aw > wa.right - wa.left) aw = wa.right - wa.left;
+  /* карточка остаётся там, куда её положили: прыгать к мыши ей незачем,
+     читают её долго. Первый раз — рядом с находками, чтобы не накрывать их */
+  int x = g_cardX, y = g_cardY;
+  if (!x && !y) {
+    RECT ar;
+    if (g_answer && IsWindowVisible(g_answer) && GetWindowRect(g_answer, &ar)) {
+      /* справа от находок, а если справа не влезает — слева: закрывать
+         собой список ей незачем, ради этого всё и затевалось */
+      y = ar.top;
+      if (ar.right + 10 + aw <= wa.right) x = ar.right + 10;
+      else if (ar.left - 10 - aw >= wa.left) x = ar.left - 10 - aw;
+      else x = wa.right - aw - 8;
+    } else {
+      x = pt.x + 18;
+      y = pt.y + 22;
+    }
+  }
+  if (x + aw > wa.right) x = wa.right - aw - 8;
+  if (y + ah > wa.bottom) y = wa.bottom - ah - 8;
+  if (x < wa.left) x = wa.left + 8;
+  if (y < wa.top) y = wa.top + 8;
+  g_cardBig = FALSE;
+  SetWindowPos(g_card, HWND_TOPMOST, x, y, aw, ah, SWP_SHOWWINDOW);
+  card_sync_buttons();
+  InvalidateRect(g_card, NULL, TRUE);
+}
+
 static void start_lookup(const wchar_t *q) {
   if (!q) return;
   g_ansTitle = NULL;
-  g_ansMono = FALSE;
-  g_cardDraw[0] = 0;
   g_selDraw[0] = 0;
-  g_ansObj[0] = 0;
   InterlockedIncrement(&g_drawGen);
-  g_fullMode = FALSE;
-  draw_close();
+  /* открытую карточку новый поиск не трогает: на то она и отдельное окно */
   while (*q == L' ' || *q == L'\t' || *q == L'\r' || *q == L'\n') q++;
   if (!q[0]) {
     show_status(L"Нечего искать — скопируйте текст");

@@ -170,7 +170,13 @@ static HWND g_filesRootEdit;
 static HWND g_btnIdx;
 static HWND g_filesStat;
 static HFONT g_fontMono;
-static BOOL g_ansMono; /* ответ показывается колонками */
+/* Карточка теперь в своём окне: находки не затираются, и можно
+   смотреть список и карточку рядом. У каждого окна своё место, размер
+   и масштаб текста. */
+static HWND g_card, g_cardEdit;
+static int g_cardPt = 10;
+static int g_cardX, g_cardY;
+static HFONT g_cardFontZoom;
 static HWND g_filesBar;
 static HWND g_chkAuto;
 static HWND g_chkAnsPin;
@@ -281,6 +287,7 @@ static LONG WINAPI on_crash(EXCEPTION_POINTERS *ex);
 static BOOL autostart_get(void);
 static void autostart_set(BOOL on);
 static void create_answer(HWND owner);
+static void create_card(HWND owner);
 static void show_answer_text(const wchar_t *text);
 
 static void apply_dpi(HWND hwnd) {
@@ -499,6 +506,10 @@ static void apply_theme(void) {
     SetClassLongPtrW(g_answer, GCLP_HBRBACKGROUND, (LONG_PTR)g_paper);
     InvalidateRect(g_answer, NULL, TRUE);
   }
+  if (g_card) {
+    SetClassLongPtrW(g_card, GCLP_HBRBACKGROUND, (LONG_PTR)g_paper);
+    InvalidateRect(g_card, NULL, TRUE);
+  }
   if (g_edit) InvalidateRect(g_edit, NULL, TRUE);
   if (g_clipEdit) InvalidateRect(g_clipEdit, NULL, TRUE);
   update_theme_buttons();
@@ -522,17 +533,23 @@ static void load_cursor_pref(void) {
   HANDLE h = CreateFileW(g_prefPath, GENERIC_READ, FILE_SHARE_READ, NULL,
                          OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
   if (h == INVALID_HANDLE_VALUE) return;
-  char buf[192];
+  char buf[240];
   DWORD n = 0;
-  ReadFile(h, buf, 191, &n, NULL);
+  ReadFile(h, buf, 239, &n, NULL);
   CloseHandle(h);
   buf[n] = 0;
   char skin[16] = {0};
   char eng[16] = {0};
   int bg = g_alphaFollow, fg = g_alphaPinned, autoOn = -1, theme = 0, aw = 0, ah = 0;
   int cw = 0, ch = 0, pt = 0, keep = 0, ax = 0, ay = 0;
-  sscanf(buf, "%15s %d %d %15s %d %d %d %d %d %d %d %d %d %d", skin, &bg, &fg, eng, &autoOn,
-         &theme, &aw, &ah, &cw, &ch, &pt, &keep, &ax, &ay);
+  /* три последних — про окно карточки; в старых файлах их нет,
+     sscanf просто их не заполнит и останутся нули */
+  int cx = 0, cy = 0, cpt = 0;
+  sscanf(buf, "%15s %d %d %15s %d %d %d %d %d %d %d %d %d %d %d %d %d", skin, &bg, &fg, eng,
+         &autoOn, &theme, &aw, &ah, &cw, &ch, &pt, &keep, &ax, &ay, &cx, &cy, &cpt);
+  g_cardX = cx;
+  g_cardY = cy;
+  if (cpt >= 7 && cpt <= 22) g_cardPt = cpt;
   g_ansKeepPos = keep == 1;
   g_ansX = ax;
   g_ansY = ay;
@@ -557,10 +574,10 @@ static void load_cursor_pref(void) {
 static void save_cursor_pref(void) {
   const char *v = g_skin == 2 ? "k3" : (g_skin == 0 ? "system" : "k2");
   const char *e = g_engine == 4 ? "plm" : (g_engine == 5 ? "files" : "ai");
-  char buf[160];
-  snprintf(buf, sizeof(buf), "%s %d %d %s %d %d %d %d %d %d %d %d %d %d\n", v, g_alphaFollow,
-           g_alphaPinned, e, g_autostart ? 1 : 0, g_theme, g_ansW, g_ansH, g_cardW, g_cardH,
-           g_ansPt, g_ansKeepPos ? 1 : 0, g_ansX, g_ansY);
+  char buf[200];
+  snprintf(buf, sizeof(buf), "%s %d %d %s %d %d %d %d %d %d %d %d %d %d %d %d %d\n", v,
+           g_alphaFollow, g_alphaPinned, e, g_autostart ? 1 : 0, g_theme, g_ansW, g_ansH, g_cardW,
+           g_cardH, g_ansPt, g_ansKeepPos ? 1 : 0, g_ansX, g_ansY, g_cardX, g_cardY, g_cardPt);
   HANDLE h = CreateFileW(g_prefPath, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
                          FILE_ATTRIBUTE_NORMAL, NULL);
   if (h == INVALID_HANDLE_VALUE) return;
@@ -2281,6 +2298,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     create_settings(hwnd);
     create_ask(hwnd);
     create_answer(hwnd);
+    create_card(hwnd);
     apply_theme();
     SendMessageW(g_tbBg, TBM_SETPOS, TRUE, g_alphaFollow);
     SendMessageW(g_tbFg, TBM_SETPOS, TRUE, g_alphaPinned);
@@ -2463,6 +2481,15 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     }
     return 0;
   }
+  /* карточка приходит отдельно: ей своё окно, находки остаются на месте */
+  case WM_CARD_DONE: {
+    wchar_t *text = (wchar_t *)lParam;
+    if (text) {
+      show_card_text(text);
+      free(text);
+    }
+    return 0;
+  }
   case WM_FILES_DONE: {
     KillTimer(hwnd, TIMER_FILES_TICK);
     files_refresh_status();
@@ -2539,6 +2566,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     if (g_setHwnd) DestroyWindow(g_setHwnd);
     if (g_askHwnd) DestroyWindow(g_askHwnd);
     if (g_answer) DestroyWindow(g_answer);
+    if (g_card) DestroyWindow(g_card);
     if (g_pick) DestroyWindow(g_pick);
     restore_system_cursor();
     KillTimer(hwnd, TIMER_FOLLOW);
