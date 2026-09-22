@@ -1354,13 +1354,13 @@ static int card_norms(SQLHDBC dbc, const wchar_t *ids, CardRow *rows, wchar_t *e
       L"FROM InfoObjectAttributes AS a WITH(NOLOCK) "
       L"JOIN NameKeys AS nk WITH(NOLOCK) ON nk.NameKeyId=a.NameKeyId "
       L"AND nk.Value IN (N'SetupTime',N'TimePerPiece') "
-      /* у составного атрибута собственное значение пустое, а в
-         InfoObjectCollectionElements его строки привязаны к тому, на что
-         он ссылается. Пробуем и ссылку, и сам атрибут. */
-      /* без отбора по устаревшим: зонд насчитал строку там, где рабочий
-         запрос её не видел, и разница была ровно в этом условии */
+      /* Строки составного атрибута привязаны к его собственному номеру.
+         Ссылку проверяем только когда она ненулевая: у этих атрибутов она
+         равна нулю, а строк с AttributeId=0 в базе тысячи — они забивали
+         выдачу целиком, и настоящие значения до неё не доходили.
+         Отбора по устаревшим здесь нет намеренно. */
       L"JOIN InfoObjectCollectionElements AS ce WITH(NOLOCK) "
-      L"ON ce.AttributeId IN (a.Link, a.AttributeId) "
+      L"ON (ce.AttributeId=a.AttributeId OR (a.Link>0 AND ce.AttributeId=a.Link)) "
       L"JOIN InfoObjectAttributes AS ea WITH(NOLOCK) "
       L"ON ea.CollectionElementId=ce.CollectionElementId "
       L"JOIN NameKeys AS nk2 WITH(NOLOCK) ON nk2.NameKeyId=ea.NameKeyId "
@@ -1640,8 +1640,8 @@ static void card_operations(SQLHDBC dbc, long tpId, long verId, CardOut *c, Card
       card_add(c, L"  (сложено по %d операциям из %d)\r\n", counted, n);
   } else if (ops && n > 0) {
     card_add(c, L"  ────────────────────────────────────────\r\n");
-    card_add(c, L"  Тпз и Тшт под этими именами не нашлись.\r\n");
-    card_probe_time(dbc, list, c, rows, err);
+    card_add(c, L"  Нормы времени у этих операций не заполнены.\r\n");
+    if (g_cardVerbose) card_probe_time(dbc, list, c, rows, err);
   }
   if (n > shown)
     card_add(c, L"  показано подробно первых %d операций из %d\r\n", shown, n);
