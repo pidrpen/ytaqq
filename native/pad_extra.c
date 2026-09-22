@@ -912,6 +912,56 @@ static void plm_designation(const wchar_t *name, wchar_t *out, int cap) {
   out[i] = 0;
 }
 
+/* Имена у изделия и его техпроцесса пишутся по-разному: у одного
+   впереди буквенный код («АДЕ 3422-682.01.01.02»), у другого его нет, зато
+   сзади висит «ТП». Приводим оба к голому обозначению, иначе сравнивать их
+   бессмысленно. */
+static void plm_core_des(const wchar_t *name, wchar_t *out, int cap) {
+  wchar_t tmp[PLM_COL1];
+  plm_designation(name, tmp, PLM_COL1);
+  size_t l = wcslen(tmp);
+  /* хвост «ТП» и похожие пометки в обозначение не входят */
+  while (l > 2 && (tmp[l - 1] == L' ' || tmp[l - 1] == L'_' || tmp[l - 1] == L'-')) l--;
+  if (l > 2 && _wcsnicmp(tmp + l - 2, L"ТП", 2) == 0) l -= 2;
+  while (l > 0 && (tmp[l - 1] == L' ' || tmp[l - 1] == L'_' || tmp[l - 1] == L'-')) l--;
+  tmp[l] = 0;
+  /* буквенный код впереди — только если дальше идёт само число */
+  const wchar_t *p = tmp;
+  const wchar_t *sp = wcschr(p, L' ');
+  if (sp && sp > p && sp - p <= 8) {
+    BOOL letters = TRUE;
+    for (const wchar_t *q = p; q < sp; q++)
+      if (*q >= L'0' && *q <= L'9') letters = FALSE;
+    const wchar_t *rest = sp;
+    while (*rest == L' ') rest++;
+    if (letters && *rest >= L'0' && *rest <= L'9') p = rest;
+  }
+  lstrcpynW(out, p, cap);
+}
+
+/* Одно ли это изделие. Точное совпадение или короткий хвост сверх —
+   «-01», « вар.2» и тому подобное. Четырёх знаков мало, чтобы считать
+   совпадение неслучайным. */
+static BOOL plm_same_item(const wchar_t *a, const wchar_t *b) {
+  wchar_t ca[PLM_COL1], cb[PLM_COL1];
+  plm_core_des(a, ca, PLM_COL1);
+  plm_core_des(b, cb, PLM_COL1);
+  size_t la = wcslen(ca), lb = wcslen(cb);
+  if (la < 5 || lb < 5) return FALSE;
+  if (_wcsicmp(ca, cb) == 0) return TRUE;
+  const wchar_t *lng = la >= lb ? ca : cb;
+  const wchar_t *shr = la >= lb ? cb : ca;
+  size_t ll = la >= lb ? la : lb, sl = la >= lb ? lb : la;
+  if (ll - sl > 6) return FALSE;
+  if (_wcsnicmp(lng, shr, sl) != 0) return FALSE;
+  /* хвост вроде «-01» — это исполнение того же изделия. А вот лишняя
+     точка — уже другая ступень состава: техпроцесс детали прилипал бы
+     к строке сборки, в которую она входит. */
+  for (size_t k = sl; k < ll; k++)
+    if (lng[k] == L'.') return FALSE;
+  return TRUE;
+}
+
 static BOOL plm_lookup(const wchar_t *query, wchar_t *out, int cap) {
   g_plmLastLink[0] = 0;
   g_plmCount = 0;
@@ -922,7 +972,9 @@ static BOOL plm_lookup(const wchar_t *query, wchar_t *out, int cap) {
   wchar_t sql[3800];
   _snwprintf(
       sql, 3800,
-      L"SELECT TOP 20 "
+      /* ищут обычно не целиком обозначение, а его начало: двадцать строк
+         режут семейство пополам, и техпроцесс остаётся без своего изделия */
+      L"SELECT TOP 60 "
       L"CASE WHEN o0.TemplateId=1794 AND ISNULL(o0.ParentId,0)<>0 "
       L"THEN o0.ParentId ELSE o0.InfoObjectId END AS OpenId, "
       L"o0.TemplateId, o0.Name, p.Name, o0.InfoObjectId "
@@ -974,10 +1026,10 @@ static BOOL plm_lookup(const wchar_t *query, wchar_t *out, int cap) {
   SQLBindCol(st, 4, SQL_C_WCHAR, pnm, sizeof(pnm), &pInd);
   SQLBindCol(st, 5, SQL_C_SLONG, &ownId, sizeof(ownId), &ownInd);
   int n = 0;
-  wchar_t links[1800] = {0};
+  wchar_t links[4200] = {0};
   size_t linkLen = 0;
   /* та же беда, что и в карточке: SQL_SUCCESS_WITH_INFO обрывал выдачу */
-  while (SQL_SUCCEEDED(SQLFetch(st)) && n < 20) {
+  while (SQL_SUCCEEDED(SQLFetch(st)) && n < 60) {
     long oid = (idInd == SQL_NULL_DATA || openId == 0) ? 0 : (long)openId;
     make_plm_link(g_plmLinks[n], PLM_LINK, oid);
     g_plmIds[n] = oid;
@@ -997,7 +1049,7 @@ static BOOL plm_lookup(const wchar_t *query, wchar_t *out, int cap) {
     if (!g_plmLastLink[0]) lstrcpynW(g_plmLastLink, g_plmLinks[n], PLM_LINK);
     /* the separator has to fit too, or a long result list walks off the end */
     size_t add = wcslen(g_plmLinks[n]);
-    if (linkLen + (n ? 2 : 0) + add + 1 < 1800) {
+    if (linkLen + (n ? 2 : 0) + add + 1 < 4200) {
       if (n) {
         links[linkLen++] = L'\r';
         links[linkLen++] = L'\n';
@@ -1013,7 +1065,7 @@ static BOOL plm_lookup(const wchar_t *query, wchar_t *out, int cap) {
   TpProd *tps = NULL;
   int tn = 0;
   {
-    wchar_t ids[300];
+    wchar_t ids[800];
     int idn = 0;
     size_t idl = 0;
     ids[0] = 0;
@@ -1021,14 +1073,14 @@ static BOOL plm_lookup(const wchar_t *query, wchar_t *out, int cap) {
       if (g_plmTmpl[i] != 1794 || !g_plmRealId[i]) continue;
       wchar_t one[24];
       int k = _snwprintf(one, 24, idn ? L",%ld" : L"%ld", g_plmRealId[i]);
-      if (k <= 0 || idl + (size_t)k + 1 >= 300) break;
+      if (k <= 0 || idl + (size_t)k + 1 >= 800) break;
       memcpy(ids + idl, one, ((size_t)k + 1) * sizeof(wchar_t));
       idl += (size_t)k;
       idn++;
     }
     if (idn) {
-      tps = (TpProd *)calloc(24, sizeof(TpProd));
-      if (tps) tn = plm_tp_products(dbc, ids, tps, 24);
+      tps = (TpProd *)calloc(64, sizeof(TpProd));
+      if (tps) tn = plm_tp_products(dbc, ids, tps, 64);
     }
   }
   for (int i = 0; i < n; i++) {
@@ -1053,29 +1105,16 @@ static BOOL plm_lookup(const wchar_t *query, wchar_t *out, int cap) {
     if (hit < 0 && pname) {
       /* ссылка может вести на другую версию того же изделия — тогда
          сводим по обозначению самого изделия, а не техпроцесса */
-      wchar_t dp[PLM_COL1];
-      plm_designation(pname, dp, PLM_COL1);
-      if (dp[0]) {
-        for (int j = 0; j < n && hit < 0; j++) {
-          if (j == i || g_plmTmpl[j] == 1794 || g_plmTp[j][0] || !g_plmEsi[j][0]) continue;
-          wchar_t des[PLM_COL1];
-          plm_designation(g_plmEsi[j], des, PLM_COL1);
-          if (des[0] && _wcsicmp(des, dp) == 0) hit = j;
-        }
+      for (int j = 0; j < n && hit < 0; j++) {
+        if (j == i || g_plmTmpl[j] == 1794 || g_plmTp[j][0] || !g_plmEsi[j][0]) continue;
+        if (plm_same_item(pname, g_plmEsi[j])) hit = j;
       }
     }
     if (hit < 0) {
-      /* ссылки нет вовсе — остаётся старый способ, по началу обозначения */
-      wchar_t dtp[PLM_COL1];
-      plm_designation(g_plmTp[i], dtp, PLM_COL1);
-      size_t dl = wcslen(dtp);
-      for (int j = 0; j < n && hit < 0 && dl; j++) {
+      /* ссылки нет вовсе — остаётся сверка обозначений */
+      for (int j = 0; j < n && hit < 0; j++) {
         if (j == i || g_plmTmpl[j] == 1794 || g_plmTp[j][0] || !g_plmEsi[j][0]) continue;
-        wchar_t des[PLM_COL1];
-        plm_designation(g_plmEsi[j], des, PLM_COL1);
-        size_t el = wcslen(des);
-        if (!el || el > dl || dl - el > 6) continue;
-        if (_wcsnicmp(dtp, des, el) == 0) hit = j;
+        if (plm_same_item(g_plmTp[i], g_plmEsi[j])) hit = j;
       }
     }
     if (hit < 0) continue;
@@ -1108,7 +1147,7 @@ static BOOL plm_lookup(const wchar_t *query, wchar_t *out, int cap) {
     links[0] = 0;
     for (int i = 0; i < n; i++) {
       size_t add = wcslen(g_plmLinks[i]);
-      if (linkLen + (i ? 2 : 0) + add + 1 >= 1800) break;
+      if (linkLen + (i ? 2 : 0) + add + 1 >= 4200) break;
       if (i) {
         links[linkLen++] = L'\r';
         links[linkLen++] = L'\n';
