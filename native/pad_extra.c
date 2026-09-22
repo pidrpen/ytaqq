@@ -858,6 +858,7 @@ static void plm_designation(const wchar_t *name, wchar_t *out, int cap) {
 static BOOL plm_lookup(const wchar_t *query, wchar_t *out, int cap) {
   g_plmLastLink[0] = 0;
   g_plmCount = 0;
+  memset(g_plmTpId, 0, sizeof(g_plmTpId));
   wchar_t pat[420];
   like_escape(query, pat, 420);
   wchar_t sql[3800];
@@ -954,17 +955,18 @@ static BOOL plm_lookup(const wchar_t *query, wchar_t *out, int cap) {
     wchar_t dtp[PLM_COL1];
     plm_designation(g_plmTp[i], dtp, PLM_COL1);
     size_t dl = wcslen(dtp);
-    /* у техпроцесса на конце обычно «ТП», но не всегда: если суффикса нет,
-       сравниваем как есть, иначе такие строки вообще не сводились */
-    wchar_t bare[PLM_COL1];
-    lstrcpynW(bare, dtp, PLM_COL1);
-    if (dl > 2 && _wcsicmp(dtp + dl - 2, L"ТП") == 0) bare[dl - 2] = 0;
-    if (!bare[0]) continue;
+    if (!dl) continue;
     for (int j = 0; j < n; j++) {
       if (j == i || g_plmTmpl[j] == 1794 || g_plmTp[j][0] || !g_plmEsi[j][0]) continue;
       wchar_t des[PLM_COL1];
       plm_designation(g_plmEsi[j], des, PLM_COL1);
-      if (_wcsicmp(des, bare) != 0 && _wcsicmp(des, dtp) != 0) continue;
+      size_t el = wcslen(des);
+      /* Обозначение техпроцесса — это обозначение детали плюс короткий хвост:
+         «ТП», «-01ТП» и подобное. Точного совпадения требовать нельзя —
+         хвосты разные. Сравниваем начало и не даём короткому обозначению
+         подцепить чужой техпроцесс: хвост не длиннее шести знаков. */
+      if (!el || el > dl || dl - el > 6) continue;
+      if (_wcsnicmp(dtp, des, el) != 0) continue;
       lstrcpynW(g_plmTp[j], g_plmTp[i], PLM_COL2);
       /* номер техпроцесса не теряем: карточка находит его сразу, а не
          ищет заново по обозначению */
@@ -2672,7 +2674,6 @@ static void ans_zoom(int delta) {
     DeleteObject(g_ansFontZoom);
     g_ansFontZoom = NULL;
   }
-  if (g_fullMode && g_cardDraw[0] && !g_drawImg) draw_open(g_cardDraw);
   if (g_answerEdit) {
     SendMessageW(g_answerEdit, WM_SETFONT, (WPARAM)ans_font(), TRUE);
     InvalidateRect(g_answerEdit, NULL, TRUE);
@@ -2750,6 +2751,9 @@ static void ans_toggle_big(HWND hwnd) {
 
 static void show_answer_text(const wchar_t *text) {
   if (!g_answer) return;
+  /* чертёж открывает то же окно, которое его рисует: GDI+ не терпит, когда
+     картинку готовит один поток, а показывает другой */
+  if (g_fullMode && g_cardDraw[0] && !g_drawImg) draw_open(g_cardDraw);
   if (g_answerEdit) {
     SendMessageW(g_answerEdit, WM_SETFONT, (WPARAM)ans_font(), TRUE);
     SetWindowTextW(g_answerEdit, text ? text : L"");
