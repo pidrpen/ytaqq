@@ -261,6 +261,7 @@ static wchar_t g_plmTp[PLM_ROWS][PLM_COL2];
 static long g_plmIds[PLM_ROWS];  /* InfoObjectId каждой строки — для карточки */
 static int g_plmTmpl[PLM_ROWS];  /* шаблон строки: по нему видно, где ТП */
 static long g_plmTpId[PLM_ROWS];  /* id техпроцесса, сведённого в эту строку */
+static long g_plmRealId[PLM_ROWS]; /* собственный id строки: у ТП он свой, а открывается родитель */
 static int g_plmCount = 0;
 static BOOL g_autostart = FALSE;
 static void show_status(const wchar_t *text);

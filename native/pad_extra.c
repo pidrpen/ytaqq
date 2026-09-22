@@ -842,6 +842,63 @@ static void show_selected_in_explorer(void) {
   show_in_explorer(g_plmLinks[i]);
 }
 
+/* Техпроцесс сам знает, на какое изделие он написан: это ссылка
+   ManufacturedProducts. Сличать обозначения по именам — гадание: хвосты
+   у всех разные. Спрашиваем базу — один запрос на все найденные ТП. */
+typedef struct {
+  long tp;
+  long prod;
+  wchar_t name[PLM_COL1];
+} TpProd;
+
+static int plm_tp_products(SQLHDBC dbc, const wchar_t *ids, TpProd *out, int max) {
+  wchar_t *sql = (wchar_t *)malloc(3000 * sizeof(wchar_t));
+  if (!sql) return 0;
+  _snwprintf(sql, 3000,
+             L"SELECT TOP %d a.OwnerId, o.InfoObjectId, o.Name "
+             L"FROM InfoObjectAttributes AS a WITH(NOLOCK) "
+             L"JOIN NameKeys AS nk WITH(NOLOCK) ON nk.NameKeyId=a.NameKeyId "
+             L"AND nk.Value=N'ManufacturedProducts' "
+             L"OUTER APPLY (SELECT TOP 1 ea.Link AS L "
+             L"FROM InfoObjectCollectionElements AS ce WITH(NOLOCK) "
+             L"JOIN InfoObjectAttributes AS ea WITH(NOLOCK) "
+             L"ON ea.CollectionElementId=ce.CollectionElementId AND ea.DataType=6 "
+             /* без этой оговорки пустая ссылка тянет чужие строки */
+             L"WHERE ce.Outdated=0 AND (ce.AttributeId=a.AttributeId "
+             L"OR (ISNULL(a.Link,0)<>0 AND ce.AttributeId=a.Link))) AS el "
+             L"JOIN InfoObjects AS o WITH(NOLOCK) "
+             L"ON o.InfoObjectId=COALESCE(el.L, a.Link) AND o.Erased=0 "
+             L"WHERE a.OwnerId IN (%s) AND a.Outdated=0",
+             max, ids);
+  SQLHSTMT st = SQL_NULL_HSTMT;
+  if (!SQL_SUCCEEDED(SQLAllocHandle(SQL_HANDLE_STMT, dbc, &st))) {
+    free(sql);
+    return 0;
+  }
+  SQLRETURN r = SQLExecDirectW(st, (SQLWCHAR *)sql, SQL_NTS);
+  free(sql);
+  if (!SQL_SUCCEEDED(r)) {
+    SQLFreeHandle(SQL_HANDLE_STMT, st);
+    return 0;
+  }
+  SQLINTEGER tpId = 0, prId = 0;
+  SQLWCHAR nm[200];
+  SQLLEN t1 = 0, t2 = 0, t3 = 0;
+  SQLBindCol(st, 1, SQL_C_SLONG, &tpId, sizeof(tpId), &t1);
+  SQLBindCol(st, 2, SQL_C_SLONG, &prId, sizeof(prId), &t2);
+  SQLBindCol(st, 3, SQL_C_WCHAR, nm, sizeof(nm), &t3);
+  int n = 0;
+  while (n < max && SQL_SUCCEEDED(SQLFetch(st))) {
+    out[n].tp = (t1 == SQL_NULL_DATA) ? 0 : (long)tpId;
+    out[n].prod = (t2 == SQL_NULL_DATA) ? 0 : (long)prId;
+    out[n].name[0] = 0;
+    if (t3 > 0) lstrcpynW(out[n].name, (wchar_t *)nm, PLM_COL1);
+    n++;
+  }
+  SQLFreeHandle(SQL_HANDLE_STMT, st);
+  return n;
+}
+
 /* Обозначение — всё до первой скобки или двоеточия в имени объекта. */
 static void plm_designation(const wchar_t *name, wchar_t *out, int cap) {
   int i = 0;
@@ -859,6 +916,7 @@ static BOOL plm_lookup(const wchar_t *query, wchar_t *out, int cap) {
   g_plmLastLink[0] = 0;
   g_plmCount = 0;
   memset(g_plmTpId, 0, sizeof(g_plmTpId));
+  memset(g_plmRealId, 0, sizeof(g_plmRealId));
   wchar_t pat[420];
   like_escape(query, pat, 420);
   wchar_t sql[3800];
@@ -867,7 +925,7 @@ static BOOL plm_lookup(const wchar_t *query, wchar_t *out, int cap) {
       L"SELECT TOP 20 "
       L"CASE WHEN o0.TemplateId=1794 AND ISNULL(o0.ParentId,0)<>0 "
       L"THEN o0.ParentId ELSE o0.InfoObjectId END AS OpenId, "
-      L"o0.TemplateId, o0.Name, p.Name "
+      L"o0.TemplateId, o0.Name, p.Name, o0.InfoObjectId "
       L"FROM InfoObjects AS o0 WITH(NOLOCK) "
       L"LEFT JOIN InfoObjects AS p WITH(NOLOCK) ON p.InfoObjectId=o0.ParentId "
       L"WHERE o0.Erased=0 AND ("
@@ -907,13 +965,14 @@ static BOOL plm_lookup(const wchar_t *query, wchar_t *out, int cap) {
     SQLFreeHandle(SQL_HANDLE_ENV, env);
     return FALSE;
   }
-  SQLINTEGER openId = 0, tmpl = 0;
+  SQLINTEGER openId = 0, tmpl = 0, ownId = 0;
   SQLWCHAR nm[200], pnm[200];
-  SQLLEN idInd = 0, tmInd = 0, nmInd = 0, pInd = 0;
+  SQLLEN idInd = 0, tmInd = 0, nmInd = 0, pInd = 0, ownInd = 0;
   SQLBindCol(st, 1, SQL_C_SLONG, &openId, sizeof(openId), &idInd);
   SQLBindCol(st, 2, SQL_C_SLONG, &tmpl, sizeof(tmpl), &tmInd);
   SQLBindCol(st, 3, SQL_C_WCHAR, nm, sizeof(nm), &nmInd);
   SQLBindCol(st, 4, SQL_C_WCHAR, pnm, sizeof(pnm), &pInd);
+  SQLBindCol(st, 5, SQL_C_SLONG, &ownId, sizeof(ownId), &ownInd);
   int n = 0;
   wchar_t links[1800] = {0};
   size_t linkLen = 0;
@@ -922,6 +981,7 @@ static BOOL plm_lookup(const wchar_t *query, wchar_t *out, int cap) {
     long oid = (idInd == SQL_NULL_DATA || openId == 0) ? 0 : (long)openId;
     make_plm_link(g_plmLinks[n], PLM_LINK, oid);
     g_plmIds[n] = oid;
+    g_plmRealId[n] = (ownInd == SQL_NULL_DATA) ? 0 : (long)ownId;
     g_plmTmpl[n] = (int)tmpl;
     g_plmEsi[n][0] = 0;
     g_plmTp[n][0] = 0;
@@ -948,33 +1008,84 @@ static BOOL plm_lookup(const wchar_t *query, wchar_t *out, int cap) {
     n++;
   }
   /* ЭСИ и его техпроцесс приходят из поиска двумя отдельными строками, хотя
-     это одно и то же изделие. Сводим их в одну: обозначение у них общее,
-     у техпроцесса на конце лишнее «ТП». Запросов для этого не нужно. */
-  for (int i = 0; i < n; i++) {
-    if (g_plmTmpl[i] != 1794 || !g_plmTp[i][0]) continue;
-    wchar_t dtp[PLM_COL1];
-    plm_designation(g_plmTp[i], dtp, PLM_COL1);
-    size_t dl = wcslen(dtp);
-    if (!dl) continue;
-    for (int j = 0; j < n; j++) {
-      if (j == i || g_plmTmpl[j] == 1794 || g_plmTp[j][0] || !g_plmEsi[j][0]) continue;
-      wchar_t des[PLM_COL1];
-      plm_designation(g_plmEsi[j], des, PLM_COL1);
-      size_t el = wcslen(des);
-      /* Обозначение техпроцесса — это обозначение детали плюс короткий хвост:
-         «ТП», «-01ТП» и подобное. Точного совпадения требовать нельзя —
-         хвосты разные. Сравниваем начало и не даём короткому обозначению
-         подцепить чужой техпроцесс: хвост не длиннее шести знаков. */
-      if (!el || el > dl || dl - el > 6) continue;
-      if (_wcsnicmp(dtp, des, el) != 0) continue;
-      lstrcpynW(g_plmTp[j], g_plmTp[i], PLM_COL2);
-      /* номер техпроцесса не теряем: карточка находит его сразу, а не
-         ищет заново по обозначению */
-      g_plmTpId[j] = g_plmIds[i];
-      g_plmTmpl[i] = -1;
-      break;
+     это одно и то же изделие. Сводим их в одну по ссылке из базы, а не по
+     созвучию имён: хвосты у техпроцессов разные, и на них сведение разваливалось. */
+  TpProd *tps = NULL;
+  int tn = 0;
+  {
+    wchar_t ids[300];
+    int idn = 0;
+    size_t idl = 0;
+    ids[0] = 0;
+    for (int i = 0; i < n; i++) {
+      if (g_plmTmpl[i] != 1794 || !g_plmRealId[i]) continue;
+      wchar_t one[24];
+      int k = _snwprintf(one, 24, idn ? L",%ld" : L"%ld", g_plmRealId[i]);
+      if (k <= 0 || idl + (size_t)k + 1 >= 300) break;
+      memcpy(ids + idl, one, ((size_t)k + 1) * sizeof(wchar_t));
+      idl += (size_t)k;
+      idn++;
+    }
+    if (idn) {
+      tps = (TpProd *)calloc(24, sizeof(TpProd));
+      if (tps) tn = plm_tp_products(dbc, ids, tps, 24);
     }
   }
+  for (int i = 0; i < n; i++) {
+    if (g_plmTmpl[i] != 1794 || !g_plmTp[i][0]) continue;
+    long prod = 0;
+    const wchar_t *pname = NULL;
+    for (int k = 0; k < tn; k++) {
+      if (tps[k].tp != g_plmRealId[i]) continue;
+      prod = tps[k].prod;
+      if (tps[k].name[0]) pname = tps[k].name;
+      break;
+    }
+    /* изделие у техпроцесса теперь известно точно — показываем его
+       в строке, даже если своей строки у изделия в находках нет */
+    if (pname) lstrcpynW(g_plmEsi[i], pname, PLM_COL1);
+    if (prod && !g_plmIds[i]) g_plmIds[i] = prod;
+    int hit = -1;
+    for (int j = 0; j < n && hit < 0; j++) {
+      if (j == i || g_plmTmpl[j] == 1794 || g_plmTp[j][0] || !g_plmEsi[j][0]) continue;
+      if (prod && (g_plmIds[j] == prod || g_plmRealId[j] == prod)) hit = j;
+    }
+    if (hit < 0 && pname) {
+      /* ссылка может вести на другую версию того же изделия — тогда
+         сводим по обозначению самого изделия, а не техпроцесса */
+      wchar_t dp[PLM_COL1];
+      plm_designation(pname, dp, PLM_COL1);
+      if (dp[0]) {
+        for (int j = 0; j < n && hit < 0; j++) {
+          if (j == i || g_plmTmpl[j] == 1794 || g_plmTp[j][0] || !g_plmEsi[j][0]) continue;
+          wchar_t des[PLM_COL1];
+          plm_designation(g_plmEsi[j], des, PLM_COL1);
+          if (des[0] && _wcsicmp(des, dp) == 0) hit = j;
+        }
+      }
+    }
+    if (hit < 0) {
+      /* ссылки нет вовсе — остаётся старый способ, по началу обозначения */
+      wchar_t dtp[PLM_COL1];
+      plm_designation(g_plmTp[i], dtp, PLM_COL1);
+      size_t dl = wcslen(dtp);
+      for (int j = 0; j < n && hit < 0 && dl; j++) {
+        if (j == i || g_plmTmpl[j] == 1794 || g_plmTp[j][0] || !g_plmEsi[j][0]) continue;
+        wchar_t des[PLM_COL1];
+        plm_designation(g_plmEsi[j], des, PLM_COL1);
+        size_t el = wcslen(des);
+        if (!el || el > dl || dl - el > 6) continue;
+        if (_wcsnicmp(dtp, des, el) == 0) hit = j;
+      }
+    }
+    if (hit < 0) continue;
+    lstrcpynW(g_plmTp[hit], g_plmTp[i], PLM_COL2);
+    /* номер техпроцесса нужен его собственный, а не родительский:
+       раньше карточка брала из снимка чужой номер и операций не находила */
+    g_plmTpId[hit] = g_plmRealId[i] ? g_plmRealId[i] : g_plmIds[i];
+    g_plmTmpl[i] = -1;
+  }
+  free(tps);
   {
     int w = 0;
     for (int i = 0; i < n; i++) {
@@ -985,6 +1096,7 @@ static BOOL plm_lookup(const wchar_t *query, wchar_t *out, int cap) {
         lstrcpynW(g_plmLinks[w], g_plmLinks[i], PLM_LINK);
         g_plmIds[w] = g_plmIds[i];
         g_plmTpId[w] = g_plmTpId[i];
+        g_plmRealId[w] = g_plmRealId[i];
         g_plmTmpl[w] = g_plmTmpl[i];
       }
       w++;
