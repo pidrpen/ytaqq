@@ -497,6 +497,15 @@ static void open_plm_link(const wchar_t *link) {
 }
 
 static wchar_t g_cardDraw[PLM_LINK]; /* чертёж, найденный для карточки */
+/* Сколько заняли шаги карточки. Без этого непонятно, что именно медленное:
+   база, обратный поиск по ссылкам или обход индекса файлов. */
+static ULONGLONG g_cardT0, g_cardTAttrs, g_cardTTp, g_cardTOps, g_cardTUsed, g_cardTFiles;
+static ULONGLONG card_lap(void) {
+  ULONGLONG now = GetTickCount64();
+  ULONGLONG d = now - g_cardT0;
+  g_cardT0 = now;
+  return d;
+}
 static BOOL g_fullMode; /* показывать чертёж рядом с карточкой */
 static int g_sortCol = -1, g_sortDesc = 0; /* which column the list is ordered by */
 
@@ -1181,6 +1190,8 @@ static const CardLabel kCardLabels[] = {
     {L"ManufacturingSign", L"Признак изготовления"},
     {L"MainPVC", L"Основной ПВС"},
     {L"UnitOfNormalization", L"Единица нормирования"},
+    {L"SetupTime", L"Тпз"},
+    {L"TimePerPiece", L"Тшт"},
     {L"ZUM_TempCraftName", L"Профессия"},
     {L"ZUM_TempEquipmentName", L"Оборудование"},
     {L"WorkShop", L"Цех"},
@@ -1230,6 +1241,7 @@ static BOOL card_is_time(const wchar_t *key, long dataType) {
   /* UnitOfNormalization — это в чём меряют («1 минута»), а не сколько.
      Раньше он попадал в приметы по слову norm и складывался в итог. */
   if (_wcsicmp(key, L"UnitOfNormalization") == 0) return FALSE;
+  if (_wcsicmp(key, L"SetupTime") == 0 || _wcsicmp(key, L"TimePerPiece") == 0) return TRUE;
   static const wchar_t *marks[] = {L"tsht", L"tpz",  L"tshk",  L"time",
                                    L"normtime", L"labor", L"labour", L"duration"};
   wchar_t low[64];
@@ -1314,53 +1326,32 @@ static const wchar_t *card_type_name(long t) {
 /* Состав техпроцесса: ТП → ActualVersion → MainVariantInVersion → дети
    варианта. У самой операции содержательное имя часто лежит не на ней, а на
    объекте по ссылке TSOperation, поэтому он подтягивается сразу. */
-/* Норма времени на операции не нашлась среди её собственных атрибутов.
-   Значит она, скорее всего, лежит в коллекции — в переходах или в строках
-   нормирования. Их значения видны только через InfoObjectCollectionElements,
-   поэтому для первой операции показываем, что там есть: по именам сразу
-   станет ясно, что брать. */
-static void card_probe_collections(SQLHDBC dbc, long opId, CardOut *c, CardRow *rows,
-                                   wchar_t *err) {
-  wchar_t *sql = (wchar_t *)malloc(3200 * sizeof(wchar_t));
-  if (!sql) return;
-  _snwprintf(
-      sql, 3200,
-      L"SELECT TOP 60 ce.CollectionElementId, nk2.Value, "
-      L"CASE ea.DataType "
-      L"WHEN 3 THEN CASE WHEN ea.BoolValue=1 THEN N'да' ELSE N'нет' END "
-      L"WHEN 2 THEN ea.ShortText "
-      L"WHEN 24 THEN CAST(ea.LargeText AS NVARCHAR(200)) "
-      L"WHEN 1 THEN CONVERT(NVARCHAR(64), ea.FloatNumber) "
-      L"WHEN 13 THEN CONVERT(NVARCHAR(64), ea.IntegerNumber) "
-      L"WHEN 32 THEN CONVERT(NVARCHAR(64), ea.LongNumber) "
-      L"WHEN 5 THEN CONVERT(NVARCHAR(64), ea.LongNumber) "
-      L"ELSE N'' END, "
-      L"ISNULL(ea.Link,0), ea.DataType "
-      L"FROM InfoObjectAttributes AS a WITH(NOLOCK) "
-      L"JOIN InfoObjectCollectionElements AS ce WITH(NOLOCK) "
-      L"ON ce.AttributeId=a.AttributeId AND ce.Outdated=0 "
-      L"JOIN InfoObjectAttributes AS ea WITH(NOLOCK) "
-      L"ON ea.CollectionElementId=ce.CollectionElementId "
-      L"JOIN NameKeys AS nk2 WITH(NOLOCK) ON nk2.NameKeyId=ea.NameKeyId "
-      L"WHERE a.OwnerId=%ld AND a.Outdated=0 AND a.DataType=8 "
-      L"ORDER BY ce.CollectionElementId, nk2.Value",
-      opId);
+/* Тпз и Тшт лежат не в самой операции, а в строках её коллекции, поэтому
+   обычным запросом атрибутов их не видно. Берём только эти два имени и
+   сразу по всем операциям — один запрос вместо похода в каждую. */
+static int card_norms(SQLHDBC dbc, const wchar_t *ids, CardRow *rows, wchar_t *err) {
+  if (!ids || !ids[0]) return 0;
+  wchar_t *sql = (wchar_t *)malloc(3000 * sizeof(wchar_t));
+  if (!sql) return 0;
+  _snwprintf(sql, 3000,
+             L"SELECT TOP 400 a.OwnerId, nk.Value, "
+             L"CASE ea.DataType WHEN 1 THEN CONVERT(NVARCHAR(64), ea.FloatNumber) "
+             L"WHEN 13 THEN CONVERT(NVARCHAR(64), ea.IntegerNumber) "
+             L"WHEN 32 THEN CONVERT(NVARCHAR(64), ea.LongNumber) "
+             L"WHEN 2 THEN ea.ShortText ELSE N'' END, 0, ea.DataType "
+             L"FROM InfoObjectAttributes AS a WITH(NOLOCK) "
+             L"JOIN InfoObjectCollectionElements AS ce WITH(NOLOCK) "
+             L"ON ce.AttributeId=a.AttributeId AND ce.Outdated=0 "
+             L"JOIN InfoObjectAttributes AS ea WITH(NOLOCK) "
+             L"ON ea.CollectionElementId=ce.CollectionElementId "
+             L"JOIN NameKeys AS nk WITH(NOLOCK) ON nk.NameKeyId=ea.NameKeyId "
+             L"AND nk.Value IN (N'SetupTime',N'TimePerPiece') "
+             L"WHERE a.OwnerId IN (%s) AND a.Outdated=0 AND a.DataType=8 "
+             L"ORDER BY a.OwnerId",
+             ids);
   int n = card_query(dbc, sql, rows, CARD_ROWS, err, 280);
   free(sql);
-  if (n <= 0) return;
-  card_add(c, L"  ── что лежит в строках первой операции (ищем норму) ──\r\n");
-  long lastEl = 0;
-  int shown = 0;
-  for (int i = 0; i < n && shown < 40; i++) {
-    if (!rows[i].s2[0]) continue;
-    if (rows[i].n1 != lastEl) {
-      lastEl = rows[i].n1;
-      card_add(c, L"     строка %ld\r\n", lastEl);
-    }
-    card_add(c, L"       %-26s %s\r\n", rows[i].s1, rows[i].s2);
-    shown++;
-  }
-  card_add(c, L"\r\n");
+  return n < 0 ? 0 : n;
 }
 
 static void card_operations(SQLHDBC dbc, long tpId, long verId, CardOut *c, CardRow *rows,
@@ -1427,13 +1418,20 @@ static void card_operations(SQLHDBC dbc, long tpId, long verId, CardOut *c, Card
 
   double totalMins = 0.0;
   int counted = 0;
+  /* нормы держим отдельно: они приходят из коллекций, а не из атрибутов */
+  CardRow *nr = (CardRow *)malloc(sizeof(CardRow) * CARD_ROWS);
+  int nn = 0;
+  wchar_t list[CARD_OPS * 2 * 12];
+  {
+    int q = 0;
+    for (int i = 0; i < nid && q < (int)(sizeof(list) / sizeof(list[0])) - 14; i++)
+      q += _snwprintf(list + q, 13, i ? L",%ld" : L"%ld", ids[i]);
+    list[q] = 0;
+  }
+  if (nr && nid) nn = card_norms(dbc, list, nr, err);
+
   int na = 0;
   if (ops && nid) {
-    wchar_t list[CARD_OPS * 2 * 12];
-    int p = 0;
-    for (int i = 0; i < nid && p < (int)(sizeof(list) / sizeof(list[0])) - 14; i++)
-      p += _snwprintf(list + p, 13, i ? L",%ld" : L"%ld", ids[i]);
-    list[p] = 0;
     wchar_t *big = (wchar_t *)malloc(4200 * sizeof(wchar_t));
     if (big) {
       _snwprintf(big, 4200,
@@ -1469,6 +1467,12 @@ static void card_operations(SQLHDBC dbc, long tpId, long verId, CardOut *c, Card
       card_pair_s(c, L"       ", rows[k].s1, rows[k].s2, rows[k].n2, rows[k].n3, &opMins);
       printed++;
     }
+    for (int k = 0; k < nn; k++) {
+      if (nr[k].n1 != o->n1 && nr[k].n1 != o->n3) continue;
+      if (!nr[k].s2[0]) continue;
+      card_pair_s(c, L"       ", nr[k].s1, nr[k].s2, 0, nr[k].n3, &opMins);
+      printed++;
+    }
     if (!printed) card_add(c, L"       (своих значений нет)\r\n");
     if (opMins > 0.0) {
       card_total(c, L"       ", L"Итого на операцию", opMins);
@@ -1484,12 +1488,12 @@ static void card_operations(SQLHDBC dbc, long tpId, long verId, CardOut *c, Card
       card_add(c, L"  (сложено по %d операциям из %d)\r\n", counted, n);
   } else if (ops && n > 0) {
     card_add(c, L"  ────────────────────────────────────────\r\n");
-    card_add(c, L"  Нормы времени среди атрибутов операций нет.\r\n");
-    card_probe_collections(dbc, ops[0].n1, c, rows, err);
+    card_add(c, L"  Тпз и Тшт у этих операций не заполнены.\r\n");
   }
   if (n > shown)
     card_add(c, L"  показано подробно первых %d операций из %d\r\n", shown, n);
   free(ops);
+  free(nr);
 }
 
 
@@ -1517,7 +1521,7 @@ static void card_where_used(SQLHDBC dbc, long id, CardOut *c, CardRow *rows, wch
       L"JOIN NameKeys AS nkp WITH(NOLOCK) ON nkp.NameKeyId=pa.NameKeyId AND nkp.Value=N'Product' "
       L"JOIN InfoObjects AS o3 WITH(NOLOCK) ON o3.InfoObjectId=pa.Link "
       L"WHERE pa.OwnerId=own.InfoObjectId AND pa.Outdated=0) AS pr "
-      L"WHERE ea.Link=%ld AND ea.Outdated=0 "
+      L"WHERE ea.Link=%ld AND ea.Outdated=0 AND ea.DataType=6 "
       L"AND ce.CollectionElementId NOT IN ("
       L"SELECT ioa.CollectionElementId FROM InfoObjectAttributes AS ioa WITH(NOLOCK) "
       L"JOIN NameKeys AS nk WITH(NOLOCK) ON nk.NameKeyId=ioa.NameKeyId "
@@ -1556,23 +1560,42 @@ static BOOL card_is_drawing(const wchar_t *name) {
   return FALSE;
 }
 
-static int card_find_files(const wchar_t *key, CardOut *c, int wantDrawings) {
-  int shown = 0;
+/* Индекс большой — 200 тысяч записей, — поэтому обходим его один раз и
+   раскладываем находки сразу по двум спискам, а не ищем трижды. */
+typedef struct {
+  wchar_t draw[8][PLM_LINK];
+  wchar_t other[6][PLM_LINK];
+  int nd, no, total;
+} CardFiles;
+
+static void card_scan_files(const wchar_t *key, CardFiles *f) {
+  memset(f, 0, sizeof(*f));
   files_lock();
   FileIdx *ix = g_idx;
   if (ix) {
-    for (int i = 0; i < ix->n && shown < 12; i++) {
+    for (int i = 0; i < ix->n; i++) {
       if (!wcs_istr(ix->ent[i].name, key)) continue;
-      BOOL draw = card_is_drawing(ix->ent[i].name);
-      if (wantDrawings != (draw ? 1 : 0)) continue;
+      f->total++;
       const wchar_t *dir = ix->ent[i].dir < ix->dirsN ? ix->dirs[ix->ent[i].dir] : L"";
-      card_add(c, L"  %s\r\n       %s\r\n", ix->ent[i].name, dir);
-      if (draw && !g_cardDraw[0]) _snwprintf(g_cardDraw, PLM_LINK, L"%s\\%s", dir, ix->ent[i].name);
-      shown++;
+      if (card_is_drawing(ix->ent[i].name)) {
+        if (f->nd < 8) _snwprintf(f->draw[f->nd++], PLM_LINK, L"%s\\%s", dir, ix->ent[i].name);
+      } else if (f->no < 6) {
+        _snwprintf(f->other[f->no++], PLM_LINK, L"%s\\%s", dir, ix->ent[i].name);
+      }
     }
   }
   files_unlock();
-  return shown;
+}
+
+static void card_show_file(CardOut *c, const wchar_t *full) {
+  const wchar_t *slash = wcsrchr(full, L'\\');
+  if (slash) {
+    wchar_t dir[PLM_LINK];
+    lstrcpynW(dir, full, (int)(slash - full) + 1);
+    card_add(c, L"  %s\r\n       %s\r\n", slash + 1, dir);
+  } else {
+    card_add(c, L"  %s\r\n", full);
+  }
 }
 
 /* У конфигурации изделия своего атрибута Designation нет, а обозначение
@@ -1590,60 +1613,10 @@ static void card_des_from_name(const wchar_t *name, wchar_t *out, int cap) {
   out[i] = 0;
 }
 
-static void card_drawings(const wchar_t *designation, CardOut *c) {
-  card_add(c, L"\r\nЧЕРТЁЖ И ФАЙЛЫ");
-  if (!designation || !designation[0]) {
-    card_add(c, L": у объекта нет обозначения, искать нечего.\r\n");
-    return;
-  }
-  if (g_filesN == 0) files_load_idx();
-  if (g_filesN == 0) {
-    card_add(c, L": индекс файлов пуст — нажмите «Обновить JSON» в Настройках.\r\n");
-    return;
-  }
-  /* Обозначение ЭСИ бывает длиннее имени файла: у техпроцесса на конце -01ТП,
-     а чертёж назван по самой детали. Не нашли — отрезаем хвост и пробуем ещё. */
-  wchar_t key[200];
-  lstrcpynW(key, designation, 200);
-  int found = 0;
-  for (int attempt = 0; attempt < 3 && !found; attempt++) {
-    if (attempt) {
-      wchar_t *cut = wcsrchr(key, L'-');
-      if (!cut || cut == key) break;
-      *cut = 0;
-    }
-    files_lock();
-    FileIdx *ix = g_idx;
-    if (ix)
-      for (int i = 0; i < ix->n; i++)
-        if (wcs_istr(ix->ent[i].name, key)) {
-          found = 1;
-          break;
-        }
-    files_unlock();
-  }
-  if (!found) {
-    card_add(c, L": по «%s» в индексе ничего нет.\r\n", designation);
-    return;
-  }
-  card_add(c, L" (по «%s»)\r\n", key);
-  int d = card_find_files(key, c, 1);
-  if (!d) card_add(c, L"  чертежей не нашлось\r\n");
-  int o = card_find_files(key, c, 0);
-  if (o) card_add(c, L"  — и ещё %d файлов рядом\r\n", o);
-}
-
-/* От ЭСИ к его техпроцессам путь прямой: TechnologicalProcessesCard →
-   коллекция → ТП. Обратно — той же дорогой задом наперёд: находим строку
-   коллекции, которая ссылается на этот ТП, поднимаемся к карточке, и ищем,
-   у кого эта карточка указана. Отдельной ссылки «ТП → изделие» в базе нет,
-   поэтому иначе их и не связать. Заодно забираем обозначение ЭСИ — чертёж
-   назван по нему, а не по обозначению техпроцесса. */
 /* Найденный объект бывает не изделием и не техпроцессом, а конфигурацией
    версии изделия: у неё нет ни ActualVersion, ни карточки техпроцессов.
    Но техпроцесс на эту деталь существует и зовётся по тому же обозначению —
-   именно так его находит обычный поиск. Ищем так же: объекты с ActualVersion,
-   чьё имя начинается с нашего обозначения, основной первым. */
+   именно так его находит обычный поиск. */
 static long card_tp_by_designation(SQLHDBC dbc, const wchar_t *des, CardOut *c, CardRow *rows,
                                    wchar_t *err, long *verOut) {
   if (!des || !des[0]) return 0;
@@ -1659,7 +1632,10 @@ static long card_tp_by_designation(SQLHDBC dbc, const wchar_t *des, CardOut *c, 
   _snwprintf(
       sql, 3000,
       L"SELECT TOP 20 tp.InfoObjectId, tp.Name, ISNULL(flag.V,N'нет'), av.L, tp.TemplateId "
-      L"FROM InfoObjects AS tp WITH(NOLOCK) "
+      /* сперва сужаем по имени, и только потом лезем в атрибуты: иначе
+         сервер обходит атрибуты каждого объекта базы */
+      L"FROM (SELECT TOP 200 InfoObjectId, Name, TemplateId FROM InfoObjects WITH(NOLOCK) "
+      L"WHERE Erased=0 AND Name LIKE N'%s' ESCAPE '\\' COLLATE Cyrillic_General_CI_AS) AS tp "
       L"CROSS APPLY (SELECT TOP 1 ISNULL(iv.Link,0) AS L "
       L"FROM InfoObjectAttributes AS iv WITH(NOLOCK) "
       L"JOIN NameKeys AS nkv WITH(NOLOCK) ON nkv.NameKeyId=iv.NameKeyId "
@@ -1670,8 +1646,7 @@ static long card_tp_by_designation(SQLHDBC dbc, const wchar_t *des, CardOut *c, 
       L"JOIN NameKeys AS nki WITH(NOLOCK) ON nki.NameKeyId=ia.NameKeyId "
       L"WHERE ia.OwnerId=tp.InfoObjectId AND ia.Outdated=0 "
       L"AND nki.Value IN (N'MainTP',N'IsActual') AND ia.BoolValue=1) AS flag "
-      L"WHERE tp.Erased=0 AND av.L>0 "
-      L"AND tp.Name LIKE N'%s' ESCAPE '\\' COLLATE Cyrillic_General_CI_AS "
+      L"WHERE av.L>0 "
       L"ORDER BY CASE WHEN flag.V=N'да' THEN 0 ELSE 1 END, tp.InfoObjectId",
       pat);
   int k = card_query(dbc, sql, rows, CARD_ROWS, err, 280);
@@ -1691,6 +1666,45 @@ static long card_tp_by_designation(SQLHDBC dbc, const wchar_t *des, CardOut *c, 
   card_add(c, L"\r\n");
   if (verOut) *verOut = rows[0].n2;
   return rows[0].n1;
+}
+
+static void card_drawings(const wchar_t *designation, CardOut *c) {
+  card_add(c, L"\r\nЧЕРТЁЖ И ФАЙЛЫ");
+  if (!designation || !designation[0]) {
+    card_add(c, L": у объекта нет обозначения, искать нечего.\r\n");
+    return;
+  }
+  if (g_filesN == 0) files_load_idx();
+  if (g_filesN == 0) {
+    card_add(c, L": индекс файлов пуст — нажмите «Обновить JSON» в Настройках.\r\n");
+    return;
+  }
+  /* Обозначение ЭСИ бывает длиннее имени файла: у техпроцесса на конце -01ТП,
+     а чертёж назван по самой детали. Не нашли — отрезаем хвост и пробуем ещё. */
+  wchar_t key[200];
+  lstrcpynW(key, designation, 200);
+  CardFiles f;
+  memset(&f, 0, sizeof(f));
+  for (int attempt = 0; attempt < 3; attempt++) {
+    if (attempt) {
+      wchar_t *cut = wcsrchr(key, L'-');
+      if (!cut || cut == key) break;
+      *cut = 0;
+    }
+    card_scan_files(key, &f);
+    if (f.total) break;
+  }
+  if (!f.total) {
+    card_add(c, L": по «%s» в индексе ничего нет.\r\n", designation);
+    return;
+  }
+  card_add(c, L" (по «%s», найдено %d)\r\n", key, f.total);
+  for (int i = 0; i < f.nd; i++) {
+    card_show_file(c, f.draw[i]);
+    if (!g_cardDraw[0]) lstrcpynW(g_cardDraw, f.draw[i], PLM_LINK);
+  }
+  if (!f.nd) card_add(c, L"  чертежей не нашлось\r\n");
+  for (int i = 0; i < f.no; i++) card_show_file(c, f.other[i]);
 }
 
 static long card_owner_of_tp(SQLHDBC dbc, long tpId, CardOut *c, CardRow *rows, wchar_t *err,
@@ -1746,6 +1760,8 @@ static void plm_card(long id, wchar_t *out, int cap) {
     ans_printf(out, cap, L"Не удалось подключиться к %s.\r\n%s", g_sqlHost, err);
     return;
   }
+  g_cardT0 = GetTickCount64();
+  g_cardTAttrs = g_cardTTp = g_cardTOps = g_cardTUsed = g_cardTFiles = 0;
   long actualVer = 0, tpCard = 0;
   wchar_t designation[200] = {0}, objName[260] = {0};
   BOOL mainFlag = FALSE;
@@ -1818,6 +1834,7 @@ static void plm_card(long id, wchar_t *out, int cap) {
     card_add(&c, L"\r\n");
   }
 
+  g_cardTAttrs = card_lap();
   if (!designation[0] && objName[0]) card_des_from_name(objName, designation, 200);
 
   /* 3. дальше зависит от того, что это за объект.
@@ -1829,7 +1846,9 @@ static void plm_card(long id, wchar_t *out, int cap) {
               mainFlag ? L", помечен основным" : L"");
     /* чертёж назван по обозначению детали, а не техпроцесса — берём его отсюда */
     card_owner_of_tp(dbc, id, &c, rows, err, designation, 200);
+    g_cardTTp = card_lap();
     card_operations(dbc, id, actualVer, &c, rows, err);
+    g_cardTOps = card_lap();
     card_where_used(dbc, id, &c, rows, err);
     goto freed;
   }
@@ -1840,7 +1859,9 @@ static void plm_card(long id, wchar_t *out, int cap) {
     card_add(&c, L"Своего техпроцесса у объекта нет — ищу по обозначению.\r\n\r\n");
     long ver = 0;
     long tp = card_tp_by_designation(dbc, designation, &c, rows, err, &ver);
+    g_cardTTp = card_lap();
     if (tp) card_operations(dbc, tp, ver, &c, rows, err);
+    g_cardTOps = card_lap();
     card_where_used(dbc, id, &c, rows, err);
     goto freed;
   }
@@ -1922,11 +1943,20 @@ static void plm_card(long id, wchar_t *out, int cap) {
     card_where_used(dbc, id, &c, rows, err);
     goto freed;
   }
+  g_cardTTp = card_lap();
   card_operations(dbc, chosen, chosenVer, &c, rows, err);
+  g_cardTOps = card_lap();
   card_where_used(dbc, id, &c, rows, err);
 
 freed:
+  g_cardTUsed = card_lap();
   card_drawings(designation, &c);
+  g_cardTFiles = card_lap();
+  card_add(&c, L"\r\n── время сбора ──────────────────────────\r\n");
+  card_add(&c,
+           L"  свойства %llu мс · техпроцесс %llu мс · операции %llu мс\r\n"
+           L"  входимость %llu мс · файлы %llu мс\r\n",
+           g_cardTAttrs, g_cardTTp, g_cardTOps, g_cardTUsed, g_cardTFiles);
   free(rows);
 done:
   SQLDisconnect(dbc);
