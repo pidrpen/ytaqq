@@ -188,7 +188,9 @@ static NOTIFYICONDATAW g_nid;
 static BOOL g_follow = TRUE;
 static BOOL g_dirty = FALSE;
 static BOOL g_notesTruncated = FALSE; /* loaded file was bigger than the box */
-static int g_ansW = 0, g_ansH = 0; /* remembered size of the results panel */
+static int g_ansW = 0, g_ansH = 0;   /* запомненный размер окна находок */
+static int g_cardW = 0, g_cardH = 0; /* у карточки он свой: она длиннее списка */
+static int g_ansPt = 10;             /* масштаб текста ответа, Ctrl+колесо */
 static const wchar_t *g_ansTitle; /* set when the panel shows something other than hits */
 static BOOL g_trayAdded = FALSE;
 static BOOL g_hidden = FALSE;
@@ -513,17 +515,22 @@ static void load_cursor_pref(void) {
   HANDLE h = CreateFileW(g_prefPath, GENERIC_READ, FILE_SHARE_READ, NULL,
                          OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
   if (h == INVALID_HANDLE_VALUE) return;
-  char buf[64];
+  char buf[128];
   DWORD n = 0;
-  ReadFile(h, buf, 63, &n, NULL);
+  ReadFile(h, buf, 127, &n, NULL);
   CloseHandle(h);
   buf[n] = 0;
   char skin[16] = {0};
   char eng[16] = {0};
   int bg = g_alphaFollow, fg = g_alphaPinned, autoOn = -1, theme = 0, aw = 0, ah = 0;
-  sscanf(buf, "%15s %d %d %15s %d %d %d %d", skin, &bg, &fg, eng, &autoOn, &theme, &aw, &ah);
+  int cw = 0, ch = 0, pt = 0;
+  sscanf(buf, "%15s %d %d %15s %d %d %d %d %d %d %d", skin, &bg, &fg, eng, &autoOn, &theme, &aw,
+         &ah, &cw, &ch, &pt);
   if (aw >= 320 && aw <= 4000) g_ansW = aw;
   if (ah >= 200 && ah <= 3000) g_ansH = ah;
+  if (cw >= 320 && cw <= 4000) g_cardW = cw;
+  if (ch >= 200 && ch <= 3000) g_cardH = ch;
+  if (pt >= 7 && pt <= 22) g_ansPt = pt;
   if (skin[0] == 'k' && skin[1] == '3') g_skin = 2;
   else if (skin[0] == 's') g_skin = 0;
   else g_skin = 1;
@@ -540,9 +547,10 @@ static void load_cursor_pref(void) {
 static void save_cursor_pref(void) {
   const char *v = g_skin == 2 ? "k3" : (g_skin == 0 ? "system" : "k2");
   const char *e = g_engine == 4 ? "plm" : (g_engine == 5 ? "files" : "ai");
-  char buf[96];
-  snprintf(buf, sizeof(buf), "%s %d %d %s %d %d %d %d\n", v, g_alphaFollow, g_alphaPinned, e,
-           g_autostart ? 1 : 0, g_theme, g_ansW, g_ansH);
+  char buf[128];
+  snprintf(buf, sizeof(buf), "%s %d %d %s %d %d %d %d %d %d %d\n", v, g_alphaFollow,
+           g_alphaPinned, e, g_autostart ? 1 : 0, g_theme, g_ansW, g_ansH, g_cardW, g_cardH,
+           g_ansPt);
   HANDLE h = CreateFileW(g_prefPath, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
                          FILE_ATTRIBUTE_NORMAL, NULL);
   if (h == INVALID_HANDLE_VALUE) return;

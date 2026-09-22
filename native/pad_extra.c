@@ -2217,6 +2217,8 @@ typedef struct {
 } SearchJob;
 
 static void show_answer_text(const wchar_t *text);
+static void ans_zoom(int delta);
+static void ans_toggle_big(HWND hwnd);
 static void show_card_selected(void);
 static void show_card_full(void);
 
@@ -2309,6 +2311,16 @@ static LRESULT CALLBACK AnswerProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
   }
   case WM_NCHITTEST:
     return panel_hittest(hwnd, lParam);
+  case WM_MOUSEWHEEL:
+    if (GetKeyState(VK_CONTROL) & 0x8000) {
+      ans_zoom(GET_WHEEL_DELTA_WPARAM(wParam) > 0 ? 1 : -1);
+      return 0;
+    }
+    break;
+  case WM_NCLBUTTONDBLCLK:
+    /* двойной щелчок по шапке — на весь экран и обратно, как у обычных окон */
+    ans_toggle_big(hwnd);
+    return 0;
   case WM_DRAWITEM:
     draw_pad_button((const DRAWITEMSTRUCT *)lParam);
     return TRUE;
@@ -2381,8 +2393,13 @@ static LRESULT CALLBACK AnswerProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
     if (wParam != SIZE_MINIMIZED) {
       RECT wr;
       GetWindowRect(hwnd, &wr);
-      g_ansW = wr.right - wr.left;
-      g_ansH = wr.bottom - wr.top;
+      if (g_ansMono) {
+        g_cardW = wr.right - wr.left;
+        g_cardH = wr.bottom - wr.top;
+      } else {
+        g_ansW = wr.right - wr.left;
+        g_ansH = wr.bottom - wr.top;
+      }
     }
     return 0;
   }
@@ -2528,11 +2545,115 @@ static void show_card_selected_mode(BOOL full) {
   else InterlockedExchange(&g_netBusy, 0);
 }
 
+/* Масштаб текста ответа. Карточка бывает длинной, и подгонять окно мышью
+   каждый раз утомительно — проще уменьшить текст. Ctrl+колесо. */
+static HFONT make_font(const wchar_t *face, int pt, int weight);
+static HFONT g_ansFontZoom;
+static BOOL g_ansZoomMono;
+
+static HFONT ans_font(void) {
+  if (g_ansFontZoom && g_ansZoomMono == (g_ansMono != 0)) return g_ansFontZoom;
+  if (g_ansFontZoom) DeleteObject(g_ansFontZoom);
+  g_ansZoomMono = g_ansMono != 0;
+  g_ansFontZoom = make_font(g_ansMono ? L"Consolas" : L"Segoe UI Variable Text", g_ansPt,
+                            FW_NORMAL);
+  if (!g_ansFontZoom)
+    g_ansFontZoom = make_font(g_ansMono ? L"Courier New" : L"Segoe UI", g_ansPt, FW_NORMAL);
+  return g_ansFontZoom;
+}
+
+static void ans_zoom(int delta) {
+  int pt = g_ansPt + delta;
+  if (pt < 7) pt = 7;
+  if (pt > 22) pt = 22;
+  if (pt == g_ansPt) return;
+  g_ansPt = pt;
+  if (g_ansFontZoom) {
+    DeleteObject(g_ansFontZoom);
+    g_ansFontZoom = NULL;
+  }
+  if (g_answerEdit) {
+    SendMessageW(g_answerEdit, WM_SETFONT, (WPARAM)ans_font(), TRUE);
+    InvalidateRect(g_answerEdit, NULL, TRUE);
+  }
+  save_cursor_pref();
+  wchar_t m[64];
+  _snwprintf(m, 64, L"Масштаб текста: %d", g_ansPt);
+  show_status(m);
+}
+
+/* Подобрать размер окна под текст: длина самой длинной строки и число строк.
+   Больше рабочей области не делаем, меньше разумного — тоже. */
+static void ans_fit(const wchar_t *text, const RECT *wa, int *outW, int *outH) {
+  int minW = ANS_W, minH = ANS_H;
+  *outW = minW;
+  *outH = minH;
+  if (!text || !text[0] || !g_answerEdit) return;
+  HDC dc = GetDC(g_answerEdit);
+  if (!dc) return;
+  HFONT prev = (HFONT)SelectObject(dc, ans_font());
+  TEXTMETRICW tm;
+  GetTextMetricsW(dc, &tm);
+  int maxw = 0, lines = 1;
+  const wchar_t *line = text;
+  for (const wchar_t *p = text;; p++) {
+    if (*p == L'\n' || !*p) {
+      int len = (int)(p - line);
+      if (len > 0 && line[len - 1] == L'\r') len--;
+      if (len > 0 && len < 400) {
+        SIZE sz;
+        if (GetTextExtentPoint32W(dc, line, len, &sz) && sz.cx > maxw) maxw = sz.cx;
+      } else if (len >= 400) {
+        maxw = 100000; /* очень длинная строка — упрёмся в ширину экрана */
+      }
+      if (!*p) break;
+      lines++;
+      line = p + 1;
+    }
+  }
+  if (prev) SelectObject(dc, prev);
+  ReleaseDC(g_answerEdit, dc);
+  int w = maxw + 64;  /* поля и полоса прокрутки */
+  int h = lines * tm.tmHeight + PANEL_TITLE_H + 70;
+  int maxW = wa->right - wa->left - 48, maxH = wa->bottom - wa->top - 48;
+  if (w > maxW) w = maxW;
+  if (h > maxH) h = maxH;
+  if (w < minW) w = minW;
+  if (h < minH) h = minH;
+  *outW = w;
+  *outH = h;
+}
+
+/* Разворот на всю рабочую область и возврат к прежнему размеру. Окно без
+   обычной рамки, поэтому штатной кнопки у него нет — делаем сами. */
+static RECT g_ansPrev;
+static BOOL g_ansBig;
+
+static void ans_toggle_big(HWND hwnd) {
+  POINT pt;
+  RECT wa, wr;
+  GetWindowRect(hwnd, &wr);
+  pt.x = (wr.left + wr.right) / 2;
+  pt.y = (wr.top + wr.bottom) / 2;
+  get_work_area(pt, &wa);
+  if (!g_ansBig) {
+    g_ansPrev = wr;
+    g_ansBig = TRUE;
+    SetWindowPos(hwnd, HWND_TOPMOST, wa.left + 8, wa.top + 8, wa.right - wa.left - 16,
+                 wa.bottom - wa.top - 16, SWP_SHOWWINDOW);
+  } else {
+    g_ansBig = FALSE;
+    SetWindowPos(hwnd, HWND_TOPMOST, g_ansPrev.left, g_ansPrev.top,
+                 g_ansPrev.right - g_ansPrev.left, g_ansPrev.bottom - g_ansPrev.top,
+                 SWP_SHOWWINDOW);
+  }
+  layout_answer();
+}
+
 static void show_answer_text(const wchar_t *text) {
   if (!g_answer) return;
   if (g_answerEdit) {
-    HFONT f = (g_ansMono && g_fontMono) ? g_fontMono : g_fontBody;
-    if (f) SendMessageW(g_answerEdit, WM_SETFONT, (WPARAM)f, TRUE);
+    SendMessageW(g_answerEdit, WM_SETFONT, (WPARAM)ans_font(), TRUE);
     SetWindowTextW(g_answerEdit, text ? text : L"");
   }
   fill_plm_list();
@@ -2545,11 +2666,25 @@ static void show_answer_text(const wchar_t *text) {
   if (y + ANS_H > wa.bottom) y = wa.bottom - ANS_H - 8;
   if (x < wa.left) x = wa.left + 8;
   if (y < wa.top) y = wa.top + 8;
-  int aw = g_ansW > 0 ? g_ansW : ANS_W, ah = g_ansH > 0 ? g_ansH : ANS_H;
+  /* у карточки свой запомненный размер; пока его нет — подгоняем под текст,
+     чтобы не тянуть окно мышью каждый раз */
+  int aw, ah;
+  if (g_ansMono) {
+    if (g_cardW > 0 && g_cardH > 0) {
+      aw = g_cardW;
+      ah = g_cardH;
+    } else {
+      ans_fit(text, &wa, &aw, &ah);
+    }
+  } else {
+    aw = g_ansW > 0 ? g_ansW : ANS_W;
+    ah = g_ansH > 0 ? g_ansH : ANS_H;
+  }
   if (x + aw > wa.right) x = wa.right - aw - 8;
   if (y + ah > wa.bottom) y = wa.bottom - ah - 8;
   if (x < wa.left) x = wa.left + 8;
   if (y < wa.top) y = wa.top + 8;
+  g_ansBig = FALSE;
   SetWindowPos(g_answer, HWND_TOPMOST, x, y, aw, ah, SWP_SHOWWINDOW);
   layout_answer();
   if (g_plmCount > 0 && g_answerList) SetFocus(g_answerList);
