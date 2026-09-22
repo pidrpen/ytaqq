@@ -512,7 +512,8 @@ static ULONGLONG card_lap(void) {
   g_cardT0 = now;
   return d;
 }
-static BOOL g_fullMode; /* показывать чертёж рядом с карточкой */
+static BOOL g_fullMode;     /* показывать чертёж рядом с карточкой */
+static BOOL g_cardVerbose;  /* показывать ещё и все атрибуты */
 static int g_sortCol = -1, g_sortDesc = 0; /* which column the list is ordered by */
 
 /* ---- просмотр чертежа ----------------------------------------------------
@@ -1494,6 +1495,7 @@ static void card_operations(SQLHDBC dbc, long tpId, long verId, CardOut *c, Card
     double opMins = 0.0;
     for (int k = 0; k < na && printed < 40; k++) {
       if (rows[k].n1 != o->n1 && rows[k].n1 != o->n3) continue;
+      if (!g_cardVerbose) break; /* в обычном виде под операцией только время */
       if (card_hidden(rows[k].s1) || card_op_hidden(rows[k].s1)) continue;
       /* голая ссылка в операции — это номер справочника, читать его незачем */
       if (!rows[k].s2[0]) continue;
@@ -1506,7 +1508,7 @@ static void card_operations(SQLHDBC dbc, long tpId, long verId, CardOut *c, Card
       card_pair_s(c, L"       ", nr[k].s1, nr[k].s2, 0, nr[k].n3, &opMins);
       printed++;
     }
-    if (!printed) card_add(c, L"       (своих значений нет)\r\n");
+    if (!printed && g_cardVerbose) card_add(c, L"       (своих значений нет)\r\n");
     if (opMins > 0.0) {
       card_total(c, L"       ", L"Итого на операцию", opMins);
       totalMins += opMins;
@@ -1635,6 +1637,20 @@ static void card_show_file(CardOut *c, const wchar_t *full) {
 /* У конфигурации изделия своего атрибута Designation нет, а обозначение
    при этом стоит первым словом в имени: «АДЕ 3422-682.01.01.00 [Шаблон]:1».
    Берём всё до первой скобки, двоеточия или угловой скобки. */
+/* Наименование стоит в скобках: «АДЕ 3422-682.01.01.01ТП [Секция]». */
+static void card_title_from_name(const wchar_t *name, wchar_t *out, int cap) {
+  out[0] = 0;
+  const wchar_t *open = wcschr(name, L'[');
+  if (!open) return;
+  open++;
+  int i = 0;
+  while (open[i] && open[i] != L']' && i < cap - 1) {
+    out[i] = open[i];
+    i++;
+  }
+  out[i] = 0;
+}
+
 static void card_des_from_name(const wchar_t *name, wchar_t *out, int cap) {
   int i = 0;
   while (name[i] && i < cap - 1) {
@@ -1870,12 +1886,18 @@ static void plm_card(long id, wchar_t *out, int cap) {
     card_add(&c, L"Объект %ld в базе не найден.\r\n", id);
     goto freed;
   }
-  card_add(&c, L"┌──────────────────────────────────────────────────────────┐\r\n");
   lstrcpynW(objName, rows[0].s1, 260);
-  card_add(&c, L"  %s\r\n", rows[0].s1[0] ? rows[0].s1 : L"(без имени)");
-  card_add(&c, L"  %s · ID %ld", rows[0].s2[0] ? rows[0].s2 : L"?", id);
-  if (rows[0].n2) card_add(&c, L" · внутри %ld", rows[0].n2);
-  card_add(&c, L"\r\n└──────────────────────────────────────────────────────────┘\r\n\r\n");
+  {
+    wchar_t des0[200] = {0}, title0[200] = {0};
+    card_des_from_name(objName, des0, 200);
+    card_title_from_name(objName, title0, 200);
+    card_add(&c, L"┌──────────────────────────────────────────────────────────┐\r\n");
+    card_add(&c, L"  %-14s%s\r\n", L"Обозначение", des0[0] ? des0 : objName);
+    if (title0[0]) card_add(&c, L"  %-14s%s\r\n", L"Наименование", title0);
+    card_add(&c, L"  %-14sID %ld", L"", id);
+    if (g_cardVerbose) card_add(&c, L" · %s", rows[0].s2[0] ? rows[0].s2 : L"?");
+    card_add(&c, L"\r\n└──────────────────────────────────────────────────────────┘\r\n\r\n");
+  }
 
   /* 2. его атрибуты */
   _snwprintf(sql, 3600,
@@ -1891,7 +1913,7 @@ static void plm_card(long id, wchar_t *out, int cap) {
   } else if (n == 0) {
     card_add(&c, L"Атрибутов нет.\r\n\r\n");
   } else {
-    card_add(&c, L"СВОЙСТВА\r\n");
+    if (g_cardVerbose) card_add(&c, L"СВОЙСТВА\r\n");
     int skipped = 0, unknown = 0;
     for (int i = 0; i < n; i++) {
       /* эти три решают, куда идти дальше, и они уже прочитаны — лишний
@@ -1908,11 +1930,11 @@ static void plm_card(long id, wchar_t *out, int cap) {
       }
       if (!rows[i].s2[0] && !rows[i].n2) continue; /* пустое не показываем */
       if (!card_label(rows[i].s1)) unknown++;
-      card_pair_t(&c, L"  ", rows[i].s1, rows[i].s2, rows[i].n2, rows[i].n3);
+      if (g_cardVerbose) card_pair_t(&c, L"  ", rows[i].s1, rows[i].s2, rows[i].n2, rows[i].n3);
     }
-    if (skipped) card_add(&c, L"  (служебных скрыто: %d)\r\n", skipped);
+    if (skipped && g_cardVerbose) card_add(&c, L"  (служебных скрыто: %d)\r\n", skipped);
     (void)unknown;
-    card_add(&c, L"\r\n");
+    if (g_cardVerbose) card_add(&c, L"\r\n");
   }
 
   g_cardTAttrs = card_lap();
@@ -2033,11 +2055,15 @@ freed:
   g_cardTUsed = card_lap();
   card_drawings(designation, &c);
   g_cardTFiles = card_lap();
-  card_add(&c, L"\r\n── время сбора ──────────────────────────\r\n");
-  card_add(&c,
-           L"  свойства %llu мс · техпроцесс %llu мс · операции %llu мс\r\n"
-           L"  входимость %llu мс · файлы %llu мс\r\n",
-           g_cardTAttrs, g_cardTTp, g_cardTOps, g_cardTUsed, g_cardTFiles);
+  if (g_cardVerbose)
+    card_add(&c,
+             L"\r\n── время сбора ──────────────────────────\r\n"
+             L"  свойства %llu мс · техпроцесс %llu мс · операции %llu мс\r\n"
+             L"  входимость %llu мс · файлы %llu мс\r\n",
+             g_cardTAttrs, g_cardTTp, g_cardTOps, g_cardTUsed, g_cardTFiles);
+  else
+    card_add(&c, L"\r\n  собрано за %llu мс\r\n",
+             g_cardTAttrs + g_cardTTp + g_cardTOps + g_cardTUsed + g_cardTFiles);
   free(rows);
 done:
   SQLDisconnect(dbc);
@@ -2302,9 +2328,9 @@ static void create_answer(HWND owner) {
   }
   HWND open = mk_btn(g_answer, L"Открыть PLM", ID_ANS_OPEN);
   HWND show = mk_btn(g_answer, L"В проводнике", ID_ANS_SHOW);
-  HWND card = mk_btn(g_answer, L"Что внутри", ID_ANS_CARD);
+  HWND card = mk_btn(g_answer, L"Карточка", ID_ANS_CARD);
   HWND draw = mk_btn(g_answer, L"Открыть чертёж", ID_ANS_DRAW);
-  HWND full = mk_btn(g_answer, L"Открыть всё", ID_ANS_FULL);
+  HWND full = mk_btn(g_answer, L"Атрибуты", ID_ANS_FULL);
   HWND copy = mk_btn(g_answer, L"Копировать", ID_ANS_COPY);
   HWND notes = mk_btn(g_answer, L"В блокнот", ID_ANS_NOTES);
   HWND cls = mk_btn(g_answer, L"Закрыть", ID_ANS_CLOSE);
@@ -2343,12 +2369,12 @@ static DWORD WINAPI card_thread(LPVOID param) {
 static void show_card_selected_mode(BOOL full);
 
 static void show_card_selected(void) {
-  /* обе кнопки показывают чертёж: разбираться, какая из них «с картинкой»,
-     человеку незачем */
+  g_cardVerbose = FALSE; /* «Карточка»: обозначение, ТП с операциями, входимость */
   show_card_selected_mode(TRUE);
 }
 
 static void show_card_full(void) {
+  g_cardVerbose = TRUE; /* «Атрибуты»: то же плюс всё содержимое объекта */
   show_card_selected_mode(TRUE);
 }
 
@@ -2368,7 +2394,7 @@ static void show_card_selected_mode(BOOL full) {
     g_snapId[g_snapN] = g_plmIds[k];
     g_snapN++;
   }
-  g_ansTitle = full ? L"Всё об объекте" : L"Что внутри";
+  g_ansTitle = g_cardVerbose ? L"Атрибуты объекта" : L"Карточка";
   g_ansMono = TRUE;
   g_cardDraw[0] = 0;
   g_fullMode = full;
