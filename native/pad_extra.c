@@ -1336,51 +1336,32 @@ static const wchar_t *card_type_name(long t) {
 /* Тпз и Тшт лежат не в самой операции, а в строках её коллекции, поэтому
    обычным запросом атрибутов их не видно. Берём только эти два имени и
    сразу по всем операциям — один запрос вместо похода в каждую. */
+/* Тпз и Тшт — составные атрибуты (тип 23): сама строка атрибута значения не
+   хранит, число лежит в строках его коллекции, и поля внутри зовутся уже
+   по-своему. Поэтому берём не сам атрибут, а его содержимое: на каждую
+   операцию возвращаем «имя нормы» и «поле=значение» из её строк. */
 static int card_norms(SQLHDBC dbc, const wchar_t *ids, CardRow *rows, wchar_t *err) {
   if (!ids || !ids[0]) return 0;
-  wchar_t *sql = (wchar_t *)malloc(6000 * sizeof(wchar_t));
+  wchar_t *sql = (wchar_t *)malloc(4000 * sizeof(wchar_t));
   if (!sql) return 0;
-  /* Где именно лежат Тпз и Тшт, в базе по-разному: у самой операции, в
-     строках её коллекции или у её детей-переходов. Смотрим во всех трёх
-     местах сразу — один запрос вместо трёх походов. */
   _snwprintf(
-      sql, 6000,
-      L"SELECT TOP 400 src.Op, src.K, src.V, 0, src.T FROM ("
-      /* не полагаемся на DataType: берём первую непустую числовую колонку */
-      L"SELECT a.OwnerId AS Op, nk.Value AS K, "
-      L"COALESCE(CONVERT(NVARCHAR(64), a.FloatNumber), "
-      L"CONVERT(NVARCHAR(64), a.IntegerNumber), "
-      L"CONVERT(NVARCHAR(64), a.LongNumber), a.ShortText, N'') AS V, a.DataType AS T "
+      sql, 4000,
+      L"SELECT TOP 400 a.OwnerId, nk.Value, "
+      L"nk2.Value + N'=' + COALESCE(CONVERT(NVARCHAR(64), ea.FloatNumber), "
+      L"CONVERT(NVARCHAR(64), ea.IntegerNumber), "
+      L"CONVERT(NVARCHAR(64), ea.LongNumber), ea.ShortText, N''), "
+      L"0, ea.DataType "
       L"FROM InfoObjectAttributes AS a WITH(NOLOCK) "
       L"JOIN NameKeys AS nk WITH(NOLOCK) ON nk.NameKeyId=a.NameKeyId "
       L"AND nk.Value IN (N'SetupTime',N'TimePerPiece') "
-      L"WHERE a.OwnerId IN (%s) "
-      L"UNION ALL "
-      L"SELECT col.OwnerId, nk2.Value, "
-      L"COALESCE(CONVERT(NVARCHAR(64), ea.FloatNumber), "
-      L"CONVERT(NVARCHAR(64), ea.IntegerNumber), "
-      L"CONVERT(NVARCHAR(64), ea.LongNumber), ea.ShortText, N''), ea.DataType "
-      L"FROM InfoObjectAttributes AS col WITH(NOLOCK) "
       L"JOIN InfoObjectCollectionElements AS ce WITH(NOLOCK) "
-      L"ON ce.AttributeId=col.AttributeId AND ce.Outdated=0 "
+      L"ON ce.AttributeId=a.AttributeId AND ce.Outdated=0 "
       L"JOIN InfoObjectAttributes AS ea WITH(NOLOCK) "
       L"ON ea.CollectionElementId=ce.CollectionElementId "
       L"JOIN NameKeys AS nk2 WITH(NOLOCK) ON nk2.NameKeyId=ea.NameKeyId "
-      L"AND nk2.Value IN (N'SetupTime',N'TimePerPiece') "
-      L"WHERE col.OwnerId IN (%s) AND col.Outdated=0 "
-      L"UNION ALL "
-      L"SELECT ch.ParentId, nk3.Value, "
-      L"COALESCE(CONVERT(NVARCHAR(64), ca.FloatNumber), "
-      L"CONVERT(NVARCHAR(64), ca.IntegerNumber), "
-      L"CONVERT(NVARCHAR(64), ca.LongNumber), ca.ShortText, N''), ca.DataType "
-      L"FROM InfoObjects AS ch WITH(NOLOCK) "
-      L"JOIN InfoObjectAttributes AS ca WITH(NOLOCK) "
-      L"ON ca.OwnerId=ch.InfoObjectId AND ca.Outdated=0 "
-      L"JOIN NameKeys AS nk3 WITH(NOLOCK) ON nk3.NameKeyId=ca.NameKeyId "
-      L"AND nk3.Value IN (N'SetupTime',N'TimePerPiece') "
-      L"WHERE ch.ParentId IN (%s) AND ch.Erased=0"
-      L") AS src ORDER BY src.Op",
-      ids, ids, ids);
+      L"WHERE a.OwnerId IN (%s) "
+      L"ORDER BY a.OwnerId, nk.Value, nk2.Value",
+      ids);
   int n = card_query(dbc, sql, rows, CARD_ROWS, err, 280);
   free(sql);
   return n < 0 ? 0 : n;
@@ -1534,11 +1515,40 @@ static void card_operations(SQLHDBC dbc, long tpId, long verId, CardOut *c, Card
       card_pair_s(c, L"       ", rows[k].s1, rows[k].s2, rows[k].n2, rows[k].n3, &opMins);
       printed++;
     }
+    wchar_t lastNorm[80] = {0};
     for (int k = 0; k < nn; k++) {
       if (nr[k].n1 != o->n1 && nr[k].n1 != o->n3) continue;
-      if (!nr[k].s2[0]) continue;
-      card_pair_s(c, L"       ", nr[k].s1, nr[k].s2, 0, nr[k].n3, &opMins);
-      printed++;
+      wchar_t *eq = wcschr(nr[k].s2, L'=');
+      if (!eq || !eq[1]) continue;
+      *eq = 0;
+      const wchar_t *field = nr[k].s2, *val = eq + 1;
+      wchar_t *stop = NULL;
+      wcstod(val, &stop);
+      BOOL numeric = stop && stop != val;
+      /* в составном атрибуте числовых полей может быть несколько — например
+         само время и коэффициент. Берём первое и не складываем остальные,
+         иначе итог снова окажется выдуманным. */
+      if (numeric && !g_cardVerbose && _wcsicmp(lastNorm, nr[k].s1) == 0) numeric = FALSE;
+      if (numeric) {
+        lstrcpynW(lastNorm, nr[k].s1, 80);
+        /* поле внутри составного атрибута зовётся по-своему, человеку нужна
+           сама норма — Тпз или Тшт */
+        wchar_t label[80];
+        if (g_cardVerbose)
+          _snwprintf(label, 80, L"%s · %s", card_label(nr[k].s1) ? card_label(nr[k].s1) : nr[k].s1,
+                     field);
+        else
+          lstrcpynW(label, card_label(nr[k].s1) ? card_label(nr[k].s1) : nr[k].s1, 80);
+        wchar_t t[64];
+        if (card_time_text(val, t, 64, &opMins)) {
+          card_add(c, L"       %-28s %s\r\n", label, t);
+          printed++;
+        }
+      } else if (g_cardVerbose && val[0]) {
+        card_add(c, L"       %-28s %s\r\n", field, val);
+        printed++;
+      }
+      *eq = L'=';
     }
     if (!printed && g_cardVerbose) card_add(c, L"       (своих значений нет)\r\n");
     if (opMins > 0.0) {
