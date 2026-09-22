@@ -1092,7 +1092,6 @@ static BOOL replace_current_line(const wchar_t *text) {
   int linelen = (int)SendMessageW(g_edit, EM_LINELENGTH, (WPARAM)idx, 0);
   int end = idx + linelen;
   int total = GetWindowTextLengthW(g_edit);
-  wchar_t cr[4] = {0};
   if (end < total) {
     SendMessageW(g_edit, EM_SETSEL, (WPARAM)end, (LPARAM)end + 2);
     SendMessageW(g_edit, EM_GETSEL, 0, 0);

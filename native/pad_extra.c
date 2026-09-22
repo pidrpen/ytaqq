@@ -1951,10 +1951,10 @@ static long card_owner_of_tp(SQLHDBC dbc, long tpId, CardOut *c, CardRow *rows, 
   int n = card_query(dbc, sql, rows, CARD_ROWS, err, 280);
   free(sql);
   if (n <= 0) {
-    card_add(c, L"ЭСИ: ссылки ManufacturedProducts у техпроцесса нет.\r\n");
-    /* Ищем, как она вообще зовётся и на чём висит: на самом техпроцессе,
-       на его версии или на варианте. */
-    sql = (wchar_t *)malloc(2600 * sizeof(wchar_t));
+    card_add(c, L"Изделие: прямой ссылки на него у техпроцесса нет.\r\n");
+    /* Разбор, как она зовётся и на чём висит, нужен не в карточке,
+       а когда с ней разбираются. */
+    sql = g_cardVerbose ? (wchar_t *)malloc(2600 * sizeof(wchar_t)) : NULL;
     if (sql) {
       _snwprintf(sql, 2600,
                  L"SELECT TOP 30 a.OwnerId, nk.Value, "
