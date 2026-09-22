@@ -1357,8 +1357,10 @@ static int card_norms(SQLHDBC dbc, const wchar_t *ids, CardRow *rows, wchar_t *e
       /* у составного атрибута собственное значение пустое, а в
          InfoObjectCollectionElements его строки привязаны к тому, на что
          он ссылается. Пробуем и ссылку, и сам атрибут. */
+      /* без отбора по устаревшим: зонд насчитал строку там, где рабочий
+         запрос её не видел, и разница была ровно в этом условии */
       L"JOIN InfoObjectCollectionElements AS ce WITH(NOLOCK) "
-      L"ON ce.AttributeId IN (a.Link, a.AttributeId) AND ce.Outdated=0 "
+      L"ON ce.AttributeId IN (a.Link, a.AttributeId) "
       L"JOIN InfoObjectAttributes AS ea WITH(NOLOCK) "
       L"ON ea.CollectionElementId=ce.CollectionElementId "
       L"JOIN NameKeys AS nk2 WITH(NOLOCK) ON nk2.NameKeyId=ea.NameKeyId "
@@ -1423,6 +1425,37 @@ static void card_probe_time(SQLHDBC dbc, const wchar_t *ids, CardOut *c, CardRow
   n = card_query(dbc, sql, rows, CARD_ROWS, err, 280);
   free(sql);
   if (n <= 0) return;
+  card_add(c, L"  ── что внутри строк составного атрибута ──\r\n");
+  {
+    wchar_t *d = (wchar_t *)malloc(3200 * sizeof(wchar_t));
+    if (d) {
+      _snwprintf(d, 3200,
+                 L"SELECT TOP 60 a.OwnerId, nk.Value + N' · ' + nk2.Value, "
+                 L"COALESCE(CONVERT(NVARCHAR(64), ea.FloatNumber), "
+                 L"CONVERT(NVARCHAR(64), ea.IntegerNumber), "
+                 L"CONVERT(NVARCHAR(64), ea.LongNumber), ea.ShortText, "
+                 L"N'ссылка ' + CONVERT(NVARCHAR(32), ea.Link), N'—'), "
+                 L"ISNULL(ea.Outdated,0), ea.DataType "
+                 L"FROM InfoObjectAttributes AS a WITH(NOLOCK) "
+                 L"JOIN NameKeys AS nk WITH(NOLOCK) ON nk.NameKeyId=a.NameKeyId "
+                 L"AND nk.Value IN (N'SetupTime',N'TimePerPiece') "
+                 L"JOIN InfoObjectCollectionElements AS ce WITH(NOLOCK) "
+                 L"ON ce.AttributeId=a.AttributeId "
+                 L"JOIN InfoObjectAttributes AS ea WITH(NOLOCK) "
+                 L"ON ea.CollectionElementId=ce.CollectionElementId "
+                 L"JOIN NameKeys AS nk2 WITH(NOLOCK) ON nk2.NameKeyId=ea.NameKeyId "
+                 L"WHERE a.OwnerId IN (%s) ORDER BY a.OwnerId, nk2.Value",
+                 ids);
+      int m = card_query(dbc, d, rows, CARD_ROWS, err, 280);
+      free(d);
+      if (m > 0)
+        for (int i = 0; i < m; i++)
+          card_add(c, L"     %ld  %-34s %-14s тип %ld%s\r\n", rows[i].n1, rows[i].s1, rows[i].s2,
+                   rows[i].n3, rows[i].n2 ? L" (устаревшее)" : L"");
+      else
+        card_add(c, L"     строки есть, но полей в них не нашлось\r\n");
+    }
+  }
   card_add(c, L"  ── где строки составного атрибута ──\r\n");
   for (int i = 0; i < n; i++)
     card_add(c, L"     %ld  %-16s атрибут %s · строк по атрибуту %ld, по ссылке %ld\r\n",
@@ -1543,6 +1576,19 @@ static void card_operations(SQLHDBC dbc, long tpId, long verId, CardOut *c, Card
       card_pair_s(c, L"       ", rows[k].s1, rows[k].s2, rows[k].n2, rows[k].n3, &opMins);
       printed++;
     }
+    /* Поле с числом зовётся Value — но если его в строке нет, лучше показать
+       первое числовое, чем промолчать. Поэтому сперва смотрим, есть ли Value
+       вообще, и только потом печатаем. */
+    BOOL haveValue = FALSE;
+    for (int k = 0; k < nn; k++) {
+      if (nr[k].n1 != o->n1 && nr[k].n1 != o->n3) continue;
+      wchar_t *e2 = wcschr(nr[k].s2, L'=');
+      if (!e2) continue;
+      *e2 = 0;
+      if (_wcsicmp(nr[k].s2, L"Value") == 0) haveValue = TRUE;
+      *e2 = L'=';
+      if (haveValue) break;
+    }
     wchar_t lastNorm[80] = {0};
     for (int k = 0; k < nn; k++) {
       if (nr[k].n1 != o->n1 && nr[k].n1 != o->n3) continue;
@@ -1556,7 +1602,7 @@ static void card_operations(SQLHDBC dbc, long tpId, long verId, CardOut *c, Card
       /* Внутри составного атрибута само число лежит в поле Value, рядом
          с ним бывают коэффициенты и ссылки. Берём именно Value, а не первое
          попавшееся число. */
-      if (numeric && _wcsicmp(field, L"Value") != 0) numeric = FALSE;
+      if (numeric && haveValue && _wcsicmp(field, L"Value") != 0) numeric = FALSE;
       if (numeric && !g_cardVerbose && _wcsicmp(lastNorm, nr[k].s1) == 0) numeric = FALSE;
       if (numeric) {
         lstrcpynW(lastNorm, nr[k].s1, 80);
