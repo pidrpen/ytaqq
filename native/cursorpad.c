@@ -53,6 +53,7 @@
 #define ID_SEARCH_EDIT 112
 #define ID_SEARCH_GO 113
 #define ID_ASK_TAB 114
+#define ID_NARDY_BTN 190 /* «Нарды» внизу окна */
 #define ID_CLIP 131
 #define ID_CLIPCLR 153
 #define ID_ANSPIN 154
@@ -202,6 +203,7 @@ static HWND g_tbBg;
 static HWND g_tbFg;
 static HWND g_btnSet;
 static HWND g_btnAsk;
+static HWND g_btnNd; /* кнопка «Нарды» внизу окна */
 static HWND g_setHwnd;
 static HWND g_askHwnd;
 static HWND g_btnSys;
@@ -1237,10 +1239,13 @@ static void layout_children(void) {
   if (g_clipEdit) MoveWindow(g_clipEdit, gut, th, cw - gut - pad - clrW - gap, clipH, TRUE);
   if (g_clipClr) MoveWindow(g_clipClr, cw - pad - clrW, th, clrW, clipH, TRUE);
   MoveWindow(g_edit, gut, th + clipH, cw - gut - pad, ch - th - clipH - fh, TRUE);
-  int half = (cw - pad * 2 - gap) / 2;
+  /* внизу три кнопки: Поиск · Нарды · Настройки; средняя чуть уже */
+  int avail = cw - pad * 2 - gap * 2;
+  int ndW = avail * 3 / 10, side = (avail - ndW) / 2;
   int fy = ch - fh + (fh - btnH) / 2;
-  if (g_btnAsk) MoveWindow(g_btnAsk, pad, fy, half, btnH, TRUE);
-  if (g_btnSet) MoveWindow(g_btnSet, pad + half + gap, fy, half, btnH, TRUE);
+  if (g_btnAsk) MoveWindow(g_btnAsk, pad, fy, side, btnH, TRUE);
+  if (g_btnNd) MoveWindow(g_btnNd, pad + side + gap, fy, ndW, btnH, TRUE);
+  if (g_btnSet) MoveWindow(g_btnSet, cw - pad - side, fy, side, btnH, TRUE);
 }
 
 static void round_corners(HWND hwnd) {
@@ -1268,6 +1273,7 @@ static void apply_follow_state(void) {
   EnableWindow(g_min, !g_follow);
   EnableWindow(g_btnSet, !g_follow);
   if (g_btnAsk) EnableWindow(g_btnAsk, !g_follow);
+  if (g_btnNd) EnableWindow(g_btnNd, !g_follow);
   if (g_searchEdit) EnableWindow(g_searchEdit, !g_follow);
   if (g_searchGo) EnableWindow(g_searchGo, !g_follow);
   if (g_ocr) EnableWindow(g_ocr, !g_follow);
@@ -3056,6 +3062,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                                  WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
                                  0, 0, 100, 24, hwnd, (HMENU)(INT_PTR)ID_CLIP, NULL, NULL);
     g_btnAsk = mk_btn(hwnd, L"Поиск", ID_ASK_TAB);
+    g_btnNd = mk_btn(hwnd, L"Нарды", ID_NARDY_BTN);
     g_btnSet = mk_btn(hwnd, L"Настройки", ID_SETTINGS);
     SendMessageW(g_pin, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
     if (g_clipClr) SendMessageW(g_clipClr, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
@@ -3068,6 +3075,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     }
     SendMessageW(g_btnSet, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
     if (g_btnAsk) SendMessageW(g_btnAsk, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
+    if (g_btnNd) SendMessageW(g_btnNd, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
     SendMessageW(g_edit, EM_SETLIMITTEXT, 200000, 0);
     g_oldEdit = (WNDPROC)SetWindowLongPtrW(g_edit, GWLP_WNDPROC, (LONG_PTR)EditProc);
 
@@ -3238,6 +3246,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     if (LOWORD(wParam) == ID_MIN) toggle_hidden();
     if (LOWORD(wParam) == ID_SETTINGS) toggle_settings();
     if (LOWORD(wParam) == ID_ASK_TAB) toggle_ask();
+    if (LOWORD(wParam) == ID_NARDY_BTN) nardy_show();
     if (LOWORD(wParam) == ID_EDIT && HIWORD(wParam) == EN_CHANGE) {
       g_dirty = TRUE;
       InvalidateRect(hwnd, NULL, FALSE);

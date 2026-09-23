@@ -1341,7 +1341,18 @@ static void nd_layout(void) {
   if (wait) MoveWindow(b[8], pad, S_(ND_TOP) + S_(60), S_(170), bh, TRUE);
 }
 
+/* кнопка «Нарды» в окне курсора: точка, когда вас ждут — ваш ход или зовут */
+static void nd_mark_btn(void) {
+  if (!g_btnNd) return;
+  BOOL wait = nd_my_turn() || (g_nd.mode != ND_PLAY && g_nd.mode != ND_WAIT && g_nd.poll && g_nd.poll->nInv > 0);
+  const wchar_t *want = wait ? L"● Нарды" : L"Нарды";
+  wchar_t cur[32];
+  GetWindowTextW(g_btnNd, cur, 32);
+  if (wcscmp(cur, want)) SetWindowTextW(g_btnNd, want);
+}
+
 static void nd_refresh_view(void) {
+  nd_mark_btn();
   if (!g_ndWnd) return;
   if (g_ndList && g_nd.mode == ND_LOBBY) {
     NdPoll *pl = g_nd.poll;
