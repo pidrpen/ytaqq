@@ -1659,6 +1659,7 @@ static void files_on_changes(FileChanges *c) {
   if (g_trayAdded) {
     NOTIFYICONDATAW n = g_nid;
     n.uFlags = NIF_INFO;
+    g_balloonKind = 0;
     lstrcpynW(n.szInfoTitle, L"Новое в папке", 64);
     _snwprintf(n.szInfo, 256, L"%s\nНажмите, чтобы посмотреть список", msg);
     n.szInfo[255] = 0;

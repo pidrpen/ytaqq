@@ -289,6 +289,7 @@ static BOOL g_statusOn = FALSE;
 static HINSTANCE g_inst;
 static int g_skin = 1; /* 0 system, 1 sword, 2 gauntlet, 3 fairy */
 static BOOL g_sparkle = TRUE; /* у «Феи» — звёздочки при нажатии */
+static int g_balloonKind; /* куда ведёт щелчок по всплывашке: 0 — изменения в папке, 1 — нарды */
 static HCURSOR g_staticCur[3];
 static HCURSOR g_ibeamCur[3];
 static HCURSOR g_handCur[3];
@@ -339,6 +340,7 @@ static void toggle_settings(void);
 static void save_cursor_pref(void);
 static void set_skin(int skin);
 static void fx_sync(void); /* fairy_fx.c: звёздочки при нажатии у «Феи» */
+static void nardy_show(void); /* nardy.c: короткие нарды через общую папку */
 static void start_lookup(const wchar_t *q);
 static BOOL clipboard_text(wchar_t *out, int n);
 static void search_web(const wchar_t *q);
@@ -2114,6 +2116,7 @@ static void tray_menu(HWND hwnd) {
   AppendMenuW(menu, MF_STRING, 15, L"Выделить и прочитать (F6)");
   AppendMenuW(menu, MF_STRING, 17, L"Обновить с GitHub");
   AppendMenuW(menu, MF_STRING, 18, L"Что нового в папке");
+  AppendMenuW(menu, MF_STRING, 21, L"Нарды");
   AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
   AppendMenuW(menu, MF_STRING | (g_skin == 1 ? MF_CHECKED : 0), 10, L"Курсор: Мечник");
   AppendMenuW(menu, MF_STRING | (g_skin == 2 ? MF_CHECKED : 0), 11, L"Курсор: Рукавица");
@@ -2152,6 +2155,7 @@ static void tray_menu(HWND hwnd) {
   } else if (cmd == 15) run_ocr_test();
   else if (cmd == 17) start_update();
   else if (cmd == 18) files_show_changes();
+  else if (cmd == 21) nardy_show();
   else if (cmd == 16) {
     if (g_follow) toggle_follow();
     toggle_settings();
@@ -3018,6 +3022,8 @@ static void create_settings(HWND owner) {
   layout_settings();
 }
 
+#include "nardy.c"
+
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
   switch (msg) {
   case WM_CREATE: {
@@ -3073,6 +3079,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     load_cursor_pref();
     load_plm_pref();
     share_start();
+    nardy_start(); /* «я в сети» для нард и приглашения — пока задана общая папка */
     load_files_pref();
     if (g_autostart) autostart_set(TRUE);
     create_settings(hwnd);
@@ -3382,7 +3389,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     return 0;
   case WM_TRAY:
     /* щелчок по всплывашке «Новое в папке» */
-    if (lParam == NIN_BALLOONUSERCLICK) files_show_changes();
+    if (lParam == NIN_BALLOONUSERCLICK) {
+      if (g_balloonKind == 1) nardy_show();
+      else files_show_changes();
+    }
     if (lParam == WM_RBUTTONUP || lParam == WM_CONTEXTMENU) tray_menu(hwnd);
     if (lParam == WM_LBUTTONUP || lParam == WM_LBUTTONDBLCLK) {
       if (g_hidden) restore_from_tray();
@@ -3391,6 +3401,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     return 0;
   case WM_CLOSE:
     DestroyWindow(hwnd);
+    return 0;
+  case WM_NARDY_POLL:
+    nd_on_poll((NdPoll *)lParam);
     return 0;
   case WM_FAIRY_CLICK:
     fx_burst((int)(LONG_PTR)wParam, (int)(LONG_PTR)lParam);
