@@ -94,11 +94,11 @@
 #define PAD 12
 #define GUTTER 26
 #define SET_W 312
-#define SET_H 812  /* +32 на строку «оставлять на месте» */
+#define SET_H 777  /* темы теперь в один ряд — на строку ниже */
 #define ASK_W 312
 #define ASK_H 224 /* room for the drawn header */
 #define ID_THEME_BASE 140
-#define THEME_COUNT 8
+#define THEME_COUNT 4
 
 static COLORREF COL_PAPER = RGB(255, 255, 255);
 static COLORREF COL_PAPER_DARK = RGB(243, 244, 246);
@@ -107,21 +107,47 @@ static COLORREF COL_MUTED = RGB(107, 114, 128);
 static COLORREF COL_SAGE = RGB(37, 99, 235);
 static COLORREF COL_LINE = RGB(226, 229, 233);
 
+/* Тема — не только цвет. Меняются шрифт, форма кнопок, вид шапок и
+   углы окон: с одной палитрой темы выглядели перекрашенной одной и той же
+   программой. Тёмные убраны. */
+#define BTN_SOFT 0  /* мягкая заливка и тонкая рамка */
+#define BTN_LINE 1  /* только контур, как на чертеже */
+#define BTN_TONE 2  /* цветная подложка без рамки */
+#define HEAD_BAND 0  /* шапка полосой */
+#define HEAD_RULE 1  /* шапка на фоне, под ней линия */
+#define HEAD_PLAIN 2 /* без полосы и линии, заголовок цветом */
+
 typedef struct {
   COLORREF paper, dark, ink, muted, sage;
   const wchar_t *name;
+  const wchar_t *face;     /* кнопки и текст */
+  const wchar_t *faceAlt;  /* если основного в системе нет */
+  const wchar_t *faceHead; /* «CursorPad» и крупные заголовки */
+  const wchar_t *faceSmall;
+  int radius;              /* скругление кнопок: 0 — прямые, -1 — «таблетка» */
+  int btn, head;
+  int corners;             /* углы окон: 1 прямые, 2 круглые, 3 чуть скруглённые */
+  BOOL caps;               /* заголовки панелей прописными */
 } PadTheme;
 
 static const PadTheme kThemes[THEME_COUNT] = {
-    /* flat surfaces, one accent each: four light, four dark */
-    {RGB(255, 255, 255), RGB(243, 244, 246), RGB(17, 24, 39), RGB(107, 114, 128), RGB(37, 99, 235), L"Светлая"},
-    {RGB(250, 250, 249), RGB(240, 239, 236), RGB(28, 25, 23), RGB(120, 113, 108), RGB(180, 83, 9), L"Песок"},
-    {RGB(248, 250, 250), RGB(238, 244, 243), RGB(15, 31, 28), RGB(95, 122, 116), RGB(13, 148, 136), L"Мята"},
-    {RGB(253, 249, 249), RGB(246, 238, 238), RGB(31, 20, 22), RGB(124, 99, 103), RGB(190, 18, 60), L"Роза"},
-    {RGB(26, 27, 30), RGB(35, 37, 41), RGB(232, 234, 237), RGB(154, 160, 166), RGB(96, 165, 250), L"Тёмная"},
-    {RGB(15, 17, 21), RGB(23, 26, 32), RGB(230, 232, 236), RGB(139, 146, 158), RGB(129, 140, 248), L"Ночь"},
-    {RGB(32, 33, 36), RGB(23, 24, 26), RGB(227, 227, 227), RGB(158, 158, 158), RGB(52, 211, 153), L"Графит"},
-    {RGB(24, 24, 27), RGB(33, 33, 36), RGB(237, 237, 239), RGB(155, 155, 163), RGB(245, 158, 11), L"Уголь"},
+    /* привычный вид — как было до сих пор */
+    {RGB(255, 255, 255), RGB(243, 244, 246), RGB(17, 24, 39), RGB(107, 114, 128), RGB(37, 99, 235),
+     L"Обычная", L"Segoe UI Variable Text", L"Segoe UI", L"Segoe UI Variable Display",
+     L"Segoe UI Variable Small", 8, BTN_SOFT, HEAD_BAND, 2, FALSE},
+    /* тёплая бумага, шрифт с засечками, линейка под шапкой */
+    {RGB(251, 248, 241), RGB(241, 234, 219), RGB(43, 33, 24), RGB(125, 110, 95), RGB(154, 91, 19),
+     L"Бумага", L"Georgia", L"Cambria", L"Georgia", L"Georgia", 3, BTN_SOFT, HEAD_RULE, 3,
+     FALSE},
+    /* округлое и мягкое: кнопки-таблетки без рамок */
+    {RGB(247, 250, 249), RGB(234, 243, 240), RGB(15, 31, 28), RGB(95, 122, 116), RGB(13, 148, 136),
+     L"Мягкая", L"Segoe UI Variable Text", L"Segoe UI", L"Segoe UI Variable Display",
+     L"Segoe UI Variable Small", -1, BTN_TONE, HEAD_PLAIN, 2, FALSE},
+    /* чертёжный лист: прямые углы, контуры, узкий технический шрифт,
+       заголовки прописными — как основная надпись */
+    {RGB(255, 255, 255), RGB(244, 245, 247), RGB(20, 24, 31), RGB(100, 108, 120), RGB(30, 58, 95),
+     L"Чертёж", L"Bahnschrift", L"Segoe UI", L"Bahnschrift", L"Bahnschrift", 0, BTN_LINE,
+     HEAD_RULE, 1, TRUE},
 };
 
 static COLORREF blend_rgb(COLORREF a, COLORREF b, int t) {
@@ -484,6 +510,101 @@ static void update_theme_buttons(void) {
   }
 }
 
+static HFONT make_font(const wchar_t *face, int px, int weight);
+static void layout_children(void);
+static void layout_settings(void);
+static void layout_ask(void);
+static void layout_answer(void);
+static void layout_card(void);
+static void layout_ocr(void);
+static void theme_zoom_fonts_reset(void);
+static void round_corners(HWND hwnd);
+static void theme_fit_windows(void);
+/* шрифт текста текущей темы: по нему строят свои шрифты окна с масштабом */
+static wchar_t g_faceBody[LF_FACESIZE] = L"Segoe UI";
+
+static int CALLBACK font_seen_cb(const LOGFONTW *lf, const TEXTMETRICW *tm, DWORD type, LPARAM lp) {
+  (void)lf;
+  (void)tm;
+  (void)type;
+  *(BOOL *)lp = TRUE;
+  return 0;
+}
+
+/* CreateFont никогда не отказывает: нет такого шрифта — молча подставит
+   какой-нибудь свой. Поэтому запасной шрифт выбираем сами, спросив
+   у системы, есть ли он. На Windows 10 нет Segoe UI Variable, и до сих пор
+   там вместо него выходил случайный шрифт, а не Segoe UI. */
+static BOOL font_exists(const wchar_t *face) {
+  if (!face || !face[0]) return FALSE;
+  LOGFONTW lf;
+  memset(&lf, 0, sizeof(lf));
+  lf.lfCharSet = DEFAULT_CHARSET;
+  lstrcpynW(lf.lfFaceName, face, LF_FACESIZE);
+  BOOL seen = FALSE;
+  HDC dc = GetDC(NULL);
+  if (dc) {
+    EnumFontFamiliesExW(dc, &lf, font_seen_cb, (LPARAM)&seen, 0);
+    ReleaseDC(NULL, dc);
+  }
+  return seen;
+}
+
+static const wchar_t *pick_face(const wchar_t *want, const wchar_t *spare) {
+  if (font_exists(want)) return want;
+  if (font_exists(spare)) return spare;
+  return L"Segoe UI";
+}
+
+typedef struct {
+  HFONT from[4], to[4];
+} FontMap;
+
+/* Каждому элементу — новый шрифт той же роли, что и был: кнопка остаётся
+   кнопкой, текст текстом. Шрифты со своим масштабом (карточка, находки)
+   сюда не попадают — их перестраивают сами окна. */
+static BOOL CALLBACK remap_font_cb(HWND h, LPARAM lp) {
+  const FontMap *m = (const FontMap *)lp;
+  HFONT cur = (HFONT)SendMessageW(h, WM_GETFONT, 0, 0);
+  if (!cur) return TRUE;
+  for (int i = 0; i < 4; i++) {
+    if (m->from[i] && cur == m->from[i]) {
+      SendMessageW(h, WM_SETFONT, (WPARAM)m->to[i], TRUE);
+      break;
+    }
+  }
+  return TRUE;
+}
+
+static void theme_fonts(void) {
+  const PadTheme *t = &kThemes[g_theme];
+  const wchar_t *face = pick_face(t->face, t->faceAlt);
+  const wchar_t *head = pick_face(t->faceHead, face);
+  const wchar_t *small = pick_face(t->faceSmall, face);
+  lstrcpynW(g_faceBody, face, LF_FACESIZE);
+  FontMap m;
+  m.from[0] = g_fontDisplay;
+  m.from[1] = g_fontUi;
+  m.from[2] = g_fontBody;
+  m.from[3] = g_fontSmall;
+  g_fontDisplay = make_font(head, 13, FW_SEMIBOLD);
+  g_fontUi = make_font(face, 9, FW_SEMIBOLD);
+  g_fontBody = make_font(face, 10, FW_NORMAL);
+  g_fontSmall = make_font(small, 8, FW_NORMAL);
+  m.to[0] = g_fontDisplay;
+  m.to[1] = g_fontUi;
+  m.to[2] = g_fontBody;
+  m.to[3] = g_fontSmall;
+  HWND tops[6] = {g_hwnd, g_setHwnd, g_askHwnd, g_answer, g_card, g_ocrWnd};
+  for (int i = 0; i < 6; i++)
+    if (tops[i]) EnumChildWindows(tops[i], remap_font_cb, (LPARAM)&m);
+  /* старые шрифты удаляем только после замены — иначе элемент
+     успеет отрисоваться удалённым */
+  for (int i = 0; i < 4; i++)
+    if (m.from[i] && m.from[i] != m.to[i]) DeleteObject(m.from[i]);
+  theme_zoom_fonts_reset();
+}
+
 static void apply_theme(void) {
   if (g_theme < 0 || g_theme >= THEME_COUNT) g_theme = 0;
   COL_PAPER = kThemes[g_theme].paper;
@@ -523,6 +644,20 @@ static void apply_theme(void) {
   if (g_edit) InvalidateRect(g_edit, NULL, TRUE);
   if (g_clipEdit) InvalidateRect(g_clipEdit, NULL, TRUE);
   update_theme_buttons();
+  theme_fonts();
+  HWND tops[6] = {g_hwnd, g_setHwnd, g_askHwnd, g_answer, g_card, g_ocrWnd};
+  for (int i = 0; i < 6; i++)
+    if (tops[i]) round_corners(tops[i]);
+  /* шрифт другой — у надписей другая ширина, кнопки перемеряем */
+  if (g_hwnd) layout_children();
+  if (g_setHwnd) layout_settings();
+  if (g_askHwnd) layout_ask();
+  if (g_answer) layout_answer();
+  if (g_card) layout_card();
+  if (g_ocrWnd) layout_ocr();
+  theme_fit_windows();
+  for (int i = 0; i < 6; i++)
+    if (tops[i]) RedrawWindow(tops[i], NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
 }
 
 static void set_theme(int t) {
@@ -810,7 +945,8 @@ static void round_corners(HWND hwnd) {
   DwmSetWindowAttributeFn fn =
       (DwmSetWindowAttributeFn)GetProcAddress(dwm, "DwmSetWindowAttribute");
   if (fn) {
-    int pref = 2; /* DWMWCP_ROUND */
+    /* углы окна берутся из темы: у «Чертежа» прямые, у остальных круглые */
+    int pref = (g_theme >= 0 && g_theme < THEME_COUNT) ? kThemes[g_theme].corners : 2;
     fn(hwnd, 33, &pref, sizeof(pref));
   }
   FreeLibrary(dwm);
@@ -1304,17 +1440,44 @@ static void fill_round_rect(HDC hdc, RECT rc, COLORREF fill, COLORREF border, in
 static void draw_panel_header(HWND hwnd, HDC hdc, const wchar_t *title) {
   RECT rc;
   GetClientRect(hwnd, &rc);
+  const PadTheme *th = &kThemes[g_theme];
   RECT hd = {0, 0, rc.right, PANEL_TITLE_H};
-  FillRect(hdc, &hd, g_paperDark);
-  RECT rule = {14, PANEL_TITLE_H - 1, rc.right - 14, PANEL_TITLE_H};
-  HBRUSH line = CreateSolidBrush(COL_LINE);
-  FillRect(hdc, &rule, line);
-  DeleteObject(line);
+  COLORREF titleCol = COL_INK;
+  if (th->head == HEAD_BAND) {
+    FillRect(hdc, &hd, g_paperDark);
+    RECT rule = {14, PANEL_TITLE_H - 1, rc.right - 14, PANEL_TITLE_H};
+    HBRUSH line = CreateSolidBrush(COL_LINE);
+    FillRect(hdc, &rule, line);
+    DeleteObject(line);
+  } else {
+    /* шапка на фоне самого окна, без отдельной полосы */
+    HBRUSH bg = (HBRUSH)GetClassLongPtrW(hwnd, GCLP_HBRBACKGROUND);
+    FillRect(hdc, &hd, bg ? bg : g_paper);
+    if (th->head == HEAD_RULE) {
+      /* линейка под шапкой, у «Чертежа» жирная — как рамка листа */
+      int w = th->caps ? 2 : 1;
+      RECT rule = {14, PANEL_TITLE_H - w, rc.right - 14, PANEL_TITLE_H};
+      HBRUSH line = CreateSolidBrush(blend_rgb(COL_INK, COL_PAPER, th->caps ? 40 : 150));
+      FillRect(hdc, &rule, line);
+      DeleteObject(line);
+    } else {
+      titleCol = COL_SAGE;
+    }
+  }
   SetBkMode(hdc, TRANSPARENT);
-  SetTextColor(hdc, COL_INK);
+  SetTextColor(hdc, titleCol);
   if (g_fontUi) SelectObject(hdc, g_fontUi);
   RECT t = {16, 0, rc.right - 44, PANEL_TITLE_H};
-  DrawTextW(hdc, title, -1, &t, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+  if (th->caps) {
+    wchar_t up[128];
+    lstrcpynW(up, title, 128);
+    CharUpperBuffW(up, (DWORD)wcslen(up));
+    int oldExtra = SetTextCharacterExtra(hdc, 1);
+    DrawTextW(hdc, up, -1, &t, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    SetTextCharacterExtra(hdc, oldExtra);
+  } else {
+    DrawTextW(hdc, title, -1, &t, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+  }
 }
 
 /* the header doubles as the drag handle, the way the pad's own title does */
@@ -1371,25 +1534,60 @@ static void draw_pad_button(const DRAWITEMSTRUCT *dis) {
       fill = blend_rgb(fill, COL_PAPER_DARK, 80);
       fg = th->muted;
     }
-  } else if (disab) {
-    fill = blend_rgb(COL_PAPER, COL_PAPER_DARK, 160);
-    fg = COL_MUTED;
-    bd = COL_LINE;
-  } else if (on || primary) {
-    fill = press ? blend_rgb(COL_SAGE, COL_INK, 48) : COL_SAGE;
-    fg = COL_PAPER;
-    bd = fill;
-  } else if (quiet) {
-    fill = press ? COL_PAPER : COL_PAPER_DARK;
-    fg = COL_INK;
-    bd = COL_LINE;
   } else {
-    fill = press ? blend_rgb(COL_PAPER_DARK, COL_INK, 30) : COL_PAPER;
-    fg = COL_INK;
-    bd = COL_LINE;
+    int style = kThemes[g_theme].btn;
+    if (disab) {
+      fill = blend_rgb(COL_PAPER, COL_PAPER_DARK, 160);
+      fg = COL_MUTED;
+      bd = style == BTN_TONE ? fill : COL_LINE;
+    } else if (style == BTN_LINE) {
+      /* чертёж: контур вместо заливки; главная кнопка — контур и
+         надпись цветом, выбранная — залита, иначе её не отличить */
+      if (on) {
+        fill = press ? blend_rgb(COL_SAGE, COL_INK, 48) : COL_SAGE;
+        fg = COL_PAPER;
+        bd = fill;
+      } else if (primary) {
+        fill = press ? blend_rgb(COL_PAPER, COL_SAGE, 40) : COL_PAPER;
+        fg = COL_SAGE;
+        bd = COL_SAGE;
+      } else {
+        fill = press ? blend_rgb(COL_PAPER, COL_INK, 30) : COL_PAPER;
+        fg = COL_INK;
+        bd = blend_rgb(COL_INK, COL_PAPER, 110);
+      }
+    } else if (style == BTN_TONE) {
+      /* мягкая: подложка цвета темы, рамок нет совсем */
+      if (on || primary) {
+        fill = press ? blend_rgb(COL_SAGE, COL_INK, 48) : COL_SAGE;
+        fg = COL_PAPER;
+      } else {
+        fill = blend_rgb(COL_PAPER, COL_SAGE, press ? 70 : 34);
+        fg = blend_rgb(COL_INK, COL_SAGE, 60);
+      }
+      bd = fill;
+    } else if (on || primary) {
+      fill = press ? blend_rgb(COL_SAGE, COL_INK, 48) : COL_SAGE;
+      fg = COL_PAPER;
+      bd = fill;
+    } else if (quiet) {
+      fill = press ? COL_PAPER : COL_PAPER_DARK;
+      fg = COL_INK;
+      bd = COL_LINE;
+    } else {
+      fill = press ? blend_rgb(COL_PAPER_DARK, COL_INK, 30) : COL_PAPER;
+      fg = COL_INK;
+      bd = COL_LINE;
+    }
   }
   int h = rc.bottom - rc.top;
-  int rad = quiet ? (h / 2) : (h >= 26 ? 8 : 6);
+  /* скругление задаёт тема; кнопки выбора темы рисуются формой своей
+     темы — сразу видно, что получится */
+  int tr = kThemes[themeBtn && ti >= 0 ? ti : g_theme].radius;
+  int rad;
+  if (tr < 0) rad = h / 2;
+  else if (tr == 0) rad = 0;
+  else rad = quiet ? (h / 2) : (h >= 26 ? tr : (tr > 2 ? tr - 2 : tr));
   fill_round_rect(dis->hDC, rc, fill, bd, rad);
   SetBkMode(dis->hDC, TRANSPARENT);
   SetTextColor(dis->hDC, fg);
@@ -2204,6 +2402,8 @@ static void create_settings(HWND owner) {
   if (g_plmPass) SendMessageW(g_plmPass, 0x1501, TRUE, (LPARAM)L"пароль SQL");
   if (g_sqlPass[0] && g_plmPass) SetWindowTextW(g_plmPass, L"********");
   if (g_chkAuto) SendMessageW(g_chkAuto, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
+  /* вторая галочка шрифта не получала и рисовалась системным — и теме не подчинялась */
+  if (g_chkAnsPin) SendMessageW(g_chkAnsPin, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
   if (g_chkAuto) SendMessageW(g_chkAuto, BM_SETCHECK, g_autostart ? BST_CHECKED : BST_UNCHECKED, 0);
   if (g_chkAnsPin)
     SendMessageW(g_chkAnsPin, BM_SETCHECK, g_ansKeepPos ? BST_CHECKED : BST_UNCHECKED, 0);
@@ -2325,15 +2525,24 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     int th = MulDiv(TITLE_H, dpi, 96);
     int fh = MulDiv(FOOT_H, dpi, 96);
     RECT title = {0, 0, rc.right, th};
-    FillRect(hdc, &title, g_paperDark);
     RECT foot = {0, rc.bottom - fh, rc.right, rc.bottom};
-    FillRect(hdc, &foot, g_paperDark);
-    RECT rule = {0, th - 1, rc.right, th};
-    HBRUSH line = CreateSolidBrush(COL_LINE);
-    FillRect(hdc, &rule, line);
-    RECT frule = {0, rc.bottom - fh, rc.right, rc.bottom - fh + 1};
-    FillRect(hdc, &frule, line);
-    DeleteObject(line);
+    const PadTheme *pth = &kThemes[g_theme];
+    /* шапка и низ блокнота — в том же стиле, что шапки остальных окон */
+    if (pth->head == HEAD_BAND) {
+      FillRect(hdc, &title, g_paperDark);
+      FillRect(hdc, &foot, g_paperDark);
+    }
+    if (pth->head != HEAD_PLAIN) {
+      int w = (pth->head == HEAD_RULE && pth->caps) ? 2 : 1;
+      RECT rule = {0, th - w, rc.right, th};
+      RECT frule = {0, rc.bottom - fh, rc.right, rc.bottom - fh + w};
+      HBRUSH line = CreateSolidBrush(pth->head == HEAD_BAND
+                                         ? COL_LINE
+                                         : blend_rgb(COL_INK, COL_PAPER, pth->caps ? 40 : 150));
+      FillRect(hdc, &rule, line);
+      FillRect(hdc, &frule, line);
+      DeleteObject(line);
+    }
 
     SetBkMode(hdc, TRANSPARENT);
     int padx = MulDiv(PAD, dpi, 96);

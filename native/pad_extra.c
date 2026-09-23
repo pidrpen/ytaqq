@@ -2508,6 +2508,63 @@ static DWORD WINAPI search_thread(LPVOID param) {
   return 0;
 }
 
+/* Сколько места нужно ряду кнопок, чтобы ни одна надпись не обрезалась.
+   У тем разные шрифты: Georgia заметно шире Segoe UI, и окно, которое в
+   «Обычной» влезало, в «Бумаге» резало бы подписи многоточием. */
+static int btn_row_width(HWND parent, const int *ids, int n) {
+  if (!parent) return 0;
+  HDC dc = GetDC(parent);
+  if (!dc) return 0;
+  HGDIOBJ old = g_fontUi ? SelectObject(dc, g_fontUi) : NULL;
+  int total = 0, vis = 0;
+  for (int k = 0; k < n; k++) {
+    HWND b = GetDlgItem(parent, ids[k]);
+    if (!b) continue;
+    wchar_t t[96];
+    t[0] = 0;
+    GetWindowTextW(b, t, 96);
+    SIZE sz;
+    sz.cx = 60;
+    sz.cy = 0;
+    GetTextExtentPoint32W(dc, t, (int)wcslen(t), &sz);
+    int w = sz.cx + 24;
+    total += w < 56 ? 56 : w;
+    vis++;
+  }
+  if (old) SelectObject(dc, old);
+  ReleaseDC(parent, dc);
+  if (!vis) return 0;
+  /* поля по 12 с краёв, зазоры по 7, рамка окна */
+  return total + 7 * (vis - 1) + 24 + 16;
+}
+
+static const int kAnsBtns[5] = {ID_ANS_OPEN, ID_ANS_CARD, ID_ANS_DRAW, ID_ANS_SHOW, ID_ANS_CLOSE};
+static const int kCardBtns[5] = {ID_CARD_OPEN, ID_CARD_DRAW, ID_CARD_SHOW, ID_CARD_1C, ID_CARD_CLOSE};
+static const int kOcrBtns[4] = {ID_OCR_COPY, ID_OCR_FIND, ID_OCR_AGAIN, ID_OCR_CLOSE};
+
+/* Дотянуть открытое окно до ширины ряда кнопок — сразу после смены темы.
+   Сузить руками потом можно: кнопки тогда пожмутся. */
+static void widen_to_row(HWND w, const int *ids, int n) {
+  if (!w || !IsWindowVisible(w)) return;
+  int need = btn_row_width(w, ids, n);
+  RECT wr;
+  GetWindowRect(w, &wr);
+  if (need <= wr.right - wr.left) return;
+  POINT c = {wr.left, wr.top};
+  RECT wa;
+  get_work_area(c, &wa);
+  if (need > wa.right - wa.left) need = wa.right - wa.left;
+  int x = wr.left;
+  if (x + need > wa.right) x = wa.right - need;
+  SetWindowPos(w, NULL, x, wr.top, need, wr.bottom - wr.top, SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
+static void theme_fit_windows(void) {
+  widen_to_row(g_answer, kAnsBtns, 5);
+  widen_to_row(g_card, kCardBtns, 5);
+  widen_to_row(g_ocrWnd, kOcrBtns, 4);
+}
+
 static void layout_answer(void) {
   if (!g_answer) return;
   RECT rc;
@@ -2847,8 +2904,7 @@ static HFONT g_ansFontZoom;
 
 static HFONT ans_font(void) {
   if (g_ansFontZoom) return g_ansFontZoom;
-  g_ansFontZoom = make_font(L"Segoe UI Variable Text", g_ansPt, FW_NORMAL);
-  if (!g_ansFontZoom) g_ansFontZoom = make_font(L"Segoe UI", g_ansPt, FW_NORMAL);
+  g_ansFontZoom = make_font(g_faceBody, g_ansPt, FW_NORMAL);
   return g_ansFontZoom;
 }
 
@@ -2975,6 +3031,10 @@ static void show_answer_text(const wchar_t *text) {
   /* запомненная с прошлых версий ширина бывает такой, что надписи
      на кнопках обрезаются многоточием — ниже этого не опускаемся */
   if (aw < ANS_W) aw = ANS_W;
+  {
+    int row = btn_row_width(g_answer, kAnsBtns, 5);
+    if (aw < row) aw = row;
+  }
   if (aw > wa.right - wa.left) aw = wa.right - wa.left;
   if (x + aw > wa.right) x = wa.right - aw - 8;
   if (y + ah > wa.bottom) y = wa.bottom - ah - 8;
@@ -3398,6 +3458,10 @@ static void show_card_text(const wchar_t *text) {
   int aw = g_cardW, ah = g_cardH;
   if (aw <= 0 || ah <= 0) ans_fit(text, &wa, &aw, &ah, g_cardEdit, card_font());
   if (aw < ANS_W) aw = ANS_W;
+  {
+    int row = btn_row_width(g_card, kCardBtns, 5);
+    if (aw < row) aw = row;
+  }
   if (aw > wa.right - wa.left) aw = wa.right - wa.left;
   /* карточка остаётся там, куда её положили: прыгать к мыши ей незачем,
      читают её долго. Первый раз — рядом с находками, чтобы не накрывать их */
@@ -3435,9 +3499,24 @@ static void start_ocr_pick(void);
 
 static HFONT ocr_font(void) {
   if (g_ocrFontZoom) return g_ocrFontZoom;
-  g_ocrFontZoom = make_font(L"Segoe UI Variable Text", g_ocrPt, FW_NORMAL);
-  if (!g_ocrFontZoom) g_ocrFontZoom = make_font(L"Segoe UI", g_ocrPt, FW_NORMAL);
+  g_ocrFontZoom = make_font(g_faceBody, g_ocrPt, FW_NORMAL);
   return g_ocrFontZoom;
+}
+
+/* Сменилась тема — у находок и распознанного текста свой шрифт с масштабом,
+   его собираем заново из шрифта темы. Карточка остаётся моноширинной: её
+   колонки на другом шрифте разъедутся. */
+static void theme_zoom_fonts_reset(void) {
+  if (g_ansFontZoom) {
+    DeleteObject(g_ansFontZoom);
+    g_ansFontZoom = NULL;
+  }
+  if (g_answerEdit) SendMessageW(g_answerEdit, WM_SETFONT, (WPARAM)ans_font(), TRUE);
+  if (g_ocrFontZoom) {
+    DeleteObject(g_ocrFontZoom);
+    g_ocrFontZoom = NULL;
+  }
+  if (g_ocrEdit) SendMessageW(g_ocrEdit, WM_SETFONT, (WPARAM)ocr_font(), TRUE);
 }
 
 static void ocr_zoom(int delta) {
@@ -3780,6 +3859,10 @@ static void show_ocr_text(const wchar_t *text) {
   int aw = g_ocrW > 0 ? g_ocrW : ANS_W;
   int ah = g_ocrH > 0 ? g_ocrH : 300;
   if (aw < 420) aw = 420;
+  {
+    int row = btn_row_width(g_ocrWnd, kOcrBtns, 4);
+    if (aw < row) aw = row;
+  }
   if (aw > wa.right - wa.left) aw = wa.right - wa.left;
   /* где окно оставили — там и откроется: читают и правят его долго */
   int x = g_ocrX, y = g_ocrY;
