@@ -647,14 +647,18 @@ static void fill_plm_list(void) {
   LVCOLUMNW col;
   memset(&col, 0, sizeof(col));
   col.mask = LVCF_TEXT;
-  wchar_t h0[64], h1[64];
+  wchar_t h0[64], h1[64], h2[64];
   const wchar_t *mark = g_sortDesc ? L" ↓" : L" ↑";
   _snwprintf(h0, 64, L"%s%s", g_resultFiles ? L"файл" : L"ЭСИ", g_sortCol == 0 ? mark : L"");
   _snwprintf(h1, 64, L"%s%s", g_resultFiles ? L"папка" : L"ТП", g_sortCol == 1 ? mark : L"");
+  _snwprintf(h2, 64, L"%s%s", g_resultFiles ? L"" : L"Заготовка", g_sortCol == 2 ? mark : L"");
   col.pszText = h0;
   SendMessageW(g_answerList, LVM_SETCOLUMNW, 0, (LPARAM)&col);
   col.pszText = h1;
   SendMessageW(g_answerList, LVM_SETCOLUMNW, 1, (LPARAM)&col);
+  col.pszText = h2;
+  SendMessageW(g_answerList, LVM_SETCOLUMNW, 2, (LPARAM)&col);
+  layout_answer(); /* у файлов столбца заготовки нет — ширины другие */
   SendMessageW(g_answerList, LVM_DELETEALLITEMS, 0, 0);
   for (int i = 0; i < g_plmCount; i++) {
     LVITEMW it;
@@ -666,6 +670,11 @@ static void fill_plm_list(void) {
     it.iSubItem = 1;
     it.pszText = g_plmTp[i];
     SendMessageW(g_answerList, LVM_SETITEMW, 0, (LPARAM)&it);
+    if (!g_resultFiles) {
+      it.iSubItem = 2;
+      it.pszText = g_plmPf[i];
+      SendMessageW(g_answerList, LVM_SETITEMW, 0, (LPARAM)&it);
+    }
   }
   if (g_plmCount > 0) {
     LVITEMW sel;
@@ -685,41 +694,50 @@ static void fill_plm_list(void) {
 /* Rows are three parallel arrays; with at most PLM_ROWS of them an insertion
    sort that swaps whole rows is simpler than juggling an index permutation. */
 
+/* Строка — это несколько параллельных массивов. Переставлять надо все:
+   раньше сортировка меняла местами только имена, ссылки и номера, а номер
+   ТП и шаблон оставались на старых местах — «Открыть ТП» брал чужой. */
+static void plm_swap_rows(int a, int b, wchar_t *tmp) {
+#define SWAP_STR(arr, n)                                   \
+  do {                                                     \
+    memcpy(tmp, arr[a], (n) * sizeof(wchar_t));            \
+    memcpy(arr[a], arr[b], (n) * sizeof(wchar_t));         \
+    memcpy(arr[b], tmp, (n) * sizeof(wchar_t));            \
+  } while (0)
+#define SWAP_NUM(arr)                                      \
+  do {                                                     \
+    long long t_ = (long long)arr[a];                      \
+    arr[a] = arr[b];                                       \
+    arr[b] = t_;                                           \
+  } while (0)
+  SWAP_STR(g_plmEsi, PLM_COL1);
+  SWAP_STR(g_plmTp, PLM_COL2);
+  SWAP_STR(g_plmPf, PLM_COL1);
+  SWAP_STR(g_plmLinks, PLM_LINK);
+  SWAP_NUM(g_plmIds);
+  SWAP_NUM(g_plmTpId);
+  SWAP_NUM(g_plmRealId);
+  SWAP_NUM(g_plmTmpl);
+#undef SWAP_STR
+#undef SWAP_NUM
+}
+
 static void plm_sort(int col) {
-  if (col < 0 || col > 1 || g_plmCount < 2) return;
-  wchar_t *tmpA = (wchar_t *)malloc(PLM_COL1 * sizeof(wchar_t));
-  wchar_t *tmpB = (wchar_t *)malloc(PLM_COL2 * sizeof(wchar_t));
-  wchar_t *tmpL = (wchar_t *)malloc(PLM_LINK * sizeof(wchar_t));
-  if (!tmpA || !tmpB || !tmpL) {
-    free(tmpA);
-    free(tmpB);
-    free(tmpL);
-    return;
-  }
+  if (col < 0 || col > 2 || g_plmCount < 2) return;
+  if (col == 2 && g_resultFiles) return;
+  wchar_t *tmp = (wchar_t *)malloc(PLM_LINK * sizeof(wchar_t));
+  if (!tmp) return;
   for (int i = 1; i < g_plmCount; i++) {
     for (int j = i; j > 0; j--) {
-      const wchar_t *a = col == 0 ? g_plmEsi[j] : g_plmTp[j];
-      const wchar_t *b = col == 0 ? g_plmEsi[j - 1] : g_plmTp[j - 1];
+      const wchar_t *a = col == 0 ? g_plmEsi[j] : (col == 1 ? g_plmTp[j] : g_plmPf[j]);
+      const wchar_t *b = col == 0 ? g_plmEsi[j - 1] : (col == 1 ? g_plmTp[j - 1] : g_plmPf[j - 1]);
       int cmp = _wcsicmp(a, b);
       if (g_sortDesc) cmp = -cmp;
       if (cmp >= 0) break;
-      memcpy(tmpA, g_plmEsi[j], PLM_COL1 * sizeof(wchar_t));
-      memcpy(g_plmEsi[j], g_plmEsi[j - 1], PLM_COL1 * sizeof(wchar_t));
-      memcpy(g_plmEsi[j - 1], tmpA, PLM_COL1 * sizeof(wchar_t));
-      memcpy(tmpB, g_plmTp[j], PLM_COL2 * sizeof(wchar_t));
-      memcpy(g_plmTp[j], g_plmTp[j - 1], PLM_COL2 * sizeof(wchar_t));
-      memcpy(g_plmTp[j - 1], tmpB, PLM_COL2 * sizeof(wchar_t));
-      memcpy(tmpL, g_plmLinks[j], PLM_LINK * sizeof(wchar_t));
-      memcpy(g_plmLinks[j], g_plmLinks[j - 1], PLM_LINK * sizeof(wchar_t));
-      memcpy(g_plmLinks[j - 1], tmpL, PLM_LINK * sizeof(wchar_t));
-      long tmpId = g_plmIds[j];
-      g_plmIds[j] = g_plmIds[j - 1];
-      g_plmIds[j - 1] = tmpId;
+      plm_swap_rows(j, j - 1, tmp);
     }
   }
-  free(tmpA);
-  free(tmpB);
-  free(tmpL);
+  free(tmp);
 }
 
 static int plm_selected_index(void) {
@@ -920,6 +938,78 @@ static BOOL share_client_on(void);
 static BOOL share_lookup(const wchar_t *query, wchar_t *out, int cap);
 static void share_card(long id, BOOL verbose, wchar_t *out, int cap);
 
+/* Заготовки изделия: ProductPreformsCard → её дети (так их грузит PlmApi),
+   а если в карточке есть коллекция ProductPreforms — и её элементы. */
+#define PF_OF_CARD(card)                                                                    \
+  L"o.Erased=0 AND (o.ParentId=" card L" OR o.InfoObjectId IN ("                            \
+  L"SELECT ea.Link FROM InfoObjectAttributes AS la WITH(NOLOCK) "                           \
+  L"JOIN NameKeys AS nkl WITH(NOLOCK) ON nkl.NameKeyId=la.NameKeyId "                       \
+  L"AND nkl.Value=N'ProductPreforms' "                                                      \
+  L"JOIN InfoObjectCollectionElements AS ce WITH(NOLOCK) ON ce.AttributeId=la.AttributeId " \
+  L"AND ce.Outdated=0 "                                                                     \
+  L"JOIN InfoObjectAttributes AS ea WITH(NOLOCK) "                                          \
+  L"ON ea.CollectionElementId=ce.CollectionElementId AND ea.DataType=6 "                    \
+  L"WHERE la.OwnerId=" card L" AND la.Outdated=0))"
+
+/* Столбец «Заготовка»: одним запросом на все строки находок. Не вышло —
+   столбец просто пустой, поиск от этого не страдает. */
+static void plm_fill_preforms(SQLHDBC dbc, int n) {
+  for (int i = 0; i < n; i++) g_plmPf[i][0] = 0;
+  wchar_t ids[1600];
+  size_t il = 0;
+  ids[0] = 0;
+  for (int i = 0; i < n; i++) {
+    if (!g_plmIds[i]) continue;
+    BOOL dup = FALSE;
+    for (int j = 0; j < i && !dup; j++) dup = g_plmIds[j] == g_plmIds[i];
+    if (dup) continue;
+    wchar_t one[24];
+    int k = _snwprintf(one, 24, il ? L",%ld" : L"%ld", g_plmIds[i]);
+    if (k <= 0 || il + (size_t)k + 1 >= 1600) break;
+    memcpy(ids + il, one, ((size_t)k + 1) * sizeof(wchar_t));
+    il += (size_t)k;
+  }
+  if (!il) return;
+  wchar_t *sql = (wchar_t *)malloc(4000 * sizeof(wchar_t));
+  if (!sql) return;
+  _snwprintf(sql, 4000,
+             L"SELECT DISTINCT TOP 400 a.OwnerId, o.Name "
+             L"FROM InfoObjectAttributes AS a WITH(NOLOCK) "
+             L"JOIN NameKeys AS nk WITH(NOLOCK) ON nk.NameKeyId=a.NameKeyId "
+             L"AND nk.Value=N'ProductPreformsCard' "
+             L"JOIN InfoObjects AS o WITH(NOLOCK) ON " PF_OF_CARD(L"a.Link") L" "
+             L"WHERE a.OwnerId IN (%s) AND a.Outdated=0 AND ISNULL(a.Link,0)<>0 "
+             L"ORDER BY a.OwnerId, o.Name",
+             ids);
+  sql[3999] = 0;
+  SQLHSTMT st = SQL_NULL_HSTMT;
+  if (!SQL_SUCCEEDED(SQLAllocHandle(SQL_HANDLE_STMT, dbc, &st))) {
+    free(sql);
+    return;
+  }
+  SQLRETURN r = SQLExecDirectW(st, (SQLWCHAR *)sql, SQL_NTS);
+  free(sql);
+  if (SQL_SUCCEEDED(r)) {
+    SQLINTEGER own = 0;
+    SQLWCHAR nm[200];
+    SQLLEN t1 = 0, t2 = 0;
+    SQLBindCol(st, 1, SQL_C_SLONG, &own, sizeof(own), &t1);
+    SQLBindCol(st, 2, SQL_C_WCHAR, nm, sizeof(nm), &t2);
+    while (SQL_SUCCEEDED(SQLFetch(st))) {
+      if (t1 == SQL_NULL_DATA || t2 <= 0) continue;
+      for (int i = 0; i < n; i++) {
+        if (g_plmIds[i] != (long)own) continue;
+        wchar_t *d = g_plmPf[i];
+        size_t dl = wcslen(d);
+        if (dl) _snwprintf(d + dl, PLM_COL1 - dl, L"; %s", (wchar_t *)nm);
+        else lstrcpynW(d, (wchar_t *)nm, PLM_COL1);
+        d[PLM_COL1 - 1] = 0;
+      }
+    }
+  }
+  SQLFreeHandle(SQL_HANDLE_STMT, st);
+}
+
 static BOOL plm_lookup(const wchar_t *query, wchar_t *out, int cap) {
   if (share_client_on()) return share_lookup(query, out, cap);
   g_plmLastLink[0] = 0;
@@ -1119,6 +1209,7 @@ static BOOL plm_lookup(const wchar_t *query, wchar_t *out, int cap) {
   }
   g_plmCount = n;
   SQLFreeHandle(SQL_HANDLE_STMT, st);
+  plm_fill_preforms(dbc, n);
   SQLDisconnect(dbc);
   SQLFreeHandle(SQL_HANDLE_DBC, dbc);
   SQLFreeHandle(SQL_HANDLE_ENV, env);
@@ -2266,6 +2357,62 @@ static long card_owner_of_tp(SQLHDBC dbc, long tpId, CardOut *c, CardRow *rows, 
   return rows[0].n1;
 }
 
+/* Заготовка в карточке: что это и что в ней записано (материал, размеры…).
+   Ссылки показываем именем объекта, на который они ведут, а не номером. */
+static void card_preforms(SQLHDBC dbc, long pfCard, CardOut *c, CardRow *rows, wchar_t *err) {
+  wchar_t card[24];
+  _snwprintf(card, 24, L"%ld", pfCard);
+  wchar_t *sql = (wchar_t *)malloc(4000 * sizeof(wchar_t));
+  if (!sql) return;
+  _snwprintf(sql, 4000,
+             L"SELECT DISTINCT TOP 10 o.InfoObjectId, o.Name, t.NameKey, 0, 0 "
+             L"FROM InfoObjects AS o WITH(NOLOCK) "
+             L"JOIN Templates AS t WITH(NOLOCK) ON t.TemplateId=o.TemplateId "
+             L"WHERE " PF_OF_CARD(L"%s"),
+             card, card);
+  int n = card_query(dbc, sql, rows, CARD_ROWS, err, 280);
+  if (n < 0) {
+    card_add(c, L"ЗАГОТОВКА: запрос не выполнился.\r\n%s\r\n\r\n", err);
+    free(sql);
+    return;
+  }
+  if (n == 0) {
+    card_add(c, L"ЗАГОТОВКА: карточка заготовок есть (%ld), но заготовок в ней нет.\r\n\r\n", pfCard);
+    free(sql);
+    return;
+  }
+  /* rows сейчас перепишутся атрибутами — список заготовок снимаем в сторону */
+  long ids[10];
+  wchar_t names[10][260];
+  int pn = n > 10 ? 10 : n;
+  for (int i = 0; i < pn; i++) {
+    ids[i] = rows[i].n1;
+    lstrcpynW(names[i], rows[i].s1[0] ? rows[i].s1 : L"(без имени)", 260);
+  }
+  card_add(c, L"%s\r\n", pn > 1 ? L"ЗАГОТОВКИ" : L"ЗАГОТОВКА");
+  for (int p = 0; p < pn; p++) {
+    card_add(c, L"  %s", names[p]);
+    if (g_cardVerbose) card_add(c, L"   ID %ld", ids[p]);
+    card_add(c, L"\r\n");
+    _snwprintf(sql, 4000,
+               L"SELECT TOP 80 a.AttributeId, nk.Value, COALESCE(lo.Name, " CARD_VALUE_SQL L"), 0, "
+               L"a.DataType "
+               L"FROM InfoObjectAttributes AS a WITH(NOLOCK) "
+               L"JOIN NameKeys AS nk WITH(NOLOCK) ON nk.NameKeyId=a.NameKeyId "
+               L"LEFT JOIN InfoObjects AS lo WITH(NOLOCK) ON a.DataType=6 AND lo.InfoObjectId=a.Link "
+               L"WHERE a.OwnerId=%ld AND a.Outdated=0 AND ISNULL(a.CollectionElementId,0)=0 "
+               L"ORDER BY nk.Value",
+               ids[p]);
+    int k = card_query(dbc, sql, rows, CARD_ROWS, err, 280);
+    for (int i = 0; i < k; i++) {
+      if (card_hidden(rows[i].s1) || !rows[i].s2[0]) continue;
+      card_pair_t(c, L"      ", rows[i].s1, rows[i].s2, 0, rows[i].n3);
+    }
+  }
+  card_add(c, L"\r\n");
+  free(sql);
+}
+
 static void plm_card(long id, wchar_t *out, int cap) {
   g_opsPendN = 0;
   if (share_client_on()) {
@@ -2287,7 +2434,7 @@ static void plm_card(long id, wchar_t *out, int cap) {
   }
   g_cardT0 = GetTickCount64();
   g_cardTAttrs = g_cardTTp = g_cardTOps = g_cardTUsed = g_cardTFiles = 0;
-  long actualVer = 0, tpCard = 0;
+  long actualVer = 0, tpCard = 0, pfCard = 0;
   wchar_t designation[200] = {0}, objName[260] = {0};
   BOOL mainFlag = FALSE;
   g_cardDraw[0] = 0;
@@ -2350,6 +2497,7 @@ static void plm_card(long id, wchar_t *out, int cap) {
         lstrcpynW(designation, rows[i].s2, 200);
       if (_wcsicmp(rows[i].s1, L"ActualVersion") == 0) actualVer = rows[i].n2;
       if (_wcsicmp(rows[i].s1, L"TechnologicalProcessesCard") == 0) tpCard = rows[i].n2;
+      if (_wcsicmp(rows[i].s1, L"ProductPreformsCard") == 0) pfCard = rows[i].n2;
       if (_wcsicmp(rows[i].s1, L"MainTP") == 0 || _wcsicmp(rows[i].s1, L"IsActual") == 0)
         mainFlag = _wcsicmp(rows[i].s2, L"да") == 0;
       if (card_hidden(rows[i].s1)) {
@@ -2488,6 +2636,7 @@ static void plm_card(long id, wchar_t *out, int cap) {
   card_where_used(dbc, id, &c, rows, err);
 
 freed:
+  if (pfCard) card_preforms(dbc, pfCard, &c, rows, err);
   g_cardTUsed = card_lap();
   card_drawings(designation, &c);
   g_cardTFiles = card_lap();
@@ -2627,10 +2776,15 @@ static void layout_answer(void) {
     LVCOLUMNW col;
     memset(&col, 0, sizeof(col));
     col.mask = LVCF_WIDTH;
-    col.cx = cw / 2;
+    /* у файлов два столбца пополам; в PLM третий — заготовка */
+    int w0 = g_resultFiles ? cw / 2 : cw * 36 / 100;
+    int w1 = g_resultFiles ? cw - cw / 2 : cw * 36 / 100;
+    col.cx = w0;
     SendMessageW(g_answerList, LVM_SETCOLUMNW, 0, (LPARAM)&col);
-    col.cx = cw - cw / 2;
+    col.cx = w1;
     SendMessageW(g_answerList, LVM_SETCOLUMNW, 1, (LPARAM)&col);
+    col.cx = g_resultFiles ? 0 : cw - w0 - w1;
+    SendMessageW(g_answerList, LVM_SETCOLUMNW, 2, (LPARAM)&col);
   }
   /* У кнопок разная длина надписи, и делить ряд поровну нельзя:
      «Закрыть» болталась бы пустой, а «Открыть файл в проводнике»
@@ -2871,6 +3025,10 @@ static void create_answer(HWND owner) {
     col.iSubItem = 1;
     col.pszText = L"2 ТП";
     SendMessageW(g_answerList, LVM_INSERTCOLUMNW, 1, (LPARAM)&col);
+    col.cx = 150;
+    col.iSubItem = 2;
+    col.pszText = L"3 Заготовка";
+    SendMessageW(g_answerList, LVM_INSERTCOLUMNW, 2, (LPARAM)&col);
   }
   HWND open = mk_btn(g_answer, L"Открыть ЭСИ в СОЮЗ", ID_ANS_OPEN);
   HWND openTp = mk_btn(g_answer, L"Открыть ТП в СОЮЗ", ID_ANS_OPENTP);

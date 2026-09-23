@@ -273,6 +273,13 @@ static int share_serve_child(const wchar_t *reqPath, const wchar_t *ansPath) {
       sb_field(&b, g_plmTp[i]);
       sb_field(&b, g_plmLinks[i]);
       sb_add(&b, L"\n");
+      /* заготовка — отдельной строкой: старая версия у коллеги её пропустит,
+         а не примет за часть ссылки */
+      if (g_plmPf[i][0]) {
+        sb_add(&b, L"pf\t%d", i);
+        sb_field(&b, g_plmPf[i]);
+        sb_add(&b, L"\n");
+      }
     }
   } else if (!wcscmp(kind, L"card") && id > 0) {
     load_files_pref(); /* чертёж для карточки ищется в своём индексе */
@@ -574,7 +581,11 @@ static BOOL share_lookup(const wchar_t *query, wchar_t *out, int cap) {
       lstrcpynW(g_plmEsi[n], f[5], PLM_COL1);
       lstrcpynW(g_plmTp[n], f[6], PLM_COL2);
       lstrcpynW(g_plmLinks[n], f[7], PLM_LINK);
+      g_plmPf[n][0] = 0;
       n++;
+    } else if (!wcscmp(f[0], L"pf") && k >= 3) {
+      int r = (int)wcstol(f[1], NULL, 10);
+      if (r >= 0 && r < n) lstrcpynW(g_plmPf[r], f[2], PLM_COL1);
     }
   }
   g_plmCount = n;
