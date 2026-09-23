@@ -61,6 +61,8 @@
 #define TIMER_STATUS 4
 #define TIMER_FILES_PLAN 10 /* раз в минуту: не пора ли полный обход папки */
 #define ID_FILES_NOTIFY 157
+#define ID_WATCH_EDIT 158
+#define ID_WATCH_BROWSE 159
 #define HOTKEY_TOGGLE 1
 #define HOTKEY_SNIP_BASE 10
 #define HOTKEY_CURSOR 2
@@ -96,7 +98,7 @@
 #define PAD 12
 #define GUTTER 26
 #define SET_W 312
-#define SET_H 846  /* темы в два ряда: четыре и рыцарская под ними */
+#define SET_H 881  /* темы в два ряда: четыре и рыцарская под ними */
 #define ASK_W 312
 #define ASK_H 224 /* room for the drawn header */
 #define ID_THEME_BASE 140
@@ -2252,6 +2254,34 @@ static BOOL pick_folder(HWND owner, wchar_t *out, int cap) {
   return ok;
 }
 
+/* Строка «следить за папкой» имеет смысл, только пока включены уведомления. */
+static void watch_enable(void) {
+  if (g_filesWatchEdit) EnableWindow(g_filesWatchEdit, g_filesNotify);
+  HWND br = g_setHwnd ? GetDlgItem(g_setHwnd, ID_WATCH_BROWSE) : NULL;
+  if (br) EnableWindow(br, g_filesNotify);
+}
+
+/* Папка для полного обхода по датам и уведомлений. Пусто — вся папка архива. */
+static void files_apply_watch(void) {
+  if (!g_filesWatchEdit) return;
+  wchar_t w[MAX_PATH];
+  GetWindowTextW(g_filesWatchEdit, w, MAX_PATH);
+  wchar_t *p = w;
+  while (*p == L' ') p++;
+  size_t n = wcslen(p);
+  while (n > 0 && (p[n - 1] == L' ' || p[n - 1] == L'\\')) p[--n] = 0;
+  if (p[0] && !path_under(p, g_filesRoot)) {
+    SetWindowTextW(g_filesWatchEdit, g_filesWatch);
+    show_status(L"Нужна папка внутри архива");
+    return;
+  }
+  if (wcscmp(p, g_filesWatch) == 0) return;
+  lstrcpynW(g_filesWatch, p, MAX_PATH);
+  SetWindowTextW(g_filesWatchEdit, g_filesWatch);
+  save_files_pref();
+  show_status(g_filesWatch[0] ? L"Слежу за выбранной папкой" : L"Слежу за всей папкой архива");
+}
+
 static void layout_settings(void) {
   if (!g_setHwnd) return;
   RECT rc;
@@ -2274,6 +2304,14 @@ static void layout_settings(void) {
   if (g_filesBar) MoveWindow(g_filesBar, pad, y + btnH - 8, cw - pad, 6, TRUE);
   y += btnH + gap;
   if (g_chkNotify) MoveWindow(g_chkNotify, pad, y, cw - pad, btnH, TRUE);
+  y += btnH + gap;
+  {
+    int browseW = 78;
+    if (g_filesWatchEdit)
+      MoveWindow(g_filesWatchEdit, pad, y, cw - pad - browseW - gap, btnH, TRUE);
+    HWND br = GetDlgItem(g_setHwnd, ID_WATCH_BROWSE);
+    if (br) MoveWindow(br, cw - browseW, y, browseW, btnH, TRUE);
+  }
   y += btnH + gap;
   if (g_plmServer) MoveWindow(g_plmServer, pad, y, half, btnH, TRUE);
   if (g_plmDb) MoveWindow(g_plmDb, pad + half + gap, y, half, btnH, TRUE);
@@ -2430,8 +2468,18 @@ static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
       if (InterlockedCompareExchange(&g_filesBusy, 0, 0)) files_stop_index();
       else files_apply_root(TRUE);
     }
+    if (LOWORD(wParam) == ID_WATCH_BROWSE) {
+      wchar_t picked[MAX_PATH];
+      if (pick_folder(hwnd, picked, MAX_PATH)) {
+        if (g_filesWatchEdit) SetWindowTextW(g_filesWatchEdit, picked);
+        files_apply_watch();
+      }
+      return 0;
+    }
+    if (LOWORD(wParam) == ID_WATCH_EDIT && HIWORD(wParam) == EN_KILLFOCUS) files_apply_watch();
     if (LOWORD(wParam) == ID_FILES_NOTIFY) {
       g_filesNotify = (SendMessageW(g_chkNotify, BM_GETCHECK, 0, 0) == BST_CHECKED);
+      watch_enable();
       save_files_pref();
       show_status(g_filesNotify ? L"Буду сообщать о новых файлах в папке"
                                 : L"Уведомления о файлах выключены");
@@ -2733,6 +2781,10 @@ static void create_settings(HWND owner) {
   g_chkNotify = CreateWindowExW(0, L"BUTTON", L"Сообщать о новых и изменённых файлах",
                                 WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 0, 0, 240, 26,
                                 g_setHwnd, (HMENU)(INT_PTR)ID_FILES_NOTIFY, NULL, NULL);
+  g_filesWatchEdit = CreateWindowExW(0, L"EDIT", g_filesWatch,
+                                     WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+                                     0, 0, 200, 26, g_setHwnd, (HMENU)(INT_PTR)ID_WATCH_EDIT, NULL, NULL);
+  mk_btn(g_setHwnd, L"Обзор…", ID_WATCH_BROWSE);
   g_plmServer = CreateWindowExW(0, L"EDIT", g_sqlHost,
                                 WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
                                 0, 0, 120, 26, g_setHwnd, (HMENU)(INT_PTR)ID_PLM_SERVER, NULL, NULL);
@@ -2799,6 +2851,11 @@ static void create_settings(HWND owner) {
     SendMessageW(g_chkNotify, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
     SendMessageW(g_chkNotify, BM_SETCHECK, g_filesNotify ? BST_CHECKED : BST_UNCHECKED, 0);
   }
+  if (g_filesWatchEdit) {
+    SendMessageW(g_filesWatchEdit, WM_SETFONT, (WPARAM)g_fontBody, TRUE);
+    SendMessageW(g_filesWatchEdit, 0x1501, TRUE, (LPARAM)L"следить: вся папка архива");
+  }
+  watch_enable();
   update_engine_buttons();
   layout_settings();
 }
@@ -2874,7 +2931,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     SetTimer(hwnd, TIMER_FOLLOW, 10, NULL);
     SetTimer(hwnd, TIMER_SAVE, 2000, NULL);
     SetTimer(hwnd, TIMER_CURSOR_KEEP, 4000, NULL);
-    SetTimer(hwnd, TIMER_FILES, 3600000, NULL);
+    /* раз в пять минут спрашиваем, не исполнился ли индексу час: так час
+       считается от последнего обхода, а не от запуска программы */
+    SetTimer(hwnd, TIMER_FILES, 300000, NULL);
     SetTimer(hwnd, TIMER_FILES_PLAN, 60000, NULL);
     if (g_filesRoot[0]) files_start_index(FALSE);
     if (!register_toggle_hotkey(hwnd)) {
@@ -3073,7 +3132,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
       send_paste();
     }
     if (wParam == TIMER_CURSOR_KEEP && g_skin > 0) apply_scheme_slots();
-    if (wParam == TIMER_FILES) files_start_index(TRUE);
+    if (wParam == TIMER_FILES) files_start_index(FALSE);
     if (wParam == TIMER_FILES_TICK) files_refresh_status();
     if (wParam == TIMER_FILES_PLAN) files_plan_tick();
     return 0;
@@ -3097,6 +3156,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
   }
   case WM_FILES_DONE: {
     KillTimer(hwnd, TIMER_FILES_TICK);
+    if (lParam) files_full_done();
     files_refresh_status();
     wchar_t m[160];
     if (wParam)

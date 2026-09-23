@@ -29,6 +29,21 @@ typedef struct {
 static BOOL g_filesNotify = TRUE;
 /* расписание полных обходов: день (ГГГГММДД), сколько уже было, следующий — в минутах от полуночи */
 static int g_fullDay, g_fullRuns, g_fullNext;
+/* За какой папкой следить: полный обход по датам и уведомления — только в ней.
+   Пусто — вся папка архива. Должна лежать внутри неё. */
+static wchar_t g_filesWatch[MAX_PATH];
+static wchar_t g_walkWatch[MAX_PATH]; /* снимок для идущего обхода */
+static HWND g_filesWatchEdit;
+static volatile LONG g_filesUserStop; /* обход остановили кнопкой, а не выходом */
+
+/* dir — это base или папка внутри неё */
+static BOOL path_under(const wchar_t *dir, const wchar_t *base) {
+  size_t b = wcslen(base);
+  while (b > 0 && base[b - 1] == L'\\') b--;
+  if (b == 0) return FALSE;
+  if (_wcsnicmp(dir, base, b) != 0) return FALSE;
+  return dir[b] == 0 || dir[b] == L'\\';
+}
 #define TIMER_FILES 8
 #define TIMER_FILES_TICK 9
 #define FILES_ARENA_CHUNK 262144   /* wchar_t per arena chunk */
@@ -327,6 +342,16 @@ static void files_stamp_from_file(void) {
   if (!FileTimeToLocalFileTime(&ad.ftLastWriteTime, &local)) return;
   if (!FileTimeToSystemTime(&local, &g_filesWhen)) return;
   g_filesWhenOk = TRUE;
+  /* сколько индексу лет: свежий после перезапуска (обновление программы,
+     перезагрузка) заново не обходим — ждём, пока ему исполнится час */
+  FILETIME nowFt;
+  GetSystemTimeAsFileTime(&nowFt);
+  ULONGLONG now = ((ULONGLONG)nowFt.dwHighDateTime << 32) | nowFt.dwLowDateTime;
+  ULONGLONG wr = ((ULONGLONG)ad.ftLastWriteTime.dwHighDateTime << 32) | ad.ftLastWriteTime.dwLowDateTime;
+  if (now > wr && now - wr < 3600ULL * 10000000ULL) {
+    ULONGLONG ageMs = (now - wr) / 10000ULL, tick = GetTickCount64();
+    g_filesAt = tick > ageMs ? tick - ageMs : 1;
+  }
 }
 
 static void files_refresh_status(void) {
@@ -1071,7 +1096,9 @@ static BOOL walk_reuse(WalkWorker *w, const wchar_t *dir, ULONGLONG mt) {
   if (!mt) return FALSE;
   /* Если файл перезаписали под тем же именем, дата папки не меняется,
      и быстрый обход такую замену не увидит. Полный — заглядывает везде. */
-  if (InterlockedCompareExchange(&g_filesFull, 0, 0)) return FALSE;
+  if (InterlockedCompareExchange(&g_filesFull, 0, 0) &&
+      (!g_walkWatch[0] || path_under(dir, g_walkWatch)))
+    return FALSE;
   WalkQ *q = w->q;
   FileIdx *old = q->old;
   if (!old || !old->mtime || !old->subs || !old->begin || !old->count) return FALSE;
@@ -1369,6 +1396,7 @@ static FileChanges *files_diff(const FileIdx *old, const FileIdx *fresh) {
       int d = fresh->ent[j].dir;
       if (d < 0 || d >= fresh->dirsN) continue;
       const wchar_t *nm = fresh->ent[j].name;
+      if (g_walkWatch[0] && !path_under(fresh->dirs[d], g_walkWatch)) continue;
       unsigned h = chg_key(ndh[d], nm) & mask;
       int found = -1;
       while (tab[h] >= 0) {
@@ -1396,8 +1424,14 @@ static FileChanges *files_diff(const FileIdx *old, const FileIdx *fresh) {
   return r;
 }
 
+static void files_post_changes(FileChanges *chg) {
+  if (chg && (!g_hwnd || !PostMessageW(g_hwnd, WM_FILES_CHANGES, 0, (LPARAM)chg))) free(chg);
+}
+
 static DWORD WINAPI files_index_thread(LPVOID param) {
   (void)param;
+  FileChanges *pend = NULL; /* отдаём после WM_FILES_DONE, чтобы его строка не затёрла нашу */
+  BOOL lastOk = FALSE;
 again:;
   InterlockedExchange(&g_filesCancel, 0); /* иначе повтор оборвётся сразу же */
   InterlockedExchange(&g_filesScanned, 0);
@@ -1421,7 +1455,10 @@ again:;
     } else {
       lstrcpynW(g_filesNote, L"Обход прерван — прежний индекс сохранён", 120);
       InterlockedExchange(&g_filesAgain, 0);
+      /* остановили — следующий плановый через час, а не через пять минут */
+      g_filesAt = GetTickCount64();
     }
+    lastOk = FALSE;
   } else if (ix) {
     BOOL saved = files_save_idx(ix);
     g_filesNote[0] = 0;
@@ -1437,12 +1474,21 @@ again:;
       if (chg) chg->full = InterlockedCompareExchange(&g_filesFull, 0, 0) != 0;
     }
     idx_publish(ix);
-    if (chg && (!g_hwnd || !PostMessageW(g_hwnd, WM_FILES_CHANGES, 0, (LPARAM)chg))) free(chg);
+    if (chg) {
+      files_post_changes(pend);
+      pend = chg;
+    }
+    lastOk = TRUE;
   }
   if (InterlockedExchange(&g_filesAgain, 0)) goto again;
-  InterlockedExchange(&g_filesFull, 0);
+  /* полный обход засчитывается, если дошёл до конца или его остановили
+     кнопкой. Оборванный выходом (обновление, перезагрузка) повторится. */
+  BOOL wasFull = InterlockedExchange(&g_filesFull, 0) != 0;
+  BOOL userStop = InterlockedExchange(&g_filesUserStop, 0) != 0;
   InterlockedExchange(&g_filesBusy, 0);
-  if (g_hwnd) PostMessageW(g_hwnd, WM_FILES_DONE, (WPARAM)g_filesN, 0);
+  if (g_hwnd)
+    PostMessageW(g_hwnd, WM_FILES_DONE, (WPARAM)g_filesN, (LPARAM)(wasFull && (lastOk || userStop)));
+  files_post_changes(pend);
   return 0;
 }
 
@@ -1452,7 +1498,9 @@ static void files_start_index(BOOL force) {
     files_refresh_status();
     return;
   }
-  if (!force && g_filesN > 0 && g_filesAt && GetTickCount64() - g_filesAt < 3600000ULL)
+  /* раз в час, считая от последнего обхода, — и через перезапуск тоже:
+     время берётся по дате files.json */
+  if (!force && g_filesAt && GetTickCount64() - g_filesAt < 3600000ULL)
     return;
   if (InterlockedCompareExchange(&g_filesBusy, 1, 0) != 0) {
     InterlockedExchange(&g_filesAgain, 1);
@@ -1461,6 +1509,11 @@ static void files_start_index(BOOL force) {
   }
   InterlockedExchange(&g_filesScanned, 0);
   InterlockedExchange(&g_filesCancel, 0);
+  InterlockedExchange(&g_filesUserStop, 0);
+  if (g_filesWatch[0] && path_under(g_filesWatch, g_filesRoot))
+    lstrcpynW(g_walkWatch, g_filesWatch, MAX_PATH);
+  else
+    g_walkWatch[0] = 0;
   files_refresh_status();
   HANDLE th = CreateThread(NULL, 0, files_index_thread, NULL, 0, NULL);
   if (th) {
@@ -1527,7 +1580,19 @@ static void files_plan_tick(void) {
     save_files_pref();
     return;
   }
-  if (!files_start_full()) return; /* идёт обычный обход — попробуем через минуту */
+  /* идёт обычный обход — попробуем через минуту. Сам запуск в план не
+     пишется: засчитывается законченный обход (files_full_done), а оборванный
+     выходом программы — например, её обновлением — пройдёт заново. */
+  files_start_full();
+}
+
+/* Полный обход дошёл до конца: следующий — через четыре часа. */
+static void files_full_done(void) {
+  SYSTEMTIME st;
+  GetLocalTime(&st);
+  int day = st.wYear * 10000 + st.wMonth * 100 + st.wDay;
+  int now = st.wHour * 60 + st.wMinute;
+  if (day != g_fullDay) return; /* начался вчера — сегодняшнему плану не мешает */
   g_fullRuns++;
   g_fullNext = now + FULL_GAP;
   /* второй не влезает до 16:30 — сегодня его не будет */
@@ -1607,6 +1672,7 @@ static void files_on_changes(FileChanges *c) {
 static void files_stop_index(void) {
   if (!InterlockedCompareExchange(&g_filesBusy, 0, 0)) return;
   InterlockedExchange(&g_filesAgain, 0);
+  InterlockedExchange(&g_filesUserStop, 1);
   InterlockedExchange(&g_filesCancel, 1);
   if (g_filesStat) SetWindowTextW(g_filesStat, L"Останавливаю обход…");
 }
@@ -1736,7 +1802,7 @@ static void load_files_pref(void) {
   HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
                          FILE_ATTRIBUTE_NORMAL, NULL);
   if (h != INVALID_HANDLE_VALUE) {
-    char buf[MAX_PATH * 3 + 256];
+    char buf[MAX_PATH * 6 + 256];
     DWORD n = 0;
     ReadFile(h, buf, sizeof(buf) - 1, &n, NULL);
     CloseHandle(h);
@@ -1752,6 +1818,8 @@ static void load_files_pref(void) {
       if (cr) *cr = 0;
       if (ln == 0) {
         if (line[0]) MultiByteToWideChar(CP_UTF8, 0, line, -1, g_filesRoot, MAX_PATH);
+      } else if (!strncmp(line, "watch ", 6)) {
+        MultiByteToWideChar(CP_UTF8, 0, line + 6, -1, g_filesWatch, MAX_PATH);
       } else if (!strncmp(line, "notify ", 7)) {
         g_filesNotify = atoi(line + 7) != 0;
       } else if (!strncmp(line, "plan ", 5)) {
@@ -1775,12 +1843,20 @@ static void save_files_pref(void) {
   wchar_t path[MAX_PATH];
   if (!g_dataDir[0]) return;
   _snwprintf(path, MAX_PATH, L"%s\\files.txt", g_dataDir);
-  char utf[MAX_PATH * 3 + 128];
+  char utf[MAX_PATH * 6 + 128];
   int ul = WideCharToMultiByte(CP_UTF8, 0, g_filesRoot, -1, utf, MAX_PATH * 3, NULL, NULL);
   if (ul <= 0) utf[0] = 0;
   size_t used = strlen(utf);
   snprintf(utf + used, sizeof(utf) - used, "\nnotify %d\nplan %d %d %d\n", g_filesNotify ? 1 : 0,
            g_fullDay, g_fullRuns, g_fullNext);
+  if (g_filesWatch[0]) {
+    used = strlen(utf);
+    memcpy(utf + used, "watch ", 6);
+    used += 6;
+    ul = WideCharToMultiByte(CP_UTF8, 0, g_filesWatch, -1, utf + used, MAX_PATH * 3, NULL, NULL);
+    if (ul <= 0) utf[used - 6] = 0;
+    else strcat(utf, "\n");
+  }
   HANDLE h = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
   if (h == INVALID_HANDLE_VALUE) return;
   DWORD w = 0;
