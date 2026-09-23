@@ -950,7 +950,11 @@ static void share_card(long id, BOOL verbose, wchar_t *out, int cap);
   L"UNION SELECT hc.Link FROM InfoObjectAttributes AS hc WITH(NOLOCK) "                     \
   L"JOIN NameKeys AS nhc WITH(NOLOCK) ON nhc.NameKeyId=hc.NameKeyId "                       \
   L"AND nhc.Value=N'ProductConfiguration' "                                                 \
-  L"WHERE hc.OwnerId IN (x.Id, x.Par) AND hc.Outdated=0 AND ISNULL(hc.Link,0)<>0) AS h1 "  \
+  L"WHERE hc.OwnerId=x.Id AND hc.Outdated=0 AND ISNULL(hc.Link,0)<>0 "                     \
+  L"UNION SELECT hp.Link FROM InfoObjectAttributes AS hp WITH(NOLOCK) "                     \
+  L"JOIN NameKeys AS nhp WITH(NOLOCK) ON nhp.NameKeyId=hp.NameKeyId "                       \
+  L"AND nhp.Value=N'ProductConfiguration' "                                                 \
+  L"WHERE hp.OwnerId=x.Par AND hp.Outdated=0 AND ISNULL(hp.Link,0)<>0) AS h1 "             \
   L"CROSS APPLY (SELECT h1.H AS H UNION SELECT hi.Link "                                    \
   L"FROM InfoObjectAttributes AS hi WITH(NOLOCK) "                                          \
   L"JOIN NameKeys AS nhi WITH(NOLOCK) ON nhi.NameKeyId=hi.NameKeyId "                       \
@@ -962,16 +966,24 @@ static void share_card(long id, BOOL verbose, wchar_t *out, int cap);
 
 /* Заготовки изделия: ProductPreformsCard → её дети (так их грузит PlmApi),
    а если в карточке есть коллекция ProductPreforms — и её элементы. */
-#define PF_OF_CARD(card)                                                                    \
-  L"o.Erased=0 AND (o.ParentId=" card L" OR o.InfoObjectId IN ("                            \
-  L"SELECT ea.Link FROM InfoObjectAttributes AS la WITH(NOLOCK) "                           \
+/* Раньше тут было «ParentId=карточка ИЛИ номер в списке» одним условием — такое
+   ИЛИ по разным столбцам сервер проходит перебором всей таблицы объектов, и
+   поиск у раздающего не укладывался в ожидание коллеги. Две половины через
+   UNION идут каждая по своему индексу. */
+#define PF_APPLY(card)                                                                      \
+  L"CROSS APPLY (SELECT o.InfoObjectId AS PfId, CAST(o.Name AS NVARCHAR(200)) AS PfName, "  \
+  L"o.TemplateId AS PfT FROM InfoObjects AS o WITH(NOLOCK) "                                \
+  L"WHERE o.ParentId=" card L" AND o.Erased=0 "                                             \
+  L"UNION SELECT o2.InfoObjectId, CAST(o2.Name AS NVARCHAR(200)), o2.TemplateId "           \
+  L"FROM InfoObjectAttributes AS la WITH(NOLOCK) "                                          \
   L"JOIN NameKeys AS nkl WITH(NOLOCK) ON nkl.NameKeyId=la.NameKeyId "                       \
   L"AND nkl.Value=N'ProductPreforms' "                                                      \
   L"JOIN InfoObjectCollectionElements AS ce WITH(NOLOCK) ON ce.AttributeId=la.AttributeId " \
   L"AND ce.Outdated=0 "                                                                     \
   L"JOIN InfoObjectAttributes AS ea WITH(NOLOCK) "                                          \
   L"ON ea.CollectionElementId=ce.CollectionElementId AND ea.DataType=6 "                    \
-  L"WHERE la.OwnerId=" card L" AND la.Outdated=0))"
+  L"JOIN InfoObjects AS o2 WITH(NOLOCK) ON o2.InfoObjectId=ea.Link AND o2.Erased=0 "        \
+  L"WHERE la.OwnerId=" card L" AND la.Outdated=0) AS pf "
 
 /* Столбец «Заготовка»: одним запросом на все строки находок. Не вышло —
    столбец просто пустой, поиск от этого не страдает. */
@@ -997,10 +1009,10 @@ static void plm_fill_preforms(SQLHDBC dbc, int n) {
   /* в 2026.09.23.6 карточку заготовок искали в самом объекте — а она в карте
      взаимосвязей, и столбец был пуст у всех */
   _snwprintf(sql, 4000,
-             L"SELECT TOP 400 x.Id, CAST(o.Name AS NVARCHAR(200)) "
+             L"SELECT TOP 400 x.Id, pf.PfName "
              PLM_HOLDERS(L"%s") L"AND nkp.Value=N'ProductPreformsCard' "
-             L"JOIN InfoObjects AS o WITH(NOLOCK) ON " PF_OF_CARD(L"pa.Link") L" "
-             L"ORDER BY x.Id, o.InfoObjectId",
+             PF_APPLY(L"pa.Link")
+             L"ORDER BY x.Id, pf.PfId",
              ids);
   sql[3999] = 0;
   SQLHSTMT st = SQL_NULL_HSTMT;
@@ -1008,6 +1020,8 @@ static void plm_fill_preforms(SQLHDBC dbc, int n) {
     free(sql);
     return;
   }
+  /* столбец — довесок: поиск не должен ждать его дольше нескольких секунд */
+  SQLSetStmtAttr(st, SQL_ATTR_QUERY_TIMEOUT, (SQLPOINTER)(SQLULEN)6, 0);
   SQLRETURN r = SQLExecDirectW(st, (SQLWCHAR *)sql, SQL_NTS);
   free(sql);
   if (SQL_SUCCEEDED(r)) {
@@ -1404,11 +1418,16 @@ typedef struct {
   wchar_t s2[600];
 } CardRow;
 
+/* предел в секундах для очередного запроса карточки; 0 — без предела */
+static int g_qTimeout;
+
 static int card_query(SQLHDBC dbc, const wchar_t *sql, CardRow *rows, int max, wchar_t *err,
                       int ecap) {
   if (err && ecap) err[0] = 0;
   SQLHSTMT st = SQL_NULL_HSTMT;
   if (!SQL_SUCCEEDED(SQLAllocHandle(SQL_HANDLE_STMT, dbc, &st))) return -1;
+  if (g_qTimeout > 0)
+    SQLSetStmtAttr(st, SQL_ATTR_QUERY_TIMEOUT, (SQLPOINTER)(SQLULEN)g_qTimeout, 0);
   if (!SQL_SUCCEEDED(SQLExecDirectW(st, (SQLWCHAR *)sql, SQL_NTS))) {
     if (err && ecap) odbc_err(st, SQL_HANDLE_STMT, err, ecap);
     SQLFreeHandle(SQL_HANDLE_STMT, st);
@@ -2398,12 +2417,11 @@ static void card_preforms(SQLHDBC dbc, long pfCard, CardOut *c, CardRow *rows, w
   wchar_t *sql = (wchar_t *)malloc(4000 * sizeof(wchar_t));
   if (!sql) return;
   _snwprintf(sql, 4000,
-             L"SELECT DISTINCT TOP 10 o.InfoObjectId, CAST(o.Name AS NVARCHAR(200)), "
-             L"CAST(t.NameKey AS NVARCHAR(200)), 0, 0 "
-             L"FROM InfoObjects AS o WITH(NOLOCK) "
-             L"JOIN Templates AS t WITH(NOLOCK) ON t.TemplateId=o.TemplateId "
-             L"WHERE " PF_OF_CARD(L"%s"),
-             card, card);
+             L"SELECT TOP 10 pf.PfId, pf.PfName, CAST(t.NameKey AS NVARCHAR(200)), 0, 0 "
+             L"FROM (SELECT %s AS CardId) AS k " PF_APPLY(L"k.CardId")
+             L"JOIN Templates AS t WITH(NOLOCK) ON t.TemplateId=pf.PfT "
+             L"ORDER BY pf.PfId",
+             card);
   int n = card_query(dbc, sql, rows, CARD_ROWS, err, 280);
   if (n < 0) {
     card_add(c, L"ЗАГОТОВКА: запрос не выполнился.\r\n%s\r\n\r\n", err);
@@ -2660,7 +2678,9 @@ static void plm_card(long id, wchar_t *out, int cap) {
              L"SELECT DISTINCT TOP 20 pa.Link, nkp.Value, N'', 0, 0 " PLM_HOLDERS(L"%ld")
              L"AND nkp.Value IN (N'ProductPreformsCard',N'TechCompCard',N'ProductConfiguration')",
              id);
+  g_qTimeout = 10; /* новые разделы не должны задерживать карточку */
   n = card_query(dbc, sql, rows, CARD_ROWS, err, 280);
+  g_qTimeout = 0;
   if (n < 0) card_add(&c, L"Карточки заготовок и техсостава: запрос не выполнился.\r\n%s\r\n\r\n", err);
   for (int i = 0; i < n; i++) {
     if (!pfCard && _wcsicmp(rows[i].s1, L"ProductPreformsCard") == 0) pfCard = rows[i].n1;
@@ -2784,10 +2804,12 @@ static void plm_card(long id, wchar_t *out, int cap) {
 
 freed:
   /* не нашлось — пишем прямо, иначе не отличить «нет заготовки» от «не нашли» */
+  g_qTimeout = 15;
   if (pfCard) card_preforms(dbc, pfCard, &c, rows, err);
   else if (!actualVer) card_add(&c, L"ЗАГОТОВКА: карточки заготовок у изделия не нашлось.\r\n\r\n");
   if (tcCard) card_techcomp(dbc, tcCard, prodConf, &c, rows, err);
   else if (!actualVer) card_add(&c, L"ТЕХСОСТАВ: карточки техсостава у изделия не нашлось.\r\n\r\n");
+  g_qTimeout = 0;
   g_cardTUsed = card_lap();
   card_drawings(designation, &c);
   g_cardTFiles = card_lap();

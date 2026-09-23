@@ -340,10 +340,14 @@ static void share_run_one(const wchar_t *work, const wchar_t *ans) {
   memset(&pi, 0, sizeof(pi));
   BOOL started = CreateProcessW(NULL, cmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
   free(cmd);
-  BOOL answered = FALSE;
+  BOOL answered = FALSE, killed = FALSE;
+  ULONGLONG t0 = GetTickCount64();
   if (started) {
     /* тяжёлая карточка на загруженном сервере — до полутора минут */
-    if (WaitForSingleObject(pi.hProcess, 90000) == WAIT_TIMEOUT) TerminateProcess(pi.hProcess, 2);
+    if (WaitForSingleObject(pi.hProcess, 90000) == WAIT_TIMEOUT) {
+      TerminateProcess(pi.hProcess, 2);
+      killed = TRUE;
+    }
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
     answered = GetFileAttributesW(ans) != INVALID_FILE_ATTRIBUTES;
@@ -351,7 +355,13 @@ static void share_run_one(const wchar_t *work, const wchar_t *ans) {
   if (!answered)
     share_write(ans, L"CPANS1\ntext\nPLM\r\n\r\nУ коллеги запрос не выполнился — попробуйте ещё раз.");
   DeleteFileW(work);
-  share_log(who, what);
+  /* в журнал — и сколько шло: без этого «не отвечает» не с чем сверить */
+  wchar_t what2[520];
+  _snwprintf(what2, 520, L"%s — %.1f с%s", what, (double)(GetTickCount64() - t0) / 1000.0,
+             !started ? L", не запустился исполнитель" : (killed ? L", прерван: дольше 90 с" :
+             (answered ? L"" : L", без ответа")));
+  what2[519] = 0;
+  share_log(who, what2);
 }
 
 /* Фоновый поток раздающего. Пока галочка снята — только спит. */
@@ -546,10 +556,24 @@ static wchar_t *share_ask(const wchar_t *body, int waitSec, wchar_t *out, int ca
     }
     return a;
   }
-  /* не взяли — забираем запрос обратно, чтобы его не выполнили впустую */
-  DeleteFileW(req);
-  ans_printf(out, cap, L"PLM\r\n\r\n%s не ответил за %d с. Возможно, компьютер занят или выключается.",
-             who, waitSec);
+  /* Два разных случая, и по ним разное делать: запрос так и лежит — его не
+     забрали (у раздающего не видна папка или выключена раздача); запроса нет —
+     забрали, но ответ не успел (долго идёт запрос к базе). */
+  BOOL untouched = GetFileAttributesW(req) != INVALID_FILE_ATTRIBUTES;
+  DeleteFileW(req); /* не взяли — забираем обратно, чтобы не выполнили впустую */
+  if (untouched)
+    ans_printf(out, cap,
+               L"PLM\r\n\r\n%s не забрал запрос за %d с.\r\n\r\n"
+               L"Программа там запущена, но запрос не видит: проверьте, что у раздающего "
+               L"в Настройках та же общая папка и стоит «Раздавать PLM коллегам через меня», "
+               L"а логин и пароль SQL вписаны.",
+               who, waitSec);
+  else
+    ans_printf(out, cap,
+               L"PLM\r\n\r\n%s забрал запрос, но ответ не пришёл за %d с.\r\n\r\n"
+               L"Запрос к базе у раздающего идёт долго. Сколько именно — видно у него "
+               L"в файле plm_share.log (папка программы).",
+               who, waitSec);
   return NULL;
 }
 
@@ -563,7 +587,7 @@ static BOOL share_lookup(const wchar_t *query, wchar_t *out, int cap) {
   wchar_t body[480];
   _snwprintf(body, 480, L"kind\tsearch\nq\t%s", q);
   body[479] = 0;
-  wchar_t *a = share_ask(body, 45, out, cap);
+  wchar_t *a = share_ask(body, 60, out, cap);
   if (!a) return FALSE;
   wchar_t via[200] = L"";
   wchar_t *p = a, *line;
