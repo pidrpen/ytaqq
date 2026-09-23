@@ -1865,7 +1865,7 @@ static void draw_pad_button(const DRAWITEMSTRUCT *dis) {
   int ti = themeBtn ? id - ID_THEME_BASE : -1;
   BOOL on = t[0] == 0x25CF || (themeBtn && g_theme == ti);
   BOOL primary = id == ID_SETTINGS || id == ID_SEARCH_GO || id == ID_UPDATE || id == ID_PIN ||
-                 id == ID_ANS_OPEN || (id == ID_ASK_TAB && g_askOpen);
+                 id == ID_ANS_OPEN || id == ID_ANS_OPENTP || (id == ID_ASK_TAB && g_askOpen);
   BOOL quiet = id == ID_CLOSE || id == ID_MIN || id == ID_PANEL_CLOSE;
   COLORREF fill, fg, bd;
   /* рыцарская тема рисует кнопки целиком по-своему; кнопка выбора

@@ -30,6 +30,7 @@
 #define ID_OCR_AGAIN 166
 #define ID_OCR_CLOSE 167
 #define ID_CARD_1C 168
+#define ID_ANS_OPENTP 170
 #define TIMER_1C 21
 
 #define TIMER_CURSOR_KEEP 6
@@ -735,6 +736,28 @@ static void open_plm_selected(void) {
   lstrcpynW(g_plmLastLink, g_plmLinks[i], PLM_LINK);
   open_plm_link(g_plmLinks[i]);
   show_status(g_resultFiles ? L"Открываю файл" : L"В текущий клиент PLM");
+}
+
+/* ТП строки: сведённый к изделию — его собственный номер; строка, где ТП
+   осталось само по себе, — её номер (ссылка строки ведёт на родителя). */
+static long plm_row_tp(int i) {
+  if (g_resultFiles || i < 0 || i >= g_plmCount) return 0;
+  if (g_plmTpId[i]) return g_plmTpId[i];
+  if (g_plmTmpl[i] == 1794) return g_plmRealId[i];
+  return 0;
+}
+
+static void open_plm_tp_selected(void) {
+  long tp = plm_row_tp(plm_selected_index());
+  if (!tp) {
+    show_status(L"У этой строки нет ТП");
+    return;
+  }
+  wchar_t link[PLM_LINK];
+  make_plm_link(link, PLM_LINK, tp);
+  lstrcpynW(g_plmLastLink, link, PLM_LINK);
+  open_plm_link(link);
+  show_status(L"ТП — в текущий клиент СОЮЗ");
 }
 
 /* Reveal the selected file in Explorer with the row highlighted; if the file
@@ -1972,6 +1995,7 @@ static const wchar_t *ans_draw_file(void) {
 static void ans_sync_buttons(void) {
   if (!g_answer) return;
   HWND open = GetDlgItem(g_answer, ID_ANS_OPEN);
+  HWND openTp = GetDlgItem(g_answer, ID_ANS_OPENTP);
   HWND card = GetDlgItem(g_answer, ID_ANS_CARD);
   HWND draw = GetDlgItem(g_answer, ID_ANS_DRAW);
   HWND show = GetDlgItem(g_answer, ID_ANS_SHOW);
@@ -1980,9 +2004,11 @@ static void ans_sync_buttons(void) {
   const wchar_t *file = ans_draw_file();
   BOOL haveFile = file && file[0];
   if (open) {
-    SetWindowTextW(open, g_resultFiles ? L"Открыть файл" : L"Открыть в СОЮЗ");
+    SetWindowTextW(open, g_resultFiles ? L"Открыть файл" : L"Открыть ЭСИ в СОЮЗ");
     EnableWindow(open, row || (!g_resultFiles && g_ansObj[0] != 0));
   }
+  /* у найденных файлов ТП нет — кнопку прячет раскладка */
+  if (openTp) EnableWindow(openTp, plm_row_tp(i) != 0);
   if (card) EnableWindow(card, row && !g_resultFiles && g_plmIds[i] != 0);
   if (draw) EnableWindow(draw, haveFile && !g_resultFiles);
   if (show) EnableWindow(show, (g_resultFiles && row) || (!g_resultFiles && haveFile));
@@ -2557,7 +2583,8 @@ static int btn_row_width(HWND parent, const int *ids, int n) {
   return total + 7 * (vis - 1) + 24 + 16;
 }
 
-static const int kAnsBtns[5] = {ID_ANS_OPEN, ID_ANS_CARD, ID_ANS_DRAW, ID_ANS_SHOW, ID_ANS_CLOSE};
+static const int kAnsBtns[6] = {ID_ANS_OPEN, ID_ANS_OPENTP, ID_ANS_CARD, ID_ANS_DRAW, ID_ANS_SHOW,
+                                ID_ANS_CLOSE};
 static const int kCardBtns[5] = {ID_CARD_OPEN, ID_CARD_DRAW, ID_CARD_SHOW, ID_CARD_1C, ID_CARD_CLOSE};
 static const int kOcrBtns[4] = {ID_OCR_COPY, ID_OCR_FIND, ID_OCR_AGAIN, ID_OCR_CLOSE};
 
@@ -2579,7 +2606,7 @@ static void widen_to_row(HWND w, const int *ids, int n) {
 }
 
 static void theme_fit_windows(void) {
-  widen_to_row(g_answer, kAnsBtns, 5);
+  widen_to_row(g_answer, kAnsBtns, 6);
   widen_to_row(g_card, kCardBtns, 5);
   widen_to_row(g_ocrWnd, kOcrBtns, 4);
 }
@@ -2608,17 +2635,17 @@ static void layout_answer(void) {
   /* У кнопок разная длина надписи, и делить ряд поровну нельзя:
      «Закрыть» болталась бы пустой, а «Открыть файл в проводнике»
      обрезалось многоточием. Мерим надписи и раздаём место по ним. */
-  HWND btns[5];
-  btns[0] = GetDlgItem(g_answer, ID_ANS_OPEN);
-  btns[1] = GetDlgItem(g_answer, ID_ANS_CARD);
-  btns[2] = GetDlgItem(g_answer, ID_ANS_DRAW);
-  btns[3] = GetDlgItem(g_answer, ID_ANS_SHOW);
-  btns[4] = GetDlgItem(g_answer, ID_ANS_CLOSE);
-  int bwid[5] = {0, 0, 0, 0, 0};
+  HWND btns[6];
+  for (int k = 0; k < 6; k++) btns[k] = GetDlgItem(g_answer, kAnsBtns[k]);
+  /* у найденных файлов ТП нет — кнопка не нужна вовсе */
+  HWND tpBtn = btns[1];
+  if (tpBtn) ShowWindow(tpBtn, g_resultFiles ? SW_HIDE : SW_SHOW);
+  if (g_resultFiles) btns[1] = NULL;
+  int bwid[6] = {0, 0, 0, 0, 0, 0};
   int total = 0, vis = 0;
   HDC dc = GetDC(g_answer);
   HGDIOBJ oldFont = (dc && g_fontUi) ? SelectObject(dc, g_fontUi) : NULL;
-  for (int k = 0; k < 5; k++) {
+  for (int k = 0; k < 6; k++) {
     if (!btns[k]) continue;
     wchar_t t[96];
     t[0] = 0;
@@ -2638,9 +2665,9 @@ static void layout_answer(void) {
     int avail = rc.right - pad * 2 - gap * (vis - 1);
     if (avail < vis * 40) avail = vis * 40;
     if (total > avail && total > 0)
-      for (int k = 0; k < 5; k++) bwid[k] = bwid[k] * avail / total;
+      for (int k = 0; k < 6; k++) bwid[k] = bwid[k] * avail / total;
     int bx = pad;
-    for (int k = 0; k < 5; k++) {
+    for (int k = 0; k < 6; k++) {
       if (!btns[k]) continue;
       MoveWindow(btns[k], bx, by, bwid[k], btnH, TRUE);
       ShowWindow(btns[k], SW_SHOW);
@@ -2691,6 +2718,7 @@ static LRESULT CALLBACK AnswerProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
     return TRUE;
   case WM_COMMAND:
     if (LOWORD(wParam) == ID_ANS_CLOSE) ShowWindow(hwnd, SW_HIDE);
+    if (LOWORD(wParam) == ID_ANS_OPENTP) open_plm_tp_selected();
     if (LOWORD(wParam) == ID_ANS_OPEN) {
       if (g_plmCount > 0 || !g_ansObj[0]) open_plm_selected();
       else {
@@ -2844,7 +2872,8 @@ static void create_answer(HWND owner) {
     col.pszText = L"2 ТП";
     SendMessageW(g_answerList, LVM_INSERTCOLUMNW, 1, (LPARAM)&col);
   }
-  HWND open = mk_btn(g_answer, L"Открыть в СОЮЗ", ID_ANS_OPEN);
+  HWND open = mk_btn(g_answer, L"Открыть ЭСИ в СОЮЗ", ID_ANS_OPEN);
+  HWND openTp = mk_btn(g_answer, L"Открыть ТП в СОЮЗ", ID_ANS_OPENTP);
   HWND card = mk_btn(g_answer, L"Все данные", ID_ANS_CARD);
   HWND draw = mk_btn(g_answer, L"Открыть чертёж", ID_ANS_DRAW);
   HWND show = mk_btn(g_answer, L"Открыть файл в проводнике", ID_ANS_SHOW);
@@ -2853,6 +2882,7 @@ static void create_answer(HWND owner) {
   if (g_fontBody && g_answerList) SendMessageW(g_answerList, WM_SETFONT, (WPARAM)g_fontBody, TRUE);
   if (g_fontUi) {
     SendMessageW(open, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
+    SendMessageW(openTp, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
     SendMessageW(card, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
     SendMessageW(draw, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
     SendMessageW(show, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
@@ -3060,7 +3090,7 @@ static void show_answer_text(const wchar_t *text) {
      на кнопках обрезаются многоточием — ниже этого не опускаемся */
   if (aw < ANS_W) aw = ANS_W;
   {
-    int row = btn_row_width(g_answer, kAnsBtns, 5);
+    int row = btn_row_width(g_answer, kAnsBtns, 6);
     if (aw < row) aw = row;
   }
   if (aw > wa.right - wa.left) aw = wa.right - wa.left;
