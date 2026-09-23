@@ -334,7 +334,7 @@ static int share_serve_child(const wchar_t *reqPath, const wchar_t *ansPath) {
       SQLHDBC dbc = SQL_NULL_HDBC;
       wchar_t err[280];
       if (j->n && plm_connect(&env, &dbc, err, 280)) {
-        pf_compute(dbc, j, 15000);
+        pf_compute(dbc, j, 25000);
         SQLDisconnect(dbc);
         SQLFreeHandle(SQL_HANDLE_DBC, dbc);
         SQLFreeHandle(SQL_HANDLE_ENV, env);

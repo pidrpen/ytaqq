@@ -2367,6 +2367,8 @@ static long card_owner_of_tp(SQLHDBC dbc, long tpId, CardOut *c, CardRow *rows, 
    видно, куда смотреть. */
 typedef struct {
   wchar_t mat[200], mass[80], dims[240];
+  wchar_t sort[240]; /* сортамент: «Круг 45 ГОСТ 2590-2006 / 38ХС ГОСТ 4543-2016» */
+  int sortScore;
   int ndims;
   long seen[30];
   int nseen;
@@ -2379,9 +2381,9 @@ static BOOL pf_late(const PfSum *sm) {
 }
 
 static void pf_lower(const wchar_t *in, wchar_t *out, int cap) {
-  int i = 0;
-  for (; in[i] && i < cap - 1; i++) out[i] = (wchar_t)towlower(in[i]);
-  out[i] = 0;
+  lstrcpynW(out, in, cap);
+  /* towlower в «C»-локали кириллицу не трогает — «Круг» остался бы «Круг» */
+  CharLowerBuffW(out, (DWORD)wcslen(out));
 }
 
 /* 1 материал, 2 масса, 3 размер, 0 прочее */
@@ -2391,11 +2393,54 @@ static int pf_kind(const wchar_t *key) {
   if (wcsstr(k, L"unit") || wcsstr(k, L"substitute") || wcsstr(k, L"measure")) return 0;
   if (wcsstr(k, L"material")) return 1;
   if (wcsstr(k, L"mass") || wcsstr(k, L"weight")) return 2;
-  static const wchar_t *dims[] = {L"length", L"width", L"height", L"thick", L"diam",
-                                  L"size",   L"dimension", L"gabar", L"sortament"};
+  static const wchar_t *dims[] = {L"length", L"width",     L"height", L"thick",
+                                  L"diam",   L"dimension", L"gabar",  L"size"};
   for (size_t i = 0; i < sizeof(dims) / sizeof(dims[0]); i++)
     if (wcsstr(k, dims[i])) return 3;
   return 0;
+}
+
+/* Похоже ли значение на сортамент: начинается с вида проката и в нём есть
+   цифры («Круг 45 ГОСТ 2590-2006 / 38ХС ГОСТ 4543-2016», «Лист 4 …»).
+   Где такое лежит — в названии заготовки, в ссылке на материал или в его
+   карточке, — схема не говорит, поэтому смотрим на все значения подряд. */
+static int pf_sort_score(const wchar_t *key, const wchar_t *val) {
+  if (!val || !val[0]) return 0;
+  while (*val == L' ') val++;
+  wchar_t v[64];
+  pf_lower(val, v, 64);
+  static const wchar_t *kinds[] = {L"круг",     L"лист",     L"полоса",   L"квадрат",  L"шестигранник",
+                                   L"труба",    L"пруток",   L"уголок",   L"швеллер",  L"лента",
+                                   L"проволока", L"двутавр", L"балка",    L"профиль",  L"плита",
+                                   L"катанка",  L"шина",     L"арматура", L"отливка",  L"поковка",
+                                   L"штамповка", L"прокат",  L"сетка",    L"рулон"};
+  BOOL digit = FALSE;
+  for (const wchar_t *q = val; *q && !digit; q++) digit = *q >= L'0' && *q <= L'9';
+  for (size_t i = 0; i < sizeof(kinds) / sizeof(kinds[0]); i++) {
+    size_t l = wcslen(kinds[i]);
+    if (!wcsncmp(v, kinds[i], l) && (v[l] == L' ' || (v[l] >= L'0' && v[l] <= L'9')) && digit)
+      return wcschr(val, L'/') ? 4 : 3; /* с «/» — уже и сортамент, и марка */
+  }
+  if (key) {
+    wchar_t k[128];
+    pf_lower(key, k, 128);
+    if (wcsstr(k, L"sortament") || wcsstr(k, L"assortment") || wcsstr(k, L"rolled")) return 1;
+  }
+  return 0;
+}
+
+static void pf_sort_candidate(PfSum *sm, const wchar_t *key, const wchar_t *val) {
+  int sc = pf_sort_score(key, val);
+  if (sc <= sm->sortScore) return;
+  while (*val == L' ') val++;
+  lstrcpynW(sm->sort, val, 240);
+  sm->sortScore = sc;
+}
+
+/* сортамент, размеры и масса найдены — для сводки обход можно не продолжать
+   (одной марки мало: «Круг 45 …» может лежать глубже, в карточке материала) */
+static BOOL pf_complete(const PfSum *sm) {
+  return sm->sortScore >= 3 && sm->mass[0] && sm->ndims > 0;
 }
 
 static void pf_take(PfSum *sm, const wchar_t *key, const wchar_t *val) {
@@ -2448,6 +2493,7 @@ static void pf_explore(SQLHDBC dbc, long id, int depth, CardOut *c, const wchar_
   sm->queries++;
   int n = card_query(dbc, sql, rows, 300, err, 280);
   for (int i = 0; i < n; i++) {
+    pf_sort_candidate(sm, rows[i].s1, rows[i].s2);
     if (card_hidden(rows[i].s1)) continue;
     pf_take(sm, rows[i].s1, rows[i].s2);
     if (c && rows[i].s2[0]) card_pair_t(c, pad, rows[i].s1, rows[i].s2, 0, rows[i].n3);
@@ -2487,7 +2533,9 @@ static void pf_explore(SQLHDBC dbc, long id, int depth, CardOut *c, const wchar_
         shown = 0;
         if (c) card_add(c, L"%s- ", pad2);
       }
-      if (card_hidden(el[e].s1) || !el[e].s2[0]) continue;
+      if (!el[e].s2[0]) continue;
+      pf_sort_candidate(sm, el[e].s1, el[e].s2);
+      if (card_hidden(el[e].s1)) continue;
       pf_take(sm, el[e].s1, el[e].s2);
       const wchar_t *lab = card_label(el[e].s1);
       if (c) card_add(c, L"%s%s %s", shown ? L" · " : L"", lab ? lab : el[e].s1, el[e].s2);
@@ -2497,7 +2545,7 @@ static void pf_explore(SQLHDBC dbc, long id, int depth, CardOut *c, const wchar_
     }
     if (c && shown) card_add(c, L"\r\n");
   }
-  if (depth <= 0 || pf_late(sm)) goto out;
+  if (depth <= 0 || pf_late(sm) || (!c && pf_complete(sm))) goto out;
   /* вложенные объекты (версии, сами заготовки) */
   _snwprintf(sql, 4000,
              L"SELECT TOP 15 o.InfoObjectId, CAST(o.Name AS NVARCHAR(200)), "
@@ -2508,11 +2556,14 @@ static void pf_explore(SQLHDBC dbc, long id, int depth, CardOut *c, const wchar_
   sm->queries++;
   int k = card_query(dbc, sql, el, 300, err, 280);
   for (int i = 0; i < k; i++) {
+    pf_sort_candidate(sm, NULL, el[i].s1);
+    if (!c && pf_complete(sm)) break; /* для сводки всё уже есть — дальше не ходим */
     if (c) card_add(c, L"%s> %s  (%s)\r\n", pad, el[i].s1[0] ? el[i].s1 : L"без имени", el[i].s2);
     long child = el[i].n1;
     pf_explore(dbc, child, depth - 1, c, pad2, sm);
   }
   for (int i = 0; i < nf; i++) {
+    if (!c && pf_complete(sm)) break;
     if (c) card_add(c, L"%s> по ссылке\r\n", pad);
     pf_explore(dbc, follow[i], depth - 1, c, pad2, sm);
   }
@@ -2523,13 +2574,63 @@ out:
   free(follow);
 }
 
+/* «Круг 45 ГОСТ 2590-2006 / 38ХС ГОСТ 4543-2016»: сортамент и марка вместе;
+   если одно уже содержит другое — без повтора */
+static void pf_material_text(const PfSum *sm, wchar_t *out, int cap) {
+  out[0] = 0;
+  const wchar_t *so = sm->sortScore >= 1 ? sm->sort : L"", *ma = sm->mat;
+  wchar_t a[240], b[200];
+  pf_lower(so, a, 240);
+  pf_lower(ma, b, 200);
+  if (so[0] && ma[0] && !wcsstr(a, b) && !wcsstr(b, a))
+    _snwprintf(out, cap, L"%s / %s", so, ma);
+  else if (so[0] && (!ma[0] || wcsstr(a, b)))
+    lstrcpynW(out, so, cap);
+  else
+    lstrcpynW(out, ma, cap);
+  out[cap - 1] = 0;
+}
+
+/* масса числом — «1,52 кг»; если в ней уже есть буквы (единицы), как есть */
+static void pf_mass_text(const wchar_t *m, wchar_t *out, int cap) {
+  out[0] = 0;
+  if (!m[0]) return;
+  wchar_t *end = NULL;
+  wchar_t tmp[80];
+  lstrcpynW(tmp, m, 80);
+  for (wchar_t *q = tmp; *q; q++)
+    if (*q == L',') *q = L'.';
+  double v = wcstod(tmp, &end);
+  while (end && *end == L' ') end++;
+  if (!end || end == tmp || *end) {
+    lstrcpynW(out, m, cap);
+    return;
+  }
+  _snwprintf(out, cap, v < 10 ? L"%.3f" : (v < 100 ? L"%.2f" : L"%.1f"), v);
+  out[cap - 1] = 0;
+  wchar_t *dot = wcschr(out, L'.');
+  if (dot) {
+    size_t l = wcslen(out);
+    while (l > 0 && out[l - 1] == L'0') out[--l] = 0;
+    if (l > 0 && out[l - 1] == L'.') out[--l] = 0;
+    dot = wcschr(out, L'.');
+    if (dot) *dot = L',';
+  }
+  size_t l = wcslen(out);
+  _snwprintf(out + l, cap - l, L" кг");
+  out[cap - 1] = 0;
+}
+
 static void pf_summary_text(const PfSum *sm, wchar_t *out, int cap) {
   out[0] = 0;
   int l = 0;
-  if (sm->mat[0]) l += _snwprintf(out + l, cap - l, L"%s", sm->mat);
-  if (sm->dims[0] && l < cap)
+  wchar_t mt[480], ms[80];
+  pf_material_text(sm, mt, 480);
+  pf_mass_text(sm->mass, ms, 80);
+  if (mt[0]) l += _snwprintf(out + l, cap - l, L"%s", mt);
+  if (sm->dims[0] && l >= 0 && l < cap)
     l += _snwprintf(out + l, cap - l, L"%s%s", l ? L" · " : L"", sm->dims);
-  if (sm->mass[0] && l < cap) _snwprintf(out + l, cap - l, L"%sмасса %s", l ? L" · " : L"", sm->mass);
+  if (ms[0] && l >= 0 && l < cap) _snwprintf(out + l, cap - l, L"%s%s", l ? L" · " : L"", ms);
   out[cap - 1] = 0;
 }
 
@@ -2663,10 +2764,13 @@ static void card_preforms(SQLHDBC dbc, long pfCard, CardOut *c, CardRow *rows, w
     card_add(c, L"\r\n");
     /* сначала тихо собрать сводку, потом (в «Атрибутах») показать весь обход */
     pf_explore(dbc, ids[p], 3, NULL, L"", sm);
-    card_add(c, L"      %-14s%s\r\n", L"Материал", sm->mat[0] ? sm->mat : L"—");
+    wchar_t mt[480], ms[80];
+    pf_material_text(sm, mt, 480);
+    pf_mass_text(sm->mass, ms, 80);
+    card_add(c, L"      %-14s%s\r\n", L"Материал", mt[0] ? mt : L"—");
     card_add(c, L"      %-14s%s\r\n", L"Габариты", sm->dims[0] ? sm->dims : L"—");
-    card_add(c, L"      %-14s%s\r\n", L"Масса", sm->mass[0] ? sm->mass : L"—");
-    if (!sm->mat[0] && !sm->dims[0] && !sm->mass[0])
+    card_add(c, L"      %-14s%s\r\n", L"Масса", ms[0] ? ms : L"—");
+    if (!mt[0] && !sm->dims[0] && !sm->mass[0])
       card_add(c, L"      (в заготовке не нашлось ни материала, ни размеров, ни массы —\r\n"
                   L"       Shift + «Все данные» покажет, что в ней лежит)\r\n");
     if (g_cardVerbose) {
@@ -3061,7 +3165,7 @@ static DWORD WINAPI pf_thread(LPVOID param) {
     SQLHDBC dbc = SQL_NULL_HDBC;
     wchar_t err[280];
     if (plm_connect(&env, &dbc, err, 280)) {
-      pf_compute(dbc, j, 15000);
+      pf_compute(dbc, j, 30000);
       SQLDisconnect(dbc);
       SQLFreeHandle(SQL_HANDLE_DBC, dbc);
       SQLFreeHandle(SQL_HANDLE_ENV, env);
