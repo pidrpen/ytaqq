@@ -3230,8 +3230,12 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
       show_answer_text(text);
       free(text);
     }
+    pf_start_async(); /* находки уже на экране — заготовки к ним досчитаются следом */
     return 0;
   }
+  case WM_PF_DONE:
+    pf_apply((PfJob *)lParam);
+    return 0;
   /* карточка приходит отдельно: ей своё окно, находки остаются на месте */
   case WM_CARD_DONE: {
     wchar_t *text = (wchar_t *)lParam;

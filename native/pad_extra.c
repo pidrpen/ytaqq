@@ -985,83 +985,6 @@ static void share_card(long id, BOOL verbose, wchar_t *out, int cap);
   L"JOIN InfoObjects AS o2 WITH(NOLOCK) ON o2.InfoObjectId=ea.Link AND o2.Erased=0 "        \
   L"WHERE la.OwnerId=" card L" AND la.Outdated=0) AS pf "
 
-/* Столбец «Заготовка»: одним запросом на все строки находок. Не вышло —
-   столбец просто пустой, поиск от этого не страдает. */
-/* какие заготовки у какого изделия нашлись — для сводки в столбце */
-#define PF_PAIRS 400
-static long g_pfOwner[PF_PAIRS], g_pfId[PF_PAIRS];
-static int g_pfPairs;
-static void pf_summarize_rows(SQLHDBC dbc, int n);
-
-static void plm_fill_preforms(SQLHDBC dbc, int n) {
-  for (int i = 0; i < n; i++) g_plmPf[i][0] = 0;
-  g_pfPairs = 0;
-  wchar_t ids[1600];
-  size_t il = 0;
-  ids[0] = 0;
-  for (int i = 0; i < n; i++) {
-    if (!g_plmIds[i]) continue;
-    BOOL dup = FALSE;
-    for (int j = 0; j < i && !dup; j++) dup = g_plmIds[j] == g_plmIds[i];
-    if (dup) continue;
-    wchar_t one[24];
-    int k = _snwprintf(one, 24, il ? L",%ld" : L"%ld", g_plmIds[i]);
-    if (k <= 0 || il + (size_t)k + 1 >= 1600) break;
-    memcpy(ids + il, one, ((size_t)k + 1) * sizeof(wchar_t));
-    il += (size_t)k;
-  }
-  if (!il) return;
-  wchar_t *sql = (wchar_t *)malloc(4000 * sizeof(wchar_t));
-  if (!sql) return;
-  /* в 2026.09.23.6 карточку заготовок искали в самом объекте — а она в карте
-     взаимосвязей, и столбец был пуст у всех */
-  _snwprintf(sql, 4000,
-             L"SELECT TOP 400 x.Id, pf.PfName, pf.PfId "
-             PLM_HOLDERS(L"%s") L"AND nkp.Value=N'ProductPreformsCard' "
-             PF_APPLY(L"pa.Link")
-             L"ORDER BY x.Id, pf.PfId",
-             ids);
-  sql[3999] = 0;
-  SQLHSTMT st = SQL_NULL_HSTMT;
-  if (!SQL_SUCCEEDED(SQLAllocHandle(SQL_HANDLE_STMT, dbc, &st))) {
-    free(sql);
-    return;
-  }
-  /* столбец — довесок: поиск не должен ждать его дольше нескольких секунд */
-  SQLSetStmtAttr(st, SQL_ATTR_QUERY_TIMEOUT, (SQLPOINTER)(SQLULEN)6, 0);
-  SQLRETURN r = SQLExecDirectW(st, (SQLWCHAR *)sql, SQL_NTS);
-  free(sql);
-  if (SQL_SUCCEEDED(r)) {
-    SQLINTEGER own = 0, pfid = 0;
-    SQLWCHAR nm[200];
-    SQLLEN t1 = 0, t2 = 0, t3 = 0;
-    SQLBindCol(st, 1, SQL_C_SLONG, &own, sizeof(own), &t1);
-    SQLBindCol(st, 2, SQL_C_WCHAR, nm, sizeof(nm), &t2);
-    SQLBindCol(st, 3, SQL_C_SLONG, &pfid, sizeof(pfid), &t3);
-    while (SQL_SUCCEEDED(SQLFetch(st))) {
-      if (t1 == SQL_NULL_DATA || t2 <= 0) continue;
-      if (t3 != SQL_NULL_DATA && g_pfPairs < PF_PAIRS) {
-        g_pfOwner[g_pfPairs] = (long)own;
-        g_pfId[g_pfPairs] = (long)pfid;
-        g_pfPairs++;
-      }
-      for (int i = 0; i < n; i++) {
-        if (g_plmIds[i] != (long)own) continue;
-        wchar_t *d = g_plmPf[i];
-        /* одна и та же карточка находится по нескольким звеньям — не дублируем */
-        if (wcsstr(d, (wchar_t *)nm)) continue;
-        size_t dl = wcslen(d);
-        if (dl) _snwprintf(d + dl, PLM_COL1 - dl, L"; %s", (wchar_t *)nm);
-        else lstrcpynW(d, (wchar_t *)nm, PLM_COL1);
-        d[PLM_COL1 - 1] = 0;
-      }
-    }
-  }
-  SQLFreeHandle(SQL_HANDLE_STMT, st);
-  /* вместо названий — материал, габариты и масса, где их удалось найти */
-  if (g_pfPairs) pf_summarize_rows(dbc, n);
-}
-
 static BOOL plm_lookup(const wchar_t *query, wchar_t *out, int cap) {
   if (share_client_on()) return share_lookup(query, out, cap);
   g_plmLastLink[0] = 0;
@@ -1261,7 +1184,9 @@ static BOOL plm_lookup(const wchar_t *query, wchar_t *out, int cap) {
   }
   g_plmCount = n;
   SQLFreeHandle(SQL_HANDLE_STMT, st);
-  plm_fill_preforms(dbc, n);
+  /* столбец «Заготовка» заполняется потом, в фоне (pf_start_async): раньше
+     поиск ждал его, и результат приходил на десятки секунд позже */
+  for (int i = 0; i < n; i++) g_plmPf[i][0] = 0;
   SQLDisconnect(dbc);
   SQLFreeHandle(SQL_HANDLE_DBC, dbc);
   SQLFreeHandle(SQL_HANDLE_ENV, env);
@@ -1434,7 +1359,8 @@ typedef struct {
 } CardRow;
 
 /* предел в секундах для очередного запроса карточки; 0 — без предела */
-static int g_qTimeout;
+static __thread int g_qTimeout; /* у каждого потока свой: карточка и фон не мешают */
+static volatile LONG g_pfGen; /* номер задания столбца «Заготовка»: старые ответы отбрасываем */
 
 static int card_query(SQLHDBC dbc, const wchar_t *sql, CardRow *rows, int max, wchar_t *err,
                       int ecap) {
@@ -2445,7 +2371,12 @@ typedef struct {
   long seen[30];
   int nseen;
   int queries;
+  ULONGLONG deadline; /* 0 — без предела */
 } PfSum;
+
+static BOOL pf_late(const PfSum *sm) {
+  return sm->deadline && GetTickCount64() > sm->deadline;
+}
 
 static void pf_lower(const wchar_t *in, wchar_t *out, int cap) {
   int i = 0;
@@ -2490,7 +2421,7 @@ static BOOL pf_follow_link(const wchar_t *key) {
 
 /* c == NULL — только собрать сводку, ничего не печатая */
 static void pf_explore(SQLHDBC dbc, long id, int depth, CardOut *c, const wchar_t *pad, PfSum *sm) {
-  if (!id || sm->nseen >= 30 || sm->queries > 60) return;
+  if (!id || sm->nseen >= 30 || sm->queries > 60 || pf_late(sm)) return;
   for (int i = 0; i < sm->nseen; i++)
     if (sm->seen[i] == id) return;
   sm->seen[sm->nseen++] = id;
@@ -2523,7 +2454,7 @@ static void pf_explore(SQLHDBC dbc, long id, int depth, CardOut *c, const wchar_
     if (rows[i].n3 == 6 && rows[i].n2 && nf < 40 && pf_follow_link(rows[i].s1)) follow[nf++] = rows[i].n2;
   }
   /* списки и составные атрибуты: строка за строкой */
-  for (int i = 0; i < n && sm->queries <= 60; i++) {
+  for (int i = 0; i < n && sm->queries <= 60 && !pf_late(sm); i++) {
     if ((rows[i].n3 != 8 && rows[i].n3 != 23) || card_hidden(rows[i].s1)) continue;
     _snwprintf(sql, 4000,
                L"SELECT TOP 300 a.CollectionElementId, nk.Value, COALESCE(lo.Name, " CARD_VALUE_SQL
@@ -2566,7 +2497,7 @@ static void pf_explore(SQLHDBC dbc, long id, int depth, CardOut *c, const wchar_
     }
     if (c && shown) card_add(c, L"\r\n");
   }
-  if (depth <= 0) goto out;
+  if (depth <= 0 || pf_late(sm)) goto out;
   /* вложенные объекты (версии, сами заготовки) */
   _snwprintf(sql, 4000,
              L"SELECT TOP 15 o.InfoObjectId, CAST(o.Name AS NVARCHAR(200)), "
@@ -2602,28 +2533,74 @@ static void pf_summary_text(const PfSum *sm, wchar_t *out, int cap) {
   out[cap - 1] = 0;
 }
 
-/* Столбец «Заготовка»: сводка по первым строкам находок. Обход не бесплатный,
-   поэтому общий бюджет — несколько секунд; не успели — остаются названия. */
-static void pf_summarize_rows(SQLHDBC dbc, int n) {
+/* Столбец «Заготовка» считается в фоне уже после того, как находки показаны.
+   Задание — список изделий; ответ — текст для каждого. */
+#define PF_JOB_MAX 60
+typedef struct {
+  LONG gen;
+  int n;
+  long ids[PF_JOB_MAX];
+  wchar_t text[PF_JOB_MAX][PLM_COL1];
+} PfJob;
+
+static void pf_compute(SQLHDBC dbc, PfJob *j, ULONGLONG budgetMs) {
+  if (j->n <= 0) return;
   ULONGLONG t0 = GetTickCount64();
+  wchar_t ids[1600];
+  size_t il = 0;
+  ids[0] = 0;
+  for (int k = 0; k < j->n; k++) {
+    wchar_t one[24];
+    int w = _snwprintf(one, 24, il ? L",%ld" : L"%ld", j->ids[k]);
+    if (w <= 0 || il + (size_t)w + 1 >= 1600) break;
+    memcpy(ids + il, one, ((size_t)w + 1) * sizeof(wchar_t));
+    il += (size_t)w;
+  }
+  CardRow *rows = (CardRow *)malloc(sizeof(CardRow) * 400);
+  wchar_t *sql = (wchar_t *)malloc(4000 * sizeof(wchar_t));
+  long *pk = (long *)malloc(sizeof(long) * 400), *pid = (long *)malloc(sizeof(long) * 400);
+  if (!rows || !sql || !pk || !pid) goto out;
+  _snwprintf(sql, 4000,
+             L"SELECT TOP 400 x.Id, pf.PfName, N'', pf.PfId, 0 "
+             PLM_HOLDERS(L"%s") L"AND nkp.Value=N'ProductPreformsCard' "
+             PF_APPLY(L"pa.Link")
+             L"ORDER BY x.Id, pf.PfId",
+             ids);
+  sql[3999] = 0;
+  g_qTimeout = 8;
+  wchar_t err[280];
+  int n = card_query(dbc, sql, rows, 400, err, 280);
+  int np = 0;
+  for (int r = 0; r < n; r++) {
+    int k = -1;
+    for (int q = 0; q < j->n && k < 0; q++)
+      if (j->ids[q] == rows[r].n1) k = q;
+    if (k < 0) continue;
+    wchar_t *d = j->text[k];
+    if (rows[r].s1[0] && !wcsstr(d, rows[r].s1)) {
+      size_t dl = wcslen(d);
+      _snwprintf(d + dl, PLM_COL1 - dl, L"%s%s", dl ? L"; " : L"", rows[r].s1);
+      d[PLM_COL1 - 1] = 0;
+    }
+    if (np < 400) {
+      pk[np] = k;
+      pid[np] = rows[r].n2;
+      np++;
+    }
+  }
+  /* вместо названий — материал, габариты и масса, где их удалось найти */
   g_qTimeout = 3;
-  long done[60];
-  int nd = 0;
-  for (int r = 0; r < n && nd < 60; r++) {
-    if (GetTickCount64() - t0 > 7000) break;
-    long own = g_plmIds[r];
-    BOOL was = FALSE;
-    for (int j = 0; j < nd && !was; j++) was = done[j] == own;
-    if (was || !own) continue;
-    done[nd++] = own;
+  for (int k = 0; k < j->n; k++) {
+    if (GetTickCount64() - t0 > budgetMs) break;
     wchar_t line[PLM_COL1];
     line[0] = 0;
     int parts = 0;
-    for (int p = 0; p < g_pfPairs && parts < 3; p++) {
-      if (g_pfOwner[p] != own) continue;
+    for (int p = 0; p < np && parts < 3; p++) {
+      if (pk[p] != k) continue;
       PfSum *sm = (PfSum *)calloc(1, sizeof(PfSum));
       if (!sm) break;
-      pf_explore(dbc, g_pfId[p], 3, NULL, L"", sm);
+      sm->deadline = t0 + budgetMs;
+      pf_explore(dbc, pid[p], 3, NULL, L"", sm);
       wchar_t one[PLM_COL1];
       pf_summary_text(sm, one, PLM_COL1);
       free(sm);
@@ -2633,11 +2610,14 @@ static void pf_summarize_rows(SQLHDBC dbc, int n) {
       line[PLM_COL1 - 1] = 0;
       parts++;
     }
-    if (!line[0]) continue;
-    for (int i = 0; i < n; i++)
-      if (g_plmIds[i] == own) lstrcpynW(g_plmPf[i], line, PLM_COL1);
+    if (line[0]) lstrcpynW(j->text[k], line, PLM_COL1);
   }
+out:
   g_qTimeout = 0;
+  free(rows);
+  free(sql);
+  free(pk);
+  free(pid);
 }
 
 /* Заготовка в карточке: сводка (материал, габариты, масса) у каждой; в
@@ -2671,9 +2651,13 @@ static void card_preforms(SQLHDBC dbc, long pfCard, CardOut *c, CardRow *rows, w
     lstrcpynW(names[i], rows[i].s1[0] ? rows[i].s1 : L"(без имени)", 200);
   }
   card_add(c, L"%s\r\n", pn > 1 ? L"ЗАГОТОВКИ" : L"ЗАГОТОВКА");
+  /* на все заготовки карточки — не больше 20 с, на одну — 8 */
+  ULONGLONG cardEnd = GetTickCount64() + 20000;
   for (int p = 0; p < pn; p++) {
     PfSum *sm = (PfSum *)calloc(1, sizeof(PfSum));
     if (!sm) break;
+    ULONGLONG one = GetTickCount64() + 8000;
+    sm->deadline = one < cardEnd ? one : cardEnd;
     card_add(c, L"  %s", names[p]);
     if (g_cardVerbose) card_add(c, L"   ID %ld", ids[p]);
     card_add(c, L"\r\n");
@@ -2688,6 +2672,7 @@ static void card_preforms(SQLHDBC dbc, long pfCard, CardOut *c, CardRow *rows, w
     if (g_cardVerbose) {
       PfSum *sv = (PfSum *)calloc(1, sizeof(PfSum));
       if (sv) {
+        sv->deadline = GetTickCount64() + 8000;
         card_add(c, L"      ── что внутри ──\r\n");
         pf_explore(dbc, ids[p], 3, c, L"      ", sv);
         free(sv);
@@ -3063,6 +3048,77 @@ done:
 }
 
 #include "share.c"
+
+/* ---- столбец «Заготовка» в фоне ------------------------------------------- */
+#define WM_PF_DONE (WM_APP + 16) /* lParam — PfJob*, освобождает получатель */
+
+static DWORD WINAPI pf_thread(LPVOID param) {
+  PfJob *j = (PfJob *)param;
+  if (share_client_on()) {
+    share_pf(j); /* своего логина нет — спрашиваем того же, кто искал */
+  } else {
+    SQLHENV env = SQL_NULL_HENV;
+    SQLHDBC dbc = SQL_NULL_HDBC;
+    wchar_t err[280];
+    if (plm_connect(&env, &dbc, err, 280)) {
+      pf_compute(dbc, j, 15000);
+      SQLDisconnect(dbc);
+      SQLFreeHandle(SQL_HANDLE_DBC, dbc);
+      SQLFreeHandle(SQL_HANDLE_ENV, env);
+    }
+  }
+  if (!g_hwnd || !PostMessageW(g_hwnd, WM_PF_DONE, 0, (LPARAM)j)) free(j);
+  return 0;
+}
+
+static void pf_update_column(void) {
+  if (!g_answerList || g_resultFiles) return;
+  for (int i = 0; i < g_plmCount; i++) {
+    LVITEMW it;
+    memset(&it, 0, sizeof(it));
+    it.iSubItem = 2;
+    it.pszText = g_plmPf[i];
+    SendMessageW(g_answerList, LVM_SETITEMTEXTW, (WPARAM)i, (LPARAM)&it);
+  }
+}
+
+/* находки показаны — теперь заготовки к ним */
+static void pf_start_async(void) {
+  if (g_resultFiles || g_plmCount <= 0 || g_engine != 4) return;
+  PfJob *j = (PfJob *)calloc(1, sizeof(PfJob));
+  if (!j) return;
+  j->gen = InterlockedIncrement(&g_pfGen);
+  for (int i = 0; i < g_plmCount && j->n < PF_JOB_MAX; i++) {
+    if (!g_plmIds[i]) continue;
+    BOOL dup = FALSE;
+    for (int k = 0; k < j->n && !dup; k++) dup = j->ids[k] == g_plmIds[i];
+    if (!dup) j->ids[j->n++] = g_plmIds[i];
+  }
+  if (!j->n) {
+    free(j);
+    return;
+  }
+  for (int i = 0; i < g_plmCount; i++) lstrcpynW(g_plmPf[i], L"…", PLM_COL1);
+  pf_update_column();
+  HANDLE th = CreateThread(NULL, 0, pf_thread, j, 0, NULL);
+  if (th) CloseHandle(th);
+  else free(j);
+}
+
+static void pf_apply(PfJob *j) {
+  if (!j) return;
+  /* пока считали, могли начать новый поиск — тогда ответ уже не про него */
+  if (j->gen == g_pfGen && !g_resultFiles) {
+    for (int i = 0; i < g_plmCount; i++) {
+      const wchar_t *t = L"";
+      for (int k = 0; k < j->n; k++)
+        if (j->ids[k] == g_plmIds[i]) t = j->text[k];
+      lstrcpynW(g_plmPf[i], t, PLM_COL1);
+    }
+    pf_update_column();
+  }
+  free(j);
+}
 
 static void compose_answer(const wchar_t *query, wchar_t *out, int cap) {
   wchar_t a[1200] = {0};
@@ -4534,15 +4590,21 @@ static void start_lookup(const wchar_t *q) {
     show_status(L"Нечего искать — скопируйте текст");
     return;
   }
+  /* сперва — не идёт ли уже поиск: раньше «Ищу…» затирало окно, а потом
+     приходил ответ того, прежнего поиска */
+  if (InterlockedCompareExchange(&g_netBusy, 1, 0) != 0) {
+    show_status(L"Поиск уже идёт");
+    return;
+  }
+  /* список прошлого поиска убираем сразу: иначе окно открывалось со старыми
+     находками и только потом менялось на новые */
+  g_plmCount = 0;
+  InterlockedIncrement(&g_pfGen);
   wchar_t wait[440];
   _snwprintf(wait, 440,
              g_engine == 4 ? L"Ищу в PLM «%.80s»…" :
              (g_engine == 5 ? L"Ищу файлы «%.80s»…" : L"Мини-ИИ «%.80s»…"), q);
   show_answer_text(wait);
-  if (InterlockedCompareExchange(&g_netBusy, 1, 0) != 0) {
-    show_status(L"Поиск уже идёт");
-    return;
-  }
   SearchJob *job = (SearchJob *)calloc(1, sizeof(SearchJob));
   if (!job) {
     InterlockedExchange(&g_netBusy, 0);

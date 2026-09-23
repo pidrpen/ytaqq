@@ -238,7 +238,7 @@ static int share_serve_child(const wchar_t *reqPath, const wchar_t *ansPath) {
   load_plm_pref();
   wchar_t *req = share_read(reqPath);
   if (!req) return 1;
-  wchar_t kind[16] = L"", q[400] = L"", from[200] = L"";
+  wchar_t kind[16] = L"", q[400] = L"", from[200] = L"", idl[1400] = L"";
   long id = 0;
   BOOL verbose = FALSE;
   wchar_t *p = req, *line;
@@ -251,6 +251,7 @@ static int share_serve_child(const wchar_t *reqPath, const wchar_t *ansPath) {
     else if (!wcscmp(f[0], L"id")) id = wcstol(f[1], NULL, 10);
     else if (!wcscmp(f[0], L"verbose")) verbose = f[1][0] == L'1';
     else if (!wcscmp(f[0], L"from")) lstrcpynW(from, f[1], 200);
+    else if (!wcscmp(f[0], L"ids")) lstrcpynW(idl, f[1], 1400);
   }
   free(req);
   wchar_t user[128], pc[64];
@@ -295,6 +296,33 @@ static int share_serve_child(const wchar_t *reqPath, const wchar_t *ansPath) {
       sb_field(&b, g_cardDraw);
       sb_add(&b, L"\n");
     }
+  } else if (!wcscmp(kind, L"pf") && idl[0]) {
+    /* столбец «Заготовка» для находок коллеги — отдельно от самого поиска */
+    PfJob *j = (PfJob *)calloc(1, sizeof(PfJob));
+    if (j) {
+      for (wchar_t *t = idl; *t && j->n < PF_JOB_MAX;) {
+        long v = wcstol(t, &t, 10);
+        if (v > 0) j->ids[j->n++] = v;
+        while (*t == L',' || *t == L' ') t++;
+        if (*t && !iswdigit(*t)) break;
+      }
+      SQLHENV env = SQL_NULL_HENV;
+      SQLHDBC dbc = SQL_NULL_HDBC;
+      wchar_t err[280];
+      if (j->n && plm_connect(&env, &dbc, err, 280)) {
+        pf_compute(dbc, j, 15000);
+        SQLDisconnect(dbc);
+        SQLFreeHandle(SQL_HANDLE_DBC, dbc);
+        SQLFreeHandle(SQL_HANDLE_ENV, env);
+      }
+      for (int k = 0; k < j->n; k++) {
+        if (!j->text[k][0]) continue;
+        sb_add(&b, L"pfr\t%ld", j->ids[k]);
+        sb_field(&b, j->text[k]);
+        sb_add(&b, L"\n");
+      }
+      free(j);
+    }
   } else {
     lstrcpynW(out, L"PLM\r\n\r\nНепонятный запрос.", 160000);
   }
@@ -311,6 +339,51 @@ static BOOL ends_with(const wchar_t *s, const wchar_t *suf) {
 }
 
 /* выполнить один забранный запрос отдельным процессом */
+/* Заготовки для столбца коллеги — фоновая работа: её исполнитель идёт сам по
+   себе, а поиски и карточки коллег за ним не ждут в очереди. Одновременно
+   не больше одного такого. */
+static HANDLE g_pfProc;
+static wchar_t g_pfWork[SHARE_PATH], g_pfAns[SHARE_PATH];
+static ULONGLONG g_pfT0;
+
+static void share_pf_reap(BOOL force) {
+  if (!g_pfProc) return;
+  BOOL done = WaitForSingleObject(g_pfProc, 0) == WAIT_OBJECT_0;
+  if (!done && !force && GetTickCount64() - g_pfT0 < 60000) return;
+  if (!done) TerminateProcess(g_pfProc, 2);
+  CloseHandle(g_pfProc);
+  g_pfProc = NULL;
+  /* пустой ответ — только если исполнителя пришлось прервать: закончивший
+     свой ответ уже положил, и коллега мог его забрать раньше этой проверки */
+  if (!done) share_write(g_pfAns, L"CPANS1\ntext\n");
+  DeleteFileW(g_pfWork);
+}
+
+static void share_pf_start(const wchar_t *work, const wchar_t *ans) {
+  wchar_t exe[MAX_PATH];
+  GetModuleFileNameW(NULL, exe, MAX_PATH);
+  wchar_t *cmd = (wchar_t *)malloc(sizeof(wchar_t) * (MAX_PATH + SHARE_PATH * 2 + 64));
+  if (!cmd) return;
+  _snwprintf(cmd, MAX_PATH + SHARE_PATH * 2 + 64, L"\"%s\" --plm-serve \"%s\" \"%s\"", exe, work, ans);
+  STARTUPINFOW si;
+  PROCESS_INFORMATION pi;
+  memset(&si, 0, sizeof(si));
+  si.cb = sizeof(si);
+  memset(&pi, 0, sizeof(pi));
+  BOOL ok = CreateProcessW(NULL, cmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
+  free(cmd);
+  if (!ok) {
+    share_write(ans, L"CPANS1\ntext\n");
+    DeleteFileW(work);
+    return;
+  }
+  CloseHandle(pi.hThread);
+  g_pfProc = pi.hProcess;
+  g_pfT0 = GetTickCount64();
+  lstrcpynW(g_pfWork, work, SHARE_PATH);
+  lstrcpynW(g_pfAns, ans, SHARE_PATH);
+}
+
 static void share_run_one(const wchar_t *work, const wchar_t *ans) {
   wchar_t *req = share_read(work);
   wchar_t who[200] = L"?", what[440] = L"?";
@@ -417,7 +490,13 @@ static DWORD WINAPI share_serve_thread(LPVOID param) {
       } while (nn < 8 && FindNextFileW(f, &fd));
       FindClose(f);
     }
+    share_pf_reap(FALSE);
+    /* два прохода: сперва поиски и карточки (их ждут), потом заготовки */
+    for (int pass = 0; pass < 2; pass++)
     for (int i = 0; i < nn; i++) {
+      BOOL isPf = ends_with(names[i], L"-pf.req");
+      if ((pass == 0) == isPf) continue;
+      if (isPf && g_pfProc) continue; /* прежний ещё считает — этот подождёт */
       wchar_t req[SHARE_PATH], work[SHARE_PATH], ans[SHARE_PATH];
       _snwprintf(req, SHARE_PATH, L"%s\\%s", dReq, names[i]);
       /* брошенный запрос (коллега давно не ждёт) — убрать */
@@ -430,7 +509,8 @@ static DWORD WINAPI share_serve_thread(LPVOID param) {
       _snwprintf(ans, SHARE_PATH, L"%s\\%.*s.ans", dAns, (int)bl, names[i]);
       /* забрать: переименование удаётся только одному из раздающих */
       if (!MoveFileW(req, work)) continue;
-      share_run_one(work, ans);
+      if (isPf) share_pf_start(work, ans);
+      else share_run_one(work, ans);
     }
     /* ответы, которые никто не забрал, — раз в десять минут */
     if (now - lastClean > 600000) {
@@ -469,6 +549,7 @@ static void share_stop(void) {
   LeaveCriticalSection(&g_shareCs);
   if (beat[0]) DeleteFileW(beat);
 }
+
 
 /* ---- сторона коллеги без логина ------------------------------------------- */
 
@@ -511,7 +592,8 @@ static BOOL share_find_server(const wchar_t *root, wchar_t *who, int cap) {
 
 /* Отправить запрос и дождаться ответа. Возвращает текст ответа (освобождает
    вызывающий) или NULL — тогда в out уже объяснение. */
-static wchar_t *share_ask(const wchar_t *body, int waitSec, wchar_t *out, int cap) {
+static wchar_t *share_ask(const wchar_t *body, const wchar_t *tag, int waitSec, wchar_t *out,
+                          int cap) {
   wchar_t root[MAX_PATH];
   share_root_copy(root);
   wchar_t who[200] = L"";
@@ -530,7 +612,7 @@ static wchar_t *share_ask(const wchar_t *body, int waitSec, wchar_t *out, int ca
   wchar_t user[128], pc[64];
   share_me(user, pc);
   wchar_t id[160];
-  _snwprintf(id, 160, L"%s-%lu-%llu", pc, GetCurrentProcessId(), GetTickCount64());
+  _snwprintf(id, 160, L"%s-%lu-%llu%s", pc, GetCurrentProcessId(), GetTickCount64(), tag);
   for (wchar_t *c = id; *c; c++)
     if (wcschr(L"\\/:*?\"<>| ", *c)) *c = L'_';
   wchar_t req[SHARE_PATH], ans[SHARE_PATH];
@@ -587,7 +669,7 @@ static BOOL share_lookup(const wchar_t *query, wchar_t *out, int cap) {
   wchar_t body[480];
   _snwprintf(body, 480, L"kind\tsearch\nq\t%s", q);
   body[479] = 0;
-  wchar_t *a = share_ask(body, 60, out, cap);
+  wchar_t *a = share_ask(body, L"", 60, out, cap);
   if (!a) return FALSE;
   wchar_t via[200] = L"";
   wchar_t *p = a, *line;
@@ -624,7 +706,7 @@ static void share_card(long id, BOOL verbose, wchar_t *out, int cap) {
   g_cardDraw[0] = 0;
   wchar_t body[120];
   _snwprintf(body, 120, L"kind\tcard\nid\t%ld\nverbose\t%d", id, verbose ? 1 : 0);
-  wchar_t *a = share_ask(body, 100, out, cap);
+  wchar_t *a = share_ask(body, L"", 100, out, cap);
   if (!a) return;
   wchar_t via[200] = L"";
   wchar_t *p = a, *line;
@@ -640,5 +722,30 @@ static void share_card(long id, BOOL verbose, wchar_t *out, int cap) {
       lstrcpynW(g_cardDraw, f[1], PLM_LINK);
   }
   ans_printf(out, cap, L"%s\r\n\r\n  PLM через компьютер: %s", p ? p : L"", via[0] ? via : L"коллеги");
+  free(a);
+}
+
+/* Столбец «Заготовка» через раздающего: отдельным фоновым запросом. */
+static void share_pf(PfJob *j) {
+  wchar_t body[1500];
+  size_t l = (size_t)_snwprintf(body, 1500, L"kind\tpf\nids\t");
+  for (int k = 0; k < j->n; k++) {
+    int w = _snwprintf(body + l, 1500 - l, k ? L",%ld" : L"%ld", j->ids[k]);
+    if (w <= 0 || l + (size_t)w >= 1490) break;
+    l += (size_t)w;
+  }
+  body[1499] = 0;
+  wchar_t out[600];
+  wchar_t *a = share_ask(body, L"-pf", 45, out, 600);
+  if (!a) return;
+  wchar_t *p = a, *line;
+  while ((line = share_next_line(&p)) != NULL) {
+    if (!wcscmp(line, L"text")) break;
+    wchar_t *f[3];
+    if (share_split(line, f, 3) < 3 || wcscmp(f[0], L"pfr")) continue;
+    long id = wcstol(f[1], NULL, 10);
+    for (int k = 0; k < j->n; k++)
+      if (j->ids[k] == id) lstrcpynW(j->text[k], f[2], PLM_COL1);
+  }
   free(a);
 }
