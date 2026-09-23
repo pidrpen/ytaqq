@@ -123,7 +123,9 @@ def arrow_head(c, tip, direction, w=0.20, l=0.22):
             (bx - nx * w / 2, by - ny * w / 2)])
 
 
-def double_arrow(c, direction, shaft=0.085):
+# Толщины — как у системных курсоров Windows: до 2026.09.23.16 стержень
+# был 8–9 % размера и вместе с контуром выходил толстой полосой.
+def double_arrow(c, direction, shaft=0.036):
     dx, dy = direction
     n = math.hypot(dx, dy)
     dx, dy = dx / n, dy / n
@@ -133,18 +135,17 @@ def double_arrow(c, direction, shaft=0.085):
     t2 = (cx - dx * reach, cy - dy * reach)
     c.line([t2, t1], shaft)
     # heads about three times the shaft, the way system resize arrows read
-    arrow_head(c, t1, (dx, dy), w=0.30, l=0.26)
-    arrow_head(c, t2, (-dx, -dy), w=0.30, l=0.26)
-    # brass band across the middle: the family mark
-    px, py = -dy, dx
-    c.line([(cx + px * 0.055, cy + py * 0.055),
-            (cx - px * 0.055, cy - py * 0.055)], 0.06, accent=True)
+    arrow_head(c, t1, (dx, dy), w=0.24, l=0.22)
+    arrow_head(c, t2, (-dx, -dy), w=0.24, l=0.22)
+    # маленькая точка в середине — знак набора (была широкая полоса)
+    c.ellipse(cx - 0.035, cy - 0.035, cx + 0.035, cy + 0.035, accent=True)
 
 
 def role_ibeam(c):
-    c.rect(0.455, 0.10, 0.545, 0.90)
-    c.rect(0.36, 0.10, 0.64, 0.155, accent=True)
-    c.rect(0.36, 0.845, 0.64, 0.90, accent=True)
+    # тонкий, как текстовый курсор Windows (был 9 % ширины)
+    c.rect(0.482, 0.12, 0.518, 0.88)
+    c.rect(0.39, 0.10, 0.61, 0.135, accent=True)
+    c.rect(0.39, 0.865, 0.61, 0.90, accent=True)
 
 
 def role_cross(c):
@@ -197,11 +198,11 @@ ROLES = {
 
 
 def role_sizeall(c):
-    c.line([(0.12, 0.5), (0.88, 0.5)], 0.095)
-    c.line([(0.5, 0.12), (0.5, 0.88)], 0.095)
+    c.line([(0.12, 0.5), (0.88, 0.5)], 0.036)
+    c.line([(0.5, 0.12), (0.5, 0.88)], 0.036)
     for d in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-        arrow_head(c, (0.5 + d[0] * 0.46, 0.5 + d[1] * 0.46), d, w=0.20, l=0.20)
-    c.ellipse(0.425, 0.425, 0.575, 0.575, accent=True)
+        arrow_head(c, (0.5 + d[0] * 0.46, 0.5 + d[1] * 0.46), d, w=0.20, l=0.18)
+    c.ellipse(0.46, 0.46, 0.54, 0.54, accent=True)
 
 
 ROLES["sizeall"] = (role_sizeall, (0.5, 0.5))
@@ -333,6 +334,20 @@ def build_theme(tag: str):
     write_ani(wait_frames, SRC / f"{tag}_wait.ani")
     write_ani(app_frames, SRC / f"{tag}_app.ani")
     return len(ROLES) + 1 + 16
+
+
+def build_roles(tag: str, names, sizes):
+    """Перерисовать только перечисленные виды — остальное в наборе не трогать."""
+    global THEME
+    THEME = THEMES[tag]
+    for name in names:
+        draw, hot = ROLES[name]
+        imgs = []
+        for px in sizes:
+            c = Canvas(px)
+            draw(c)
+            imgs.append(c.render())
+        write_cur(imgs, SRC / f"{tag}_{name}.cur", hot)
 
 
 def main():
