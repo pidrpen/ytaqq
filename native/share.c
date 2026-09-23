@@ -84,7 +84,10 @@ static BOOL ft_within(FILETIME f, ULONGLONG seconds) {
 
 /* Файл пишется целиком под временным именем и переименовывается: второй
    компьютер никогда не прочтёт половину. */
-static BOOL share_write(const wchar_t *path, const wchar_t *text) {
+/* direct — если подмена файла не выходит (на сетевом диске её может не
+   пустить чужая открытая копия), записать прямо поверх. Читающая сторона
+   тогда может застать файл недописанным и должна это проверять. */
+static BOOL share_write_ex(const wchar_t *path, const wchar_t *text, BOOL direct) {
   int need = WideCharToMultiByte(CP_UTF8, 0, text, -1, NULL, 0, NULL, NULL);
   if (need <= 0) return FALSE;
   char *utf = (char *)malloc((size_t)need);
@@ -99,12 +102,33 @@ static BOOL share_write(const wchar_t *path, const wchar_t *text) {
     DWORD w = 0;
     ok = WriteFile(h, utf, (DWORD)(need - 1), &w, NULL) && w == (DWORD)(need - 1);
     CloseHandle(h);
-    if (ok) ok = MoveFileExW(tmp, path, MOVEFILE_REPLACE_EXISTING);
+    if (ok) {
+      BOOL moved = FALSE;
+      for (int tries = 0; tries < 5 && !moved; tries++) {
+        if (tries) Sleep(40); /* другой компьютер как раз читает — подождать */
+        moved = MoveFileExW(tmp, path, MOVEFILE_REPLACE_EXISTING);
+      }
+      if (!moved && direct) {
+        moved = FALSE;
+        for (int tries = 0; tries < 5 && !moved; tries++) {
+          if (tries) Sleep(40);
+          HANDLE d = CreateFileW(path, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_DELETE, NULL,
+                                 CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+          if (d == INVALID_HANDLE_VALUE) continue;
+          DWORD w2 = 0;
+          moved = WriteFile(d, utf, (DWORD)(need - 1), &w2, NULL) && w2 == (DWORD)(need - 1);
+          CloseHandle(d);
+        }
+      }
+      ok = moved;
+    }
     if (!ok) DeleteFileW(tmp);
   }
   free(utf);
   return ok;
 }
+
+static BOOL share_write(const wchar_t *path, const wchar_t *text) { return share_write_ex(path, text, FALSE); }
 
 static wchar_t *share_read(const wchar_t *path) {
   HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE, NULL,

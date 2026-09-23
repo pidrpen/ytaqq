@@ -39,6 +39,7 @@ typedef struct {
   wchar_t invGame[ND_MAXINV][96], invFrom[ND_MAXINV][96], invName[ND_MAXINV][128];
   wchar_t game[96];
   wchar_t *p0, *p1; /* содержимое файлов партии (или NULL) */
+  BOOL partial[2];    /* файл застали недописанным — вместо него прошлое целое */
 } NdPoll;
 
 typedef struct {
@@ -279,7 +280,27 @@ static BOOL nd_write_mine(void) {
   wchar_t path[SHARE_PATH];
   nd_game_path(g_nd.game, g_nd.me, path);
   if (!path[0] || !g_nd.log.w) return FALSE;
-  return share_write(path, g_nd.log.w);
+  if (share_write_ex(path, g_nd.log.w, TRUE)) return TRUE;
+  DWORD err = GetLastError();
+  if (g_dataDir[0]) { /* для разбора: почему не записалось */
+    wchar_t lp[MAX_PATH];
+    _snwprintf(lp, MAX_PATH, L"%s\\nardy.log", g_dataDir);
+    SYSTEMTIME t;
+    GetLocalTime(&t);
+    wchar_t line[SHARE_PATH + 80];
+    _snwprintf(line, SHARE_PATH + 80, L"%02d.%02d %02d:%02d:%02d не записался %s (ошибка %lu)\r\n", t.wDay, t.wMonth,
+               t.wHour, t.wMinute, t.wSecond, path, err);
+    line[SHARE_PATH + 79] = 0;
+    char u[(SHARE_PATH + 80) * 3];
+    int n = WideCharToMultiByte(CP_UTF8, 0, line, -1, u, (int)sizeof(u), NULL, NULL);
+    HANDLE f = CreateFileW(lp, FILE_APPEND_DATA, FILE_SHARE_READ, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (f != INVALID_HANDLE_VALUE) {
+      DWORD w = 0;
+      if (n > 1) WriteFile(f, u, (DWORD)(n - 1), &w, NULL);
+      CloseHandle(f);
+    }
+  }
+  return FALSE;
 }
 
 static void nd_log_reset(void) {
@@ -335,7 +356,9 @@ static void nd_load_local(void) {
    файлы партии — раз в секунду и только пока она идёт. */
 static DWORD WINAPI nd_thread(LPVOID param) {
   (void)param;
-  ULONGLONG lastBeat = 0, lastOnline = 0, lastInv = 0;
+  ULONGLONG lastBeat = 0, lastOnline = 0, lastInv = 0, lastPost = 0;
+  static wchar_t *good[2]; /* последнее целое содержимое файлов партии */
+  static wchar_t goodGame[96];
   unsigned lastSum = 0;
   static NdPoll cur; /* последнее известное — копируется в каждое сообщение */
   static wchar_t cacheId[ND_MAXONLINE * 2][96], cacheName[ND_MAXONLINE * 2][128];
@@ -432,12 +455,32 @@ static DWORD WINAPI nd_thread(LPVOID param) {
     nd_lock();
     lstrcpynW(pl->game, g_ndWatch, 96);
     nd_unlock();
+    if (wcscmp(goodGame, pl->game)) {
+      free(good[0]);
+      free(good[1]);
+      good[0] = good[1] = NULL;
+      lstrcpynW(goodGame, pl->game, 96);
+    }
     if (pl->game[0]) {
-      wchar_t p[SHARE_PATH];
-      nd_game_path(pl->game, 0, p);
-      if (p[0]) pl->p0 = share_read(p);
-      nd_game_path(pl->game, 1, p);
-      if (p[0]) pl->p1 = share_read(p);
+      for (int s = 0; s < 2; s++) {
+        wchar_t p[SHARE_PATH];
+        nd_game_path(pl->game, s, p);
+        wchar_t *t = p[0] ? share_read(p) : NULL;
+        /* каждая запись кончается переводом строки; без него файл застали
+           недописанным — берём прошлое целое, иначе недописанный ход
+           показался бы неправильным и остановил партию */
+        size_t l = t ? wcslen(t) : 0;
+        if (t && (l == 0 || t[l - 1] != L'\n')) {
+          free(t);
+          t = good[s] ? _wcsdup(good[s]) : NULL;
+          pl->partial[s] = TRUE;
+        } else if (t) {
+          free(good[s]);
+          good[s] = _wcsdup(t);
+        }
+        if (s == 0) pl->p0 = t;
+        else pl->p1 = t;
+      }
     }
     /* отправляем, только если что-то поменялось */
     unsigned sum = 2166136261u;
@@ -450,15 +493,20 @@ static DWORD WINAPI nd_thread(LPVOID param) {
     ND_MIX(pl->onName, sizeof(pl->onName[0]) * pl->nOnline);
     ND_MIX(pl->invGame, sizeof(pl->invGame[0]) * pl->nInv);
     ND_MIX(pl->game, sizeof(pl->game));
+    ND_MIX(pl->partial, sizeof(pl->partial));
     if (pl->p0) ND_MIX(pl->p0, wcslen(pl->p0) * sizeof(wchar_t));
     if (pl->p1) ND_MIX(pl->p1, wcslen(pl->p1) * sizeof(wchar_t));
 #undef ND_MIX
-    if (sum == lastSum || !g_hwnd || !PostMessageW(g_hwnd, WM_NARDY_POLL, 0, (LPARAM)pl)) {
+    /* во время партии — ещё и раз в 5 секунд без перемен: окно сверит свой
+       файл в папке и перепишет его, если прошлая запись не удалась */
+    BOOL due = sum != lastSum || (pl->game[0] && now - lastPost > 5000);
+    if (!due || !g_hwnd || !PostMessageW(g_hwnd, WM_NARDY_POLL, 0, (LPARAM)pl)) {
       free(pl->p0);
       free(pl->p1);
       free(pl);
     } else {
       lastSum = sum;
+      lastPost = now;
     }
   }
   return 0;
@@ -542,6 +590,8 @@ static void nd_replay(const wchar_t *p0, const wchar_t *p1) {
     g_nd.ready = FALSE;
     if (g_nd.mode == ND_WAIT && s1[0]) g_nd.mode = ND_PLAY;
     if (g_nd.mode == ND_WAIT) nd_status(L"Ждём ответа: %s", g_nd.oppName[0] ? g_nd.oppName : g_nd.oppId);
+    else if (g_nd.me == 1 && !s0[0])
+      nd_status(L"Готовим кубики: ждём %s (у него должен быть запущен CursorPad)…", g_nd.oppName);
     else nd_status(L"Готовим кубики…");
     return;
   }
@@ -699,14 +749,24 @@ static void nd_on_poll(NdPoll *pl) {
     _snwprintf(t, 200, L"%s зовёт сыграть в короткие нарды", pl->invName[i]);
     nd_balloon(L"Нарды", t);
   }
-  if ((g_nd.mode == ND_WAIT || g_nd.mode == ND_PLAY) && !wcscmp(pl->game, g_nd.game)) {
-    if (!g_nd.logLoaded) {
-      /* после перезапуска: свой файл — из папки */
-      const wchar_t *mineSrc = g_nd.me == 0 ? pl->p0 : pl->p1;
-      nd_log_reset();
-      if (mineSrc) sb_add(&g_nd.log, L"%s", mineSrc);
-      g_nd.logLoaded = TRUE;
+  BOOL thisGame = g_nd.game[0] && !wcscmp(pl->game, g_nd.game);
+  const wchar_t *mineNow = g_nd.me == 0 ? pl->p0 : pl->p1;
+  if (thisGame && g_nd.mode != ND_LOBBY && !g_nd.logLoaded) {
+    /* после перезапуска: свой файл — из папки; не прочёлся — подождём */
+    if (!mineNow) {
+      nd_refresh_view();
+      return;
     }
+    nd_log_reset();
+    sb_add(&g_nd.log, L"%s", mineNow);
+    g_nd.logLoaded = TRUE;
+  }
+  /* в папке не то, что у нас (запись не удалась или ещё не дошла) — пишем снова;
+     и после конца партии: «сдаюсь» тоже должно дойти */
+  if (thisGame && g_nd.mode != ND_LOBBY && g_nd.logLoaded && g_nd.log.w && g_nd.log.w[0] &&
+      (!mineNow || pl->partial[g_nd.me] || wcscmp(mineNow, g_nd.log.w)))
+    nd_write_mine();
+  if ((g_nd.mode == ND_WAIT || g_nd.mode == ND_PLAY) && thisGame) {
     int prevTurn = g_nd.turn, prevMode = g_nd.mode;
     nd_replay(pl->p0, pl->p1);
     nd_after_replay(prevTurn, prevMode);
@@ -901,7 +961,7 @@ static void nd_done(void) {
   for (int i = 0; i < g_nd.ndone; i++)
     sb_add(&g_nd.log, L"%s%d:%d", i ? L" " : L"", g_nd.done[i].from, g_nd.done[i].die);
   sb_add(&g_nd.log, L"\n");
-  if (!nd_write_mine()) nd_status(L"Не удалось записать ход в общую папку — повторю");
+  if (!nd_write_mine()) nd_status(L"Не удалось записать ход в общую папку — повторю сам");
   int prevTurn = g_nd.turn, prevMode = g_nd.mode;
   NdPoll *pl = g_nd.poll;
   nd_replay(pl ? pl->p0 : NULL, pl ? pl->p1 : NULL);
