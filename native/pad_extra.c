@@ -938,6 +938,28 @@ static BOOL share_client_on(void);
 static BOOL share_lookup(const wchar_t *query, wchar_t *out, int cap);
 static void share_card(long id, BOOL verbose, wchar_t *out, int cap);
 
+/* Где у изделия лежат его карточки (заготовок, техсостава, ТП). Не в самом
+   объекте из поиска: по PlmApi путь такой — объект (и его родитель) →
+   ProductConfiguration → ProductInterconnectCard, а уже в ней ссылки на
+   карточки. Перебираем все эти звенья: где нашлось, там и лежит. После
+   макроса продолжается условие ON по nkp.Value. */
+#define PLM_HOLDERS(ids)                                                                    \
+  L"FROM (SELECT InfoObjectId AS Id, ISNULL(ParentId,0) AS Par "                           \
+  L"FROM InfoObjects WITH(NOLOCK) WHERE InfoObjectId IN (" ids L")) AS x "                   \
+  L"CROSS APPLY (SELECT x.Id AS H UNION SELECT x.Par "                                      \
+  L"UNION SELECT hc.Link FROM InfoObjectAttributes AS hc WITH(NOLOCK) "                     \
+  L"JOIN NameKeys AS nhc WITH(NOLOCK) ON nhc.NameKeyId=hc.NameKeyId "                       \
+  L"AND nhc.Value=N'ProductConfiguration' "                                                 \
+  L"WHERE hc.OwnerId IN (x.Id, x.Par) AND hc.Outdated=0 AND ISNULL(hc.Link,0)<>0) AS h1 "  \
+  L"CROSS APPLY (SELECT h1.H AS H UNION SELECT hi.Link "                                    \
+  L"FROM InfoObjectAttributes AS hi WITH(NOLOCK) "                                          \
+  L"JOIN NameKeys AS nhi WITH(NOLOCK) ON nhi.NameKeyId=hi.NameKeyId "                       \
+  L"AND nhi.Value=N'ProductInterconnectCard' "                                              \
+  L"WHERE hi.OwnerId=h1.H AND hi.Outdated=0 AND ISNULL(hi.Link,0)<>0) AS h2 "              \
+  L"JOIN InfoObjectAttributes AS pa WITH(NOLOCK) ON pa.OwnerId=h2.H AND pa.Outdated=0 "     \
+  L"AND ISNULL(pa.Link,0)<>0 AND ISNULL(pa.CollectionElementId,0)=0 "                       \
+  L"JOIN NameKeys AS nkp WITH(NOLOCK) ON nkp.NameKeyId=pa.NameKeyId "
+
 /* Заготовки изделия: ProductPreformsCard → её дети (так их грузит PlmApi),
    а если в карточке есть коллекция ProductPreforms — и её элементы. */
 #define PF_OF_CARD(card)                                                                    \
@@ -972,14 +994,13 @@ static void plm_fill_preforms(SQLHDBC dbc, int n) {
   if (!il) return;
   wchar_t *sql = (wchar_t *)malloc(4000 * sizeof(wchar_t));
   if (!sql) return;
+  /* в 2026.09.23.6 карточку заготовок искали в самом объекте — а она в карте
+     взаимосвязей, и столбец был пуст у всех */
   _snwprintf(sql, 4000,
-             L"SELECT DISTINCT TOP 400 a.OwnerId, o.Name "
-             L"FROM InfoObjectAttributes AS a WITH(NOLOCK) "
-             L"JOIN NameKeys AS nk WITH(NOLOCK) ON nk.NameKeyId=a.NameKeyId "
-             L"AND nk.Value=N'ProductPreformsCard' "
-             L"JOIN InfoObjects AS o WITH(NOLOCK) ON " PF_OF_CARD(L"a.Link") L" "
-             L"WHERE a.OwnerId IN (%s) AND a.Outdated=0 AND ISNULL(a.Link,0)<>0 "
-             L"ORDER BY a.OwnerId, o.Name",
+             L"SELECT TOP 400 x.Id, CAST(o.Name AS NVARCHAR(200)) "
+             PLM_HOLDERS(L"%s") L"AND nkp.Value=N'ProductPreformsCard' "
+             L"JOIN InfoObjects AS o WITH(NOLOCK) ON " PF_OF_CARD(L"pa.Link") L" "
+             L"ORDER BY x.Id, o.InfoObjectId",
              ids);
   sql[3999] = 0;
   SQLHSTMT st = SQL_NULL_HSTMT;
@@ -1000,6 +1021,8 @@ static void plm_fill_preforms(SQLHDBC dbc, int n) {
       for (int i = 0; i < n; i++) {
         if (g_plmIds[i] != (long)own) continue;
         wchar_t *d = g_plmPf[i];
+        /* одна и та же карточка находится по нескольким звеньям — не дублируем */
+        if (wcsstr(d, (wchar_t *)nm)) continue;
         size_t dl = wcslen(d);
         if (dl) _snwprintf(d + dl, PLM_COL1 - dl, L"; %s", (wchar_t *)nm);
         else lstrcpynW(d, (wchar_t *)nm, PLM_COL1);
@@ -1429,6 +1452,16 @@ static int card_query(SQLHDBC dbc, const wchar_t *sql, CardRow *rows, int max, w
   L"WHEN 4 THEN CONVERT(NVARCHAR(64), a.LongNumber) "                                    \
   L"WHEN 5 THEN CONVERT(NVARCHAR(64), a.LongNumber) "                                    \
   L"WHEN 33 THEN CONVERT(NVARCHAR(64), a.LongNumber) "                                   \
+  /* перечисления и ссылки на шаблоны — словами (так их читает PlmApi) */                \
+  L"WHEN 11 THEN (SELECT TOP 1 CAST(cvn.NameUI AS NVARCHAR(400)) "                          \
+  L"FROM NamedValues AS cvn WITH(NOLOCK) "                                               \
+  L"WHERE cvn.NamedValueId=a.Link) "                                                     \
+  L"WHEN 22 THEN (SELECT TOP 1 CAST(cvt.NameUI AS NVARCHAR(400)) "                          \
+  L"FROM Templates AS cvt WITH(NOLOCK) "                                                 \
+  L"WHERE cvt.TemplateId=a.Link) "                                                       \
+  L"WHEN 25 THEN (SELECT TOP 1 CAST(cvt.NameUI AS NVARCHAR(400)) "                          \
+  L"FROM Templates AS cvt WITH(NOLOCK) "                                                 \
+  L"WHERE cvt.TemplateId=a.Link) "                                                       \
   L"ELSE N'' END"
 
 /* Внутренние имена атрибутов человеку ничего не говорят. Известные
@@ -2365,7 +2398,8 @@ static void card_preforms(SQLHDBC dbc, long pfCard, CardOut *c, CardRow *rows, w
   wchar_t *sql = (wchar_t *)malloc(4000 * sizeof(wchar_t));
   if (!sql) return;
   _snwprintf(sql, 4000,
-             L"SELECT DISTINCT TOP 10 o.InfoObjectId, o.Name, t.NameKey, 0, 0 "
+             L"SELECT DISTINCT TOP 10 o.InfoObjectId, CAST(o.Name AS NVARCHAR(200)), "
+             L"CAST(t.NameKey AS NVARCHAR(200)), 0, 0 "
              L"FROM InfoObjects AS o WITH(NOLOCK) "
              L"JOIN Templates AS t WITH(NOLOCK) ON t.TemplateId=o.TemplateId "
              L"WHERE " PF_OF_CARD(L"%s"),
@@ -2413,6 +2447,107 @@ static void card_preforms(SQLHDBC dbc, long pfCard, CardOut *c, CardRow *rows, w
   free(sql);
 }
 
+/* Техсостав (материалы, покупные) — как его собирает PlmApi: TechCompCard →
+   ActualVersionTechComp → среди детей версии та, чей Product — конфигурация
+   изделия → её коллекция TechComposition, без строк с IsRemoved. */
+static void card_techcomp(SQLHDBC dbc, long tcCard, long prodConf, CardOut *c, CardRow *rows,
+                          wchar_t *err) {
+  wchar_t *sql = (wchar_t *)malloc(4000 * sizeof(wchar_t));
+  if (!sql) return;
+  _snwprintf(sql, 4000,
+             L"SELECT DISTINCT TOP 300 ce.CollectionElementId, N'', N'', 0, 0 "
+             L"FROM InfoObjectAttributes AS av WITH(NOLOCK) "
+             L"JOIN NameKeys AS nkv WITH(NOLOCK) ON nkv.NameKeyId=av.NameKeyId "
+             L"AND nkv.Value=N'ActualVersionTechComp' "
+             L"JOIN InfoObjects AS ch WITH(NOLOCK) ON ch.ParentId=av.Link AND ch.Erased=0 "
+             L"JOIN InfoObjectAttributes AS tc WITH(NOLOCK) ON tc.OwnerId=ch.InfoObjectId "
+             L"AND tc.Outdated=0 "
+             L"JOIN NameKeys AS nktc WITH(NOLOCK) ON nktc.NameKeyId=tc.NameKeyId "
+             L"AND nktc.Value=N'TechComposition' "
+             L"JOIN InfoObjectCollectionElements AS ce WITH(NOLOCK) ON ce.AttributeId=tc.AttributeId "
+             L"AND ce.Outdated=0 "
+             L"WHERE av.OwnerId=%ld AND av.Outdated=0 "
+             L"AND (%ld=0 OR EXISTS (SELECT 1 FROM InfoObjectAttributes AS pr WITH(NOLOCK) "
+             L"JOIN NameKeys AS nkpr WITH(NOLOCK) ON nkpr.NameKeyId=pr.NameKeyId "
+             L"AND nkpr.Value=N'Product' "
+             L"WHERE pr.OwnerId=ch.InfoObjectId AND pr.Outdated=0 AND pr.Link=%ld)) "
+             L"AND NOT EXISTS (SELECT 1 FROM InfoObjectAttributes AS ir WITH(NOLOCK) "
+             L"JOIN NameKeys AS nkr WITH(NOLOCK) ON nkr.NameKeyId=ir.NameKeyId "
+             L"AND nkr.Value=N'IsRemoved' "
+             L"WHERE ir.CollectionElementId=ce.CollectionElementId AND ir.BoolValue=1) "
+             L"ORDER BY ce.CollectionElementId",
+             tcCard, prodConf, prodConf);
+  int n = card_query(dbc, sql, rows, CARD_ROWS, err, 280);
+  if (n < 0) {
+    card_add(c, L"ТЕХСОСТАВ: запрос не выполнился.\r\n%s\r\n\r\n", err);
+    free(sql);
+    return;
+  }
+  if (n == 0) {
+    card_add(c, L"ТЕХСОСТАВ: карточка есть (%ld), но строк в нём нет.\r\n\r\n", tcCard);
+    free(sql);
+    return;
+  }
+  int en = n > 120 ? 120 : n;
+  long *els = (long *)malloc(sizeof(long) * (size_t)en);
+  wchar_t *ids = (wchar_t *)malloc(sizeof(wchar_t) * 1800);
+  if (!els || !ids) {
+    free(els);
+    free(ids);
+    free(sql);
+    return;
+  }
+  size_t il = 0;
+  ids[0] = 0;
+  int used = 0;
+  for (int i = 0; i < en; i++) {
+    wchar_t one[24];
+    int k = _snwprintf(one, 24, il ? L",%ld" : L"%ld", rows[i].n1);
+    if (k <= 0 || il + (size_t)k + 1 >= 1800) break;
+    memcpy(ids + il, one, ((size_t)k + 1) * sizeof(wchar_t));
+    il += (size_t)k;
+    els[used++] = rows[i].n1;
+  }
+  /* все атрибуты всех строк одним запросом; ссылки — именем объекта */
+  _snwprintf(sql, 4000,
+             L"SELECT TOP %d a.CollectionElementId, nk.Value, COALESCE(lo.Name, " CARD_VALUE_SQL L"), "
+             L"0, a.DataType "
+             L"FROM InfoObjectAttributes AS a WITH(NOLOCK) "
+             L"JOIN NameKeys AS nk WITH(NOLOCK) ON nk.NameKeyId=a.NameKeyId "
+             L"LEFT JOIN InfoObjects AS lo WITH(NOLOCK) ON a.DataType=6 AND lo.InfoObjectId=a.Link "
+             L"WHERE a.CollectionElementId IN (%s) AND a.Outdated=0 "
+             L"AND nk.Value NOT IN (N'LastChanged',N'IsRemoved') "
+             L"ORDER BY a.CollectionElementId, a.DataType DESC, nk.Value",
+             CARD_ROWS, ids);
+  n = card_query(dbc, sql, rows, CARD_ROWS, err, 280);
+  card_add(c, L"ТЕХСОСТАВ (%d)\r\n", used);
+  for (int e = 0; e < used; e++) {
+    card_add(c, L"  %2d. ", e + 1);
+    int shown = 0;
+    /* сначала то, на что строка ссылается (материал, деталь), потом прочее */
+    for (int pass = 0; pass < 2; pass++) {
+      for (int i = 0; i < n; i++) {
+        if (rows[i].n1 != els[e] || !rows[i].s2[0] || card_hidden(rows[i].s1)) continue;
+        BOOL link = rows[i].n3 == 6;
+        if ((pass == 0) != link) continue;
+        const wchar_t *lab = card_label(rows[i].s1);
+        if (link)
+          card_add(c, L"%s%s", shown ? L" · " : L"", rows[i].s2);
+        else
+          card_add(c, L"%s%s %s", shown ? L" · " : L"", lab ? lab : rows[i].s1, rows[i].s2);
+        shown++;
+      }
+    }
+    if (!shown) card_add(c, L"(пустая строка)");
+    card_add(c, L"\r\n");
+  }
+  if (n < 0) card_add(c, L"  состав строк не прочитался: %s\r\n", err);
+  card_add(c, L"\r\n");
+  free(els);
+  free(ids);
+  free(sql);
+}
+
 static void plm_card(long id, wchar_t *out, int cap) {
   g_opsPendN = 0;
   if (share_client_on()) {
@@ -2434,7 +2569,7 @@ static void plm_card(long id, wchar_t *out, int cap) {
   }
   g_cardT0 = GetTickCount64();
   g_cardTAttrs = g_cardTTp = g_cardTOps = g_cardTUsed = g_cardTFiles = 0;
-  long actualVer = 0, tpCard = 0, pfCard = 0;
+  long actualVer = 0, tpCard = 0, pfCard = 0, tcCard = 0, prodConf = 0;
   wchar_t designation[200] = {0}, objName[260] = {0};
   BOOL mainFlag = FALSE;
   g_cardDraw[0] = 0;
@@ -2497,7 +2632,6 @@ static void plm_card(long id, wchar_t *out, int cap) {
         lstrcpynW(designation, rows[i].s2, 200);
       if (_wcsicmp(rows[i].s1, L"ActualVersion") == 0) actualVer = rows[i].n2;
       if (_wcsicmp(rows[i].s1, L"TechnologicalProcessesCard") == 0) tpCard = rows[i].n2;
-      if (_wcsicmp(rows[i].s1, L"ProductPreformsCard") == 0) pfCard = rows[i].n2;
       if (_wcsicmp(rows[i].s1, L"MainTP") == 0 || _wcsicmp(rows[i].s1, L"IsActual") == 0)
         mainFlag = _wcsicmp(rows[i].s2, L"да") == 0;
       if (card_hidden(rows[i].s1)) {
@@ -2519,6 +2653,19 @@ static void plm_card(long id, wchar_t *out, int cap) {
     if (skipped && g_cardVerbose) card_add(&c, L"  (служебных скрыто: %d)\r\n", skipped);
     (void)unknown;
     if (g_cardVerbose) card_add(&c, L"\r\n");
+  }
+
+  /* карточки заготовок и техсостава лежат в карте взаимосвязей изделия */
+  _snwprintf(sql, 3600,
+             L"SELECT DISTINCT TOP 20 pa.Link, nkp.Value, N'', 0, 0 " PLM_HOLDERS(L"%ld")
+             L"AND nkp.Value IN (N'ProductPreformsCard',N'TechCompCard',N'ProductConfiguration')",
+             id);
+  n = card_query(dbc, sql, rows, CARD_ROWS, err, 280);
+  if (n < 0) card_add(&c, L"Карточки заготовок и техсостава: запрос не выполнился.\r\n%s\r\n\r\n", err);
+  for (int i = 0; i < n; i++) {
+    if (!pfCard && _wcsicmp(rows[i].s1, L"ProductPreformsCard") == 0) pfCard = rows[i].n1;
+    if (!tcCard && _wcsicmp(rows[i].s1, L"TechCompCard") == 0) tcCard = rows[i].n1;
+    if (!prodConf && _wcsicmp(rows[i].s1, L"ProductConfiguration") == 0) prodConf = rows[i].n1;
   }
 
   g_cardTAttrs = card_lap();
@@ -2636,7 +2783,11 @@ static void plm_card(long id, wchar_t *out, int cap) {
   card_where_used(dbc, id, &c, rows, err);
 
 freed:
+  /* не нашлось — пишем прямо, иначе не отличить «нет заготовки» от «не нашли» */
   if (pfCard) card_preforms(dbc, pfCard, &c, rows, err);
+  else if (!actualVer) card_add(&c, L"ЗАГОТОВКА: карточки заготовок у изделия не нашлось.\r\n\r\n");
+  if (tcCard) card_techcomp(dbc, tcCard, prodConf, &c, rows, err);
+  else if (!actualVer) card_add(&c, L"ТЕХСОСТАВ: карточки техсостава у изделия не нашлось.\r\n\r\n");
   g_cardTUsed = card_lap();
   card_drawings(designation, &c);
   g_cardTFiles = card_lap();
