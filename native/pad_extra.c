@@ -443,6 +443,16 @@ static LRESULT CALLBACK AnsEditProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
   return CallWindowProcW(g_oldAnsEdit, hwnd, msg, wParam, lParam);
 }
 
+/* и над списком находок Ctrl+колесо — масштаб, а не прокрутка */
+static WNDPROC g_oldAnsList;
+static LRESULT CALLBACK AnsListProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+  if (msg == WM_MOUSEWHEEL && (GetKeyState(VK_CONTROL) & 0x8000)) {
+    ans_zoom(GET_WHEEL_DELTA_WPARAM(wParam) > 0 ? 1 : -1);
+    return 0;
+  }
+  return CallWindowProcW(g_oldAnsList, hwnd, msg, wParam, lParam);
+}
+
 static RECT g_ansPrev;
 static BOOL g_ansBig; /* окно находок развёрнуто на весь экран */
 static wchar_t g_cardDraw[PLM_LINK]; /* чертёж, найденный для карточки */
@@ -644,6 +654,85 @@ static LRESULT CALLBACK DrawPaneProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
 
 /* столбец «Заготовка» в находках — коротко; полностью — в подсказке и карточке */
 static void pf_short(const wchar_t *full, wchar_t *out, int cap);
+static HFONT ans_font(void);
+
+/* Заготовка не влезает в ширину столбца — строки находок становятся в две
+   строки текста, и она переносится (сам список так не умеет: высоту строк
+   задаёт картинка-распорка, а текст столбца рисуем сами, с переносом).
+   Влезает всё — строки обычные. Считается заново при смене ширины окна,
+   масштаба (Ctrl+колесо) и когда приходят заготовки. */
+static BOOL g_ansTall;
+static int g_ansRowH;
+static HIMAGELIST g_ansRowIl;
+
+static void ans_rows_fit(void) {
+  if (!g_answerList) return;
+  HFONT f = (HFONT)SendMessageW(g_answerList, WM_GETFONT, 0, 0);
+  HDC dc = GetDC(g_answerList);
+  if (!dc) return;
+  HGDIOBJ of = f ? SelectObject(dc, f) : NULL;
+  TEXTMETRICW tm;
+  GetTextMetricsW(dc, &tm);
+  int colW = (int)SendMessageW(g_answerList, LVM_GETCOLUMNWIDTH, 2, 0) - 12;
+  int lines = 1; /* сколько строк текста нужно самой длинной заготовке, не больше трёх */
+  if (!g_resultFiles && colW > 20 && tm.tmHeight > 0)
+    for (int i = 0; i < g_plmCount && lines < 3; i++) {
+      wchar_t sh[PLM_COL1];
+      pf_short(g_plmPf[i], sh, PLM_COL1);
+      if (!sh[0]) continue;
+      RECT m = {0, 0, colW, 0};
+      DrawTextW(dc, sh, -1, &m, DT_LEFT | DT_WORDBREAK | DT_EDITCONTROL | DT_NOPREFIX | DT_CALCRECT);
+      int n = (m.bottom + tm.tmHeight - 1) / tm.tmHeight;
+      if (n > lines) lines = n > 3 ? 3 : n;
+    }
+  if (of) SelectObject(dc, of);
+  ReleaseDC(g_answerList, dc);
+  BOOL need = lines > 1;
+  int h = need ? tm.tmHeight * lines + 6 : 0;
+  if (need == g_ansTall && h == g_ansRowH) return;
+  g_ansTall = need;
+  g_ansRowH = h;
+  HIMAGELIST old = g_ansRowIl;
+  g_ansRowIl = need ? ImageList_Create(1, h, ILC_COLOR32, 1, 0) : NULL;
+  SendMessageW(g_answerList, LVM_SETIMAGELIST, LVSIL_SMALL, (LPARAM)g_ansRowIl);
+  if (old) ImageList_Destroy(old);
+  if (!need && f) SendMessageW(g_answerList, WM_SETFONT, (WPARAM)f, FALSE); /* вернуть обычную высоту */
+  InvalidateRect(g_answerList, NULL, TRUE);
+}
+
+/* ячейка заготовки в высоких строках — с переносом по словам */
+static LRESULT ans_list_customdraw(NMLVCUSTOMDRAW *cd) {
+  DWORD st = cd->nmcd.dwDrawStage;
+  if (st == CDDS_PREPAINT) return g_ansTall && !g_resultFiles ? CDRF_NOTIFYITEMDRAW : CDRF_DODEFAULT;
+  if (st == CDDS_ITEMPREPAINT) return CDRF_NOTIFYSUBITEMDRAW;
+  if (st != (CDDS_ITEMPREPAINT | CDDS_SUBITEM) || cd->iSubItem != 2) return CDRF_DODEFAULT;
+  int i = (int)cd->nmcd.dwItemSpec;
+  if (i < 0 || i >= g_plmCount) return CDRF_DODEFAULT;
+  RECT r;
+  r.top = 2;
+  r.left = LVIR_BOUNDS;
+  if (!SendMessageW(g_answerList, LVM_GETSUBITEMRECT, (WPARAM)i, (LPARAM)&r)) return CDRF_DODEFAULT;
+  BOOL sel = (SendMessageW(g_answerList, LVM_GETITEMSTATE, (WPARAM)i, LVIS_SELECTED) & LVIS_SELECTED) != 0;
+  BOOL foc = GetFocus() == g_answerList;
+  COLORREF bg = sel ? GetSysColor(foc ? COLOR_HIGHLIGHT : COLOR_BTNFACE) : COL_PAPER;
+  COLORREF fg = sel && foc ? GetSysColor(COLOR_HIGHLIGHTTEXT) : COL_INK;
+  HDC dc = cd->nmcd.hdc;
+  HBRUSH br = CreateSolidBrush(bg);
+  FillRect(dc, &r, br);
+  DeleteObject(br);
+  wchar_t sh[PLM_COL1];
+  pf_short(g_plmPf[i], sh, PLM_COL1);
+  RECT t = {r.left + 6, r.top + 2, r.right - 4, r.bottom - 2};
+  RECT m = t;
+  UINT fl = DT_LEFT | DT_WORDBREAK | DT_EDITCONTROL | DT_NOPREFIX;
+  DrawTextW(dc, sh, -1, &m, fl | DT_CALCRECT);
+  int th = m.bottom - m.top, bh = t.bottom - t.top;
+  if (th < bh) t.top += (bh - th) / 2; /* по середине строки, как соседние столбцы */
+  SetBkMode(dc, TRANSPARENT);
+  SetTextColor(dc, fg);
+  DrawTextW(dc, sh, -1, &t, fl | DT_END_ELLIPSIS);
+  return CDRF_SKIPDEFAULT;
+}
 
 static void fill_plm_list(void) {
   if (!g_answerList) return;
@@ -691,6 +780,7 @@ static void fill_plm_list(void) {
   InvalidateRect(g_answer, NULL, TRUE);
   ShowWindow(g_answerList, g_plmCount > 0 ? SW_SHOW : SW_HIDE);
   if (g_answerEdit) ShowWindow(g_answerEdit, g_plmCount > 0 ? SW_HIDE : SW_SHOW);
+  ans_rows_fit();
   /* чертёж для первой строки ищется сразу: его кнопка должна быть
      живой или потухшей ещё до того, как на неё потянутся */
   request_row_draw();
@@ -1445,6 +1535,9 @@ static const CardLabel kCardLabels[] = {
     {L"ProductClass", L"Класс изделия"},
     {L"Mass", L"Масса"},
     {L"PreformSize", L"Габариты заготовки"},
+    {L"ZDiametr", L"Диаметр заготовки"},
+    {L"ZLength", L"Длина заготовки"},
+    {L"ZSizeAdd", L"Припуск"},
     {L"PreformExpense", L"Масса заготовки"},
     {L"Weight", L"Масса"},
     {L"Length", L"Длина"},
@@ -2376,6 +2469,7 @@ typedef struct {
   wchar_t mat[200], mass[80], dims[240];
   wchar_t sort[240]; /* сортамент: «Круг 45 ГОСТ 2590-2006 / 38ХС ГОСТ 4543-2016» */
   BOOL dimsFixed, massFixed; /* нашлись PreformSize / PreformExpense — другие не нужны */
+  wchar_t zd[40], zl[40], za[40]; /* ZDiametr, ZLength, ZSizeAdd (припуск) */
   int sortScore;
   int ndims;
   long seen[30];
@@ -2463,7 +2557,7 @@ static void pf_sort_candidate(PfSum *sm, const wchar_t *key, const wchar_t *val)
 /* сортамент, размеры и масса найдены — для сводки обход можно не продолжать
    (одной марки мало: «Круг 45 …» может лежать глубже, в карточке материала) */
 static BOOL pf_complete(const PfSum *sm) {
-  return sm->sortScore >= 3 && sm->mass[0] && sm->ndims > 0;
+  return sm->sortScore >= 3 && sm->mass[0] && (sm->zl[0] || (sm->ndims > 0 && !sm->zd[0]));
 }
 
 static void pf_take(PfSum *sm, const wchar_t *key, const wchar_t *val) {
@@ -2471,6 +2565,19 @@ static void pf_take(PfSum *sm, const wchar_t *key, const wchar_t *val) {
   /* Где у заготовки габариты и масса, известно точно: PreformSize и
      PreformExpense (масса — в его строке Value). Они главнее любых других
      размеров и масс, найденных при обходе (у материала, у изделия). */
+  /* диаметр, длина и припуск заготовки — свои поля, их собираем отдельно */
+  if (!_wcsicmp(key, L"ZDiametr") || !_wcsicmp(key, L"ZDiameter")) {
+    if (!sm->zd[0]) lstrcpynW(sm->zd, val, 40);
+    return;
+  }
+  if (!_wcsicmp(key, L"ZLength")) {
+    if (!sm->zl[0]) lstrcpynW(sm->zl, val, 40);
+    return;
+  }
+  if (!_wcsicmp(key, L"ZSizeAdd")) {
+    if (!sm->za[0]) lstrcpynW(sm->za, val, 40);
+    return;
+  }
   if (!_wcsicmp(key, L"PreformSize")) {
     if (!sm->dimsFixed) {
       _snwprintf(sm->dims, 240, L"Габариты %s", val);
@@ -2544,7 +2651,9 @@ static void pf_explore(SQLHDBC dbc, long id, int depth, CardOut *c, const wchar_
   }
   /* списки и составные атрибуты: строка за строкой */
   for (int i = 0; i < n && sm->queries <= 60 && !pf_late(sm); i++) {
-    BOOL known = !_wcsicmp(rows[i].s1, L"PreformSize") || !_wcsicmp(rows[i].s1, L"PreformExpense");
+    BOOL known = !_wcsicmp(rows[i].s1, L"PreformSize") || !_wcsicmp(rows[i].s1, L"PreformExpense") ||
+                 !_wcsicmp(rows[i].s1, L"ZDiametr") || !_wcsicmp(rows[i].s1, L"ZLength") ||
+                 !_wcsicmp(rows[i].s1, L"ZSizeAdd");
     if (!known && ((rows[i].n3 != 8 && rows[i].n3 != 23) || card_hidden(rows[i].s1))) continue;
     _snwprintf(sql, 4000,
                L"SELECT TOP 300 a.CollectionElementId, nk.Value, " PF_VALUE_SQL
@@ -2635,6 +2744,45 @@ out:
   free(follow);
 }
 
+/* «45.000» → «45», «2.5» → «2,5»; не число — как есть */
+static void pf_num(const wchar_t *v, wchar_t *out, int cap) {
+  wchar_t tmp[64], *end = NULL;
+  lstrcpynW(tmp, v, 64);
+  for (wchar_t *q = tmp; *q; q++)
+    if (*q == L',') *q = L'.';
+  double d = wcstod(tmp, &end);
+  while (end && *end == L' ') end++;
+  if (!end || end == tmp || *end) {
+    lstrcpynW(out, v, cap);
+    return;
+  }
+  _snwprintf(out, cap, L"%.3f", d);
+  out[cap - 1] = 0;
+  size_t l = wcslen(out);
+  while (l > 0 && out[l - 1] == L'0') out[--l] = 0;
+  if (l > 0 && out[l - 1] == L'.') out[--l] = 0;
+  wchar_t *dot = wcschr(out, L'.');
+  if (dot) *dot = L',';
+}
+
+/* Габариты: из ZDiametr / ZLength / ZSizeAdd, если они есть, — «Ø45×L118,
+   припуск 3»; иначе то, что нашлось (PreformSize или поля с размерами). */
+static void pf_dims_text(const PfSum *sm, wchar_t *out, int cap) {
+  out[0] = 0;
+  if (!sm->zd[0] && !sm->zl[0]) {
+    lstrcpynW(out, sm->dims, cap);
+    return;
+  }
+  wchar_t d[40] = L"", l[40] = L"", a[40] = L"";
+  if (sm->zd[0]) pf_num(sm->zd, d, 40);
+  if (sm->zl[0]) pf_num(sm->zl, l, 40);
+  if (sm->za[0]) pf_num(sm->za, a, 40);
+  int n = _snwprintf(out, cap, L"Габариты %s%s%s%s%s", d[0] ? L"Ø" : L"", d, d[0] && l[0] ? L"×" : L"",
+                     l[0] ? L"L" : L"", l);
+  if (a[0] && wcscmp(a, L"0") && n > 0 && n < cap) _snwprintf(out + n, cap - n, L", припуск %s", a);
+  out[cap - 1] = 0;
+}
+
 /* «Круг 45 ГОСТ 2590-2006 / 38ХС ГОСТ 4543-2016»: сортамент и марка вместе;
    если одно уже содержит другое — без повтора */
 static void pf_material_text(const PfSum *sm, wchar_t *out, int cap) {
@@ -2689,8 +2837,9 @@ static void pf_summary_text(const PfSum *sm, wchar_t *out, int cap) {
   pf_material_text(sm, mt, 480);
   pf_mass_text(sm->mass, ms, 80);
   if (mt[0]) l += _snwprintf(out + l, cap - l, L"%s", mt);
-  if (sm->dims[0] && l >= 0 && l < cap)
-    l += _snwprintf(out + l, cap - l, L"%s%s", l ? L" · " : L"", sm->dims);
+  wchar_t dt[240];
+  pf_dims_text(sm, dt, 240);
+  if (dt[0] && l >= 0 && l < cap) l += _snwprintf(out + l, cap - l, L"%s%s", l ? L" · " : L"", dt);
   if (ms[0] && l >= 0 && l < cap) _snwprintf(out + l, cap - l, L"%s%s", l ? L" · " : L"", ms);
   out[cap - 1] = 0;
 }
@@ -2960,11 +3109,13 @@ static void card_preforms(SQLHDBC dbc, long pfCard, CardOut *c, CardRow *rows, w
     pf_material_text(sm, mt, 480);
     pf_mass_text(sm->mass, ms, 80);
     card_add(c, L"      %-14s%s\r\n", L"Материал", mt[0] ? mt : L"—");
-    const wchar_t *dv = sm->dims;
+    wchar_t dt[240];
+    pf_dims_text(sm, dt, 240);
+    const wchar_t *dv = dt;
     if (!wcsncmp(dv, L"Габариты ", 9)) dv += 9; /* из PreformSize — подпись уже в строке слева */
     card_add(c, L"      %-14s%s\r\n", L"Габариты", dv[0] ? dv : L"—");
     card_add(c, L"      %-14s%s\r\n", L"Масса", ms[0] ? ms : L"—");
-    if (!mt[0] && !sm->dims[0] && !sm->mass[0])
+    if (!mt[0] && !dv[0] && !sm->mass[0])
       card_add(c, L"      (в заготовке не нашлось ни материала, ни размеров, ни массы —\r\n"
                   L"       Shift + «Все данные» покажет, что в ней лежит)\r\n");
     if (g_cardVerbose) {
@@ -3380,6 +3531,7 @@ static void pf_update_column(void) {
     it.pszText = sh;
     SendMessageW(g_answerList, LVM_SETITEMTEXTW, (WPARAM)i, (LPARAM)&it);
   }
+  ans_rows_fit();
 }
 
 /* находки показаны — теперь заготовки к ним */
@@ -3547,6 +3699,7 @@ static void layout_answer(void) {
     SendMessageW(g_answerList, LVM_SETCOLUMNW, 1, (LPARAM)&col);
     col.cx = g_resultFiles ? 0 : cw - w0 - w1;
     SendMessageW(g_answerList, LVM_SETCOLUMNW, 2, (LPARAM)&col);
+    ans_rows_fit();
   }
   /* У кнопок разная длина надписи, и делить ряд поровну нельзя:
      «Закрыть» болталась бы пустой, а «Открыть файл в проводнике»
@@ -3692,6 +3845,8 @@ static LRESULT CALLBACK AnswerProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
         request_row_draw();
       break;
     }
+    if (nm && nm->idFrom == ID_ANS_LIST && nm->code == NM_CUSTOMDRAW)
+      return ans_list_customdraw((NMLVCUSTOMDRAW *)lParam);
     /* наведёшь на строку — заготовка целиком: в столбце она сокращена */
     if (nm && nm->idFrom == ID_ANS_LIST && nm->code == LVN_GETINFOTIPW && !g_resultFiles) {
       NMLVGETINFOTIPW *tip = (NMLVGETINFOTIPW *)lParam;
@@ -3810,7 +3965,10 @@ static void create_answer(HWND owner) {
   HWND show = mk_btn(g_answer, L"Открыть файл в проводнике", ID_ANS_SHOW);
   HWND cls = mk_btn(g_answer, L"Закрыть", ID_ANS_CLOSE);
   if (g_fontBody) SendMessageW(g_answerEdit, WM_SETFONT, (WPARAM)g_fontBody, TRUE);
-  if (g_fontBody && g_answerList) SendMessageW(g_answerList, WM_SETFONT, (WPARAM)g_fontBody, TRUE);
+  if (g_answerList) {
+    SendMessageW(g_answerList, WM_SETFONT, (WPARAM)(ans_font() ? ans_font() : g_fontBody), TRUE);
+    g_oldAnsList = (WNDPROC)SetWindowLongPtrW(g_answerList, GWLP_WNDPROC, (LONG_PTR)AnsListProc);
+  }
   if (g_fontUi) {
     SendMessageW(open, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
     SendMessageW(openTp, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
@@ -3919,6 +4077,11 @@ static void ans_zoom(int delta) {
   if (g_answerEdit) {
     SendMessageW(g_answerEdit, WM_SETFONT, (WPARAM)ans_font(), TRUE);
     InvalidateRect(g_answerEdit, NULL, TRUE);
+  }
+  if (g_answerList) { /* список находок — тем же масштабом */
+    SendMessageW(g_answerList, WM_SETFONT, (WPARAM)ans_font(), TRUE);
+    g_ansRowH = -1; /* высоту строк пересчитать заново */
+    ans_rows_fit();
   }
   save_cursor_pref();
   wchar_t m[64];
