@@ -11,13 +11,13 @@
    дальше: здесь только отправляется сообщение главному окну.
 
    Картинки звёзд готовятся один раз при запуске (маска с мягким краем),
-   кадр — это наложение масок нужного цвета на пустой буфер; на 26 искр
-   это доли миллисекунды. */
+   кадр — это наложение масок нужного цвета на пустой буфер; на четыре
+   искры это доли миллисекунды. */
 
 #define WM_FAIRY_CLICK (WM_APP + 17)
 #define FX_WINDOWS 4    /* столько облачков может лететь одновременно */
-#define FX_PARTS 7   /* семь звёздочек: больше — рябит (было 34) */
-#define FX_FRAMES 44    /* ~0.7 с при 16 мс на кадр */
+#define FX_PARTS 4   /* четыре звёздочки (было 34, потом 7) */
+#define FX_FRAMES 22    /* ~0.35 с при 16 мс на кадр (было 44 — медленно) */
 #define FX_SPR 8        /* 4 размера × (пятиконечная звезда, четырёхлучевая искра) */
 
 typedef struct {
@@ -82,7 +82,7 @@ static BYTE fx_cover(const float *px, const float *py, int n, int x, int y) {
 /* Три маски на звезду: сама звезда, кайма чуть шире (темнее тем же цветом —
    чтобы звезду было видно на белом) и маленькая светлая серединка. */
 static void fx_make_sprite(int k, float r, int points, float inner) {
-  float rimR = r + 1.3f * g_fxScale;
+  float rimR = r + 1.0f * g_fxScale;
   int w = (int)(rimR * 2.0f + 3.0f);
   g_fxW[k] = w;
   g_fxShape[k] = (BYTE *)calloc((size_t)w * w, 1);
@@ -111,7 +111,8 @@ static void fx_init_sprites(void) {
   g_fxScale = s ? GetDeviceCaps(s, LOGPIXELSX) / 96.0f : 1.0f;
   if (s) ReleaseDC(NULL, s);
   if (g_fxScale < 1.0f) g_fxScale = 1.0f;
-  static const float sizes[4] = {4.5f, 6.5f, 8.5f, 11.0f};
+  /* мелкие: было 4.5…11 — крупно */
+  static const float sizes[4] = {3.0f, 3.8f, 4.6f, 5.5f};
   for (int i = 0; i < 4; i++) {
     fx_make_sprite(i * 2, sizes[i] * g_fxScale, 5, 0.45f);     /* звёздочка */
     fx_make_sprite(i * 2 + 1, sizes[i] * g_fxScale, 4, 0.28f); /* искра */
@@ -123,9 +124,9 @@ static void fx_render(FxWin *f) {
   int S = f->size;
   memset(f->bits, 0, (size_t)S * S * 4);
   /* вспышка в точке нажатия: розовое колечко расходится и тает */
-  if (f->frame < 10) {
-    float t = f->frame / 10.0f;
-    float rad = (5.0f + 34.0f * t) * g_fxScale, thick = (3.5f - 2.0f * t) * g_fxScale;
+  if (f->frame < 6) {
+    float t = f->frame / 6.0f;
+    float rad = (4.0f + 22.0f * t) * g_fxScale, thick = (2.8f - 1.6f * t) * g_fxScale;
     float ra = 0.75f * (1.0f - t);
     int c0 = S / 2, span = (int)(rad + thick + 2);
     for (int y = c0 - span; y <= c0 + span; y++) {
@@ -154,7 +155,7 @@ static void fx_render(FxWin *f) {
     /* мерцание: у каждой звезды свой ритм */
     float tw = 0.80f + 0.20f * sinf(age * 0.85f + p->tw);
     float a = fade * tw;
-    if (age < 3) a *= (age + 1) / 3.0f; /* вспыхивает, а не появляется рывком */
+    if (age < 2) a *= (age + 1) / 2.0f; /* вспыхивает, а не появляется рывком */
     int w = g_fxW[p->spr];
     BYTE *sh = g_fxShape[p->spr], *co = g_fxCore[p->spr], *rim = g_fxRim[p->spr];
     if (!sh || !rim) continue;
@@ -197,8 +198,8 @@ static void fx_step(FxWin *f) {
     if (f->frame < p->delay) continue;
     p->x += p->vx;
     p->y += p->vy;
-    p->vx *= 0.93f;
-    p->vy = p->vy * 0.93f + 0.05f * g_fxScale; /* волшебная пыль чуть оседает */
+    p->vx *= 0.88f;
+    p->vy = p->vy * 0.88f + 0.06f * g_fxScale; /* волшебная пыль чуть оседает */
   }
 }
 
@@ -298,16 +299,15 @@ static void fx_burst(int x, int y) {
   float base = fx_rand() * 6.2832f;
   for (int i = 0; i < FX_PARTS; i++) {
     FxPart *p = &f->p[i];
-    /* семь — мало, поэтому по кругу почти равномерно, чтобы не слиплись */
+    /* их мало — поэтому по кругу почти равномерно, чтобы не слиплись */
     float ang = base + i * (6.2832f / FX_PARTS) + (fx_rand() - 0.5f) * 0.6f;
-    float sp = (1.4f + fx_rand() * 3.0f) * g_fxScale;
+    float sp = (2.6f + fx_rand() * 1.8f) * g_fxScale; /* быстро разлетаются */
     p->x = S / 2.0f + (fx_rand() - 0.5f) * 4.0f;
     p->y = S / 2.0f + (fx_rand() - 0.5f) * 4.0f;
     p->vx = cosf(ang) * sp;
     p->vy = sinf(ang) * sp - 0.8f * g_fxScale; /* чуть вверх: как фонтанчик */
-    /* покрупнее: из двух больших размеров (спрайты 4–7) */
-    p->spr = 4 + (int)(fx_rand() * 4) % 4;
-    p->delay = i < 5 ? 0 : 2 + (int)(fx_rand() * 4); /* пара — чуть позже */
+    p->spr = (int)(fx_rand() * FX_SPR) % FX_SPR;
+    p->delay = 0;
     p->tw = fx_rand() * 6.2832f;
     const BYTE *c = pal[order[i % 8]];
     p->r = c[0];
