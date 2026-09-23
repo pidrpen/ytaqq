@@ -1444,6 +1444,8 @@ static const CardLabel kCardLabels[] = {
     {L"ProductCode", L"Код изделия"},
     {L"ProductClass", L"Класс изделия"},
     {L"Mass", L"Масса"},
+    {L"PreformSize", L"Габариты заготовки"},
+    {L"PreformExpense", L"Масса заготовки"},
     {L"Weight", L"Масса"},
     {L"Length", L"Длина"},
     {L"Width", L"Ширина"},
@@ -2373,6 +2375,7 @@ static long card_owner_of_tp(SQLHDBC dbc, long tpId, CardOut *c, CardRow *rows, 
 typedef struct {
   wchar_t mat[200], mass[80], dims[240];
   wchar_t sort[240]; /* сортамент: «Круг 45 ГОСТ 2590-2006 / 38ХС ГОСТ 4543-2016» */
+  BOOL dimsFixed, massFixed; /* нашлись PreformSize / PreformExpense — другие не нужны */
   int sortScore;
   int ndims;
   long seen[30];
@@ -2465,7 +2468,27 @@ static BOOL pf_complete(const PfSum *sm) {
 
 static void pf_take(PfSum *sm, const wchar_t *key, const wchar_t *val) {
   if (!val || !val[0] || !wcscmp(val, L"0") || !wcscmp(val, L"нет")) return;
+  /* Где у заготовки габариты и масса, известно точно: PreformSize и
+     PreformExpense (масса — в его строке Value). Они главнее любых других
+     размеров и масс, найденных при обходе (у материала, у изделия). */
+  if (!_wcsicmp(key, L"PreformSize")) {
+    if (!sm->dimsFixed) {
+      _snwprintf(sm->dims, 240, L"Габариты %s", val);
+      sm->dims[239] = 0;
+      sm->ndims = 1;
+      sm->dimsFixed = TRUE;
+    }
+    return;
+  }
+  if (!_wcsicmp(key, L"PreformExpense")) {
+    if (!sm->massFixed) {
+      lstrcpynW(sm->mass, val, 80);
+      sm->massFixed = TRUE;
+    }
+    return;
+  }
   int k = pf_kind(key);
+  if ((k == 2 && sm->massFixed) || (k == 3 && sm->dimsFixed)) return;
   const wchar_t *lab = card_label(key);
   if (k == 1 && !sm->mat[0]) lstrcpynW(sm->mat, val, 200);
   if (k == 2 && !sm->mass[0]) lstrcpynW(sm->mass, val, 80);
@@ -2515,13 +2538,14 @@ static void pf_explore(SQLHDBC dbc, long id, int depth, CardOut *c, const wchar_
   for (int i = 0; i < n; i++) {
     pf_sort_candidate(sm, rows[i].s1, rows[i].s2);
     if (card_hidden(rows[i].s1)) continue;
-    pf_take(sm, rows[i].s1, rows[i].s2);
+    if (rows[i].n3 != 8 && rows[i].n3 != 23) pf_take(sm, rows[i].s1, rows[i].s2); /* у составных число — в строках */
     if (c && rows[i].s2[0]) card_pair_t(c, pad, rows[i].s1, rows[i].s2, 0, rows[i].n3);
     if (rows[i].n3 == 6 && rows[i].n2 && nf < 40 && pf_follow_link(rows[i].s1)) follow[nf++] = rows[i].n2;
   }
   /* списки и составные атрибуты: строка за строкой */
   for (int i = 0; i < n && sm->queries <= 60 && !pf_late(sm); i++) {
-    if ((rows[i].n3 != 8 && rows[i].n3 != 23) || card_hidden(rows[i].s1)) continue;
+    BOOL known = !_wcsicmp(rows[i].s1, L"PreformSize") || !_wcsicmp(rows[i].s1, L"PreformExpense");
+    if (!known && ((rows[i].n3 != 8 && rows[i].n3 != 23) || card_hidden(rows[i].s1))) continue;
     _snwprintf(sql, 4000,
                L"SELECT TOP 300 a.CollectionElementId, nk.Value, " PF_VALUE_SQL
                L", ISNULL(a.Link,0), a.DataType "
@@ -2557,7 +2581,8 @@ static void pf_explore(SQLHDBC dbc, long id, int depth, CardOut *c, const wchar_
            Value — значит, это масса или длина. В списке параметров имя
            параметра — в соседнем поле строки (Name, Parameter…). */
         valKey = rows[i].s1;
-        for (int q = e; q < m && el[q].n1 == cur; q++) {
+        /* у массы, длины и т.п. имя уже известно — подпись строки его не меняет */
+        for (int q = e; q < m && el[q].n1 == cur && pf_kind(rows[i].s1) == 0 && !known; q++) {
           wchar_t kq[64];
           pf_lower(el[q].s1, kq, 64);
           if (el[q].s2[0] && (!wcscmp(kq, L"name") || wcsstr(kq, L"parameter") || wcsstr(kq, L"characteristic") ||
@@ -2737,7 +2762,16 @@ static void pf_short_one(const wchar_t *seg, wchar_t *out, int cap) {
     if (pl > 3 && !wcscmp(part + pl - 3, L" кг")) {
       lstrcpynW(mass, part, 60);
     } else if (pf_kind(part) == 3 && wcsrchr(part, L' ')) {
-      const wchar_t *v = wcsrchr(part, L' ') + 1;
+      /* значение — с первой цифры или значка диаметра: «Габариты Ø45 x 118» */
+      const wchar_t *v = part;
+      while (*v && !(*v >= L'0' && *v <= L'9') && *v != 0x00D8 && *v != 0x00F8 && *v != 0x2205) v++;
+      if (!*v) v = wcsrchr(part, L' ') + 1;
+      if (wcsstr(low, L"габарит")) { /* уже целиком, со своими «×» */
+        lstrcpynW(dims, v, 120);
+        nd = 2;
+        p = sep ? sep + 3 : NULL;
+        continue;
+      }
       if (!nd++) /* одна длина без подписи непонятна — ей буква: L=120 */
         lstrcpynW(dim1, wcsstr(low, L"длин") ? L"L=" : wcsstr(low, L"толщ") ? L"s=" :
                         wcsstr(low, L"шир") ? L"B=" : wcsstr(low, L"выс") ? L"H=" : L"", 16);
@@ -2926,7 +2960,9 @@ static void card_preforms(SQLHDBC dbc, long pfCard, CardOut *c, CardRow *rows, w
     pf_material_text(sm, mt, 480);
     pf_mass_text(sm->mass, ms, 80);
     card_add(c, L"      %-14s%s\r\n", L"Материал", mt[0] ? mt : L"—");
-    card_add(c, L"      %-14s%s\r\n", L"Габариты", sm->dims[0] ? sm->dims : L"—");
+    const wchar_t *dv = sm->dims;
+    if (!wcsncmp(dv, L"Габариты ", 9)) dv += 9; /* из PreformSize — подпись уже в строке слева */
+    card_add(c, L"      %-14s%s\r\n", L"Габариты", dv[0] ? dv : L"—");
     card_add(c, L"      %-14s%s\r\n", L"Масса", ms[0] ? ms : L"—");
     if (!mt[0] && !sm->dims[0] && !sm->mass[0])
       card_add(c, L"      (в заготовке не нашлось ни материала, ни размеров, ни массы —\r\n"
