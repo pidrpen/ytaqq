@@ -12,6 +12,23 @@
      destroys a working index. */
 
 #define WM_FILES_DONE (WM_APP + 11)
+#define WM_FILES_CHANGES (WM_APP + 15) /* lParam — FileChanges*, освобождает получатель */
+#define CHG_MAX 200 /* столько строк влезает в список находок */
+
+/* Что появилось и что перезаписали с прошлого обхода. Счётчики — все,
+   список — первые CHG_MAX, новые впереди. */
+typedef struct {
+  int nNew, nUpd, n;
+  BOOL full;
+  wchar_t name[CHG_MAX][PLM_COL1];
+  wchar_t dir[CHG_MAX][PLM_COL2];
+  BYTE upd[CHG_MAX];
+} FileChanges;
+
+/* Уведомления о новых и изменённых файлах и полные обходы — одной галочкой */
+static BOOL g_filesNotify = TRUE;
+/* расписание полных обходов: день (ГГГГММДД), сколько уже было, следующий — в минутах от полуночи */
+static int g_fullDay, g_fullRuns, g_fullNext;
 #define TIMER_FILES 8
 #define TIMER_FILES_TICK 9
 #define FILES_ARENA_CHUNK 262144   /* wchar_t per arena chunk */
@@ -26,6 +43,10 @@ typedef struct FileArena {
 typedef struct {
   int dir;            /* index into FileIdx.dirs */
   const wchar_t *name;/* arena-owned */
+  /* дата изменения файла (та, что в Проводнике), в секундах с 1601 года;
+     0 — неизвестно (индекс от старой версии). По ней видно файл, перезаписанный
+     под тем же именем. */
+  ULONGLONG t;
 } FileEnt;
 
 typedef struct {
@@ -176,7 +197,7 @@ static BOOL files_junk(const wchar_t *name) {
   return FALSE;
 }
 
-static BOOL idx_add(FileIdx *ix, int dirIdx, const wchar_t *name) {
+static BOOL idx_add(FileIdx *ix, int dirIdx, const wchar_t *name, ULONGLONG t) {
   if (dirIdx < 0 || !name || !name[0]) return FALSE;
   /* не ошибка, а «этот файл нам не нужен» — вызывающий считает FALSE сбоем */
   if (files_junk(name)) return TRUE;
@@ -191,6 +212,7 @@ static BOOL idx_add(FileIdx *ix, int dirIdx, const wchar_t *name) {
   if (!copy) return FALSE;
   ix->ent[ix->n].dir = dirIdx;
   ix->ent[ix->n].name = copy;
+  ix->ent[ix->n].t = t;
   ix->n++;
   return TRUE;
 }
@@ -243,6 +265,7 @@ static BOOL idx_merge(FileIdx *dst, FileIdx *src) {
   for (int i = 0; i < src->n; i++) {
     dst->ent[dst->n].dir = base + src->ent[i].dir;
     dst->ent[dst->n].name = src->ent[i].name;
+    dst->ent[dst->n].t = src->ent[i].t;
     dst->n++;
   }
   return TRUE;
@@ -533,6 +556,11 @@ static BOOL files_save_idx(FileIdx *ix) {
     snprintf(head, sizeof(head), "%s{\"D\":%d,\"F\":", i ? "," : "", ix->ent[i].dir);
     json_put(&o, head);
     json_put_w(&o, ix->ent[i].name);
+    if (ix->ent[i].t) {
+      char tb[32];
+      snprintf(tb, sizeof(tb), ",\"T\":%llu", (unsigned long long)ix->ent[i].t);
+      json_put(&o, tb);
+    }
     json_put(&o, "}");
   }
   json_put(&o, "]}");
@@ -710,7 +738,10 @@ static BOOL files_parse_compact(const char *buf, FileIdx *ix, wchar_t *idxRoot) 
     v = json_key(obj, end, "F");
     name[0] = 0;
     if (v) json_parse_str(&v, name, MAX_PATH * 2);
-    if (name[0] && d >= 0 && d < ix->dirsN) idx_add(ix, d, name);
+    ULONGLONG t = 0;
+    v = json_key(obj, end, "T");
+    if (v) t = (ULONGLONG)strtoull(v, NULL, 10);
+    if (name[0] && d >= 0 && d < ix->dirsN) idx_add(ix, d, name, t);
     data = end + 1;
   }
   (void)idxRoot;
@@ -747,7 +778,7 @@ static BOOL files_parse_legacy(const char *buf, FileIdx *ix, const wchar_t *idxR
     if (v) json_parse_str(&v, name, MAX_PATH * 2);
     if (name[0]) {
       if (!dir[0] && idxRoot[0]) lstrcpynW(dir, idxRoot, 32768);
-      idx_add(ix, idx_dir(ix, dir), name);
+      idx_add(ix, idx_dir(ix, dir), name, 0);
     }
     data = end + 1;
   }
@@ -995,7 +1026,8 @@ static BOOL walk_entry(WalkWorker *w, const wchar_t *dir, size_t dl, const wchar
         ok = FALSE;
       }
     }
-    if (ok && !idx_add(w->ix, *dirIdx, nm)) {
+    /* дату файла Windows отдаёт вместе с именем — лишних обращений к сети нет */
+    if (ok && !idx_add(w->ix, *dirIdx, nm, childTime / 10000000ULL)) {
       w->oom = TRUE;
       ok = FALSE;
     }
@@ -1033,8 +1065,13 @@ static int walk_lookup(WalkQ *q, const wchar_t *path) {
 }
 
 /* TIFF-папка без подпапок: если дата та же, имена уже в JSON — не открываем. */
+static volatile LONG g_filesFull; /* полный обход: читаем все папки подряд */
+
 static BOOL walk_reuse(WalkWorker *w, const wchar_t *dir, ULONGLONG mt) {
   if (!mt) return FALSE;
+  /* Если файл перезаписали под тем же именем, дата папки не меняется,
+     и быстрый обход такую замену не увидит. Полный — заглядывает везде. */
+  if (InterlockedCompareExchange(&g_filesFull, 0, 0)) return FALSE;
   WalkQ *q = w->q;
   FileIdx *old = q->old;
   if (!old || !old->mtime || !old->subs || !old->begin || !old->count) return FALSE;
@@ -1050,7 +1087,7 @@ static BOOL walk_reuse(WalkWorker *w, const wchar_t *dir, ULONGLONG mt) {
   int b = old->begin[od], c = old->count[od];
   if (b >= 0 && c > 0) {
     for (int i = 0; i < c; i++) {
-      if (!idx_add(w->ix, nd, old->ent[b + i].name)) {
+      if (!idx_add(w->ix, nd, old->ent[b + i].name, old->ent[b + i].t)) {
         w->oom = TRUE;
         return TRUE;
       }
@@ -1272,6 +1309,93 @@ static void files_walk_all(const wchar_t *root, FileIdx *out, BOOL *oom, BOOL *s
   DeleteCriticalSection(&q.cs);
 }
 
+/* ---- что изменилось с прошлого обхода ------------------------------------ */
+static unsigned chg_key(unsigned dirHash, const wchar_t *name) {
+  unsigned h = dirHash ^ (unsigned)L'\\';
+  h *= 16777619u;
+  for (; *name; name++) {
+    wchar_t c = *name;
+    if (c >= L'A' && c <= L'Z') c += 32;
+    h ^= (unsigned)c;
+    h *= 16777619u;
+  }
+  return h;
+}
+
+static void chg_put(FileChanges *r, const FileIdx *ix, int i, BOOL upd) {
+  if (upd) r->nUpd++;
+  else r->nNew++;
+  if (r->n >= CHG_MAX) return;
+  const FileEnt *e = &ix->ent[i];
+  lstrcpynW(r->name[r->n], e->name, PLM_COL1);
+  lstrcpynW(r->dir[r->n], e->dir < ix->dirsN ? ix->dirs[e->dir] : L"", PLM_COL2);
+  r->upd[r->n] = (BYTE)upd;
+  r->n++;
+}
+
+/* Новый — такого пути раньше не было. Обновлён — путь тот же, а дата другая.
+   Именно «другая», а не «новее»: при копировании Windows сохраняет файлу старую
+   дату, и вернувшаяся прежняя версия чертежа — тоже изменение. Дату 0 (индекс от
+   старой версии) не сравниваем: иначе первый же обход объявил бы всё обновлённым. */
+static FileChanges *files_diff(const FileIdx *old, const FileIdx *fresh) {
+  if (!old || old->n <= 0 || !fresh || fresh->n <= 0) return NULL;
+  int cap = 1;
+  while (cap < old->n * 2) cap <<= 1;
+  unsigned mask = (unsigned)cap - 1u;
+  int *tab = (int *)malloc((size_t)cap * sizeof(int));
+  unsigned *odh = (unsigned *)malloc((size_t)(old->dirsN > 0 ? old->dirsN : 1) * sizeof(unsigned));
+  unsigned *ndh = (unsigned *)malloc((size_t)(fresh->dirsN > 0 ? fresh->dirsN : 1) * sizeof(unsigned));
+  FileChanges *r = (FileChanges *)calloc(1, sizeof(FileChanges));
+  if (!tab || !odh || !ndh || !r) {
+    free(tab);
+    free(odh);
+    free(ndh);
+    free(r);
+    return NULL;
+  }
+  for (int i = 0; i < cap; i++) tab[i] = -1;
+  for (int d = 0; d < old->dirsN; d++) odh[d] = walk_hash(old->dirs[d]);
+  for (int d = 0; d < fresh->dirsN; d++) ndh[d] = walk_hash(fresh->dirs[d]);
+  for (int i = 0; i < old->n; i++) {
+    int d = old->ent[i].dir;
+    if (d < 0 || d >= old->dirsN) continue;
+    unsigned h = chg_key(odh[d], old->ent[i].name) & mask;
+    while (tab[h] >= 0) h = (h + 1u) & mask;
+    tab[h] = i;
+  }
+  /* два прохода: сначала новые, потом обновлённые — в списке новые идут первыми */
+  for (int pass = 0; pass < 2; pass++) {
+    for (int j = 0; j < fresh->n; j++) {
+      int d = fresh->ent[j].dir;
+      if (d < 0 || d >= fresh->dirsN) continue;
+      const wchar_t *nm = fresh->ent[j].name;
+      unsigned h = chg_key(ndh[d], nm) & mask;
+      int found = -1;
+      while (tab[h] >= 0) {
+        int o = tab[h];
+        if (_wcsicmp(old->ent[o].name, nm) == 0 &&
+            _wcsicmp(old->dirs[old->ent[o].dir], fresh->dirs[d]) == 0) {
+          found = o;
+          break;
+        }
+        h = (h + 1u) & mask;
+      }
+      if (pass == 0 && found < 0) chg_put(r, fresh, j, FALSE);
+      if (pass == 1 && found >= 0 && old->ent[found].t && fresh->ent[j].t &&
+          old->ent[found].t != fresh->ent[j].t)
+        chg_put(r, fresh, j, TRUE);
+    }
+  }
+  free(tab);
+  free(odh);
+  free(ndh);
+  if (r->nNew + r->nUpd == 0) {
+    free(r);
+    return NULL;
+  }
+  return r;
+}
+
 static DWORD WINAPI files_index_thread(LPVOID param) {
   (void)param;
 again:;
@@ -1303,9 +1427,20 @@ again:;
     g_filesNote[0] = 0;
     if (oom) lstrcpynW(g_filesNote, L"Не хватило памяти — индекс неполный", 120);
     else if (!saved) lstrcpynW(g_filesNote, L"Не удалось записать индекс", 120);
+    /* сравниваем с тем, что было, до того как старый индекс уйдёт; неполный
+       обход (не хватило памяти) с прошлым не сравниваем */
+    FileChanges *chg = NULL;
+    if (g_filesNotify && !oom) {
+      files_lock();
+      chg = files_diff(g_idx, ix);
+      files_unlock();
+      if (chg) chg->full = InterlockedCompareExchange(&g_filesFull, 0, 0) != 0;
+    }
     idx_publish(ix);
+    if (chg && (!g_hwnd || !PostMessageW(g_hwnd, WM_FILES_CHANGES, 0, (LPARAM)chg))) free(chg);
   }
   if (InterlockedExchange(&g_filesAgain, 0)) goto again;
+  InterlockedExchange(&g_filesFull, 0);
   InterlockedExchange(&g_filesBusy, 0);
   if (g_hwnd) PostMessageW(g_hwnd, WM_FILES_DONE, (WPARAM)g_filesN, 0);
   return 0;
@@ -1335,6 +1470,137 @@ static void files_start_index(BOOL force) {
     InterlockedExchange(&g_filesBusy, 0);
     files_refresh_status();
   }
+}
+
+/* ---- полный обход дважды в день ------------------------------------------- */
+/* Быстрый обход раз в час видит новые и удалённые файлы, но не перезаписанные под
+   тем же именем: у такой папки дата не меняется, и он в неё не заходит. Дважды в
+   день идёт полный — в случайное время между 8:00 и 16:30, с разницей четыре часа.
+   Случайное — чтобы компьютеры всех, у кого стоит программа, не шли на сетевой
+   диск разом. */
+#define FULL_OPEN (8 * 60)
+#define FULL_CLOSE (16 * 60 + 30)
+#define FULL_GAP (4 * 60)
+
+static unsigned files_rand(unsigned range) {
+  if (range == 0) return 0;
+  unsigned x = (unsigned)GetTickCount64() ^ (GetCurrentProcessId() * 2654435761u);
+  x ^= x >> 13;
+  x *= 0x5bd1e995u;
+  x ^= x >> 15;
+  return x % range;
+}
+
+static BOOL files_start_full(void) {
+  if (InterlockedCompareExchange(&g_filesBusy, 0, 0)) return FALSE; /* идёт другой — позже */
+  InterlockedExchange(&g_filesFull, 1);
+  files_start_index(TRUE);
+  if (!InterlockedCompareExchange(&g_filesBusy, 0, 0)) {
+    InterlockedExchange(&g_filesFull, 0);
+    return FALSE;
+  }
+  return TRUE;
+}
+
+/* Зовётся раз в минуту. План на день составляется при первом тике дня и
+   запоминается в files.txt: перезапуск программы не должен давать третий проход. */
+static void files_plan_tick(void) {
+  static BOOL firstTick = TRUE;
+  BOOL wasFirst = firstTick;
+  firstTick = FALSE;
+  if (!g_filesNotify || !g_filesRoot[0]) return;
+  SYSTEMTIME st;
+  GetLocalTime(&st);
+  int day = st.wYear * 10000 + st.wMonth * 100 + st.wDay;
+  int now = st.wHour * 60 + st.wMinute;
+  if (day != g_fullDay) {
+    g_fullDay = day;
+    g_fullRuns = 0;
+    g_fullNext = FULL_OPEN + (int)files_rand(FULL_CLOSE - FULL_GAP - FULL_OPEN + 1);
+    save_files_pref();
+  }
+  if (g_fullRuns >= 2 || now < FULL_OPEN || now > FULL_CLOSE || now < g_fullNext) return;
+  /* компьютер включили позже назначенного — не бежим сразу при запуске,
+     а через случайные минуты: утром все включаются одновременно */
+  if (wasFirst && now > g_fullNext) {
+    g_fullNext = now + 1 + (int)files_rand(20);
+    save_files_pref();
+    return;
+  }
+  if (!files_start_full()) return; /* идёт обычный обход — попробуем через минуту */
+  g_fullRuns++;
+  g_fullNext = now + FULL_GAP;
+  /* второй не влезает до 16:30 — сегодня его не будет */
+  if (g_fullNext > FULL_CLOSE) g_fullRuns = 2;
+  save_files_pref();
+}
+
+/* ---- что нового в папке ------------------------------------------------ */
+/* Последний найденный список держим до следующего: по щелчку на всплывашке
+   или из меню в трее его можно открыть и позже. */
+static FileChanges *g_chgLast;
+
+static void files_show_changes(void) {
+  const FileChanges *c = g_chgLast;
+  if (!c) {
+    show_status(g_filesNotify ? L"Новых файлов в папке пока не было"
+                              : L"Уведомления о файлах выключены в Настройках");
+    return;
+  }
+  int n = c->n < PLM_ROWS ? c->n : PLM_ROWS;
+  int cap = 400 + n * (PLM_COL1 + PLM_COL2 + 16);
+  wchar_t *text = (wchar_t *)malloc((size_t)cap * sizeof(wchar_t));
+  if (!text) return;
+  int len = _snwprintf(text, cap, L"Новых: %d, обновлено: %d", c->nNew, c->nUpd);
+  if (len < 0) len = 0;
+  if (c->nNew + c->nUpd > n)
+    len += _snwprintf(text + len, cap - len, L" · показаны первые %d", n);
+  len += _snwprintf(text + len, cap - len, L"\r\n\r\n");
+  g_resultFiles = TRUE;
+  g_plmLastLink[0] = 0;
+  for (int i = 0; i < n; i++) {
+    const wchar_t *kind = c->upd[i] ? L"обновлён" : L"новый";
+    lstrcpynW(g_plmEsi[i], c->name[i], PLM_COL1);
+    _snwprintf(g_plmTp[i], PLM_COL2, L"%s · %s", kind, c->dir[i]);
+    g_plmTp[i][PLM_COL2 - 1] = 0;
+    _snwprintf(g_plmLinks[i], PLM_LINK, L"%s\\%s", c->dir[i], c->name[i]);
+    g_plmLinks[i][PLM_LINK - 1] = 0;
+    if (!g_plmLastLink[0]) lstrcpynW(g_plmLastLink, g_plmLinks[i], PLM_LINK);
+    if (len < cap - 1) {
+      int w = _snwprintf(text + len, cap - len, L"%s  %s\r\n", kind, g_plmLinks[i]);
+      len = w < 0 ? cap - 1 : len + w;
+    }
+  }
+  text[cap - 1] = 0;
+  g_plmCount = n;
+  g_ansTitle = L"Изменения в папке";
+  show_answer_text(text);
+  free(text);
+}
+
+/* Обход закончился и нашёл новое: всплывашка у часов и строка в окне. */
+static void files_on_changes(FileChanges *c) {
+  free(g_chgLast);
+  g_chgLast = c;
+  if (!c) return;
+  wchar_t msg[160];
+  if (c->nNew && c->nUpd)
+    _snwprintf(msg, 160, L"Новых файлов: %d, обновлено: %d", c->nNew, c->nUpd);
+  else if (c->nNew)
+    _snwprintf(msg, 160, L"Новых файлов: %d", c->nNew);
+  else
+    _snwprintf(msg, 160, L"Обновлено файлов: %d", c->nUpd);
+  msg[159] = 0;
+  if (g_trayAdded) {
+    NOTIFYICONDATAW n = g_nid;
+    n.uFlags = NIF_INFO;
+    lstrcpynW(n.szInfoTitle, L"Новое в папке", 64);
+    _snwprintf(n.szInfo, 256, L"%s\nНажмите, чтобы посмотреть список", msg);
+    n.szInfo[255] = 0;
+    n.dwInfoFlags = NIIF_INFO;
+    Shell_NotifyIconW(NIM_MODIFY, &n);
+  }
+  show_status(msg);
 }
 
 /* Asks the walk to give up; it notices within a few hundred files. */
@@ -1470,16 +1736,35 @@ static void load_files_pref(void) {
   HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
                          FILE_ATTRIBUTE_NORMAL, NULL);
   if (h != INVALID_HANDLE_VALUE) {
-    char buf[MAX_PATH * 3];
+    char buf[MAX_PATH * 3 + 256];
     DWORD n = 0;
     ReadFile(h, buf, sizeof(buf) - 1, &n, NULL);
     CloseHandle(h);
     buf[n] = 0;
-    char *nl = strchr(buf, '\n');
-    if (nl) *nl = 0;
-    char *cr = strchr(buf, '\r');
-    if (cr) *cr = 0;
-    if (buf[0]) MultiByteToWideChar(CP_UTF8, 0, buf, -1, g_filesRoot, MAX_PATH);
+    /* первая строка — папка; дальше (если есть) — уведомления и план полных
+       обходов. Старый файл из одной строки читается как раньше. */
+    char *line = buf;
+    int ln = 0;
+    while (line && *line) {
+      char *nl = strchr(line, '\n');
+      if (nl) *nl = 0;
+      char *cr = strchr(line, '\r');
+      if (cr) *cr = 0;
+      if (ln == 0) {
+        if (line[0]) MultiByteToWideChar(CP_UTF8, 0, line, -1, g_filesRoot, MAX_PATH);
+      } else if (!strncmp(line, "notify ", 7)) {
+        g_filesNotify = atoi(line + 7) != 0;
+      } else if (!strncmp(line, "plan ", 5)) {
+        int d = 0, r = 0, nx = 0;
+        if (sscanf(line + 5, "%d %d %d", &d, &r, &nx) == 3) {
+          g_fullDay = d;
+          g_fullRuns = r;
+          g_fullNext = nx;
+        }
+      }
+      ln++;
+      line = nl ? nl + 1 : NULL;
+    }
   }
   files_load_idx();
   files_refresh_status();
@@ -1490,8 +1775,12 @@ static void save_files_pref(void) {
   wchar_t path[MAX_PATH];
   if (!g_dataDir[0]) return;
   _snwprintf(path, MAX_PATH, L"%s\\files.txt", g_dataDir);
-  char utf[MAX_PATH * 3];
-  WideCharToMultiByte(CP_UTF8, 0, g_filesRoot, -1, utf, (int)sizeof(utf), NULL, NULL);
+  char utf[MAX_PATH * 3 + 128];
+  int ul = WideCharToMultiByte(CP_UTF8, 0, g_filesRoot, -1, utf, MAX_PATH * 3, NULL, NULL);
+  if (ul <= 0) utf[0] = 0;
+  size_t used = strlen(utf);
+  snprintf(utf + used, sizeof(utf) - used, "\nnotify %d\nplan %d %d %d\n", g_filesNotify ? 1 : 0,
+           g_fullDay, g_fullRuns, g_fullNext);
   HANDLE h = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
   if (h == INVALID_HANDLE_VALUE) return;
   DWORD w = 0;

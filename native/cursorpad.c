@@ -59,6 +59,8 @@
 #define TIMER_SAVE 2
 #define TIMER_PASTE 3
 #define TIMER_STATUS 4
+#define TIMER_FILES_PLAN 10 /* раз в минуту: не пора ли полный обход папки */
+#define ID_FILES_NOTIFY 157
 #define HOTKEY_TOGGLE 1
 #define HOTKEY_SNIP_BASE 10
 #define HOTKEY_CURSOR 2
@@ -94,7 +96,7 @@
 #define PAD 12
 #define GUTTER 26
 #define SET_W 312
-#define SET_H 812  /* темы в два ряда: четыре и рыцарская под ними */
+#define SET_H 846  /* темы в два ряда: четыре и рыцарская под ними */
 #define ASK_W 312
 #define ASK_H 224 /* room for the drawn header */
 #define ID_THEME_BASE 140
@@ -221,6 +223,7 @@ static HFONT g_cardFontZoom;
 static HWND g_filesBar;
 static HWND g_chkAuto;
 static HWND g_chkAnsPin;
+static HWND g_chkNotify; /* «Сообщать о новых и изменённых файлах» */
 static HWND g_answer;
 static HWND g_answerList;
 static HWND g_pick;
@@ -737,6 +740,7 @@ static const wchar_t *knight_title(const wchar_t *t) {
       {L"Атрибуты объекта", L"Родословная"},
       {L"Распознанный текст", L"Свиток"},
       {L"Отчёт об обновлении", L"Весть от гонца"},
+      {L"Изменения в папке", L"Вести из хранилища"},
   };
   for (size_t i = 0; i < sizeof(map) / sizeof(map[0]); i++)
     if (wcscmp(t, map[i][0]) == 0) return map[i][1];
@@ -2046,6 +2050,7 @@ static void tray_menu(HWND hwnd) {
   AppendMenuW(menu, MF_STRING, 16, L"Настройки");
   AppendMenuW(menu, MF_STRING, 15, L"Выделить и прочитать (F6)");
   AppendMenuW(menu, MF_STRING, 17, L"Обновить с GitHub");
+  AppendMenuW(menu, MF_STRING, 18, L"Что нового в папке");
   AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
   AppendMenuW(menu, MF_STRING | (g_skin == 1 ? MF_CHECKED : 0), 10, L"Курсор: Мечник");
   AppendMenuW(menu, MF_STRING | (g_skin == 2 ? MF_CHECKED : 0), 11, L"Курсор: Рукавица");
@@ -2073,6 +2078,7 @@ static void tray_menu(HWND hwnd) {
     else hide_to_tray();
   } else if (cmd == 15) run_ocr_test();
   else if (cmd == 17) start_update();
+  else if (cmd == 18) files_show_changes();
   else if (cmd == 16) {
     if (g_follow) toggle_follow();
     toggle_settings();
@@ -2267,6 +2273,8 @@ static void layout_settings(void) {
   if (g_filesStat) MoveWindow(g_filesStat, pad, y, cw - pad, btnH, TRUE);
   if (g_filesBar) MoveWindow(g_filesBar, pad, y + btnH - 8, cw - pad, 6, TRUE);
   y += btnH + gap;
+  if (g_chkNotify) MoveWindow(g_chkNotify, pad, y, cw - pad, btnH, TRUE);
+  y += btnH + gap;
   if (g_plmServer) MoveWindow(g_plmServer, pad, y, half, btnH, TRUE);
   if (g_plmDb) MoveWindow(g_plmDb, pad + half + gap, y, half, btnH, TRUE);
   y += btnH + gap;
@@ -2421,6 +2429,12 @@ static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
       /* the same button stops a walk that is already running */
       if (InterlockedCompareExchange(&g_filesBusy, 0, 0)) files_stop_index();
       else files_apply_root(TRUE);
+    }
+    if (LOWORD(wParam) == ID_FILES_NOTIFY) {
+      g_filesNotify = (SendMessageW(g_chkNotify, BM_GETCHECK, 0, 0) == BST_CHECKED);
+      save_files_pref();
+      show_status(g_filesNotify ? L"Буду сообщать о новых файлах в папке"
+                                : L"Уведомления о файлах выключены");
     }
     if (LOWORD(wParam) == ID_ANSPIN) {
       g_ansKeepPos = (SendMessageW(g_chkAnsPin, BM_GETCHECK, 0, 0) == BST_CHECKED);
@@ -2716,6 +2730,9 @@ static void create_settings(HWND owner) {
                                 (HMENU)(INT_PTR)136, NULL, NULL);
   g_filesBar = CreateWindowExW(0, PROGRESS_CLASSW, L"", WS_CHILD | PBS_MARQUEE, 0, 0, 200, 6,
                                g_setHwnd, (HMENU)(INT_PTR)137, NULL, NULL);
+  g_chkNotify = CreateWindowExW(0, L"BUTTON", L"Сообщать о новых и изменённых файлах",
+                                WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 0, 0, 240, 26,
+                                g_setHwnd, (HMENU)(INT_PTR)ID_FILES_NOTIFY, NULL, NULL);
   g_plmServer = CreateWindowExW(0, L"EDIT", g_sqlHost,
                                 WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
                                 0, 0, 120, 26, g_setHwnd, (HMENU)(INT_PTR)ID_PLM_SERVER, NULL, NULL);
@@ -2778,6 +2795,10 @@ static void create_settings(HWND owner) {
   if (g_chkAuto) SendMessageW(g_chkAuto, BM_SETCHECK, g_autostart ? BST_CHECKED : BST_UNCHECKED, 0);
   if (g_chkAnsPin)
     SendMessageW(g_chkAnsPin, BM_SETCHECK, g_ansKeepPos ? BST_CHECKED : BST_UNCHECKED, 0);
+  if (g_chkNotify) {
+    SendMessageW(g_chkNotify, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
+    SendMessageW(g_chkNotify, BM_SETCHECK, g_filesNotify ? BST_CHECKED : BST_UNCHECKED, 0);
+  }
   update_engine_buttons();
   layout_settings();
 }
@@ -2854,6 +2875,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     SetTimer(hwnd, TIMER_SAVE, 2000, NULL);
     SetTimer(hwnd, TIMER_CURSOR_KEEP, 4000, NULL);
     SetTimer(hwnd, TIMER_FILES, 3600000, NULL);
+    SetTimer(hwnd, TIMER_FILES_PLAN, 60000, NULL);
     if (g_filesRoot[0]) files_start_index(FALSE);
     if (!register_toggle_hotkey(hwnd)) {
       MessageBoxW(hwnd,
@@ -3053,6 +3075,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     if (wParam == TIMER_CURSOR_KEEP && g_skin > 0) apply_scheme_slots();
     if (wParam == TIMER_FILES) files_start_index(TRUE);
     if (wParam == TIMER_FILES_TICK) files_refresh_status();
+    if (wParam == TIMER_FILES_PLAN) files_plan_tick();
     return 0;
   case WM_SEARCH_DONE: {
     wchar_t *text = (wchar_t *)lParam;
@@ -3130,7 +3153,12 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     }
     return HTCLIENT;
   }
+  case WM_FILES_CHANGES:
+    files_on_changes((FileChanges *)lParam);
+    return 0;
   case WM_TRAY:
+    /* щелчок по всплывашке «Новое в папке» */
+    if (lParam == NIN_BALLOONUSERCLICK) files_show_changes();
     if (lParam == WM_RBUTTONUP || lParam == WM_CONTEXTMENU) tray_menu(hwnd);
     if (lParam == WM_LBUTTONUP || lParam == WM_LBUTTONDBLCLK) {
       if (g_hidden) restore_from_tray();
@@ -3158,10 +3186,12 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     KillTimer(hwnd, TIMER_SAVE);
     KillTimer(hwnd, TIMER_CURSOR_KEEP);
     KillTimer(hwnd, TIMER_FILES);
+    KillTimer(hwnd, TIMER_FILES_PLAN);
     KillTimer(hwnd, TIMER_FILES_TICK);
     files_wait_idle(2000); /* a walk over a slow share must not outlive us */
     save_files_pref();
     files_clear();
+    files_on_changes(NULL);
     UnregisterHotKey(hwnd, HOTKEY_TOGGLE);
     UnregisterHotKey(hwnd, HOTKEY_CURSOR);
     UnregisterHotKey(hwnd, HOTKEY_OCR);
