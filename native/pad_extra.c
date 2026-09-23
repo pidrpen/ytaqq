@@ -892,7 +892,13 @@ static BOOL plm_same_item(const wchar_t *a, const wchar_t *b) {
   return TRUE;
 }
 
+/* share.c: PLM через компьютер коллеги, если своего логина нет */
+static BOOL share_client_on(void);
+static BOOL share_lookup(const wchar_t *query, wchar_t *out, int cap);
+static void share_card(long id, BOOL verbose, wchar_t *out, int cap);
+
 static BOOL plm_lookup(const wchar_t *query, wchar_t *out, int cap) {
+  if (share_client_on()) return share_lookup(query, out, cap);
   g_plmLastLink[0] = 0;
   g_plmCount = 0;
   memset(g_plmTpId, 0, sizeof(g_plmTpId));
@@ -1109,9 +1115,9 @@ static void load_plm_pref(void) {
   HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
                          FILE_ATTRIBUTE_NORMAL, NULL);
   if (h != INVALID_HANDLE_VALUE) {
-    char buf[800];
+    char buf[2400];
     DWORD n = 0;
-    ReadFile(h, buf, 799, &n, NULL);
+    ReadFile(h, buf, sizeof(buf) - 1, &n, NULL);
     CloseHandle(h);
     buf[n] = 0;
     char *line = buf;
@@ -1135,6 +1141,10 @@ static void load_plm_pref(void) {
           MultiByteToWideChar(CP_UTF8, 0, val, -1, g_plmDatabase, 96);
         else if (!strcmp(line, "user") && val[0])
           MultiByteToWideChar(CP_UTF8, 0, val, -1, g_sqlUser, 96);
+        else if (!strcmp(line, "share") && val[0])
+          MultiByteToWideChar(CP_UTF8, 0, val, -1, g_shareRoot, MAX_PATH);
+        else if (!strcmp(line, "serve"))
+          g_shareServe = atoi(val) != 0;
       }
       line = nl ? nl + 1 : NULL;
     }
@@ -1191,10 +1201,13 @@ static void save_plm_pref(void) {
   WideCharToMultiByte(CP_UTF8, 0, g_plmPort, -1, port, 16, NULL, NULL);
   WideCharToMultiByte(CP_UTF8, 0, g_plmDatabase, -1, db, 96, NULL, NULL);
   WideCharToMultiByte(CP_UTF8, 0, g_sqlUser, -1, user, 96, NULL, NULL);
-  char buf[400];
-  snprintf(buf, sizeof(buf), "sql %s\nplm %s\nport %s\ndb %s\nuser %s\n",
+  char share[MAX_PATH * 3];
+  WideCharToMultiByte(CP_UTF8, 0, g_shareRoot, -1, share, sizeof(share), NULL, NULL);
+  char buf[400 + MAX_PATH * 3];
+  snprintf(buf, sizeof(buf), "sql %s\nplm %s\nport %s\ndb %s\nuser %s\nshare %s\nserve %d\n",
            sql[0] ? sql : "UM-SQLSRV", plm[0] ? plm : "um-splmsrv",
-           port[0] ? port : "4450", db[0] ? db : "-", user[0] ? user : "");
+           port[0] ? port : "4450", db[0] ? db : "-", user[0] ? user : "", share,
+           g_shareServe ? 1 : 0);
   HANDLE h = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
   if (h != INVALID_HANDLE_VALUE) {
     DWORD w = 0;
@@ -2229,6 +2242,10 @@ static long card_owner_of_tp(SQLHDBC dbc, long tpId, CardOut *c, CardRow *rows, 
 
 static void plm_card(long id, wchar_t *out, int cap) {
   g_opsPendN = 0;
+  if (share_client_on()) {
+    share_card(id, g_cardVerbose, out, cap);
+    return;
+  }
   CardOut c;
   c.w = out;
   c.cap = cap;
@@ -2463,6 +2480,8 @@ done:
   SQLFreeHandle(SQL_HANDLE_DBC, dbc);
   SQLFreeHandle(SQL_HANDLE_ENV, env);
 }
+
+#include "share.c"
 
 static void compose_answer(const wchar_t *query, wchar_t *out, int cap) {
   wchar_t a[1200] = {0};

@@ -63,6 +63,9 @@
 #define ID_FILES_NOTIFY 157
 #define ID_WATCH_EDIT 158
 #define ID_WATCH_BROWSE 159
+#define ID_SHARE_EDIT 155
+#define ID_SHARE_BROWSE 156
+#define ID_SHARE_SERVE 169
 #define HOTKEY_TOGGLE 1
 #define HOTKEY_SNIP_BASE 10
 #define HOTKEY_CURSOR 2
@@ -98,7 +101,7 @@
 #define PAD 12
 #define GUTTER 26
 #define SET_W 312
-#define SET_H 881  /* темы в два ряда: четыре и рыцарская под ними */
+#define SET_H 935  /* темы в два ряда: четыре и рыцарская под ними */
 #define ASK_W 312
 #define ASK_H 224 /* room for the drawn header */
 #define ID_THEME_BASE 140
@@ -309,6 +312,10 @@ static wchar_t g_plmPort[16] = L"4450";
 static wchar_t g_plmDatabase[96] = L"";
 static wchar_t g_sqlUser[96] = L"";
 static wchar_t g_sqlPass[128] = L"";
+/* общая папка отдела: через неё коллеги без логина получают PLM (share.c) */
+static wchar_t g_shareRoot[MAX_PATH];
+static BOOL g_shareServe; /* раздавать PLM коллегам через этот компьютер */
+static HWND g_shareEdit, g_chkServe;
 #define PLM_ROWS 200  /* result rows held for the list view */
 #define PLM_LINK 4096 /* сетевые пути бывают длиннее тысячи знаков */
 #define PLM_COL1 260
@@ -2282,6 +2289,29 @@ static void files_apply_watch(void) {
   show_status(g_filesWatch[0] ? L"Слежу за выбранной папкой" : L"Слежу за всей папкой архива");
 }
 
+static void share_apply_root(void) {
+  if (!g_shareEdit) return;
+  wchar_t w[MAX_PATH];
+  GetWindowTextW(g_shareEdit, w, MAX_PATH);
+  wchar_t *p = w;
+  while (*p == L' ') p++;
+  wchar_t old[MAX_PATH];
+  share_root_copy(old);
+  share_root_set(p);
+  wchar_t now[MAX_PATH];
+  share_root_copy(now);
+  if (wcscmp(old, now) == 0) return;
+  SetWindowTextW(g_shareEdit, now);
+  if (!now[0] && g_shareServe) {
+    g_shareServe = FALSE;
+    if (g_chkServe) SendMessageW(g_chkServe, BM_SETCHECK, BST_UNCHECKED, 0);
+  }
+  save_plm_pref();
+  if (!now[0]) show_status(L"Общая папка убрана");
+  else if (!g_sqlUser[0] || !g_sqlPass[0]) show_status(L"PLM буду спрашивать у коллег");
+  else show_status(L"Общая папка задана");
+}
+
 static void layout_settings(void) {
   if (!g_setHwnd) return;
   RECT rc;
@@ -2318,6 +2348,15 @@ static void layout_settings(void) {
   y += btnH + gap;
   if (g_plmUser) MoveWindow(g_plmUser, pad, y, half, btnH, TRUE);
   if (g_plmPass) MoveWindow(g_plmPass, pad + half + gap, y, half, btnH, TRUE);
+  y += btnH + gap + 22;
+  {
+    int browseW = 78;
+    if (g_shareEdit) MoveWindow(g_shareEdit, pad, y, cw - pad - browseW - gap, btnH, TRUE);
+    HWND br = GetDlgItem(g_setHwnd, ID_SHARE_BROWSE);
+    if (br) MoveWindow(br, cw - browseW, y, browseW, btnH, TRUE);
+  }
+  y += btnH + gap;
+  if (g_chkServe) MoveWindow(g_chkServe, pad, y, cw - pad, btnH, TRUE);
   y += btnH + gap + 22;
   if (g_btnK2) MoveWindow(g_btnK2, pad, y, half, btnH, TRUE);
   if (g_btnK3) MoveWindow(g_btnK3, pad + half + gap, y, half, btnH, TRUE);
@@ -2365,6 +2404,13 @@ static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
     {
       RECT cap = {14, PANEL_TITLE_H + 6, rc.right - 14, PANEL_TITLE_H + 24};
       DrawTextW(hdc, L"PLM и файлы", -1, &cap, DT_LEFT | DT_SINGLELINE);
+    }
+    if (g_shareEdit) {
+      RECT wr;
+      GetWindowRect(g_shareEdit, &wr);
+      MapWindowPoints(HWND_DESKTOP, hwnd, (POINT *)&wr, 2);
+      RECT a = {14, wr.top - 18, rc.right - 14, wr.top - 2};
+      DrawTextW(hdc, L"общая папка — PLM для коллег", -1, &a, DT_LEFT | DT_SINGLELINE);
     }
     if (g_btnK2) {
       RECT wr;
@@ -2467,6 +2513,32 @@ static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
       /* the same button stops a walk that is already running */
       if (InterlockedCompareExchange(&g_filesBusy, 0, 0)) files_stop_index();
       else files_apply_root(TRUE);
+    }
+    if (LOWORD(wParam) == ID_SHARE_BROWSE) {
+      wchar_t picked[MAX_PATH];
+      if (pick_folder(hwnd, picked, MAX_PATH)) {
+        if (g_shareEdit) SetWindowTextW(g_shareEdit, picked);
+        share_apply_root();
+      }
+      return 0;
+    }
+    if (LOWORD(wParam) == ID_SHARE_EDIT && HIWORD(wParam) == EN_KILLFOCUS) share_apply_root();
+    if (LOWORD(wParam) == ID_SHARE_SERVE) {
+      save_plm_pref(); /* логин могли вписать только что */
+      BOOL want = SendMessageW(g_chkServe, BM_GETCHECK, 0, 0) == BST_CHECKED;
+      if (want && (!g_sqlUser[0] || !g_sqlPass[0])) {
+        want = FALSE;
+        SendMessageW(g_chkServe, BM_SETCHECK, BST_UNCHECKED, 0);
+        show_status(L"Сначала логин и пароль SQL");
+      } else if (want && !g_shareRoot[0]) {
+        want = FALSE;
+        SendMessageW(g_chkServe, BM_SETCHECK, BST_UNCHECKED, 0);
+        show_status(L"Сначала общая папка");
+      } else {
+        show_status(want ? L"Раздаю PLM коллегам" : L"PLM коллегам больше не раздаю");
+      }
+      g_shareServe = want;
+      save_plm_pref();
     }
     if (LOWORD(wParam) == ID_WATCH_BROWSE) {
       wchar_t picked[MAX_PATH];
@@ -2797,6 +2869,12 @@ static void create_settings(HWND owner) {
   g_plmPass = CreateWindowExW(0, L"EDIT", L"",
                               WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_PASSWORD,
                               0, 0, 120, 26, g_setHwnd, (HMENU)(INT_PTR)ID_PLM_PASS, NULL, NULL);
+  g_shareEdit = CreateWindowExW(0, L"EDIT", g_shareRoot, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+                                0, 0, 200, 26, g_setHwnd, (HMENU)(INT_PTR)ID_SHARE_EDIT, NULL, NULL);
+  mk_btn(g_setHwnd, L"Обзор…", ID_SHARE_BROWSE);
+  g_chkServe = CreateWindowExW(0, L"BUTTON", L"Раздавать PLM коллегам через меня",
+                               WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 0, 0, 240, 26,
+                               g_setHwnd, (HMENU)(INT_PTR)ID_SHARE_SERVE, NULL, NULL);
   g_btnK2 = mk_btn(g_setHwnd, L"Мечник", ID_CUR_K2);
   g_btnK3 = mk_btn(g_setHwnd, L"Рукавица", ID_CUR_K3);
   g_btnSys = mk_btn(g_setHwnd, L"Курсор Windows", ID_SYS_CUR);
@@ -2850,6 +2928,14 @@ static void create_settings(HWND owner) {
   if (g_chkNotify) {
     SendMessageW(g_chkNotify, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
     SendMessageW(g_chkNotify, BM_SETCHECK, g_filesNotify ? BST_CHECKED : BST_UNCHECKED, 0);
+  }
+  if (g_shareEdit) {
+    SendMessageW(g_shareEdit, WM_SETFONT, (WPARAM)g_fontBody, TRUE);
+    SendMessageW(g_shareEdit, 0x1501, TRUE, (LPARAM)L"не задана — обмена нет");
+  }
+  if (g_chkServe) {
+    SendMessageW(g_chkServe, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
+    SendMessageW(g_chkServe, BM_SETCHECK, g_shareServe ? BST_CHECKED : BST_UNCHECKED, 0);
   }
   if (g_filesWatchEdit) {
     SendMessageW(g_filesWatchEdit, WM_SETFONT, (WPARAM)g_fontBody, TRUE);
@@ -2914,6 +3000,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     load_notes();
     load_cursor_pref();
     load_plm_pref();
+    share_start();
     load_files_pref();
     if (g_autostart) autostart_set(TRUE);
     create_settings(hwnd);
@@ -3229,6 +3316,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     DestroyWindow(hwnd);
     return 0;
   case WM_DESTROY:
+    share_stop();
     save_notes();
     save_cursor_pref(); /* keeps the results panel's size across restarts */
     if (g_oldEdit && g_edit)
@@ -3298,6 +3386,18 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
   (void)show;
   g_inst = inst;
   SetUnhandledExceptionFilter(on_crash);
+  {
+    /* одноразовый исполнитель запроса коллеги (share.c): без окна и без
+       проверки «уже запущено» — основная программа как раз запущена */
+    int argc = 0;
+    LPWSTR *argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    if (argv && argc >= 4 && wcscmp(argv[1], L"--plm-serve") == 0) {
+      int rc = share_serve_child(argv[2], argv[3]);
+      LocalFree(argv);
+      return rc;
+    }
+    if (argv) LocalFree(argv);
+  }
   clear_runas_layer();
   if (!ensure_single_instance()) return 0;
   enable_dpi();
