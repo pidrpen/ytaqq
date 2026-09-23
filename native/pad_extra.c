@@ -987,8 +987,15 @@ static void share_card(long id, BOOL verbose, wchar_t *out, int cap);
 
 /* Столбец «Заготовка»: одним запросом на все строки находок. Не вышло —
    столбец просто пустой, поиск от этого не страдает. */
+/* какие заготовки у какого изделия нашлись — для сводки в столбце */
+#define PF_PAIRS 400
+static long g_pfOwner[PF_PAIRS], g_pfId[PF_PAIRS];
+static int g_pfPairs;
+static void pf_summarize_rows(SQLHDBC dbc, int n);
+
 static void plm_fill_preforms(SQLHDBC dbc, int n) {
   for (int i = 0; i < n; i++) g_plmPf[i][0] = 0;
+  g_pfPairs = 0;
   wchar_t ids[1600];
   size_t il = 0;
   ids[0] = 0;
@@ -1009,7 +1016,7 @@ static void plm_fill_preforms(SQLHDBC dbc, int n) {
   /* в 2026.09.23.6 карточку заготовок искали в самом объекте — а она в карте
      взаимосвязей, и столбец был пуст у всех */
   _snwprintf(sql, 4000,
-             L"SELECT TOP 400 x.Id, pf.PfName "
+             L"SELECT TOP 400 x.Id, pf.PfName, pf.PfId "
              PLM_HOLDERS(L"%s") L"AND nkp.Value=N'ProductPreformsCard' "
              PF_APPLY(L"pa.Link")
              L"ORDER BY x.Id, pf.PfId",
@@ -1025,13 +1032,19 @@ static void plm_fill_preforms(SQLHDBC dbc, int n) {
   SQLRETURN r = SQLExecDirectW(st, (SQLWCHAR *)sql, SQL_NTS);
   free(sql);
   if (SQL_SUCCEEDED(r)) {
-    SQLINTEGER own = 0;
+    SQLINTEGER own = 0, pfid = 0;
     SQLWCHAR nm[200];
-    SQLLEN t1 = 0, t2 = 0;
+    SQLLEN t1 = 0, t2 = 0, t3 = 0;
     SQLBindCol(st, 1, SQL_C_SLONG, &own, sizeof(own), &t1);
     SQLBindCol(st, 2, SQL_C_WCHAR, nm, sizeof(nm), &t2);
+    SQLBindCol(st, 3, SQL_C_SLONG, &pfid, sizeof(pfid), &t3);
     while (SQL_SUCCEEDED(SQLFetch(st))) {
       if (t1 == SQL_NULL_DATA || t2 <= 0) continue;
+      if (t3 != SQL_NULL_DATA && g_pfPairs < PF_PAIRS) {
+        g_pfOwner[g_pfPairs] = (long)own;
+        g_pfId[g_pfPairs] = (long)pfid;
+        g_pfPairs++;
+      }
       for (int i = 0; i < n; i++) {
         if (g_plmIds[i] != (long)own) continue;
         wchar_t *d = g_plmPf[i];
@@ -1045,6 +1058,8 @@ static void plm_fill_preforms(SQLHDBC dbc, int n) {
     }
   }
   SQLFreeHandle(SQL_HANDLE_STMT, st);
+  /* вместо названий — материал, габариты и масса, где их удалось найти */
+  if (g_pfPairs) pf_summarize_rows(dbc, n);
 }
 
 static BOOL plm_lookup(const wchar_t *query, wchar_t *out, int cap) {
@@ -1498,6 +1513,14 @@ static const CardLabel kCardLabels[] = {
     {L"ProductCode", L"Код изделия"},
     {L"ProductClass", L"Класс изделия"},
     {L"Mass", L"Масса"},
+    {L"Weight", L"Масса"},
+    {L"Length", L"Длина"},
+    {L"Width", L"Ширина"},
+    {L"Height", L"Высота"},
+    {L"Thickness", L"Толщина"},
+    {L"Diameter", L"Диаметр"},
+    {L"Size", L"Размер"},
+    {L"Dimensions", L"Габариты"},
     {L"MassMeasureUnit", L"Единица массы"},
     {L"MeasureUnit", L"Единица измерения"},
     {L"VolumeMeasureUnit", L"Единица объёма"},
@@ -2409,8 +2432,216 @@ static long card_owner_of_tp(SQLHDBC dbc, long tpId, CardOut *c, CardRow *rows, 
   return rows[0].n1;
 }
 
-/* Заготовка в карточке: что это и что в ней записано (материал, размеры…).
-   Ссылки показываем именем объекта, на который они ведут, а не номером. */
+/* ---- заготовка: материал, габариты, масса ---------------------------------
+   Где именно в заготовке лежат эти три вещи, схема не говорит: в самом
+   объекте, в его списке, во вложенном объекте или по ссылке на материал.
+   Поэтому заготовку обходим вглубь (сама, её дети, её списки, ссылки на
+   материал и версии) и собираем поля по названию. Весь обход виден в
+   «Атрибутах» (Shift + «Все данные») — по нему, если что-то не нашлось,
+   видно, куда смотреть. */
+typedef struct {
+  wchar_t mat[200], mass[80], dims[240];
+  int ndims;
+  long seen[30];
+  int nseen;
+  int queries;
+} PfSum;
+
+static void pf_lower(const wchar_t *in, wchar_t *out, int cap) {
+  int i = 0;
+  for (; in[i] && i < cap - 1; i++) out[i] = (wchar_t)towlower(in[i]);
+  out[i] = 0;
+}
+
+/* 1 материал, 2 масса, 3 размер, 0 прочее */
+static int pf_kind(const wchar_t *key) {
+  wchar_t k[128];
+  pf_lower(key, k, 128);
+  if (wcsstr(k, L"unit") || wcsstr(k, L"substitute") || wcsstr(k, L"measure")) return 0;
+  if (wcsstr(k, L"material")) return 1;
+  if (wcsstr(k, L"mass") || wcsstr(k, L"weight")) return 2;
+  static const wchar_t *dims[] = {L"length", L"width", L"height", L"thick", L"diam",
+                                  L"size",   L"dimension", L"gabar", L"sortament"};
+  for (size_t i = 0; i < sizeof(dims) / sizeof(dims[0]); i++)
+    if (wcsstr(k, dims[i])) return 3;
+  return 0;
+}
+
+static void pf_take(PfSum *sm, const wchar_t *key, const wchar_t *val) {
+  if (!val || !val[0] || !wcscmp(val, L"0") || !wcscmp(val, L"нет")) return;
+  int k = pf_kind(key);
+  const wchar_t *lab = card_label(key);
+  if (k == 1 && !sm->mat[0]) lstrcpynW(sm->mat, val, 200);
+  if (k == 2 && !sm->mass[0]) lstrcpynW(sm->mass, val, 80);
+  if (k == 3 && sm->ndims < 4) {
+    size_t l = wcslen(sm->dims);
+    _snwprintf(sm->dims + l, 240 - l, L"%s%s %s", l ? L" · " : L"", lab ? lab : key, val);
+    sm->dims[239] = 0;
+    sm->ndims++;
+  }
+}
+
+static BOOL pf_follow_link(const wchar_t *key) {
+  wchar_t k[128];
+  pf_lower(key, k, 128);
+  return wcsstr(k, L"preform") || wcsstr(k, L"material") || wcsstr(k, L"actualversion") ||
+         wcsstr(k, L"mainvariant") || wcsstr(k, L"blank");
+}
+
+/* c == NULL — только собрать сводку, ничего не печатая */
+static void pf_explore(SQLHDBC dbc, long id, int depth, CardOut *c, const wchar_t *pad, PfSum *sm) {
+  if (!id || sm->nseen >= 30 || sm->queries > 60) return;
+  for (int i = 0; i < sm->nseen; i++)
+    if (sm->seen[i] == id) return;
+  sm->seen[sm->nseen++] = id;
+  CardRow *rows = (CardRow *)malloc(sizeof(CardRow) * 300);
+  CardRow *el = (CardRow *)malloc(sizeof(CardRow) * 300);
+  wchar_t *sql = (wchar_t *)malloc(4000 * sizeof(wchar_t));
+  long *follow = (long *)malloc(sizeof(long) * 40);
+  if (!rows || !el || !sql || !follow) goto out;
+  int nf = 0;
+  wchar_t err[280];
+  wchar_t pad2[40];
+  _snwprintf(pad2, 40, L"%s    ", pad);
+  pad2[39] = 0;
+
+  _snwprintf(sql, 4000,
+             L"SELECT TOP 300 a.AttributeId, nk.Value, COALESCE(lo.Name, " CARD_VALUE_SQL L"), "
+             L"ISNULL(a.Link,0), a.DataType "
+             L"FROM InfoObjectAttributes AS a WITH(NOLOCK) "
+             L"JOIN NameKeys AS nk WITH(NOLOCK) ON nk.NameKeyId=a.NameKeyId "
+             L"LEFT JOIN InfoObjects AS lo WITH(NOLOCK) ON a.DataType=6 AND lo.InfoObjectId=a.Link "
+             L"WHERE a.OwnerId=%ld AND a.Outdated=0 AND ISNULL(a.CollectionElementId,0)=0 "
+             L"ORDER BY nk.Value",
+             id);
+  sm->queries++;
+  int n = card_query(dbc, sql, rows, 300, err, 280);
+  for (int i = 0; i < n; i++) {
+    if (card_hidden(rows[i].s1)) continue;
+    pf_take(sm, rows[i].s1, rows[i].s2);
+    if (c && rows[i].s2[0]) card_pair_t(c, pad, rows[i].s1, rows[i].s2, 0, rows[i].n3);
+    if (rows[i].n3 == 6 && rows[i].n2 && nf < 40 && pf_follow_link(rows[i].s1)) follow[nf++] = rows[i].n2;
+  }
+  /* списки и составные атрибуты: строка за строкой */
+  for (int i = 0; i < n && sm->queries <= 60; i++) {
+    if ((rows[i].n3 != 8 && rows[i].n3 != 23) || card_hidden(rows[i].s1)) continue;
+    _snwprintf(sql, 4000,
+               L"SELECT TOP 300 a.CollectionElementId, nk.Value, COALESCE(lo.Name, " CARD_VALUE_SQL
+               L"), ISNULL(a.Link,0), a.DataType "
+               L"FROM InfoObjectCollectionElements AS ce WITH(NOLOCK) "
+               L"JOIN InfoObjectAttributes AS a WITH(NOLOCK) "
+               L"ON a.CollectionElementId=ce.CollectionElementId AND a.Outdated=0 "
+               L"JOIN NameKeys AS nk WITH(NOLOCK) ON nk.NameKeyId=a.NameKeyId "
+               L"LEFT JOIN InfoObjects AS lo WITH(NOLOCK) ON a.DataType=6 AND lo.InfoObjectId=a.Link "
+               L"WHERE ce.AttributeId IN (%ld,%ld) AND ce.Outdated=0 AND nk.Value<>N'LastChanged' "
+               L"AND NOT EXISTS (SELECT 1 FROM InfoObjectAttributes AS ir WITH(NOLOCK) "
+               L"JOIN NameKeys AS nkr WITH(NOLOCK) ON nkr.NameKeyId=ir.NameKeyId "
+               L"AND nkr.Value=N'IsRemoved' "
+               L"WHERE ir.CollectionElementId=ce.CollectionElementId AND ir.BoolValue=1) "
+               L"ORDER BY a.CollectionElementId, a.DataType DESC, nk.Value",
+               rows[i].n1, rows[i].n2 ? rows[i].n2 : rows[i].n1);
+    sm->queries++;
+    int m = card_query(dbc, sql, el, 300, err, 280);
+    if (m <= 0) continue;
+    if (c) {
+      const wchar_t *lab = card_label(rows[i].s1);
+      card_add(c, L"%s[%s]\r\n", pad, lab ? lab : rows[i].s1);
+    }
+    long cur = -1;
+    int shown = 0;
+    for (int e = 0; e < m; e++) {
+      if (el[e].n1 != cur) {
+        if (c && shown) card_add(c, L"\r\n");
+        cur = el[e].n1;
+        shown = 0;
+        if (c) card_add(c, L"%s- ", pad2);
+      }
+      if (card_hidden(el[e].s1) || !el[e].s2[0]) continue;
+      pf_take(sm, el[e].s1, el[e].s2);
+      const wchar_t *lab = card_label(el[e].s1);
+      if (c) card_add(c, L"%s%s %s", shown ? L" · " : L"", lab ? lab : el[e].s1, el[e].s2);
+      shown++;
+      /* строка списка часто ссылается на саму заготовку или материал */
+      if (el[e].n3 == 6 && el[e].n2 && nf < 40) follow[nf++] = el[e].n2;
+    }
+    if (c && shown) card_add(c, L"\r\n");
+  }
+  if (depth <= 0) goto out;
+  /* вложенные объекты (версии, сами заготовки) */
+  _snwprintf(sql, 4000,
+             L"SELECT TOP 15 o.InfoObjectId, CAST(o.Name AS NVARCHAR(200)), "
+             L"CAST(t.NameUI AS NVARCHAR(200)), 0, 0 FROM InfoObjects AS o WITH(NOLOCK) "
+             L"JOIN Templates AS t WITH(NOLOCK) ON t.TemplateId=o.TemplateId "
+             L"WHERE o.ParentId=%ld AND o.Erased=0 ORDER BY o.InfoObjectId",
+             id);
+  sm->queries++;
+  int k = card_query(dbc, sql, el, 300, err, 280);
+  for (int i = 0; i < k; i++) {
+    if (c) card_add(c, L"%s> %s  (%s)\r\n", pad, el[i].s1[0] ? el[i].s1 : L"без имени", el[i].s2);
+    long child = el[i].n1;
+    pf_explore(dbc, child, depth - 1, c, pad2, sm);
+  }
+  for (int i = 0; i < nf; i++) {
+    if (c) card_add(c, L"%s> по ссылке\r\n", pad);
+    pf_explore(dbc, follow[i], depth - 1, c, pad2, sm);
+  }
+out:
+  free(rows);
+  free(el);
+  free(sql);
+  free(follow);
+}
+
+static void pf_summary_text(const PfSum *sm, wchar_t *out, int cap) {
+  out[0] = 0;
+  int l = 0;
+  if (sm->mat[0]) l += _snwprintf(out + l, cap - l, L"%s", sm->mat);
+  if (sm->dims[0] && l < cap)
+    l += _snwprintf(out + l, cap - l, L"%s%s", l ? L" · " : L"", sm->dims);
+  if (sm->mass[0] && l < cap) _snwprintf(out + l, cap - l, L"%sмасса %s", l ? L" · " : L"", sm->mass);
+  out[cap - 1] = 0;
+}
+
+/* Столбец «Заготовка»: сводка по первым строкам находок. Обход не бесплатный,
+   поэтому общий бюджет — несколько секунд; не успели — остаются названия. */
+static void pf_summarize_rows(SQLHDBC dbc, int n) {
+  ULONGLONG t0 = GetTickCount64();
+  g_qTimeout = 3;
+  long done[60];
+  int nd = 0;
+  for (int r = 0; r < n && nd < 60; r++) {
+    if (GetTickCount64() - t0 > 7000) break;
+    long own = g_plmIds[r];
+    BOOL was = FALSE;
+    for (int j = 0; j < nd && !was; j++) was = done[j] == own;
+    if (was || !own) continue;
+    done[nd++] = own;
+    wchar_t line[PLM_COL1];
+    line[0] = 0;
+    int parts = 0;
+    for (int p = 0; p < g_pfPairs && parts < 3; p++) {
+      if (g_pfOwner[p] != own) continue;
+      PfSum *sm = (PfSum *)calloc(1, sizeof(PfSum));
+      if (!sm) break;
+      pf_explore(dbc, g_pfId[p], 3, NULL, L"", sm);
+      wchar_t one[PLM_COL1];
+      pf_summary_text(sm, one, PLM_COL1);
+      free(sm);
+      if (!one[0]) continue;
+      size_t l = wcslen(line);
+      _snwprintf(line + l, PLM_COL1 - l, L"%s%s", l ? L"; " : L"", one);
+      line[PLM_COL1 - 1] = 0;
+      parts++;
+    }
+    if (!line[0]) continue;
+    for (int i = 0; i < n; i++)
+      if (g_plmIds[i] == own) lstrcpynW(g_plmPf[i], line, PLM_COL1);
+  }
+  g_qTimeout = 0;
+}
+
+/* Заготовка в карточке: сводка (материал, габариты, масса) у каждой; в
+   «Атрибутах» — ещё и весь обход, по которому сводка собиралась. */
 static void card_preforms(SQLHDBC dbc, long pfCard, CardOut *c, CardRow *rows, wchar_t *err) {
   wchar_t card[24];
   _snwprintf(card, 24, L"%ld", pfCard);
@@ -2423,46 +2654,48 @@ static void card_preforms(SQLHDBC dbc, long pfCard, CardOut *c, CardRow *rows, w
              L"ORDER BY pf.PfId",
              card);
   int n = card_query(dbc, sql, rows, CARD_ROWS, err, 280);
+  free(sql);
   if (n < 0) {
     card_add(c, L"ЗАГОТОВКА: запрос не выполнился.\r\n%s\r\n\r\n", err);
-    free(sql);
     return;
   }
   if (n == 0) {
     card_add(c, L"ЗАГОТОВКА: карточка заготовок есть (%ld), но заготовок в ней нет.\r\n\r\n", pfCard);
-    free(sql);
     return;
   }
-  /* rows сейчас перепишутся атрибутами — список заготовок снимаем в сторону */
   long ids[10];
-  wchar_t names[10][260];
+  wchar_t names[10][200];
   int pn = n > 10 ? 10 : n;
   for (int i = 0; i < pn; i++) {
     ids[i] = rows[i].n1;
-    lstrcpynW(names[i], rows[i].s1[0] ? rows[i].s1 : L"(без имени)", 260);
+    lstrcpynW(names[i], rows[i].s1[0] ? rows[i].s1 : L"(без имени)", 200);
   }
   card_add(c, L"%s\r\n", pn > 1 ? L"ЗАГОТОВКИ" : L"ЗАГОТОВКА");
   for (int p = 0; p < pn; p++) {
+    PfSum *sm = (PfSum *)calloc(1, sizeof(PfSum));
+    if (!sm) break;
     card_add(c, L"  %s", names[p]);
     if (g_cardVerbose) card_add(c, L"   ID %ld", ids[p]);
     card_add(c, L"\r\n");
-    _snwprintf(sql, 4000,
-               L"SELECT TOP 80 a.AttributeId, nk.Value, COALESCE(lo.Name, " CARD_VALUE_SQL L"), 0, "
-               L"a.DataType "
-               L"FROM InfoObjectAttributes AS a WITH(NOLOCK) "
-               L"JOIN NameKeys AS nk WITH(NOLOCK) ON nk.NameKeyId=a.NameKeyId "
-               L"LEFT JOIN InfoObjects AS lo WITH(NOLOCK) ON a.DataType=6 AND lo.InfoObjectId=a.Link "
-               L"WHERE a.OwnerId=%ld AND a.Outdated=0 AND ISNULL(a.CollectionElementId,0)=0 "
-               L"ORDER BY nk.Value",
-               ids[p]);
-    int k = card_query(dbc, sql, rows, CARD_ROWS, err, 280);
-    for (int i = 0; i < k; i++) {
-      if (card_hidden(rows[i].s1) || !rows[i].s2[0]) continue;
-      card_pair_t(c, L"      ", rows[i].s1, rows[i].s2, 0, rows[i].n3);
+    /* сначала тихо собрать сводку, потом (в «Атрибутах») показать весь обход */
+    pf_explore(dbc, ids[p], 3, NULL, L"", sm);
+    card_add(c, L"      %-14s%s\r\n", L"Материал", sm->mat[0] ? sm->mat : L"—");
+    card_add(c, L"      %-14s%s\r\n", L"Габариты", sm->dims[0] ? sm->dims : L"—");
+    card_add(c, L"      %-14s%s\r\n", L"Масса", sm->mass[0] ? sm->mass : L"—");
+    if (!sm->mat[0] && !sm->dims[0] && !sm->mass[0])
+      card_add(c, L"      (в заготовке не нашлось ни материала, ни размеров, ни массы —\r\n"
+                  L"       Shift + «Все данные» покажет, что в ней лежит)\r\n");
+    if (g_cardVerbose) {
+      PfSum *sv = (PfSum *)calloc(1, sizeof(PfSum));
+      if (sv) {
+        card_add(c, L"      ── что внутри ──\r\n");
+        pf_explore(dbc, ids[p], 3, c, L"      ", sv);
+        free(sv);
+      }
     }
+    free(sm);
   }
   card_add(c, L"\r\n");
-  free(sql);
 }
 
 /* Техсостав (материалы, покупные) — как его собирает PlmApi: TechCompCard →
