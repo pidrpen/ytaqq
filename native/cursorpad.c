@@ -94,11 +94,11 @@
 #define PAD 12
 #define GUTTER 26
 #define SET_W 312
-#define SET_H 777  /* темы теперь в один ряд — на строку ниже */
+#define SET_H 812  /* темы в два ряда: четыре и рыцарская под ними */
 #define ASK_W 312
 #define ASK_H 224 /* room for the drawn header */
 #define ID_THEME_BASE 140
-#define THEME_COUNT 4
+#define THEME_COUNT 5
 
 static COLORREF COL_PAPER = RGB(255, 255, 255);
 static COLORREF COL_PAPER_DARK = RGB(243, 244, 246);
@@ -116,6 +116,18 @@ static COLORREF COL_LINE = RGB(226, 229, 233);
 #define HEAD_BAND 0  /* шапка полосой */
 #define HEAD_RULE 1  /* шапка на фоне, под ней линия */
 #define HEAD_PLAIN 2 /* без полосы и линии, заголовок цветом */
+#define BTN_KNIGHT 3  /* стальные пластины с заклёпками, сургучные печати */
+#define HEAD_BANNER 3 /* алое знамя с раздвоенными концами */
+/* цвета рыцарской темы, которых нет в палитре остальных */
+#define KN_GOLD RGB(201, 162, 39)
+#define KN_GOLD_LT RGB(242, 214, 128)
+#define KN_GOLD_DK RGB(128, 96, 18)
+#define KN_CRIMSON RGB(139, 30, 30)
+#define KN_CRIMSON_DK RGB(88, 14, 14)
+#define KN_STEEL_HI RGB(222, 221, 212)
+#define KN_STEEL_LO RGB(152, 150, 140)
+#define KN_STEEL_BD RGB(62, 56, 46)
+#define KN_RIVET RGB(88, 80, 66)
 
 typedef struct {
   COLORREF paper, dark, ink, muted, sage;
@@ -128,6 +140,7 @@ typedef struct {
   int btn, head;
   int corners;             /* углы окон: 1 прямые, 2 круглые, 3 чуть скруглённые */
   BOOL caps;               /* заголовки панелей прописными */
+  BOOL ornate;             /* фактура, рамки, герб и свои названия окон */
 } PadTheme;
 
 static const PadTheme kThemes[THEME_COUNT] = {
@@ -148,6 +161,11 @@ static const PadTheme kThemes[THEME_COUNT] = {
     {RGB(255, 255, 255), RGB(244, 245, 247), RGB(20, 24, 31), RGB(100, 108, 120), RGB(30, 58, 95),
      L"Чертёж", L"Bahnschrift", L"Segoe UI", L"Bahnschrift", L"Bahnschrift", 0, BTN_LINE,
      HEAD_RULE, 1, TRUE},
+    /* рыцарская: пергамент с фактурой, алые знамёна с золотом, стальные
+       пластины вместо кнопок, готический шрифт заголовков, щит у названия */
+    {RGB(241, 228, 195), RGB(228, 211, 168), RGB(43, 27, 14), RGB(118, 88, 54), KN_CRIMSON,
+     L"Рыцарская", L"Palatino Linotype", L"Georgia", L"Old English Text MT",
+     L"Palatino Linotype", 2, BTN_KNIGHT, HEAD_BANNER, 1, FALSE, TRUE},
 };
 
 static COLORREF blend_rgb(COLORREF a, COLORREF b, int t) {
@@ -605,6 +623,226 @@ static void theme_fonts(void) {
   theme_zoom_fonts_reset();
 }
 
+/* ---- рыцарская тема: материалы и украшения ---------------------------- */
+/* Пергамент рисуется самой программой, а не грузится картинкой: плитка
+   128×128 из крупных пятен и мелкого зерна. Пятна считаются по замкнутой
+   сетке, поэтому плитки стыкуются без шва. */
+static HBRUSH g_texPaper, g_texDark;
+static HBITMAP g_texPaperBm, g_texDarkBm;
+
+static float tex_smooth(float t) {
+  return t * t * (3.0f - 2.0f * t);
+}
+
+static HBRUSH make_parchment(COLORREF base, unsigned seed, HBITMAP *keep) {
+  enum { N = 128 };
+  BITMAPINFO bi;
+  memset(&bi, 0, sizeof(bi));
+  bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+  bi.bmiHeader.biWidth = N;
+  bi.bmiHeader.biHeight = -N;
+  bi.bmiHeader.biPlanes = 1;
+  bi.bmiHeader.biBitCount = 32;
+  bi.bmiHeader.biCompression = BI_RGB;
+  void *bits = NULL;
+  HBITMAP bm = CreateDIBSection(NULL, &bi, DIB_RGB_COLORS, &bits, NULL, 0);
+  if (!bm || !bits) return NULL;
+  unsigned st = seed;
+  float g1[8][8], g2[16][16];
+  for (int y = 0; y < 8; y++)
+    for (int x = 0; x < 8; x++) {
+      st = st * 1103515245u + 12345u;
+      g1[y][x] = (float)((st >> 16) & 1023) / 511.5f - 1.0f;
+    }
+  for (int y = 0; y < 16; y++)
+    for (int x = 0; x < 16; x++) {
+      st = st * 1103515245u + 12345u;
+      g2[y][x] = (float)((st >> 16) & 1023) / 511.5f - 1.0f;
+    }
+  unsigned char *px = (unsigned char *)bits;
+  for (int y = 0; y < N; y++) {
+    for (int x = 0; x < N; x++) {
+      float fx = x / 16.0f, fy = y / 16.0f;
+      int ix = (int)fx, iy = (int)fy;
+      float tx = tex_smooth(fx - ix), ty = tex_smooth(fy - iy);
+      float a = g1[iy % 8][ix % 8], b = g1[iy % 8][(ix + 1) % 8];
+      float c = g1[(iy + 1) % 8][ix % 8], d = g1[(iy + 1) % 8][(ix + 1) % 8];
+      float v1 = (a + (b - a) * tx) + ((c + (d - c) * tx) - (a + (b - a) * tx)) * ty;
+      fx = x / 8.0f;
+      fy = y / 8.0f;
+      ix = (int)fx;
+      iy = (int)fy;
+      tx = tex_smooth(fx - ix);
+      ty = tex_smooth(fy - iy);
+      a = g2[iy % 16][ix % 16];
+      b = g2[iy % 16][(ix + 1) % 16];
+      c = g2[(iy + 1) % 16][ix % 16];
+      d = g2[(iy + 1) % 16][(ix + 1) % 16];
+      float v2 = (a + (b - a) * tx) + ((c + (d - c) * tx) - (a + (b - a) * tx)) * ty;
+      st = st * 1103515245u + 12345u;
+      int grain = (int)((st >> 16) % 9) - 4;
+      float shade = v1 * 9.0f + v2 * 4.0f + (float)grain;
+      int r = (int)(GetRValue(base) + shade);
+      int gg = (int)(GetGValue(base) + shade * 0.95f);
+      int bb = (int)(GetBValue(base) + shade * 0.8f);
+      unsigned char *q = px + ((size_t)y * N + x) * 4;
+      q[0] = (unsigned char)(bb < 0 ? 0 : (bb > 255 ? 255 : bb));
+      q[1] = (unsigned char)(gg < 0 ? 0 : (gg > 255 ? 255 : gg));
+      q[2] = (unsigned char)(r < 0 ? 0 : (r > 255 ? 255 : r));
+      q[3] = 255;
+    }
+  }
+  HBRUSH br = CreatePatternBrush(bm);
+  if (!br) {
+    DeleteObject(bm);
+    return NULL;
+  }
+  *keep = bm;
+  return br;
+}
+
+static void knight_textures(BOOL on) {
+  if (g_texPaper) DeleteObject(g_texPaper);
+  if (g_texDark) DeleteObject(g_texDark);
+  if (g_texPaperBm) DeleteObject(g_texPaperBm);
+  if (g_texDarkBm) DeleteObject(g_texDarkBm);
+  g_texPaper = g_texDark = NULL;
+  g_texPaperBm = g_texDarkBm = NULL;
+  if (!on) return;
+  g_texPaper = make_parchment(COL_PAPER, 20260923u, &g_texPaperBm);
+  g_texDark = make_parchment(COL_PAPER_DARK, 1415u, &g_texDarkBm);
+}
+
+/* Фон окна: у рыцарской темы — пергамент, у остальных — ровный цвет.
+   Поля ввода остаются ровными: под каждой буквой в них рисуется сплошной
+   прямоугольник, и на фактуре текст стал бы пятнистым. */
+static HBRUSH bg_brush(BOOL dark) {
+  if (dark) return g_texDark ? g_texDark : g_paperDark;
+  return g_texPaper ? g_texPaper : g_paper;
+}
+
+static BOOL knight_on(void) {
+  return g_theme >= 0 && g_theme < THEME_COUNT && kThemes[g_theme].ornate;
+}
+
+/* Заголовки окон в рыцарской теме звучат по-своему. Надписи на
+   кнопках не трогаем: «Открыть файл» должен оставаться понятным. */
+static const wchar_t *knight_title(const wchar_t *t) {
+  static const wchar_t *map[][2] = {
+      {L"Настройки", L"Арсенал"},
+      {L"Поиск", L"Дозор"},
+      {L"Находки", L"Добыча"},
+      {L"Найденные файлы", L"Найденные свитки"},
+      {L"Карточка", L"Грамота"},
+      {L"Атрибуты объекта", L"Родословная"},
+      {L"Распознанный текст", L"Свиток"},
+      {L"Отчёт об обновлении", L"Весть от гонца"},
+  };
+  for (size_t i = 0; i < sizeof(map) / sizeof(map[0]); i++)
+    if (wcscmp(t, map[i][0]) == 0) return map[i][1];
+  return t;
+}
+
+static void fill_vgrad(HDC dc, RECT r, COLORREF top, COLORREF bottom) {
+  int h = r.bottom - r.top;
+  if (h <= 0) return;
+  for (int y = 0; y < h; y++) {
+    RECT line = {r.left, r.top + y, r.right, r.top + y + 1};
+    HBRUSH b = CreateSolidBrush(blend_rgb(top, bottom, h > 1 ? y * 256 / (h - 1) : 0));
+    FillRect(dc, &line, b);
+    DeleteObject(b);
+  }
+}
+
+static void frame_rect(HDC dc, RECT r, COLORREF c, int w) {
+  HBRUSH b = CreateSolidBrush(c);
+  RECT e;
+  e = (RECT){r.left, r.top, r.right, r.top + w};
+  FillRect(dc, &e, b);
+  e = (RECT){r.left, r.bottom - w, r.right, r.bottom};
+  FillRect(dc, &e, b);
+  e = (RECT){r.left, r.top, r.left + w, r.bottom};
+  FillRect(dc, &e, b);
+  e = (RECT){r.right - w, r.top, r.right, r.bottom};
+  FillRect(dc, &e, b);
+  DeleteObject(b);
+}
+
+static void draw_poly(HDC dc, const POINT *pt, int n, COLORREF fill, COLORREF edge, int w) {
+  HBRUSH b = CreateSolidBrush(fill);
+  HPEN pn = CreatePen(PS_SOLID, w, edge);
+  HGDIOBJ ob = SelectObject(dc, b), op = SelectObject(dc, pn);
+  Polygon(dc, pt, n);
+  SelectObject(dc, ob);
+  SelectObject(dc, op);
+  DeleteObject(b);
+  DeleteObject(pn);
+}
+
+static void draw_dot(HDC dc, int cx, int cy, int r, COLORREF fill, COLORREF edge) {
+  HBRUSH b = CreateSolidBrush(fill);
+  HPEN pn = CreatePen(PS_SOLID, 1, edge);
+  HGDIOBJ ob = SelectObject(dc, b), op = SelectObject(dc, pn);
+  Ellipse(dc, cx - r, cy - r, cx + r + 1, cy + r + 1);
+  SelectObject(dc, ob);
+  SelectObject(dc, op);
+  DeleteObject(b);
+  DeleteObject(pn);
+}
+
+/* Двойная золотая рамка по краю окна с ромбами на углах — как на
+   виньетке рукописи. */
+static void draw_knight_frame(HDC dc, RECT rc) {
+  RECT o = {rc.left + 2, rc.top + 2, rc.right - 2, rc.bottom - 2};
+  frame_rect(dc, o, KN_GOLD, 2);
+  RECT in = {rc.left + 6, rc.top + 6, rc.right - 6, rc.bottom - 6};
+  frame_rect(dc, in, KN_GOLD_DK, 1);
+  int cx[4] = {o.left + 1, o.right - 2, o.left + 1, o.right - 2};
+  int cy[4] = {o.top + 1, o.top + 1, o.bottom - 2, o.bottom - 2};
+  for (int i = 0; i < 4; i++) {
+    POINT d[4] = {{cx[i], cy[i] - 5}, {cx[i] + 5, cy[i]}, {cx[i], cy[i] + 5}, {cx[i] - 5, cy[i]}};
+    draw_poly(dc, d, 4, KN_GOLD, KN_GOLD_DK, 1);
+  }
+}
+
+/* Щит: алое поле, золотая кайма, золотой крест. Кайма — из точек
+   геральдического «испанского» щита: прямой верх и заострённый низ. */
+static void draw_shield(HDC dc, int x, int y, int w, int h) {
+  POINT p[9] = {{x, y},
+                {x + w, y},
+                {x + w, y + h * 45 / 100},
+                {x + w - w / 10, y + h * 70 / 100},
+                {x + w * 7 / 10, y + h * 88 / 100},
+                {x + w / 2, y + h},
+                {x + w * 3 / 10, y + h * 88 / 100},
+                {x + w / 10, y + h * 70 / 100},
+                {x, y + h * 45 / 100}};
+  draw_poly(dc, p, 9, KN_CRIMSON, KN_GOLD, 2);
+  HBRUSH g = CreateSolidBrush(KN_GOLD);
+  RECT v = {x + w / 2 - 1, y + h / 6, x + w / 2 + 2, y + h * 5 / 6};
+  RECT hz = {x + w / 5, y + h * 36 / 100, x + w - w / 5, y + h * 36 / 100 + 3};
+  FillRect(dc, &v, g);
+  FillRect(dc, &hz, g);
+  DeleteObject(g);
+}
+
+/* Знамя с раздвоенными концами и золотой каймой, заголовок — по центру. */
+static void draw_banner(HDC dc, RECT r, const wchar_t *title) {
+  int ym = (r.top + r.bottom) / 2, notch = (r.bottom - r.top) / 3;
+  POINT p[6] = {{r.left, r.top},  {r.right, r.top},         {r.right - notch, ym},
+                {r.right, r.bottom}, {r.left, r.bottom}, {r.left + notch, ym}};
+  draw_poly(dc, p, 6, KN_CRIMSON, KN_GOLD, 2);
+  HBRUSH d = CreateSolidBrush(KN_CRIMSON_DK);
+  RECT sh = {r.left + notch + 2, r.bottom - 5, r.right - notch - 2, r.bottom - 3};
+  FillRect(dc, &sh, d);
+  DeleteObject(d);
+  SetBkMode(dc, TRANSPARENT);
+  SetTextColor(dc, KN_GOLD_LT);
+  if (g_fontDisplay) SelectObject(dc, g_fontDisplay);
+  RECT t = {r.left + notch + 4, r.top, r.right - notch - 4, r.bottom};
+  DrawTextW(dc, title, -1, &t, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+}
+
 static void apply_theme(void) {
   if (g_theme < 0 || g_theme >= THEME_COUNT) g_theme = 0;
   COL_PAPER = kThemes[g_theme].paper;
@@ -617,29 +855,29 @@ static void apply_theme(void) {
   if (g_paperDark) DeleteObject(g_paperDark);
   g_paper = CreateSolidBrush(COL_PAPER);
   g_paperDark = CreateSolidBrush(COL_PAPER_DARK);
-  if (g_hwnd) {
-    SetClassLongPtrW(g_hwnd, GCLP_HBRBACKGROUND, (LONG_PTR)g_paper);
-    InvalidateRect(g_hwnd, NULL, TRUE);
+  /* у рыцарской темы фон окон — пергамент, у остальных ровный цвет */
+  knight_textures(kThemes[g_theme].ornate);
+  {
+    HWND lite[4] = {g_hwnd, g_answer, g_card, g_ocrWnd};
+    for (int i = 0; i < 4; i++) {
+      if (!lite[i]) continue;
+      SetClassLongPtrW(lite[i], GCLP_HBRBACKGROUND, (LONG_PTR)bg_brush(FALSE));
+      InvalidateRect(lite[i], NULL, TRUE);
+    }
+    HWND dark[2] = {g_setHwnd, g_askHwnd};
+    for (int i = 0; i < 2; i++) {
+      if (!dark[i]) continue;
+      SetClassLongPtrW(dark[i], GCLP_HBRBACKGROUND, (LONG_PTR)bg_brush(TRUE));
+      InvalidateRect(dark[i], NULL, TRUE);
+    }
   }
-  if (g_setHwnd) {
-    SetClassLongPtrW(g_setHwnd, GCLP_HBRBACKGROUND, (LONG_PTR)g_paperDark);
-    InvalidateRect(g_setHwnd, NULL, TRUE);
-  }
-  if (g_askHwnd) {
-    SetClassLongPtrW(g_askHwnd, GCLP_HBRBACKGROUND, (LONG_PTR)g_paperDark);
-    InvalidateRect(g_askHwnd, NULL, TRUE);
-  }
-  if (g_answer) {
-    SetClassLongPtrW(g_answer, GCLP_HBRBACKGROUND, (LONG_PTR)g_paper);
-    InvalidateRect(g_answer, NULL, TRUE);
-  }
-  if (g_card) {
-    SetClassLongPtrW(g_card, GCLP_HBRBACKGROUND, (LONG_PTR)g_paper);
-    InvalidateRect(g_card, NULL, TRUE);
-  }
-  if (g_ocrWnd) {
-    SetClassLongPtrW(g_ocrWnd, GCLP_HBRBACKGROUND, (LONG_PTR)g_paper);
-    InvalidateRect(g_ocrWnd, NULL, TRUE);
+  /* список находок перекрашиваем явно: свои цвета он запомнил при создании
+     и сам со сменой темы не менялся */
+  if (g_answerList) {
+    SendMessageW(g_answerList, LVM_SETBKCOLOR, 0, (LPARAM)COL_PAPER);
+    SendMessageW(g_answerList, LVM_SETTEXTBKCOLOR, 0, (LPARAM)COL_PAPER);
+    SendMessageW(g_answerList, LVM_SETTEXTCOLOR, 0, (LPARAM)COL_INK);
+    InvalidateRect(g_answerList, NULL, TRUE);
   }
   if (g_edit) InvalidateRect(g_edit, NULL, TRUE);
   if (g_clipEdit) InvalidateRect(g_clipEdit, NULL, TRUE);
@@ -1441,6 +1679,15 @@ static void draw_panel_header(HWND hwnd, HDC hdc, const wchar_t *title) {
   RECT rc;
   GetClientRect(hwnd, &rc);
   const PadTheme *th = &kThemes[g_theme];
+  if (th->head == HEAD_BANNER) {
+    /* рамка по краю окна и знамя в шапке; если справа есть крестик,
+       знамя кончается до него */
+    draw_knight_frame(hdc, rc);
+    int right = GetDlgItem(hwnd, ID_PANEL_CLOSE) ? rc.right - 46 : rc.right - 14;
+    RECT bn = {14, 7, right, PANEL_TITLE_H - 3};
+    draw_banner(hdc, bn, knight_title(title));
+    return;
+  }
   RECT hd = {0, 0, rc.right, PANEL_TITLE_H};
   COLORREF titleCol = COL_INK;
   if (th->head == HEAD_BAND) {
@@ -1503,6 +1750,96 @@ static void place_panel_close(HWND hwnd) {
   MoveWindow(b, rc.right - 14 - 26, (PANEL_TITLE_H - 24) / 2, 26, 24, TRUE);
 }
 
+/* Кнопка рыцарской темы. Обычная — стальная пластина с заклёпками по
+   углам; главная — алая с золотой каймой; выбранная — золотая. Закрыть и
+   свернуть — круглые сургучные печати. Нажатая пластина вдавливается: свет
+   и тень меняются местами. */
+static void draw_knight_button(HWND item, HDC dc, RECT rc, const wchar_t *label, BOOL press,
+                               BOOL disab, BOOL on, BOOL primary, BOOL quiet) {
+  int w = rc.right - rc.left, h = rc.bottom - rc.top;
+  HWND parent = GetParent(item);
+  HBRUSH under = parent ? (HBRUSH)GetClassLongPtrW(parent, GCLP_HBRBACKGROUND) : NULL;
+  if (quiet) {
+    if (parent) {
+      RECT ir;
+      GetWindowRect(item, &ir);
+      MapWindowPoints(HWND_DESKTOP, parent, (POINT *)&ir, 2);
+      SetBrushOrgEx(dc, -ir.left, -ir.top, NULL);
+    }
+    FillRect(dc, &rc, under ? under : g_paper);
+    int d = (w < h ? w : h) - 2;
+    int cx = rc.left + w / 2, cy = rc.top + h / 2;
+    COLORREF ring = disab ? blend_rgb(KN_GOLD, COL_PAPER, 150) : KN_GOLD;
+    COLORREF wax = disab ? blend_rgb(KN_CRIMSON, COL_PAPER, 150)
+                         : (press ? KN_CRIMSON_DK : KN_CRIMSON);
+    draw_dot(dc, cx, cy, d / 2, ring, KN_GOLD_DK);
+    draw_dot(dc, cx, cy, d / 2 - 2, wax, KN_CRIMSON_DK);
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, disab ? COL_MUTED : KN_GOLD_LT);
+    if (g_fontUi) SelectObject(dc, g_fontUi);
+    DrawTextW(dc, label, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    return;
+  }
+  COLORREF top, bot, edge, fg;
+  if (disab) {
+    top = blend_rgb(KN_STEEL_HI, COL_PAPER, 170);
+    bot = blend_rgb(KN_STEEL_LO, COL_PAPER, 170);
+    edge = blend_rgb(KN_STEEL_BD, COL_PAPER, 160);
+    fg = COL_MUTED;
+  } else if (on) {
+    top = KN_GOLD_LT;
+    bot = KN_GOLD;
+    edge = KN_GOLD_DK;
+    fg = RGB(43, 27, 14);
+  } else if (primary) {
+    top = RGB(170, 46, 46);
+    bot = KN_CRIMSON_DK;
+    edge = KN_GOLD;
+    fg = KN_GOLD_LT;
+  } else {
+    top = KN_STEEL_HI;
+    bot = KN_STEEL_LO;
+    edge = KN_STEEL_BD;
+    fg = RGB(30, 24, 18);
+  }
+  if (press && !disab) {
+    COLORREF x = top;
+    top = bot;
+    bot = x;
+  }
+  fill_vgrad(dc, rc, top, bot);
+  frame_rect(dc, rc, edge, (primary && !on && !disab) ? 2 : 1);
+  if (!disab) {
+    /* блик по верхнему краю — пластина выглядит выпуклой */
+    RECT hl = {rc.left + 2, rc.top + 2, rc.right - 2, rc.top + 3};
+    HBRUSH b = CreateSolidBrush(blend_rgb(press ? bot : top, RGB(255, 255, 255), 110));
+    FillRect(dc, &hl, b);
+    DeleteObject(b);
+  }
+  int inset = 5;
+  SIZE lsz = {0, 0};
+  if (g_fontUi) SelectObject(dc, g_fontUi);
+  GetTextExtentPoint32W(dc, label, (int)wcslen(label), &lsz);
+  /* заклёпки — только если они не съедают место под надпись: на узкой
+     кнопке понятная надпись важнее украшения */
+  if (!disab && h >= 20 && w >= lsz.cx + 26) {
+    COLORREF rv = (primary && !on) ? KN_GOLD : KN_RIVET;
+    COLORREF rvEdge = blend_rgb(rv, RGB(0, 0, 0), 110);
+    int ox = 5, oy = h >= 26 ? 6 : 5;
+    draw_dot(dc, rc.left + ox, rc.top + oy, 2, rv, rvEdge);
+    draw_dot(dc, rc.right - ox - 1, rc.top + oy, 2, rv, rvEdge);
+    draw_dot(dc, rc.left + ox, rc.bottom - oy - 1, 2, rv, rvEdge);
+    draw_dot(dc, rc.right - ox - 1, rc.bottom - oy - 1, 2, rv, rvEdge);
+    inset = 11;
+  }
+  SetBkMode(dc, TRANSPARENT);
+  SetTextColor(dc, fg);
+  if (g_fontUi) SelectObject(dc, g_fontUi);
+  RECT tr = {rc.left + inset, rc.top, rc.right - inset, rc.bottom};
+  if (press && !disab) OffsetRect(&tr, 0, 1);
+  DrawTextW(dc, label, -1, &tr, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+}
+
 static void draw_pad_button(const DRAWITEMSTRUCT *dis) {
   if (!dis || dis->CtlType != ODT_BUTTON) return;
   RECT rc = dis->rcItem;
@@ -1518,6 +1855,16 @@ static void draw_pad_button(const DRAWITEMSTRUCT *dis) {
                  id == ID_ANS_OPEN || (id == ID_ASK_TAB && g_askOpen);
   BOOL quiet = id == ID_CLOSE || id == ID_MIN || id == ID_PANEL_CLOSE;
   COLORREF fill, fg, bd;
+  /* рыцарская тема рисует кнопки целиком по-своему; кнопка выбора
+     этой темы в Настройках — тоже, чтобы было видно, что получится */
+  if ((themeBtn && ti >= 0 && kThemes[ti].btn == BTN_KNIGHT) ||
+      (!themeBtn && kThemes[g_theme].btn == BTN_KNIGHT)) {
+    const wchar_t *kl = themeBtn ? kThemes[ti].name
+                                 : ((t[0] == 0x25CF && t[1] == L' ') ? t + 2 : t);
+    draw_knight_button(dis->hwndItem, dis->hDC, rc, kl, press, disab, on, primary || themeBtn,
+                       quiet);
+    return;
+  }
   if (themeBtn && ti >= 0) {
     const PadTheme *th = &kThemes[ti];
     if (on) {
@@ -1950,7 +2297,9 @@ static void layout_settings(void) {
       if (!g_btnTheme[i]) continue;
       int row = i / cols;
       int col = i % cols;
-      MoveWindow(g_btnTheme[i], pad + col * (tw + gap), y + row * (btnH + gap), tw, btnH, TRUE);
+      /* пятая, рыцарская, — отдельным рядом во всю ширину */
+      int bw = (row > 0 && THEME_COUNT - cols == 1) ? cw - pad : tw;
+      MoveWindow(g_btnTheme[i], pad + col * (tw + gap), y + row * (btnH + gap), bw, btnH, TRUE);
     }
   }
 }
@@ -1962,7 +2311,7 @@ static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
     HDC hdc = BeginPaint(hwnd, &ps);
     RECT rc;
     GetClientRect(hwnd, &rc);
-    FillRect(hdc, &rc, g_paperDark);
+    FillRect(hdc, &rc, bg_brush(TRUE));
     draw_panel_header(hwnd, hdc, L"Настройки");
     SetBkMode(hdc, TRANSPARENT);
     if (g_fontSmall) SelectObject(hdc, g_fontSmall);
@@ -2022,6 +2371,17 @@ static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
     HDC hdc = (HDC)wParam;
     SetBkColor(hdc, COL_PAPER_DARK);
     SetTextColor(hdc, COL_MUTED);
+    /* на пергаменте галочки и ползунки не должны стоять ровными плашками */
+    if (knight_on()) {
+      SetBkMode(hdc, TRANSPARENT);
+      /* узор пергамента считаем от угла родителя, а не самого элемента —
+         иначе за ползунком виден сдвинутый прямоугольник */
+      RECT cr;
+      GetWindowRect((HWND)lParam, &cr);
+      MapWindowPoints(HWND_DESKTOP, hwnd, (POINT *)&cr, 2);
+      SetBrushOrgEx(hdc, -cr.left, -cr.top, NULL);
+      return (LRESULT)bg_brush(TRUE);
+    }
     return (LRESULT)g_paperDark;
   }
   case WM_NCHITTEST:
@@ -2194,7 +2554,7 @@ static LRESULT CALLBACK AskProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     HDC hdc = BeginPaint(hwnd, &ps);
     RECT rc;
     GetClientRect(hwnd, &rc);
-    FillRect(hdc, &rc, g_paperDark);
+    FillRect(hdc, &rc, bg_brush(TRUE));
     draw_panel_header(hwnd, hdc, L"Поиск");
     SetBkMode(hdc, TRANSPARENT);
     if (g_fontSmall) SelectObject(hdc, g_fontSmall);
@@ -2227,6 +2587,17 @@ static LRESULT CALLBACK AskProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     HDC hdc = (HDC)wParam;
     SetBkColor(hdc, COL_PAPER_DARK);
     SetTextColor(hdc, COL_MUTED);
+    /* на пергаменте галочки и ползунки не должны стоять ровными плашками */
+    if (knight_on()) {
+      SetBkMode(hdc, TRANSPARENT);
+      /* узор пергамента считаем от угла родителя, а не самого элемента —
+         иначе за ползунком виден сдвинутый прямоугольник */
+      RECT cr;
+      GetWindowRect((HWND)lParam, &cr);
+      MapWindowPoints(HWND_DESKTOP, hwnd, (POINT *)&cr, 2);
+      SetBrushOrgEx(hdc, -cr.left, -cr.top, NULL);
+      return (LRESULT)bg_brush(TRUE);
+    }
     return (LRESULT)g_paperDark;
   }
   case WM_NCHITTEST:
@@ -2514,7 +2885,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     HDC hdc = BeginPaint(hwnd, &ps);
     RECT rc;
     GetClientRect(hwnd, &rc);
-    FillRect(hdc, &rc, g_paper);
+    FillRect(hdc, &rc, bg_brush(FALSE));
     int dpi = 96;
     HMODULE user32 = GetModuleHandleW(L"user32.dll");
     if (user32) {
@@ -2528,11 +2899,25 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     RECT foot = {0, rc.bottom - fh, rc.right, rc.bottom};
     const PadTheme *pth = &kThemes[g_theme];
     /* шапка и низ блокнота — в том же стиле, что шапки остальных окон */
-    if (pth->head == HEAD_BAND) {
+    if (pth->head == HEAD_BANNER) {
+      /* рыцарская: шапка и низ — тёмный пергамент под двойной золотой линией */
+      FillRect(hdc, &title, bg_brush(TRUE));
+      FillRect(hdc, &foot, bg_brush(TRUE));
+      HBRUSH gold = CreateSolidBrush(KN_GOLD), dk = CreateSolidBrush(KN_GOLD_DK);
+      RECT r1 = {0, th - 4, rc.right, th - 2}, r2 = {0, th - 1, rc.right, th};
+      RECT f1 = {0, rc.bottom - fh, rc.right, rc.bottom - fh + 1};
+      RECT f2 = {0, rc.bottom - fh + 2, rc.right, rc.bottom - fh + 4};
+      FillRect(hdc, &r1, gold);
+      FillRect(hdc, &r2, dk);
+      FillRect(hdc, &f1, dk);
+      FillRect(hdc, &f2, gold);
+      DeleteObject(gold);
+      DeleteObject(dk);
+    } else if (pth->head == HEAD_BAND) {
       FillRect(hdc, &title, g_paperDark);
       FillRect(hdc, &foot, g_paperDark);
     }
-    if (pth->head != HEAD_PLAIN) {
+    if (pth->head != HEAD_PLAIN && pth->head != HEAD_BANNER) {
       int w = (pth->head == HEAD_RULE && pth->caps) ? 2 : 1;
       RECT rule = {0, th - w, rc.right, th};
       RECT frule = {0, rc.bottom - fh, rc.right, rc.bottom - fh + w};
@@ -2555,6 +2940,14 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
       DrawTextW(hdc, g_status, -1, &st, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     } else {
       SetTextColor(hdc, COL_INK);
+      if (pth->ornate) {
+        /* щит перед названием, само название — алым готическим */
+        int sw = MulDiv(18, dpi, 96), sh = MulDiv(22, dpi, 96);
+        draw_shield(hdc, padx + MulDiv(4, dpi, 96), (th - sh) / 2, sw, sh);
+        ttext.left += sw + MulDiv(6, dpi, 96);
+        vtext.left += sw + MulDiv(6, dpi, 96);
+        SetTextColor(hdc, KN_CRIMSON);
+      }
       if (g_fontDisplay) SelectObject(hdc, g_fontDisplay);
       DrawTextW(hdc, L"CursorPad", -1, &ttext, DT_LEFT | DT_BOTTOM | DT_SINGLELINE);
       SetTextColor(hdc, COL_MUTED);
@@ -2563,10 +2956,14 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     }
     draw_gutter_thumbs(hdc, dpi, th, fh);
 
-    RECT accent = {0, 0, MulDiv(3, dpi, 96), rc.bottom};
-    HBRUSH sage = CreateSolidBrush(COL_SAGE);
-    FillRect(hdc, &accent, sage);
-    DeleteObject(sage);
+    if (pth->ornate) {
+      draw_knight_frame(hdc, rc);
+    } else {
+      RECT accent = {0, 0, MulDiv(3, dpi, 96), rc.bottom};
+      HBRUSH sage = CreateSolidBrush(COL_SAGE);
+      FillRect(hdc, &accent, sage);
+      DeleteObject(sage);
+    }
     EndPaint(hwnd, &ps);
     return 0;
   }

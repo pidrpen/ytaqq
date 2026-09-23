@@ -2632,6 +2632,15 @@ static void layout_answer(void) {
 
 static LRESULT CALLBACK AnswerProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
   switch (msg) {
+  /* поле текста — цветами темы; без этого оно было системным серым во всех темах
+     (поле только для чтения спрашивает цвет через CTLCOLORSTATIC) */
+  case WM_CTLCOLOREDIT:
+  case WM_CTLCOLORSTATIC: {
+    HDC hdc = (HDC)wParam;
+    SetBkColor(hdc, COL_PAPER);
+    SetTextColor(hdc, COL_INK);
+    return (LRESULT)g_paper;
+  }
   case WM_ERASEBKGND:
     return 1;
   case WM_PAINT: {
@@ -2639,7 +2648,7 @@ static LRESULT CALLBACK AnswerProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
     HDC hdc = BeginPaint(hwnd, &ps);
     RECT rc;
     GetClientRect(hwnd, &rc);
-    FillRect(hdc, &rc, g_paper);
+    FillRect(hdc, &rc, bg_brush(FALSE));
     draw_panel_header(hwnd, hdc,
                       g_ansTitle ? g_ansTitle
                                  : (g_resultFiles ? L"Найденные файлы" : L"Находки"));
@@ -3319,6 +3328,15 @@ static void card_toggle_big(HWND hwnd) {
 
 static LRESULT CALLBACK CardProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
   switch (msg) {
+  /* поле текста — цветами темы; без этого оно было системным серым во всех темах
+     (поле только для чтения спрашивает цвет через CTLCOLORSTATIC) */
+  case WM_CTLCOLOREDIT:
+  case WM_CTLCOLORSTATIC: {
+    HDC hdc = (HDC)wParam;
+    SetBkColor(hdc, COL_PAPER);
+    SetTextColor(hdc, COL_INK);
+    return (LRESULT)g_paper;
+  }
   case WM_ERASEBKGND:
     return 1;
   case WM_PAINT: {
@@ -3326,7 +3344,7 @@ static LRESULT CALLBACK CardProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
     HDC hdc = BeginPaint(hwnd, &ps);
     RECT rc;
     GetClientRect(hwnd, &rc);
-    FillRect(hdc, &rc, g_paper);
+    FillRect(hdc, &rc, bg_brush(FALSE));
     draw_panel_header(hwnd, hdc, g_cardVerbose ? L"Атрибуты объекта" : L"Карточка");
     EndPaint(hwnd, &ps);
     return 0;
@@ -3739,6 +3757,15 @@ static void ocr_toggle_big(HWND hwnd) {
 
 static LRESULT CALLBACK OcrProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
   switch (msg) {
+  /* поле текста — цветами темы; без этого оно было системным серым во всех темах
+     (поле только для чтения спрашивает цвет через CTLCOLORSTATIC) */
+  case WM_CTLCOLOREDIT:
+  case WM_CTLCOLORSTATIC: {
+    HDC hdc = (HDC)wParam;
+    SetBkColor(hdc, COL_PAPER);
+    SetTextColor(hdc, COL_INK);
+    return (LRESULT)g_paper;
+  }
   case WM_ERASEBKGND:
     return 1;
   case WM_PAINT: {
@@ -3746,7 +3773,7 @@ static LRESULT CALLBACK OcrProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     HDC hdc = BeginPaint(hwnd, &ps);
     RECT rc;
     GetClientRect(hwnd, &rc);
-    FillRect(hdc, &rc, g_paper);
+    FillRect(hdc, &rc, bg_brush(FALSE));
     draw_panel_header(hwnd, hdc, L"Распознанный текст");
     EndPaint(hwnd, &ps);
     return 0;
