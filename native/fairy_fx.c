@@ -16,7 +16,7 @@
 
 #define WM_FAIRY_CLICK (WM_APP + 17)
 #define FX_WINDOWS 4    /* столько облачков может лететь одновременно */
-#define FX_PARTS 34
+#define FX_PARTS 7   /* семь звёздочек: больше — рябит (было 34) */
 #define FX_FRAMES 44    /* ~0.7 с при 16 мс на кадр */
 #define FX_SPR 8        /* 4 размера × (пятиконечная звезда, четырёхлучевая искра) */
 
@@ -287,18 +287,29 @@ static void fx_burst(int x, int y) {
   f->org.x = x - S / 2;
   f->org.y = y - S / 2;
   f->frame = 0;
+  /* цвета без повторов: перемешанная палитра */
+  int order[8] = {0, 1, 2, 3, 4, 5, 6, 7};
+  for (int i = 7; i > 0; i--) {
+    int j = (int)(fx_rand() * (i + 1)) % (i + 1);
+    int t = order[i];
+    order[i] = order[j];
+    order[j] = t;
+  }
+  float base = fx_rand() * 6.2832f;
   for (int i = 0; i < FX_PARTS; i++) {
     FxPart *p = &f->p[i];
-    float ang = fx_rand() * 6.2832f;
+    /* семь — мало, поэтому по кругу почти равномерно, чтобы не слиплись */
+    float ang = base + i * (6.2832f / FX_PARTS) + (fx_rand() - 0.5f) * 0.6f;
     float sp = (1.4f + fx_rand() * 3.0f) * g_fxScale;
     p->x = S / 2.0f + (fx_rand() - 0.5f) * 4.0f;
     p->y = S / 2.0f + (fx_rand() - 0.5f) * 4.0f;
     p->vx = cosf(ang) * sp;
     p->vy = sinf(ang) * sp - 0.8f * g_fxScale; /* чуть вверх: как фонтанчик */
-    p->spr = (int)(fx_rand() * FX_SPR) % FX_SPR;
-    p->delay = i < 20 ? 0 : (int)(fx_rand() * 8); /* вторая волна чуть позже */
+    /* покрупнее: из двух больших размеров (спрайты 4–7) */
+    p->spr = 4 + (int)(fx_rand() * 4) % 4;
+    p->delay = i < 5 ? 0 : 2 + (int)(fx_rand() * 4); /* пара — чуть позже */
     p->tw = fx_rand() * 6.2832f;
-    const BYTE *c = pal[(int)(fx_rand() * 8) % 8];
+    const BYTE *c = pal[order[i % 8]];
     p->r = c[0];
     p->g = c[1];
     p->b = c[2];
