@@ -288,6 +288,7 @@ static HFONT g_ocrFontZoom;
 static BOOL g_statusOn = FALSE;
 static HINSTANCE g_inst;
 static int g_skin = 1; /* 0 system, 1 sword, 2 gauntlet, 3 fairy */
+static BOOL g_sparkle = TRUE; /* у «Феи» — звёздочки при нажатии */
 static HCURSOR g_staticCur[3];
 static HCURSOR g_ibeamCur[3];
 static HCURSOR g_handCur[3];
@@ -337,6 +338,7 @@ static void show_status(const wchar_t *text);
 static void toggle_settings(void);
 static void save_cursor_pref(void);
 static void set_skin(int skin);
+static void fx_sync(void); /* fairy_fx.c: звёздочки при нажатии у «Феи» */
 static void start_lookup(const wchar_t *q);
 static BOOL clipboard_text(wchar_t *out, int n);
 static void search_web(const wchar_t *q);
@@ -954,9 +956,11 @@ static void load_cursor_pref(void) {
      sscanf просто их не заполнит и останутся нули */
   int cx = 0, cy = 0, cpt = 0;
   int ox = 0, oy = 0, ow = 0, oh = 0, opt = 0;
-  sscanf(buf, "%15s %d %d %15s %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d", skin, &bg,
+  int sparkle = -1; /* нет в файле — искорки включены */
+  sscanf(buf, "%15s %d %d %15s %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d", skin, &bg,
          &fg, eng, &autoOn, &theme, &aw, &ah, &cw, &ch, &pt, &keep, &ax, &ay, &cx, &cy, &cpt, &ox,
-         &oy, &ow, &oh, &opt);
+         &oy, &ow, &oh, &opt, &sparkle);
+  g_sparkle = sparkle != 0;
   g_cardX = cx;
   g_cardY = cy;
   if (cpt >= 7 && cpt <= 22) g_cardPt = cpt;
@@ -991,10 +995,10 @@ static void save_cursor_pref(void) {
   const char *v = g_skin == 3 ? "k4" : (g_skin == 2 ? "k3" : (g_skin == 0 ? "system" : "k2"));
   const char *e = g_engine == 4 ? "plm" : (g_engine == 5 ? "files" : "ai");
   char buf[280];
-  snprintf(buf, sizeof(buf), "%s %d %d %s %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d\n",
+  snprintf(buf, sizeof(buf), "%s %d %d %s %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d\n",
            v, g_alphaFollow, g_alphaPinned, e, g_autostart ? 1 : 0, g_theme, g_ansW, g_ansH,
            g_cardW, g_cardH, g_ansPt, g_ansKeepPos ? 1 : 0, g_ansX, g_ansY, g_cardX, g_cardY,
-           g_cardPt, g_ocrX, g_ocrY, g_ocrW, g_ocrH, g_ocrPt);
+           g_cardPt, g_ocrX, g_ocrY, g_ocrW, g_ocrH, g_ocrPt, g_sparkle ? 1 : 0);
   HANDLE h = CreateFileW(g_prefPath, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
                          FILE_ATTRIBUTE_NORMAL, NULL);
   if (h == INVALID_HANDLE_VALUE) return;
@@ -1018,6 +1022,7 @@ static void set_skin(int skin) {
   update_cursor_buttons();
   if (skin == 0) restore_system_cursor();
   else install_scheme_cursors();
+  fx_sync();
   _snwprintf(g_status, 160, L"Курсор: %s",
              skin == 3 ? L"Фея" : (skin == 2 ? L"Рукавица" : (skin == 0 ? L"Windows" : L"Мечник")));
   g_statusOn = TRUE;
@@ -1720,6 +1725,7 @@ static void place_panel_close(HWND hwnd);
 static void round_corners(HWND hwnd);
 
 #include "pad_extra.c"
+#include "fairy_fx.c"
 
 static void fill_round_rect(HDC hdc, RECT rc, COLORREF fill, COLORREF border, int rad) {
   int d = rad * 2;
@@ -2111,6 +2117,8 @@ static void tray_menu(HWND hwnd) {
   AppendMenuW(menu, MF_STRING | (g_skin == 1 ? MF_CHECKED : 0), 10, L"Курсор: Мечник");
   AppendMenuW(menu, MF_STRING | (g_skin == 2 ? MF_CHECKED : 0), 11, L"Курсор: Рукавица");
   AppendMenuW(menu, MF_STRING | (g_skin == 3 ? MF_CHECKED : 0), 19, L"Курсор: Фея");
+  AppendMenuW(menu, MF_STRING | (g_sparkle ? MF_CHECKED : 0) | (g_skin == 3 ? 0 : MF_GRAYED), 20,
+              L"   звёздочки при нажатии");
   AppendMenuW(menu, MF_STRING | (g_skin == 0 ? MF_CHECKED : 0), 12, L"Курсор: обычный Windows");
   AppendMenuW(menu, MF_STRING, 13, L"Следующий курсор (F7)");
   AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
@@ -2129,6 +2137,12 @@ static void tray_menu(HWND hwnd) {
   } else if (cmd == 10) set_skin(1);
   else if (cmd == 11) set_skin(2);
   else if (cmd == 19) set_skin(3);
+  else if (cmd == 20) {
+    g_sparkle = !g_sparkle;
+    save_cursor_pref();
+    fx_sync();
+    show_status(g_sparkle ? L"Звёздочки при нажатии включены" : L"Звёздочки при нажатии выключены");
+  }
   else if (cmd == 12) set_skin(0);
   else if (cmd == 13) cycle_skin();
   else if (cmd == 14) {
@@ -3095,6 +3109,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     AddClipboardFormatListener(hwnd);
     apply_follow_state();
     if (g_skin != 0) install_scheme_cursors();
+    fx_sync();
     return 0;
   }
   case WM_SIZE:
@@ -3376,7 +3391,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
   case WM_CLOSE:
     DestroyWindow(hwnd);
     return 0;
+  case WM_FAIRY_CLICK:
+    fx_burst((int)(LONG_PTR)wParam, (int)(LONG_PTR)lParam);
+    return 0;
   case WM_DESTROY:
+    fx_shutdown();
     share_stop();
     save_notes();
     save_cursor_pref(); /* keeps the results panel's size across restarts */
