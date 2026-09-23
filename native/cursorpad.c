@@ -54,6 +54,16 @@
 #define ID_SEARCH_GO 113
 #define ID_ASK_TAB 114
 #define ID_NARDY_BTN 190 /* «Нарды» внизу окна */
+#define ID_ND_LIST 180
+#define ID_ND_INVITE 181
+#define ID_ND_ACCEPT 182
+#define ID_ND_DECLINE 183
+#define ID_ND_ROLL 184
+#define ID_ND_UNDO 185
+#define ID_ND_DONE 186
+#define ID_ND_RESIGN 187
+#define ID_ND_BACK 188
+#define ID_ND_CANCEL 189
 #define ID_CLIP 131
 #define ID_CLIPCLR 153
 #define ID_ANSPIN 154
@@ -1927,7 +1937,8 @@ static void draw_pad_button(const DRAWITEMSTRUCT *dis) {
   int ti = themeBtn ? id - ID_THEME_BASE : -1;
   BOOL on = t[0] == 0x25CF || (themeBtn && g_theme == ti);
   BOOL primary = id == ID_SETTINGS || id == ID_SEARCH_GO || id == ID_UPDATE || id == ID_PIN ||
-                 id == ID_ANS_OPEN || id == ID_ANS_OPENTP || (id == ID_ASK_TAB && g_askOpen);
+                 id == ID_ANS_OPEN || id == ID_ANS_OPENTP || (id == ID_ASK_TAB && g_askOpen) ||
+                 id == ID_ND_INVITE || id == ID_ND_ACCEPT || id == ID_ND_ROLL || id == ID_ND_DONE;
   BOOL quiet = id == ID_CLOSE || id == ID_MIN || id == ID_PANEL_CLOSE;
   COLORREF fill, fg, bd;
   /* рыцарская тема рисует кнопки целиком по-своему; кнопка выбора

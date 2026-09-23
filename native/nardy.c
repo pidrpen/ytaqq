@@ -26,16 +26,7 @@
 
 #define WM_NARDY_POLL (WM_APP + 18) /* lParam — NdPoll*, освобождает получатель */
 #define ND_SUB L"CursorPad-Nardy"
-#define ID_ND_LIST 180
-#define ID_ND_INVITE 181
-#define ID_ND_ACCEPT 182
-#define ID_ND_DECLINE 183
-#define ID_ND_ROLL 184
-#define ID_ND_UNDO 185
-#define ID_ND_DONE 186
-#define ID_ND_RESIGN 187
-#define ID_ND_BACK 188
-#define ID_ND_CANCEL 189
+/* ID_ND_* — в cursorpad.c: главные из них рисуются синими */
 
 enum { ND_LOBBY, ND_WAIT, ND_PLAY, ND_OVER };
 
@@ -1305,7 +1296,10 @@ static void nd_layout(void) {
   ShowWindow(b[9], lobby ? SW_SHOW : SW_HIDE);
   if (lobby) MoveWindow(b[9], pad, S_(ND_TOP) + S_(24), rc.right - pad * 2, S_(200), TRUE);
   ShowWindow(b[0], lobby ? SW_SHOW : SW_HIDE);
-  if (lobby) MoveWindow(b[0], pad, S_(ND_TOP) + S_(232), S_(160), bh, TRUE);
+  if (lobby) {
+    MoveWindow(b[0], pad, S_(ND_TOP) + S_(232), S_(220), bh, TRUE);
+    EnableWindow(b[0], pl && pl->nOnline > 0);
+  }
   ShowWindow(b[1], inv ? SW_SHOW : SW_HIDE);
   ShowWindow(b[2], inv ? SW_SHOW : SW_HIDE);
   if (inv) {
@@ -1367,6 +1361,7 @@ static void nd_refresh_view(void) {
         SendMessageW(g_ndList, LB_ADDSTRING, 0, (LPARAM)pl->onName[i]);
         if (selId[0] && !wcscmp(selId, pl->onId[i])) keep = i;
       }
+    if (keep < 0 && pl && pl->nOnline > 0) keep = 0; /* сразу выбран первый — «Позвать» жмётся без поиска */
     if (keep >= 0) SendMessageW(g_ndList, LB_SETCURSEL, keep, 0);
     SendMessageW(g_ndList, WM_SETREDRAW, TRUE, 0);
     InvalidateRect(g_ndList, NULL, TRUE);
@@ -1393,7 +1388,7 @@ static void nd_paint(HWND hwnd, HDC hdc) {
       DrawTextW(hdc, L"Задайте общую папку в Настройках («общая папка — PLM для коллег»)", -1, &t,
                 DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
     else
-      DrawTextW(hdc, pl && pl->nOnline ? L"Кто в сети — выберите и нажмите «Позвать»" : L"Из коллег сейчас никого в сети",
+      DrawTextW(hdc, pl && pl->nOnline ? L"Кто в сети: выберите коллегу и нажмите «Позвать играть» ниже" : L"Из коллег сейчас никого в сети",
                 -1, &t, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
     if (pl && pl->nInv) {
       wchar_t s[200];
