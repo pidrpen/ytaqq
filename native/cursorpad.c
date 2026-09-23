@@ -1038,11 +1038,12 @@ static void cycle_skin(void) {
   set_skin(next);
 }
 
-/* «Фея» крупнее прочих: полтора размера системного курсора (48 точек при
-   100 %, 72 при 150 %). Её .cur несут 48 и 72 — Windows берёт ближний. */
+/* «Фея» чуть крупнее прочих: 1,25 размера системного курсора (40 точек при
+   100 %, 50 при 125 %, 60 при 150 %). Её .cur несут ровно эти размеры.
+   До 2026.09.23.13 было полтора размера — вышло крупно. */
 static HCURSOR load_big_cursor(HINSTANCE inst, int id, const wchar_t *rel) {
-  int sz = GetSystemMetrics(SM_CXCURSOR) * 3 / 2;
-  if (sz < 32) sz = 48;
+  int sz = GetSystemMetrics(SM_CXCURSOR) * 5 / 4;
+  if (sz < 32) sz = 40;
   HCURSOR c = NULL;
   if (inst && id) c = (HCURSOR)LoadImageW(inst, MAKEINTRESOURCEW(id), IMAGE_CURSOR, sz, sz, 0);
   if (!c) {
