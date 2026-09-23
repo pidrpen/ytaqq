@@ -642,6 +642,9 @@ static LRESULT CALLBACK DrawPaneProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
   return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
+/* столбец «Заготовка» в находках — коротко; полностью — в подсказке и карточке */
+static void pf_short(const wchar_t *full, wchar_t *out, int cap);
+
 static void fill_plm_list(void) {
   if (!g_answerList) return;
   LVCOLUMNW col;
@@ -671,8 +674,10 @@ static void fill_plm_list(void) {
     it.pszText = g_plmTp[i];
     SendMessageW(g_answerList, LVM_SETITEMW, 0, (LPARAM)&it);
     if (!g_resultFiles) {
+      wchar_t sh[PLM_COL1];
+      pf_short(g_plmPf[i], sh, PLM_COL1);
       it.iSubItem = 2;
-      it.pszText = g_plmPf[i];
+      it.pszText = sh;
       SendMessageW(g_answerList, LVM_SETITEMW, 0, (LPARAM)&it);
     }
   }
@@ -2376,6 +2381,14 @@ typedef struct {
   ULONGLONG deadline; /* 0 — без предела */
 } PfSum;
 
+/* Значение для обхода заготовки: как в карточке, а если по типу не вышло —
+   любое число или текст, что есть в строке (так читается и время операций:
+   поле Value внутри составного атрибута бывает и не тех типов, что в CASE). */
+#define PF_VALUE_SQL                                                                        \
+  L"COALESCE(lo.Name, NULLIF(" CARD_VALUE_SQL L", N''), "                                    \
+  L"CONVERT(NVARCHAR(64), a.FloatNumber), CONVERT(NVARCHAR(64), a.IntegerNumber), "          \
+  L"CASE WHEN a.DataType<>6 THEN CONVERT(NVARCHAR(64), a.LongNumber) END, a.ShortText, N'')"
+
 static BOOL pf_late(const PfSum *sm) {
   return sm->deadline && GetTickCount64() > sm->deadline;
 }
@@ -2390,9 +2403,16 @@ static void pf_lower(const wchar_t *in, wchar_t *out, int cap) {
 static int pf_kind(const wchar_t *key) {
   wchar_t k[128];
   pf_lower(key, k, 128);
-  if (wcsstr(k, L"unit") || wcsstr(k, L"substitute") || wcsstr(k, L"measure")) return 0;
-  if (wcsstr(k, L"material")) return 1;
-  if (wcsstr(k, L"mass") || wcsstr(k, L"weight")) return 2;
+  if (wcsstr(k, L"unit") || wcsstr(k, L"substitute") || wcsstr(k, L"measure") ||
+      wcsstr(k, L"единиц") || wcsstr(k, L"заменит"))
+    return 0;
+  if (wcsstr(k, L"material") || wcsstr(k, L"материал") || wcsstr(k, L"марка")) return 1;
+  if (wcsstr(k, L"mass") || wcsstr(k, L"weight") || wcsstr(k, L"масс") || !wcscmp(k, L"вес") ||
+      wcsstr(k, L"вес заг"))
+    return 2;
+  static const wchar_t *ru[] = {L"длин", L"ширин", L"высот", L"толщин", L"диаметр", L"размер", L"габарит"};
+  for (size_t i = 0; i < sizeof(ru) / sizeof(ru[0]); i++)
+    if (wcsstr(k, ru[i])) return 3;
   static const wchar_t *dims[] = {L"length", L"width",     L"height", L"thick",
                                   L"diam",   L"dimension", L"gabar",  L"size"};
   for (size_t i = 0; i < sizeof(dims) / sizeof(dims[0]); i++)
@@ -2482,7 +2502,7 @@ static void pf_explore(SQLHDBC dbc, long id, int depth, CardOut *c, const wchar_
   pad2[39] = 0;
 
   _snwprintf(sql, 4000,
-             L"SELECT TOP 300 a.AttributeId, nk.Value, COALESCE(lo.Name, " CARD_VALUE_SQL L"), "
+             L"SELECT TOP 300 a.AttributeId, nk.Value, " PF_VALUE_SQL L", "
              L"ISNULL(a.Link,0), a.DataType "
              L"FROM InfoObjectAttributes AS a WITH(NOLOCK) "
              L"JOIN NameKeys AS nk WITH(NOLOCK) ON nk.NameKeyId=a.NameKeyId "
@@ -2503,8 +2523,8 @@ static void pf_explore(SQLHDBC dbc, long id, int depth, CardOut *c, const wchar_
   for (int i = 0; i < n && sm->queries <= 60 && !pf_late(sm); i++) {
     if ((rows[i].n3 != 8 && rows[i].n3 != 23) || card_hidden(rows[i].s1)) continue;
     _snwprintf(sql, 4000,
-               L"SELECT TOP 300 a.CollectionElementId, nk.Value, COALESCE(lo.Name, " CARD_VALUE_SQL
-               L"), ISNULL(a.Link,0), a.DataType "
+               L"SELECT TOP 300 a.CollectionElementId, nk.Value, " PF_VALUE_SQL
+               L", ISNULL(a.Link,0), a.DataType "
                L"FROM InfoObjectCollectionElements AS ce WITH(NOLOCK) "
                L"JOIN InfoObjectAttributes AS a WITH(NOLOCK) "
                L"ON a.CollectionElementId=ce.CollectionElementId AND a.Outdated=0 "
@@ -2526,17 +2546,33 @@ static void pf_explore(SQLHDBC dbc, long id, int depth, CardOut *c, const wchar_
     }
     long cur = -1;
     int shown = 0;
+    const wchar_t *valKey = rows[i].s1; /* чьё значение лежит в поле Value этой строки */
     for (int e = 0; e < m; e++) {
       if (el[e].n1 != cur) {
         if (c && shown) card_add(c, L"\r\n");
         cur = el[e].n1;
         shown = 0;
         if (c) card_add(c, L"%s- ", pad2);
+        /* Составной атрибут (Масса, Длина…): число в его строке под именем
+           Value — значит, это масса или длина. В списке параметров имя
+           параметра — в соседнем поле строки (Name, Parameter…). */
+        valKey = rows[i].s1;
+        for (int q = e; q < m && el[q].n1 == cur; q++) {
+          wchar_t kq[64];
+          pf_lower(el[q].s1, kq, 64);
+          if (el[q].s2[0] && (!wcscmp(kq, L"name") || wcsstr(kq, L"parameter") || wcsstr(kq, L"characteristic") ||
+                              wcsstr(kq, L"property")))
+            valKey = el[q].s2;
+        }
       }
       if (!el[e].s2[0]) continue;
       pf_sort_candidate(sm, el[e].s1, el[e].s2);
       if (card_hidden(el[e].s1)) continue;
-      pf_take(sm, el[e].s1, el[e].s2);
+      if (!_wcsicmp(el[e].s1, L"Value") || !_wcsicmp(el[e].s1, L"NumberValue") ||
+          !_wcsicmp(el[e].s1, L"DoubleValue"))
+        pf_take(sm, valKey, el[e].s2);
+      else
+        pf_take(sm, el[e].s1, el[e].s2);
       const wchar_t *lab = card_label(el[e].s1);
       if (c) card_add(c, L"%s%s %s", shown ? L" · " : L"", lab ? lab : el[e].s1, el[e].s2);
       shown++;
@@ -2631,6 +2667,128 @@ static void pf_summary_text(const PfSum *sm, wchar_t *out, int cap) {
   if (sm->dims[0] && l >= 0 && l < cap)
     l += _snwprintf(out + l, cap - l, L"%s%s", l ? L" · " : L"", sm->dims);
   if (ms[0] && l >= 0 && l < cap) _snwprintf(out + l, cap - l, L"%s%s", l ? L" · " : L"", ms);
+  out[cap - 1] = 0;
+}
+
+/* Коротко для столбца: без номеров ГОСТ/ТУ, размеры через «×», масса как есть.
+   «Круг 45 ГОСТ 2590-2006 / 38ХС ГОСТ 4543-2016 · Диаметр 45 · Длина 118 · 1,49 кг»
+   → «Круг 45 / 38ХС · Ø45×118 · 1,49 кг». Строка столбца узкая, а целиком
+   такое не помещалось и обрезалось на середине сортамента. */
+static BOOL pf_is_std(const wchar_t *tok) {
+  wchar_t t[16];
+  pf_lower(tok, t, 16);
+  static const wchar_t *std[] = {L"гост", L"ост", L"сто", L"ту", L"din", L"iso", L"en"};
+  for (size_t i = 0; i < sizeof(std) / sizeof(std[0]); i++) {
+    size_t l = wcslen(std[i]);
+    if (!wcsncmp(t, std[i], l) && (!t[l] || (t[l] >= L'0' && t[l] <= L'9') || t[l] == L'-')) return TRUE;
+  }
+  return FALSE;
+}
+
+static void pf_strip_std(const wchar_t *in, wchar_t *out, int cap) {
+  wchar_t buf[600];
+  int b = 0;
+  for (const wchar_t *p = in; *p && b < 590; p++) { /* «/» — отдельным словом */
+    if (*p == L'/') {
+      buf[b++] = L' ';
+      buf[b++] = L'/';
+      buf[b++] = L' ';
+    } else {
+      buf[b++] = *p;
+    }
+  }
+  buf[b] = 0;
+  out[0] = 0;
+  int ol = 0;
+  BOOL skipping = FALSE;
+  wchar_t *ctx = NULL;
+  for (wchar_t *tok = wcstok_s(buf, L" ", &ctx); tok; tok = wcstok_s(NULL, L" ", &ctx)) {
+    BOOL digit = FALSE;
+    for (const wchar_t *q = tok; *q && !digit; q++) digit = *q >= L'0' && *q <= L'9';
+    if (pf_is_std(tok)) {
+      skipping = TRUE;
+      continue;
+    }
+    if (skipping && (digit || !wcscmp(tok, L"Р") || !wcscmp(tok, L"р"))) continue;
+    skipping = FALSE;
+    if (ol && !wcscmp(tok, L"/") && out[ol - 1] == L'/') continue;
+    ol += _snwprintf(out + ol, cap - ol, L"%s%s", ol ? L" " : L"", tok);
+    if (ol >= cap - 1) break;
+  }
+  /* «/» в конце (марки за ним не было) не нужен */
+  while (ol >= 2 && (out[ol - 1] == L'/' || out[ol - 1] == L' ')) out[--ol] = 0;
+  out[cap - 1] = 0;
+}
+
+static void pf_short_one(const wchar_t *seg, wchar_t *out, int cap) {
+  wchar_t mat[300] = L"", dims[120] = L"", mass[60] = L"", dim1[16] = L"";
+  int nd = 0;
+  const wchar_t *p = seg;
+  while (p && *p) {
+    const wchar_t *sep = wcsstr(p, L" · ");
+    size_t len = sep ? (size_t)(sep - p) : wcslen(p);
+    wchar_t part[300];
+    if (len > 299) len = 299;
+    memcpy(part, p, len * sizeof(wchar_t));
+    part[len] = 0;
+    wchar_t low[300];
+    pf_lower(part, low, 300);
+    size_t pl = wcslen(part);
+    if (pl > 3 && !wcscmp(part + pl - 3, L" кг")) {
+      lstrcpynW(mass, part, 60);
+    } else if (pf_kind(part) == 3 && wcsrchr(part, L' ')) {
+      const wchar_t *v = wcsrchr(part, L' ') + 1;
+      if (!nd++) /* одна длина без подписи непонятна — ей буква: L=120 */
+        lstrcpynW(dim1, wcsstr(low, L"длин") ? L"L=" : wcsstr(low, L"толщ") ? L"s=" :
+                        wcsstr(low, L"шир") ? L"B=" : wcsstr(low, L"выс") ? L"H=" : L"", 16);
+      size_t dl = wcslen(dims);
+      _snwprintf(dims + dl, 120 - dl, L"%s%s%s", dl ? L"×" : L"", wcsstr(low, L"диам") ? L"Ø" : L"", v);
+      dims[119] = 0;
+    } else if (!wcsncmp(low, L"масса ", 6)) {
+      pf_mass_text(part + 6, mass, 60);
+    } else {
+      wchar_t st[300];
+      pf_strip_std(part, st, 300);
+      size_t ml = wcslen(mat);
+      if (st[0]) _snwprintf(mat + ml, 300 - ml, L"%s%s", ml ? L" · " : L"", st);
+      mat[299] = 0;
+    }
+    p = sep ? sep + 3 : NULL;
+  }
+  if (nd == 1 && dim1[0]) {
+    wchar_t t[120];
+    _snwprintf(t, 120, L"%s%s", dim1, dims);
+    t[119] = 0;
+    lstrcpynW(dims, t, 120);
+  }
+  int l = 0;
+  out[0] = 0;
+  const wchar_t *pieces[3] = {mat, dims, mass};
+  for (int i = 0; i < 3; i++)
+    if (pieces[i][0] && l >= 0 && l < cap) l += _snwprintf(out + l, cap - l, L"%s%s", l ? L" · " : L"", pieces[i]);
+  out[cap - 1] = 0;
+}
+
+static void pf_short(const wchar_t *full, wchar_t *out, int cap) {
+  out[0] = 0;
+  if (!full || !full[0]) return;
+  if (!wcscmp(full, L"…")) {
+    lstrcpynW(out, full, cap);
+    return;
+  }
+  int l = 0;
+  const wchar_t *p = full;
+  while (p && *p && l >= 0 && l < cap - 1) { /* несколько заготовок — через «; » */
+    const wchar_t *sep = wcsstr(p, L"; ");
+    size_t len = sep ? (size_t)(sep - p) : wcslen(p);
+    wchar_t seg[PLM_COL1], one[PLM_COL1];
+    if (len >= PLM_COL1) len = PLM_COL1 - 1;
+    memcpy(seg, p, len * sizeof(wchar_t));
+    seg[len] = 0;
+    pf_short_one(seg, one, PLM_COL1);
+    l += _snwprintf(out + l, cap - l, L"%s%s", l ? L"; " : L"", one[0] ? one : seg);
+    p = sep ? sep + 2 : NULL;
+  }
   out[cap - 1] = 0;
 }
 
@@ -3180,8 +3338,10 @@ static void pf_update_column(void) {
   for (int i = 0; i < g_plmCount; i++) {
     LVITEMW it;
     memset(&it, 0, sizeof(it));
+    wchar_t sh[PLM_COL1];
+    pf_short(g_plmPf[i], sh, PLM_COL1);
     it.iSubItem = 2;
-    it.pszText = g_plmPf[i];
+    it.pszText = sh;
     SendMessageW(g_answerList, LVM_SETITEMTEXTW, (WPARAM)i, (LPARAM)&it);
   }
 }
@@ -3496,6 +3656,17 @@ static LRESULT CALLBACK AnswerProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
         request_row_draw();
       break;
     }
+    /* наведёшь на строку — заготовка целиком: в столбце она сокращена */
+    if (nm && nm->idFrom == ID_ANS_LIST && nm->code == LVN_GETINFOTIPW && !g_resultFiles) {
+      NMLVGETINFOTIPW *tip = (NMLVGETINFOTIPW *)lParam;
+      int i = tip->iItem;
+      if (i >= 0 && i < g_plmCount && g_plmPf[i][0] && wcscmp(g_plmPf[i], L"…") && tip->pszText &&
+          tip->cchTextMax > 0) {
+        _snwprintf(tip->pszText, tip->cchTextMax, L"Заготовка: %s", g_plmPf[i]);
+        tip->pszText[tip->cchTextMax - 1] = 0;
+      }
+      return 0;
+    }
     if (nm && nm->idFrom == ID_ANS_LIST && nm->code == LVN_COLUMNCLICK) {
       int col = ((NMLISTVIEW *)lParam)->iSubItem;
       g_sortDesc = (col == g_sortCol) ? !g_sortDesc : 0;
@@ -3576,7 +3747,7 @@ static void create_answer(HWND owner) {
       0, 0, 100, 100, g_answer, (HMENU)(INT_PTR)ID_ANS_LIST, NULL, NULL);
   if (g_answerList) {
     SendMessageW(g_answerList, LVM_SETEXTENDEDLISTVIEWSTYLE, 0,
-                 LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
+                 LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_INFOTIP);
     SendMessageW(g_answerList, LVM_SETBKCOLOR, 0, (LPARAM)COL_PAPER);
     SendMessageW(g_answerList, LVM_SETTEXTBKCOLOR, 0, (LPARAM)COL_PAPER);
     SendMessageW(g_answerList, LVM_SETTEXTCOLOR, 0, (LPARAM)COL_INK);
