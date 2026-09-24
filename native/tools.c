@@ -50,6 +50,7 @@ static void tools_menu(HWND owner, HWND btn) {
   HMENU m = CreatePopupMenu();
   if (!m) return;
   for (int k = 0; k < TOOLS_N; k++) AppendMenuW(m, MF_STRING, 1 + k, kTools[k].title);
+  webview_prewarm(); /* пока выбирают пункт, движок Edge уже просыпается */
   RECT r;
   GetWindowRect(btn, &r);
   SetForegroundWindow(owner);

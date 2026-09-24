@@ -284,6 +284,20 @@ static void wv_fallback(WvWin *w) {
   if (path[0]) wv_open_outside(path);
 }
 
+static BOOL wv_start_env(void) {
+  CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+  wchar_t udf[MAX_PATH];
+  _snwprintf(udf, MAX_PATH, L"%s\\webview2\\data", g_dataDir);
+  udf[MAX_PATH - 1] = 0;
+  g_wvEnvPending = TRUE;
+  if (FAILED(g_wvCreate(NULL, udf, NULL, &g_wvEnvDone))) {
+    g_wvEnvPending = FALSE;
+    g_wvBroken = TRUE;
+    return FALSE;
+  }
+  return TRUE;
+}
+
 /* Открыть страницу в окне CursorPad. FALSE — WebView2 нет, открывайте иначе. */
 static BOOL webview_open(const wchar_t *path, const wchar_t *title) {
   if (!wv_ready()) return FALSE;
@@ -319,19 +333,15 @@ static BOOL webview_open(const wchar_t *path, const wchar_t *title) {
   SetPropW(h, L"CursorPadWvPath", _wcsdup(path));
   ShowWindow(h, SW_SHOWNORMAL);
   SetForegroundWindow(h);
-  if (g_wvEnv) {
-    wv_attach(w);
-  } else if (!g_wvEnvPending) {
-    CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
-    wchar_t udf[MAX_PATH];
-    _snwprintf(udf, MAX_PATH, L"%s\\webview2\\data", g_dataDir);
-    udf[MAX_PATH - 1] = 0;
-    g_wvEnvPending = TRUE;
-    if (FAILED(g_wvCreate(NULL, udf, NULL, &g_wvEnvDone))) {
-      g_wvEnvPending = FALSE;
-      g_wvBroken = TRUE;
-      wv_fallback(w);
-    }
-  }
+  if (g_wvEnv) wv_attach(w);
+  else if (!g_wvEnvPending && !wv_start_env()) wv_fallback(w);
   return TRUE;
+}
+
+/* Движок Edge поднимается секунду-две. Запускаем его, как только нажали
+   «Ещё»: пока выбирают пункт, он успевает проснуться, и окно открывается
+   почти сразу. */
+static void webview_prewarm(void) {
+  if (g_wvEnv || g_wvEnvPending || !wv_ready()) return;
+  wv_start_env();
 }
