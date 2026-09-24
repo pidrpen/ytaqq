@@ -2083,7 +2083,29 @@ static void clear_copied(void) {
   if (g_clipEdit) SetWindowTextW(g_clipEdit, L"");
   /* «Сброс» заодно останавливает перенос в 1С — отдельная кнопка не нужна */
   onec_stop(NULL);
-  show_status(ok ? L"Буфер очищен" : L"Буфер занят другой программой");
+  /* и очищает весь блокнот. Спрашиваем: заметки пропадут разом. Прежние
+     заметки остаются в notes_before_reset.txt — если нажали зря. */
+  BOOL cleared = FALSE;
+  if (g_edit && GetWindowTextLengthW(g_edit) > 0) {
+    if (MessageBoxW(g_hwnd, L"Очистить весь блокнот?\n\nПрежние заметки сохранятся в notes_before_reset.txt.",
+                    L"Сброс", MB_YESNO | MB_ICONQUESTION | MB_TOPMOST) == IDYES) {
+      save_notes(); /* последние правки — в файл, потом копия */
+      wchar_t bak[MAX_PATH];
+      lstrcpynW(bak, g_notesPath, MAX_PATH);
+      wchar_t *slash = wcsrchr(bak, L'\\');
+      if (slash) {
+        lstrcpynW(slash + 1, L"notes_before_reset.txt", (int)(MAX_PATH - (slash + 1 - bak)));
+        CopyFileW(g_notesPath, bak, FALSE);
+      }
+      SetWindowTextW(g_edit, L"");
+      g_dirty = TRUE;
+      save_notes();
+      /* рамки и номера строк рисуются поверх поля — стереть и их */
+      RedrawWindow(g_hwnd, NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+      cleared = TRUE;
+    }
+  }
+  show_status(cleared ? L"Блокнот очищен" : (ok ? L"Буфер очищен" : L"Буфер занят другой программой"));
 }
 
 static void paste_line(int n) {
