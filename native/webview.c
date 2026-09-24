@@ -101,7 +101,35 @@ typedef struct {
   WvCore *core;
   wchar_t url[MAX_PATH * 3];
   WvCtlDone done;
+  ULONGLONG t0; /* когда попросили открыть — для журнала */
 } WvWin;
+
+/* Журнал: сколько занял каждый шаг (%LOCALAPPDATA%\CursorPad\webview2\log.txt).
+   По нему видно, что именно медленное: запуск движка или само окно. */
+static ULONGLONG g_wvEnvT0;
+static void wv_log(const wchar_t *fmt, ...) {
+  if (!g_dataDir[0]) return;
+  wchar_t path[MAX_PATH], line[400];
+  _snwprintf(path, MAX_PATH, L"%s\\webview2\\log.txt", g_dataDir);
+  path[MAX_PATH - 1] = 0;
+  SYSTEMTIME t;
+  GetLocalTime(&t);
+  int n = _snwprintf(line, 400, L"%02d.%02d %02d:%02d:%02d.%03d  ", t.wDay, t.wMonth, t.wHour, t.wMinute,
+                     t.wSecond, t.wMilliseconds);
+  va_list ap;
+  va_start(ap, fmt);
+  if (n > 0) _vsnwprintf(line + n, 400 - n - 3, fmt, ap);
+  va_end(ap);
+  line[396] = 0;
+  wcscat(line, L"\r\n");
+  char u[1200];
+  int k = WideCharToMultiByte(CP_UTF8, 0, line, -1, u, (int)sizeof(u), NULL, NULL);
+  HANDLE f = CreateFileW(path, FILE_APPEND_DATA, FILE_SHARE_READ, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+  if (f == INVALID_HANDLE_VALUE) return;
+  DWORD w = 0;
+  if (k > 1) WriteFile(f, u, (DWORD)(k - 1), &w, NULL);
+  CloseHandle(f);
+}
 static WvWin g_wv[WV_MAX];
 
 static WvWin *wv_find(HWND h) {
@@ -143,9 +171,11 @@ static HRESULT STDMETHODCALLTYPE wv_ctl_done(WvCtlDone *t, HRESULT hr, WvCtl *ct
   WvWin *w = wv_find(t->hwnd);
   if (!w) return S_OK; /* окно уже закрыли */
   if (FAILED(hr) || !ctl) {
+    wv_log(L"окно движка не создалось (0x%08lx) — открываю в Edge", (unsigned long)hr);
     wv_fallback(w);
     return S_OK;
   }
+  wv_log(L"окно движка готово через %llu мс после нажатия", GetTickCount64() - w->t0);
   ctl->lpVtbl->AddRef(ctl);
   w->ctl = ctl;
   RECT rc;
@@ -169,6 +199,8 @@ static void wv_attach(WvWin *w) {
 static HRESULT STDMETHODCALLTYPE wv_env_done(WvEnvDone *t, HRESULT hr, WvEnv *env) {
   (void)t;
   g_wvEnvPending = FALSE;
+  wv_log(L"движок Edge %s за %llu мс", SUCCEEDED(hr) && env ? L"запущен" : L"НЕ запустился",
+         GetTickCount64() - g_wvEnvT0);
   if (FAILED(hr) || !env) {
     g_wvBroken = TRUE; /* дальше сразу открываем по-запасному */
     for (int i = 0; i < WV_MAX; i++)
@@ -227,6 +259,30 @@ static LRESULT CALLBACK WvProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
   case WM_SETFOCUS:
     if (w && w->ctl) w->ctl->lpVtbl->MoveFocus(w->ctl, 0);
     return 0;
+  case WM_PAINT: {
+    /* пока движок поднимается, окно не пустое: видно, что оно не зависло */
+    PAINTSTRUCT ps;
+    HDC dc = BeginPaint(hwnd, &ps);
+    RECT rc;
+    GetClientRect(hwnd, &rc);
+    FillRect(dc, &rc, (HBRUSH)(COLOR_WINDOW + 1));
+    if (!w || !w->ctl) {
+      SetBkMode(dc, TRANSPARENT);
+      SetTextColor(dc, RGB(120, 120, 120));
+      if (g_fontUi) SelectObject(dc, g_fontUi);
+      DrawTextW(dc, L"Открываю…", -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
+    EndPaint(hwnd, &ps);
+    return 0;
+  }
+  case WM_CLOSE:
+    /* не закрываем, а прячем: во второй раз окно откроется мгновенно и с
+       тем, что в нём уже ввели */
+    if (w && w->ctl) {
+      ShowWindow(hwnd, SW_HIDE);
+      return 0;
+    }
+    break;
   case WM_DESTROY:
     free(GetPropW(hwnd, L"CursorPadWvPath"));
     RemovePropW(hwnd, L"CursorPadWvPath");
@@ -286,6 +342,15 @@ static void wv_fallback(WvWin *w) {
 
 static BOOL wv_start_env(void) {
   CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+  /* На рабочей сети движок Edge на старте ищет прокси (WPAD) и спрашивает
+     SmartScreen и обновления — и ждёт ответа по многу секунд. Страницы у нас
+     локальные, сеть им не нужна: всё это выключаем (параметры движка
+     задаются этой переменной — так документировано у WebView2). */
+  SetEnvironmentVariableW(L"WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
+                          L"--no-proxy-server --disable-background-networking --disable-component-update "
+                          L"--disable-features=msSmartScreenProtection,msEdgeSmartScreen");
+  g_wvEnvT0 = GetTickCount64();
+  wv_log(L"запускаю движок Edge");
   wchar_t udf[MAX_PATH];
   _snwprintf(udf, MAX_PATH, L"%s\\webview2\\data", g_dataDir);
   udf[MAX_PATH - 1] = 0;
@@ -301,6 +366,15 @@ static BOOL wv_start_env(void) {
 /* Открыть страницу в окне CursorPad. FALSE — WebView2 нет, открывайте иначе. */
 static BOOL webview_open(const wchar_t *path, const wchar_t *title) {
   if (!wv_ready()) return FALSE;
+  wchar_t url[MAX_PATH * 3];
+  wv_file_url(path, url, MAX_PATH * 3);
+  for (int i = 0; i < WV_MAX; i++) /* эта страница уже открывалась — показать то же окно */
+    if (g_wv[i].hwnd && g_wv[i].ctl && !wcscmp(g_wv[i].url, url)) {
+      ShowWindow(g_wv[i].hwnd, IsIconic(g_wv[i].hwnd) ? SW_RESTORE : SW_SHOW);
+      SetForegroundWindow(g_wv[i].hwnd);
+      wv_log(L"%s: уже открыта — показал сразу", title);
+      return TRUE;
+    }
   WvWin *w = wv_find(NULL);
   if (!w) return FALSE; /* восемь окон открыто — хватит, пусть откроется в Edge */
   static BOOL reg;
@@ -329,7 +403,9 @@ static BOOL webview_open(const wchar_t *path, const wchar_t *title) {
   if (!h) return FALSE;
   memset(w, 0, sizeof(*w));
   w->hwnd = h;
-  wv_file_url(path, w->url, MAX_PATH * 3);
+  w->t0 = GetTickCount64();
+  lstrcpynW(w->url, url, MAX_PATH * 3);
+  wv_log(L"%s: открываю (движок %s)", title, g_wvEnv ? L"уже запущен" : (g_wvEnvPending ? L"запускается" : L"ещё не запущен"));
   SetPropW(h, L"CursorPadWvPath", _wcsdup(path));
   ShowWindow(h, SW_SHOWNORMAL);
   SetForegroundWindow(h);
@@ -338,9 +414,9 @@ static BOOL webview_open(const wchar_t *path, const wchar_t *title) {
   return TRUE;
 }
 
-/* Движок Edge поднимается секунду-две. Запускаем его, как только нажали
-   «Ещё»: пока выбирают пункт, он успевает проснуться, и окно открывается
-   почти сразу. */
+/* Движок Edge поднимается небыстро. Запускаем его заранее: через 20 секунд
+   после старта программы (таймер в cursorpad.c) и ещё раз — если к тому
+   времени не вышло — как только нажали «Ещё». */
 static void webview_prewarm(void) {
   if (g_wvEnv || g_wvEnvPending || !wv_ready()) return;
   wv_start_env();

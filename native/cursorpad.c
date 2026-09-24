@@ -73,6 +73,7 @@
 #define TIMER_PASTE 3
 #define TIMER_STATUS 4
 #define TIMER_FILES_PLAN 10 /* раз в минуту: не пора ли полный обход папки */
+#define TIMER_WV_WARM 11 /* один раз после запуска: поднять движок Edge для «Ещё» заранее */
 #define ID_FILES_NOTIFY 157
 #define ID_WATCH_EDIT 158
 #define ID_WATCH_BROWSE 159
@@ -3178,6 +3179,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     round_corners(hwnd);
     layout_children();
     SetTimer(hwnd, TIMER_FOLLOW, 10, NULL);
+    SetTimer(hwnd, TIMER_WV_WARM, 20000, NULL);
     SetTimer(hwnd, TIMER_SAVE, 2000, NULL);
     SetTimer(hwnd, TIMER_CURSOR_KEEP, 4000, NULL);
     /* раз в пять минут спрашиваем, не исполнился ли индексу час: так час
@@ -3355,6 +3357,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
       paste_line((int)(wParam - HOTKEY_SNIP_BASE + 1));
     return 0;
   case WM_TIMER:
+    if (wParam == TIMER_WV_WARM) {
+      KillTimer(hwnd, TIMER_WV_WARM);
+      webview_prewarm();
+      return 0;
+    }
     if (wParam == TIMER_FOLLOW) {
       if (!g_follow || g_hidden) {
         /* двигать нечего — редкий тик только чтобы заметить, когда снова
