@@ -3403,9 +3403,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     if (wParam == TIMER_FILES_TICK) files_refresh_status();
     if (wParam == TIMER_FILES_PLAN) files_plan_tick();
     return 0;
-  case WM_TOOLS_DONE:
-    tools_on_done((int)wParam, (BOOL)lParam);
-    return 0;
   case WM_SEARCH_DONE: {
     wchar_t *text = (wchar_t *)lParam;
     if (text) {

@@ -4,21 +4,21 @@
 Страницы берут свои библиотеки (pako, UTIF, pdf-lib, jsPDF, Tailwind) с
 CDN. На рабочем ПК без интернета они бы не открылись, поэтому здесь каждая
 <script src="https://…"> заменяется самим скриптом, и страница становится
-одним файлом. Готовое кладётся в public/tools/, откуда CursorPad скачивает
-его теми же зеркалами, что и обновления, и хранит у себя.
+одним файлом. Готовое кладётся в native/tools/, а оттуда build.sh вшивает
+страницы в exe (cursorpad.rc, RCDATA 320–322): у курсора они всегда с собой,
+сеть не нужна.
 
 Запуск:  python3 native/make_tools.py [путь к клону giriaja-hall]
 Без пути страницы берутся с raw.githubusercontent.com. Страницы поменялись
-в giriaja-hall — перезапустить и выложить public/tools/ (без нового exe).
+в giriaja-hall — перезапустить, собрать и выпустить новый CursorPad.
 """
-import hashlib
 import os
 import re
 import sys
 import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-OUT = os.path.join(HERE, "..", "public", "tools")
+OUT = os.path.join(HERE, "tools")
 RAW = "https://raw.githubusercontent.com/pidrpen/giriaja-hall/main/"
 HUB = "https://pidrpen.github.io/giriaja-hall/"
 
@@ -61,7 +61,6 @@ def inline_scripts(html):
 def main():
     src_dir = sys.argv[1] if len(sys.argv) > 1 else None
     os.makedirs(OUT, exist_ok=True)
-    stamp = hashlib.sha256()
     for src, dst in PAGES:
         print(src, "→", dst)
         html = page_source(src_dir, src)
@@ -69,13 +68,9 @@ def main():
         # ссылки на соседние страницы хаба локально никуда не ведут — на сайт
         html = re.sub(r'href="(index|[\w-]+)\.html"', lambda m: 'href="%s%s.html"' % (HUB, m.group(1)), html)
         data = html.encode("utf-8")
-        stamp.update(data)
         with open(os.path.join(OUT, dst), "wb") as f:
             f.write(data)
         print("   =", len(data) // 1024, "КБ")
-    # метка набора: CursorPad сверяет её и перекачивает страницы, только если она сменилась
-    with open(os.path.join(OUT, "tools.txt"), "w") as f:
-        f.write(stamp.hexdigest()[:16] + "\n")
 
 
 if __name__ == "__main__":
