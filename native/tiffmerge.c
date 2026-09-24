@@ -98,6 +98,9 @@ typedef struct TmJob {
   TmPage *pages; /* TIFF / PDF из списка: снимок страниц (без миниатюр) */
   int npages;
   wchar_t out[MAX_PATH];
+  BOOL nothumb;           /* LOAD без миниатюр (сортировке они не нужны) */
+  HWND wnd;               /* кому слать страницы, ход и итог */
+  volatile LONG *cancel;  /* «Отмена» этого окна */
   struct TmJob *next;
 } TmJob;
 
@@ -115,6 +118,10 @@ static CRITICAL_SECTION g_tmLock;
 static TmJob *g_tmJobs;
 static BOOL g_tmRunning;
 static volatile LONG g_tmCancel;
+/* задание, которое сейчас в потоке: его окно и его «Отмена» */
+static HWND g_tmCurWnd;
+static volatile LONG *g_tmCurCancel = &g_tmCancel;
+#define TM_CANCELLED (*g_tmCurCancel)
 static int g_tmLoadPending; /* заданий на открытие ещё не выполнено */
 static BOOL g_tmExporting;  /* идёт сохранение — поверх окна полоса хода */
 /* ход работы: пишет поток, читает окно */
@@ -134,7 +141,7 @@ static void tm_progress(const wchar_t *title, const wchar_t *text, int pct) {
   DWORD t = GetTickCount();
   if (t - g_tmProgTick > 50 || pct >= 1000 || pct == 0) { /* не чаще 20 раз в секунду */
     g_tmProgTick = t;
-    PostMessageW(g_tmWnd, WM_TM_PROGRESS, 0, 0);
+    PostMessageW(g_tmCurWnd, WM_TM_PROGRESS, 0, 0);
   }
 }
 
@@ -358,7 +365,7 @@ static HRESULT tm_probe(IWICImagingFactory *f, const wchar_t *path, BOOL thumbs,
   GUID cf;
   if (SUCCEEDED(IWICBitmapDecoder_GetContainerFormat(dec, &cf)) && IsEqualGUID(&cf, &kTmTiff))
     if (FAILED(IWICBitmapDecoder_GetFrameCount(dec, &nf)) || nf < 1) nf = 1;
-  for (UINT i = 0; i < nf && !g_tmCancel; i++) {
+  for (UINT i = 0; i < nf && !TM_CANCELLED; i++) {
     IWICBitmapFrameDecode *fr = NULL;
     hr = IWICBitmapDecoder_GetFrame(dec, i, &fr);
     if (FAILED(hr)) break;
@@ -399,7 +406,7 @@ static HRESULT tm_probe(IWICImagingFactory *f, const wchar_t *path, BOOL thumbs,
     cb(ctx, pg);
   }
   IWICBitmapDecoder_Release(dec);
-  return g_tmCancel ? E_ABORT : hr;
+  return TM_CANCELLED ? E_ABORT : hr;
 }
 
 /* Прочитать страницу полосами и отдать строки: в TcPage (TIFF, ч/б для PDF)
@@ -438,7 +445,7 @@ static HRESULT tm_pump(IWICImagingFactory *f, const TmPage *pg, TcPage *tp, IWIC
     if (!buf || !row || !pk || (fe && !out)) hr = E_OUTOFMEMORY;
   }
   for (UINT y = 0; SUCCEEDED(hr) && y < h; y += band) {
-    if (g_tmCancel) {
+    if (TM_CANCELLED) {
       hr = E_ABORT;
       break;
     }
@@ -692,7 +699,7 @@ static void tm_list_cb(void *ctx, TmPage *pg) {
 
 static void tm_post_page(void *ctx, TmPage *pg) {
   (void)ctx;
-  if (!PostMessageW(g_tmWnd, WM_TM_PAGE, 0, (LPARAM)pg)) {
+  if (!PostMessageW(g_tmCurWnd, WM_TM_PAGE, 0, (LPARAM)pg)) {
     if (pg->thumb) DeleteObject(pg->thumb);
     free(pg);
   }
@@ -701,7 +708,7 @@ static void tm_post_page(void *ctx, TmPage *pg) {
 /* файлы → страницы (для «быстрых» и открытия) с объяснением неудач */
 static void tm_probe_all(IWICImagingFactory *f, wchar_t (*paths)[MAX_PATH], int n, BOOL thumbs, TmPageCb cb,
                          void *ctx, TmResult *r, const wchar_t *title) {
-  for (int i = 0; i < n && !g_tmCancel; i++) {
+  for (int i = 0; i < n && !TM_CANCELLED; i++) {
     wchar_t t[MAX_PATH + 40];
     _snwprintf(t, MAX_PATH + 40, L"%s (%d из %d)", tm_base(paths[i]), i + 1, n);
     t[MAX_PATH + 39] = 0;
@@ -734,7 +741,7 @@ static void tm_free_name(const wchar_t *src, wchar_t *out) {
 static void tm_run(IWICImagingFactory *f, TmJob *j, TmResult *r) {
   switch (j->type) {
   case TJ_LOAD:
-    tm_probe_all(f, j->paths, j->npaths, TRUE, tm_post_page, NULL, r, L"Открываю");
+    tm_probe_all(f, j->paths, j->npaths, !j->nothumb, tm_post_page, NULL, r, L"Открываю");
     r->ok = TRUE;
     break;
   case TJ_TIFF:
@@ -749,7 +756,7 @@ static void tm_run(IWICImagingFactory *f, TmJob *j, TmResult *r) {
       pages = l.p;
       n = l.n;
     }
-    if (g_tmCancel) r->cancelled = TRUE;
+    if (TM_CANCELLED) r->cancelled = TRUE;
     else if (n > 0 && !r->err[0]) r->ok = tm_write_doc(f, pages, n, pdf, j->out, r);
     r->pages = n;
     lstrcpynW(r->out, j->out, MAX_PATH);
@@ -758,7 +765,7 @@ static void tm_run(IWICImagingFactory *f, TmJob *j, TmResult *r) {
   }
   case TJ_EACH_TIFF:
     tm_progress(L"Конвертация в TIFF", L"", 0);
-    for (int i = 0; i < j->npaths && !g_tmCancel; i++) {
+    for (int i = 0; i < j->npaths && !TM_CANCELLED; i++) {
       TmList l = {0};
       HRESULT hr = tm_probe(f, j->paths[i], FALSE, tm_list_cb, &l);
       wchar_t out[MAX_PATH];
@@ -780,7 +787,7 @@ static void tm_run(IWICImagingFactory *f, TmJob *j, TmResult *r) {
       }
       free(l.p);
     }
-    if (g_tmCancel) r->cancelled = TRUE;
+    if (TM_CANCELLED) r->cancelled = TRUE;
     r->ok = r->files > 0;
     break;
   }
@@ -798,12 +805,14 @@ static DWORD WINAPI tm_worker(LPVOID arg) {
     else g_tmRunning = FALSE;
     LeaveCriticalSection(&g_tmLock);
     if (!j) break;
+    g_tmCurWnd = j->wnd;
+    g_tmCurCancel = j->cancel;
     TmResult *r = (TmResult *)calloc(1, sizeof(TmResult));
     if (r) {
       r->type = j->type;
       if (f) tm_run(f, j, r);
       else tm_err_add(r, L"Windows", L"нет компонента WIC для картинок");
-      if (!PostMessageW(g_tmWnd, WM_TM_DONE, 0, (LPARAM)r)) free(r);
+      if (!PostMessageW(j->wnd, WM_TM_DONE, 0, (LPARAM)r)) free(r);
     }
     free(j->paths);
     free(j->pages);
@@ -816,6 +825,10 @@ static DWORD WINAPI tm_worker(LPVOID arg) {
 
 static void tm_submit(TmJob *j) {
   j->next = NULL;
+  if (!j->wnd) { /* по умолчанию — окно объединения */
+    j->wnd = g_tmWnd;
+    j->cancel = &g_tmCancel;
+  }
   BOOL start = FALSE;
   EnterCriticalSection(&g_tmLock);
   TmJob **pp = &g_tmJobs;
@@ -927,14 +940,14 @@ static void tm_load_paths(TmPaths *l) {
 }
 
 /* окно выбора файлов (несколько сразу) */
-static BOOL tm_pick(TmPaths *l, const wchar_t *title) {
+static BOOL tm_pick(HWND owner, TmPaths *l, const wchar_t *title) {
   const int CAP = 65536;
   wchar_t *buf = (wchar_t *)calloc(CAP, sizeof(wchar_t));
   if (!buf) return FALSE;
   OPENFILENAMEW of;
   memset(&of, 0, sizeof(of));
   of.lStructSize = sizeof(of);
-  of.hwndOwner = g_tmWnd;
+  of.hwndOwner = owner;
   of.lpstrFilter = L"Изображения (TIFF, PNG, JPG, BMP, GIF, WebP)\0*.tif;*.tiff;*.png;*.jpg;*.jpeg;*.jpe;*.jfif;*.bmp;*.dib;*.gif;*.webp\0"
                    L"Все файлы\0*.*\0";
   of.lpstrFile = buf;
@@ -959,7 +972,7 @@ static BOOL tm_pick(TmPaths *l, const wchar_t *title) {
   return ok && l->n > 0;
 }
 
-static BOOL tm_save_as(wchar_t *file, BOOL pdf, const wchar_t *dirFrom) {
+static BOOL tm_save_as(HWND owner, wchar_t *file, BOOL pdf, const wchar_t *dirFrom) {
   wchar_t dir[MAX_PATH] = L"";
   if (dirFrom) {
     lstrcpynW(dir, dirFrom, MAX_PATH);
@@ -969,7 +982,7 @@ static BOOL tm_save_as(wchar_t *file, BOOL pdf, const wchar_t *dirFrom) {
   OPENFILENAMEW of;
   memset(&of, 0, sizeof(of));
   of.lStructSize = sizeof(of);
-  of.hwndOwner = g_tmWnd;
+  of.hwndOwner = owner;
   of.lpstrFilter = pdf ? L"PDF (*.pdf)\0*.pdf\0" : L"TIFF (*.tif)\0*.tif;*.tiff\0";
   of.lpstrFile = file;
   of.nMaxFile = MAX_PATH;
@@ -989,7 +1002,7 @@ static void tm_status(const wchar_t *text, const wchar_t *path, BOOL folderOnly)
 
 static void tm_add_files(void) {
   TmPaths l = {0};
-  if (tm_pick(&l, L"Добавить страницы")) tm_load_paths(&l);
+  if (tm_pick(g_tmWnd, &l, L"Добавить страницы")) tm_load_paths(&l);
   else free(l.p);
 }
 
@@ -1011,7 +1024,7 @@ static void tm_export(BOOL pdf) {
   if (dot) *dot = 0;
   _snwprintf(file, MAX_PATH, L"%s_объединено", base);
   file[MAX_PATH - 1] = 0;
-  if (!tm_save_as(file, pdf, g_tmPages[0].path)) return;
+  if (!tm_save_as(g_tmWnd, file, pdf, g_tmPages[0].path)) return;
   TmJob *j = (TmJob *)calloc(1, sizeof(TmJob));
   TmPage *snap = (TmPage *)malloc(sizeof(TmPage) * (size_t)g_tmN);
   if (!j || !snap) {
@@ -1032,7 +1045,7 @@ static void tm_export(BOOL pdf) {
 static void tm_quick(BOOL pdf) {
   if (g_tmExporting || g_tmLoadPending) return;
   TmPaths l = {0};
-  if (!tm_pick(&l, pdf ? L"Файлы для PDF" : L"Файлы для перевода в TIFF")) {
+  if (!tm_pick(g_tmWnd, &l, pdf ? L"Файлы для PDF" : L"Файлы для перевода в TIFF")) {
     free(l.p);
     return;
   }
@@ -1044,7 +1057,7 @@ static void tm_quick(BOOL pdf) {
     wchar_t *dot = wcsrchr(base, L'.');
     if (dot) *dot = 0;
     lstrcpynW(file, base, MAX_PATH);
-    if (!tm_save_as(file, TRUE, l.p[0])) {
+    if (!tm_save_as(g_tmWnd, file, TRUE, l.p[0])) {
       free(l.p);
       return;
     }
@@ -1088,7 +1101,7 @@ static void tm_clear(void) {
 }
 
 static void tm_open_file(const wchar_t *path) {
-  if (path && path[0]) ShellExecuteW(g_tmWnd, L"open", path, NULL, NULL, SW_SHOWNORMAL);
+  if (path && path[0]) ShellExecuteW(NULL, L"open", path, NULL, NULL, SW_SHOWNORMAL);
 }
 
 static void tm_show_in_folder(const wchar_t *path) {
@@ -1096,12 +1109,12 @@ static void tm_show_in_folder(const wchar_t *path) {
   wchar_t args[MAX_PATH + 16];
   _snwprintf(args, MAX_PATH + 16, L"/select,\"%s\"", path);
   args[MAX_PATH + 15] = 0;
-  ShellExecuteW(g_tmWnd, L"open", L"explorer.exe", args, NULL, SW_SHOWNORMAL);
+  ShellExecuteW(NULL, L"open", L"explorer.exe", args, NULL, SW_SHOWNORMAL);
 }
 
-/* Ctrl+V: файлы из Проводника или картинка (снимок экрана) */
-static void tm_paste(void) {
-  if (!OpenClipboard(g_tmWnd)) return;
+/* Ctrl+V: файлы из Проводника или картинка (снимок экрана, сохраняется в PNG) */
+static void tm_clip_paths(HWND owner, TmPaths *out) {
+  if (!OpenClipboard(owner)) return;
   TmPaths l = {0};
   HANDLE hd = GetClipboardData(CF_HDROP);
   if (hd) {
@@ -1146,15 +1159,18 @@ static void tm_paste(void) {
     if (SUCCEEDED(hr)) tm_paths_add(&l, png);
   }
   CloseClipboard();
+  *out = l;
+}
+
+static void tm_paste(void) {
+  TmPaths l = {0};
+  tm_clip_paths(g_tmWnd, &l);
   if (l.n) tm_load_paths(&l);
   else free(l.p);
 }
 
 /* ---- рисование ----------------------------------------------------------------- */
 
-static float g_tmS = 1.0f, g_tmDpi = 1.0f, g_tmZoom = 1.0f;
-static BOOL g_tmTwo = TRUE;
-static HFONT g_tf[14];
 enum { TF_H1, TF_SUB, TF_SEC, TF_SMALL, TF_SMALLM, TF_TINY, TF_BODYM, TF_BTN, TF_BTNSUB, TF_NUM, TF_ICON, TF_ICONL,
        TF_ICONS, TF_BADGE };
 static BOOL g_tmIcons; /* есть шрифт значков Windows 10/11 */
@@ -1164,10 +1180,8 @@ static int g_tmScroll, g_tmContentH;       /* прокрутка всего ок
 static int g_tmListScroll, g_tmListH;      /* прокрутка списка страниц */
 static RECT g_tmListRc;                    /* где список (в координатах полотна) */
 static int g_tmCardH, g_tmCardGap, g_tmListPad;
-static int g_tmHoverId, g_tmHoverArg = -1; /* под мышью */
 static int g_tmDragIdx = -1, g_tmDragIns = -1, g_tmDragY0, g_tmThumbGrab = -1;
 static BOOL g_tmDragging;
-static RECT g_tmCancelRc; /* «Отмена» на полосе хода — в координатах окна */
 
 enum { H_NONE, H_ADD, H_CLEAR, H_QTIFF, H_QPDF, H_UP, H_DOWN, H_CARD, H_EYE, H_DEL, H_TIFF, H_PDF, H_OPEN_OUT,
        H_SHOW_OUT, H_LTHUMB };
@@ -1175,11 +1189,24 @@ typedef struct {
   RECT r;
   int id, arg;
 } TmHot;
-static TmHot g_tmHot[96];
-static int g_tmNHot;
-static BOOL g_tmPainting; /* рисуем, а не раскладываем: места для щелчков не трогаем */
 
-static int TS(int v) { return (int)(v * g_tmS + 0.5f); }
+/* Всё, что у окна своё при общем рисовании: масштаб, шрифты, места для
+   щелчков, что под мышью. Окон два — объединение и сортировка; каждое
+   ставит g_ui на своё в начале обработки сообщения. */
+typedef struct {
+  float s, dpi, zoom; /* итоговый масштаб, масштаб экрана, свой (Ctrl+колесо) */
+  BOOL two;           /* широкая раскладка или одна колонка */
+  HFONT tf[14];
+  TmHot hot[96];
+  int nhot;
+  BOOL painting; /* рисуем, а не раскладываем: места для щелчков не трогаем */
+  int hoverId, hoverArg;
+  RECT cancelRc; /* «Отмена» на полосе хода — в координатах окна */
+} TmUi;
+static TmUi g_uiMerge = {1, 1, 1, TRUE, {0}, {{{0}}}, 0, FALSE, 0, -1, {0}};
+static TmUi *g_ui = &g_uiMerge;
+
+static int TS(int v) { return (int)(v * g_ui->s + 0.5f); }
 
 static int CALLBACK tm_font_found(const LOGFONTW *lf, const TEXTMETRICW *tm, DWORD type, LPARAM lp) {
   (void)lf;
@@ -1203,32 +1230,32 @@ static BOOL tm_have_font(const wchar_t *face) {
 
 static void tm_fonts(void) {
   for (int i = 0; i < 14; i++)
-    if (g_tf[i]) DeleteObject(g_tf[i]);
+    if (g_ui->tf[i]) DeleteObject(g_ui->tf[i]);
   static const struct {
     int px, w, icon;
   } f[14] = {{26, FW_SEMIBOLD, 0}, {13, FW_NORMAL, 0}, {15, FW_SEMIBOLD, 0}, {12, FW_NORMAL, 0}, {12, FW_SEMIBOLD, 0},
              {11, FW_NORMAL, 0},   {14, FW_SEMIBOLD, 0}, {14, FW_BOLD, 0},   {11, FW_NORMAL, 0}, {10, FW_BOLD, 0},
              {16, FW_NORMAL, 1},   {22, FW_NORMAL, 1},   {12, FW_NORMAL, 1}, {12, FW_SEMIBOLD, 0}};
   for (int i = 0; i < 14; i++)
-    g_tf[i] = CreateFontW(-TS(f[i].px), 0, 0, 0, f[i].w, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+    g_ui->tf[i] = CreateFontW(-TS(f[i].px), 0, 0, 0, f[i].w, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
                           CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, f[i].icon ? g_tmIconFace : L"Segoe UI");
 }
 
 static int tm_text(HDC dc, int font, COLORREF c, const wchar_t *s, RECT r, UINT fl) {
-  SelectObject(dc, g_tf[font]);
+  SelectObject(dc, g_ui->tf[font]);
   SetTextColor(dc, c);
   return DrawTextW(dc, s, -1, &r, fl | DT_NOPREFIX);
 }
 
 static int tm_text_w(HDC dc, int font, const wchar_t *s) {
-  SelectObject(dc, g_tf[font]);
+  SelectObject(dc, g_ui->tf[font]);
   SIZE sz;
   GetTextExtentPoint32W(dc, s, (int)wcslen(s), &sz);
   return sz.cx;
 }
 
 static int tm_text_h(HDC dc, int font, const wchar_t *s, int w) {
-  SelectObject(dc, g_tf[font]);
+  SelectObject(dc, g_ui->tf[font]);
   RECT r = {0, 0, w, 10000};
   DrawTextW(dc, s, -1, &r, DT_WORDBREAK | DT_CALCRECT | DT_NOPREFIX);
   return r.bottom;
@@ -1306,15 +1333,15 @@ static void tm_glyph(HDC dc, int g, RECT r, COLORREF c, int font) {
 }
 
 static void tm_hot(RECT r, int id, int arg) {
-  if (!g_tmPainting && g_tmNHot < 96) {
-    g_tmHot[g_tmNHot].r = r;
-    g_tmHot[g_tmNHot].id = id;
-    g_tmHot[g_tmNHot].arg = arg;
-    g_tmNHot++;
+  if (!g_ui->painting && g_ui->nhot < 96) {
+    g_ui->hot[g_ui->nhot].r = r;
+    g_ui->hot[g_ui->nhot].id = id;
+    g_ui->hot[g_ui->nhot].arg = arg;
+    g_ui->nhot++;
   }
 }
 
-static BOOL tm_is_hover(int id, int arg) { return g_tmHoverId == id && (arg < 0 || g_tmHoverArg == arg); }
+static BOOL tm_is_hover(int id, int arg) { return g_ui->hoverId == id && (arg < 0 || g_ui->hoverArg == arg); }
 
 /* «страница / страницы / страниц» */
 static const wchar_t *tm_pages_word(int n) {
@@ -1387,7 +1414,7 @@ static int tm_left(HDC dc, int x, int y, int w, BOOL paint) {
                         L"Ctrl+V — вставить картинку или скопированные файлы";
   /* узкое окно (одна колонка) — место для файлов в одну строку и без
      подсказок, чтобы страницы были видны сразу, без прокрутки */
-  BOOL compact = !g_tmTwo;
+  BOOL compact = !g_ui->two;
   int tipsH = compact ? 0 : tm_text_h(dc, TF_TINY, tips, iw) + TS(16);
   BOOL side = iw >= TS(300);
   int dzH = compact ? TS(84) : TS(214), qh = TS(38);
@@ -1817,8 +1844,8 @@ static int tm_right(HDC dc, int x, int y, int w, int h, BOOL paint) {
 
 /* всё полотно; ch — высота окна (правая карточка тянется под неё) */
 static int tm_draw(HDC dc, int cw, int ch, BOOL paint) {
-  g_tmPainting = paint;
-  if (!paint) g_tmNHot = 0;
+  g_ui->painting = paint;
+  if (!paint) g_ui->nhot = 0;
   int m = TS(24), gap = TS(24);
   int y = m;
   if (paint) {
@@ -1854,7 +1881,7 @@ static int tm_draw(HDC dc, int cw, int ch, BOOL paint) {
   y += TS(44) + TS(28);
   int avail = cw - m * 2;
   int minRight = TS(470);
-  if (g_tmTwo) {
+  if (g_ui->two) {
     int lw = (avail - gap) * 5 / 12, rw = avail - gap - lw;
     int yl = tm_left(dc, m, y, lw, paint);
     int rh = ch - y - m;
@@ -1869,7 +1896,14 @@ static int tm_draw(HDC dc, int cw, int ch, BOOL paint) {
 }
 
 /* поверх всего — полоса хода сохранения (координаты окна, без прокрутки) */
-static void tm_draw_progress(HDC dc, int cw, int ch) {
+/* цвета полосы хода: у объединения светлая, у сортировки тёмная */
+typedef struct {
+  COLORREF card, title, muted, text, track, fill, iconBg, iconFg, btn, btnBorder, btnText, hovBg, hovText;
+} TmPal;
+static const TmPal kTmLight = {TM_WHITE, TM_S900, TM_S500, TM_S700, TM_S100, TM_B500, TM_B100,
+                               TM_B600,  TM_WHITE, TM_S200, TM_S700, TM_R50,  TM_R500};
+
+static void tm_draw_progress(HDC dc, int cw, int ch, volatile LONG *cancel, const TmPal *pal) {
   /* затемнение: чёрный с прозрачностью */
   HDC m = CreateCompatibleDC(dc);
   HBITMAP px = CreateCompatibleBitmap(dc, 1, 1);
@@ -1884,7 +1918,7 @@ static void tm_draw_progress(HDC dc, int cw, int ch) {
   if (w > cw - TS(32)) w = cw - TS(32);
   int h = TS(200);
   RECT r = {(cw - w) / 2, (ch - h) / 2, (cw - w) / 2 + w, (ch - h) / 2 + h};
-  cc_round(dc, r, TS(24), TM_WHITE, TM_WHITE);
+  cc_round(dc, r, TS(24), pal->card, pal->card);
   wchar_t title[80], text[MAX_PATH + 40];
   int pct;
   EnterCriticalSection(&g_tmLock);
@@ -1894,51 +1928,52 @@ static void tm_draw_progress(HDC dc, int cw, int ch) {
   LeaveCriticalSection(&g_tmLock);
   int x = r.left + TS(24), iw = w - TS(48), y = r.top + TS(24);
   RECT ic = {x, y, x + TS(36), y + TS(36)};
-  cc_round(dc, ic, TS(14), TM_B100, TM_B100);
-  if (g_tmIcons) tm_glyph(dc, G_GEAR, ic, TM_B600, TF_ICON);
-  else tm_glyph(dc, G_DOWN, ic, TM_B600, TF_ICON);
-  tm_text(dc, TF_SEC, TM_S900, title, (RECT){x + TS(48), y - TS(1), x + iw, y + TS(19)}, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
-  tm_text(dc, TF_SMALL, TM_S500, g_tmCancel ? L"Останавливаю…" : L"Не закрывайте окно — можно свернуть",
+  cc_round(dc, ic, TS(14), pal->iconBg, pal->iconBg);
+  if (g_tmIcons) tm_glyph(dc, G_GEAR, ic, pal->iconFg, TF_ICON);
+  else tm_glyph(dc, G_DOWN, ic, pal->iconFg, TF_ICON);
+  tm_text(dc, TF_SEC, pal->title, title, (RECT){x + TS(48), y - TS(1), x + iw, y + TS(19)}, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+  tm_text(dc, TF_SMALL, pal->muted, *cancel ? L"Останавливаю…" : L"Не закрывайте окно — можно свернуть",
           (RECT){x + TS(48), y + TS(19), x + iw, y + TS(37)}, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
   y += TS(56);
   RECT bar = {x, y, x + iw, y + TS(8)};
-  cc_round(dc, bar, TS(4), TM_S100, TM_S100);
+  cc_round(dc, bar, TS(4), pal->track, pal->track);
   int fw = (int)((long long)iw * pct / 1000);
-  if (fw > TS(8)) cc_round(dc, (RECT){x, y, x + fw, y + TS(8)}, TS(4), TM_B500, TM_B500);
+  if (fw > TS(8)) cc_round(dc, (RECT){x, y, x + fw, y + TS(8)}, TS(4), pal->fill, pal->fill);
   y += TS(18);
   wchar_t p[16];
   _snwprintf(p, 16, L"%d%%", pct / 10);
   int pw = tm_text_w(dc, TF_SMALLM, p);
-  tm_text(dc, TF_SMALL, TM_S500, text, (RECT){x, y, x + iw - pw - TS(10), y + TS(18)},
+  tm_text(dc, TF_SMALL, pal->muted, text, (RECT){x, y, x + iw - pw - TS(10), y + TS(18)},
           DT_LEFT | DT_SINGLELINE | DT_PATH_ELLIPSIS);
-  tm_text(dc, TF_SMALLM, TM_S700, p, (RECT){x + iw - pw, y, x + iw, y + TS(18)}, DT_RIGHT | DT_SINGLELINE);
+  tm_text(dc, TF_SMALLM, pal->text, p, (RECT){x + iw - pw, y, x + iw, y + TS(18)}, DT_RIGHT | DT_SINGLELINE);
   y += TS(36);
   int bw = tm_text_w(dc, TF_SMALLM, L"Отмена") + TS(40);
-  g_tmCancelRc = (RECT){r.right - TS(24) - bw, y, r.right - TS(24), y + TS(36)};
-  BOOL hov = g_tmHoverId == -2;
-  cc_round(dc, g_tmCancelRc, TS(12), hov ? TM_R50 : TM_WHITE, TM_S200);
-  tm_text(dc, TF_SMALLM, hov ? TM_R500 : TM_S700, L"Отмена", g_tmCancelRc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+  g_ui->cancelRc = (RECT){r.right - TS(24) - bw, y, r.right - TS(24), y + TS(36)};
+  BOOL hov = g_ui->hoverId == -2;
+  cc_round(dc, g_ui->cancelRc, TS(12), hov ? pal->hovBg : pal->btn, pal->btnBorder);
+  tm_text(dc, TF_SMALLM, hov ? pal->hovText : pal->btnText, L"Отмена", g_ui->cancelRc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 }
 
 /* ---- полотно: раскладка, прокрутка, мышь, клавиши ------------------------------- */
 
-static void tm_fit(int cw) {
-  const float W2 = 980.0f, W1 = 560.0f, MINF = 0.72f;
-  float want = g_tmDpi * g_tmZoom, ns;
+/* W2 — ширина макета широкой раскладки, W1 — одной колонки */
+static void tm_fit(int cw, float W2, float W1) {
+  const float MINF = 0.72f;
+  float want = g_ui->dpi * g_ui->zoom, ns;
   if (cw >= W2 * want) {
-    g_tmTwo = TRUE;
+    g_ui->two = TRUE;
     ns = want;
   } else if (cw >= W2 * want * MINF) {
-    g_tmTwo = TRUE;
+    g_ui->two = TRUE;
     ns = cw / W2;
   } else {
-    g_tmTwo = FALSE;
+    g_ui->two = FALSE;
     ns = cw / W1;
     if (ns > want) ns = want;
     if (ns < want * MINF) ns = want * MINF;
   }
-  if (ns - g_tmS > 0.004f || g_tmS - ns > 0.004f) {
-    g_tmS = ns;
+  if (ns - g_ui->s > 0.004f || g_ui->s - ns > 0.004f) {
+    g_ui->s = ns;
     tm_fonts();
   }
 }
@@ -1947,7 +1982,7 @@ static void tm_relayout(void) {
   if (!g_tmCanvas) return;
   RECT rc;
   GetClientRect(g_tmCanvas, &rc);
-  tm_fit(rc.right);
+  tm_fit(rc.right, 980.0f, 560.0f);
   HDC dc = GetDC(g_tmCanvas);
   g_tmContentH = tm_draw(dc, rc.right, rc.bottom, FALSE);
   ReleaseDC(g_tmCanvas, dc);
@@ -2005,14 +2040,14 @@ static int tm_hit(int x, int y, int *arg) { /* координаты окна */
   if (g_tmExporting) {
     POINT p = {x, y};
     *arg = -1;
-    return PtInRect(&g_tmCancelRc, p) ? -2 : H_NONE;
+    return PtInRect(&g_ui->cancelRc, p) ? -2 : H_NONE;
   }
   y += g_tmScroll;
-  for (int i = g_tmNHot - 1; i >= 0; i--) { /* мелкое (кнопки на карточке) — поверх крупного */
+  for (int i = g_ui->nhot - 1; i >= 0; i--) { /* мелкое (кнопки на карточке) — поверх крупного */
     POINT p = {x, y};
-    if (PtInRect(&g_tmHot[i].r, p)) {
-      *arg = g_tmHot[i].arg;
-      return g_tmHot[i].id;
+    if (PtInRect(&g_ui->hot[i].r, p)) {
+      *arg = g_ui->hot[i].arg;
+      return g_ui->hot[i].id;
     }
   }
   *arg = -1;
@@ -2088,9 +2123,10 @@ static void tm_click(int id, int arg) {
   }
 }
 
-static void tm_save_pref(void);
+static void tm_pref_save(HWND wnd, const wchar_t *name);
 
 static LRESULT CALLBACK TmCanvasProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+  g_ui = &g_uiMerge;
   switch (msg) {
   case WM_ERASEBKGND:
     return 1;
@@ -2107,7 +2143,7 @@ static LRESULT CALLBACK TmCanvasProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
     SetViewportOrgEx(mem, 0, -g_tmScroll, NULL);
     tm_draw(mem, rc.right, rc.bottom, TRUE);
     SetViewportOrgEx(mem, 0, 0, NULL);
-    if (g_tmExporting) tm_draw_progress(mem, rc.right, rc.bottom);
+    if (g_tmExporting) tm_draw_progress(mem, rc.right, rc.bottom, &g_tmCancel, &kTmLight);
     BitBlt(hdc, 0, 0, rc.right, rc.bottom, mem, 0, 0, SRCCOPY);
     SelectObject(mem, ob);
     DeleteObject(bmp);
@@ -2141,11 +2177,11 @@ static LRESULT CALLBACK TmCanvasProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
   case WM_MOUSEWHEEL: {
     int d = GET_WHEEL_DELTA_WPARAM(wParam);
     if (GetKeyState(VK_CONTROL) & 0x8000) { /* Ctrl+колесо — масштаб */
-      g_tmZoom *= d > 0 ? 1.1f : 1 / 1.1f;
-      if (g_tmZoom < 0.6f) g_tmZoom = 0.6f;
-      if (g_tmZoom > 1.6f) g_tmZoom = 1.6f;
+      g_ui->zoom *= d > 0 ? 1.1f : 1 / 1.1f;
+      if (g_ui->zoom < 0.6f) g_ui->zoom = 0.6f;
+      if (g_ui->zoom > 1.6f) g_ui->zoom = 1.6f;
       tm_relayout();
-      tm_save_pref();
+      tm_pref_save(g_tmWnd, L"tiffmerge.txt");
       return 0;
     }
     if (g_tmExporting) return 0;
@@ -2200,9 +2236,9 @@ static LRESULT CALLBACK TmCanvasProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
       }
     }
     int arg, id = tm_hit(x, y, &arg);
-    if (id != g_tmHoverId || arg != g_tmHoverArg) {
-      g_tmHoverId = id;
-      g_tmHoverArg = arg;
+    if (id != g_ui->hoverId || arg != g_ui->hoverArg) {
+      g_ui->hoverId = id;
+      g_ui->hoverArg = arg;
       InvalidateRect(hwnd, NULL, FALSE);
     }
     TRACKMOUSEEVENT te = {sizeof(te), TME_LEAVE, hwnd, 0};
@@ -2210,9 +2246,9 @@ static LRESULT CALLBACK TmCanvasProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
     return 0;
   }
   case WM_MOUSELEAVE:
-    if (g_tmHoverId != H_NONE) {
-      g_tmHoverId = H_NONE;
-      g_tmHoverArg = -1;
+    if (g_ui->hoverId != H_NONE) {
+      g_ui->hoverId = H_NONE;
+      g_ui->hoverArg = -1;
       InvalidateRect(hwnd, NULL, FALSE);
     }
     return 0;
@@ -2367,23 +2403,24 @@ static LRESULT CALLBACK TmCanvasProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
   return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
-/* масштаб и место окна — между запусками, в tiffmerge.txt */
-static void tm_pref_path(wchar_t *p) {
-  _snwprintf(p, MAX_PATH, L"%s\\tiffmerge.txt", g_dataDir);
+/* масштаб и место окна — между запусками, в файле рядом с настройками
+   (tiffmerge.txt, tiffsort.txt): «масштаб x y ширина высота» */
+static void tm_pref_path(wchar_t *p, const wchar_t *name) {
+  _snwprintf(p, MAX_PATH, L"%s\\%s", g_dataDir, name);
   p[MAX_PATH - 1] = 0;
 }
 
-static void tm_save_pref(void) {
-  if (!g_dataDir[0] || !g_tmWnd) return;
+static void tm_pref_save(HWND wnd, const wchar_t *name) {
+  if (!g_dataDir[0] || !wnd) return;
   WINDOWPLACEMENT wp;
   wp.length = sizeof(wp);
-  if (!GetWindowPlacement(g_tmWnd, &wp)) return;
+  if (!GetWindowPlacement(wnd, &wp)) return;
   RECT r = wp.rcNormalPosition;
   char b[120];
-  int n = snprintf(b, sizeof(b), "%d %ld %ld %ld %ld\n", (int)(g_tmZoom * 100 + 0.5f), r.left, r.top, r.right - r.left,
+  int n = snprintf(b, sizeof(b), "%d %ld %ld %ld %ld\n", (int)(g_ui->zoom * 100 + 0.5f), r.left, r.top, r.right - r.left,
                    r.bottom - r.top);
   wchar_t p[MAX_PATH];
-  tm_pref_path(p);
+  tm_pref_path(p, name);
   HANDLE f = CreateFileW(p, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
   if (f == INVALID_HANDLE_VALUE) return;
   DWORD w = 0;
@@ -2391,10 +2428,10 @@ static void tm_save_pref(void) {
   CloseHandle(f);
 }
 
-static BOOL tm_load_pref(RECT *out) {
+static BOOL tm_pref_load(const wchar_t *name, RECT *out) {
   if (!g_dataDir[0]) return FALSE;
   wchar_t p[MAX_PATH];
-  tm_pref_path(p);
+  tm_pref_path(p, name);
   char *b = NULL;
   DWORD n = 0;
   if (!read_file_bytes(p, &b, &n, 200)) return FALSE;
@@ -2402,7 +2439,7 @@ static BOOL tm_load_pref(RECT *out) {
   long x = 0, y = 0, w = 0, h = 0;
   int k = sscanf(b, "%d %ld %ld %ld %ld", &z, &x, &y, &w, &h);
   free(b);
-  if (k >= 1 && z >= 60 && z <= 160) g_tmZoom = z / 100.0f;
+  if (k >= 1 && z >= 60 && z <= 160) g_ui->zoom = z / 100.0f;
   if (k < 5 || w < 300 || h < 250) return FALSE;
   RECT r = {x, y, x + w, y + h};
   if (!MonitorFromRect(&r, MONITOR_DEFAULTTONULL)) return FALSE;
@@ -2447,13 +2484,14 @@ static void tm_done(TmResult *r) {
 }
 
 static LRESULT CALLBACK TmProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+  g_ui = &g_uiMerge;
   switch (msg) {
   case WM_ERASEBKGND:
     return 1;
   case WM_GETMINMAXINFO: {
     MINMAXINFO *mm = (MINMAXINFO *)lParam;
-    mm->ptMinTrackSize.x = (int)(480 * g_tmDpi);
-    mm->ptMinTrackSize.y = (int)(420 * g_tmDpi);
+    mm->ptMinTrackSize.x = (int)(480 * g_ui->dpi);
+    mm->ptMinTrackSize.y = (int)(420 * g_ui->dpi);
     return 0;
   }
   case WM_SIZE:
@@ -2491,30 +2529,39 @@ static LRESULT CALLBACK TmProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
     tm_done((TmResult *)lParam);
     return 0;
   case WM_EXITSIZEMOVE:
-    tm_save_pref();
+    tm_pref_save(g_tmWnd, L"tiffmerge.txt");
     return 0;
   case WM_CLOSE:
-    tm_save_pref();
+    tm_pref_save(g_tmWnd, L"tiffmerge.txt");
     ShowWindow(hwnd, SW_HIDE); /* прячем: страницы остаются до следующего открытия */
     return 0;
   }
   return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
+/* общее для обоих окон — один раз */
+static void tm_common_init(void) {
+  static BOOL done;
+  if (done) return;
+  done = TRUE;
+  InitializeCriticalSection(&g_tmLock);
+  CoInitializeEx(NULL, COINIT_APARTMENTTHREADED); /* для Ctrl+V с картинкой */
+  if (tm_have_font(L"Segoe Fluent Icons")) {
+    g_tmIcons = TRUE;
+    g_tmIconFace = L"Segoe Fluent Icons";
+  } else {
+    g_tmIcons = tm_have_font(L"Segoe MDL2 Assets");
+  }
+}
+
 static void tiffmerge_show(void) {
+  g_ui = &g_uiMerge;
   if (!g_tmWnd) {
-    InitializeCriticalSection(&g_tmLock);
-    CoInitializeEx(NULL, COINIT_APARTMENTTHREADED); /* для Ctrl+V с картинкой */
+    tm_common_init();
     HDC s = GetDC(NULL);
-    g_tmDpi = s ? GetDeviceCaps(s, LOGPIXELSX) / 96.0f : 1.0f;
-    g_tmS = g_tmDpi;
+    g_ui->dpi = s ? GetDeviceCaps(s, LOGPIXELSX) / 96.0f : 1.0f;
+    g_ui->s = g_ui->dpi;
     if (s) ReleaseDC(NULL, s);
-    if (tm_have_font(L"Segoe Fluent Icons")) {
-      g_tmIcons = TRUE;
-      g_tmIconFace = L"Segoe Fluent Icons";
-    } else {
-      g_tmIcons = tm_have_font(L"Segoe MDL2 Assets");
-    }
     tm_fonts();
     WNDCLASSEXW wc;
     memset(&wc, 0, sizeof(wc));
@@ -2532,12 +2579,12 @@ static void tiffmerge_show(void) {
     RECT wa;
     SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0);
     int waw = wa.right - wa.left, wah = wa.bottom - wa.top;
-    int ww = (int)(1020 * g_tmDpi), wh = (int)(760 * g_tmDpi);
+    int ww = (int)(1020 * g_ui->dpi), wh = (int)(760 * g_ui->dpi);
     if (ww > waw * 3 / 4) ww = waw * 3 / 4;
     if (wh > wah * 7 / 8) wh = wah * 7 / 8;
     int wx = wa.left + (waw - ww) / 2, wy = wa.top + (wah - wh) / 2;
     RECT saved;
-    if (tm_load_pref(&saved)) {
+    if (tm_pref_load(L"tiffmerge.txt", &saved)) {
       wx = saved.left;
       wy = saved.top;
       ww = saved.right - saved.left;
