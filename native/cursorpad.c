@@ -53,7 +53,8 @@
 #define ID_SEARCH_EDIT 112
 #define ID_SEARCH_GO 113
 #define ID_ASK_TAB 114
-#define ID_NARDY_BTN 190 /* «Нарды» внизу окна */
+#define ID_NARDY_BTN 190 /* «Нарды» — в Настройках */
+#define ID_NOTES_TAB 191 /* «Блокнот» внизу окна: режим заметок */
 #define ID_ND_LIST 180
 #define ID_ND_INVITE 181
 #define ID_ND_ACCEPT 182
@@ -113,7 +114,7 @@
 #define PAD 12
 #define GUTTER 26
 #define SET_W 312
-#define SET_H 935  /* темы в два ряда: четыре и рыцарская под ними */
+#define SET_H 970  /* темы в два ряда: четыре и рыцарская под ними; кнопка «Нарды» */
 #define ASK_W 312
 #define ASK_H 224 /* room for the drawn header */
 #define ID_THEME_BASE 140
@@ -213,7 +214,11 @@ static HWND g_tbBg;
 static HWND g_tbFg;
 static HWND g_btnSet;
 static HWND g_btnAsk;
-static HWND g_btnNd; /* кнопка «Нарды» внизу окна */
+static HWND g_btnNd; /* кнопка «Нарды» в Настройках */
+static HWND g_btnNotes; /* «Блокнот» внизу окна */
+/* Режим окна: 0 — блокнот (заметки), 1 — поиск (поле, «Спросить» и где
+   искать — прямо в окне, без отдельного окна «Поиск»). Запоминается. */
+static int g_padMode;
 static HWND g_setHwnd;
 static HWND g_askHwnd;
 static HWND g_btnSys;
@@ -971,10 +976,12 @@ static void load_cursor_pref(void) {
   int cx = 0, cy = 0, cpt = 0;
   int ox = 0, oy = 0, ow = 0, oh = 0, opt = 0;
   int sparkle = -1; /* нет в файле — искорки включены */
-  sscanf(buf, "%15s %d %d %15s %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d", skin, &bg,
+  int padMode = 0;
+  sscanf(buf, "%15s %d %d %15s %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d", skin, &bg,
          &fg, eng, &autoOn, &theme, &aw, &ah, &cw, &ch, &pt, &keep, &ax, &ay, &cx, &cy, &cpt, &ox,
-         &oy, &ow, &oh, &opt, &sparkle);
+         &oy, &ow, &oh, &opt, &sparkle, &padMode);
   g_sparkle = sparkle != 0;
+  g_padMode = padMode == 1 ? 1 : 0;
   g_cardX = cx;
   g_cardY = cy;
   if (cpt >= 7 && cpt <= 22) g_cardPt = cpt;
@@ -1009,10 +1016,10 @@ static void save_cursor_pref(void) {
   const char *v = g_skin == 3 ? "k4" : (g_skin == 2 ? "k3" : (g_skin == 0 ? "system" : "k2"));
   const char *e = g_engine == 4 ? "plm" : (g_engine == 5 ? "files" : "ai");
   char buf[280];
-  snprintf(buf, sizeof(buf), "%s %d %d %s %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d\n",
+  snprintf(buf, sizeof(buf), "%s %d %d %s %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d\n",
            v, g_alphaFollow, g_alphaPinned, e, g_autostart ? 1 : 0, g_theme, g_ansW, g_ansH,
            g_cardW, g_cardH, g_ansPt, g_ansKeepPos ? 1 : 0, g_ansX, g_ansY, g_cardX, g_cardY,
-           g_cardPt, g_ocrX, g_ocrY, g_ocrW, g_ocrH, g_ocrPt, g_sparkle ? 1 : 0);
+           g_cardPt, g_ocrX, g_ocrY, g_ocrW, g_ocrH, g_ocrPt, g_sparkle ? 1 : 0, g_padMode);
   HANDLE h = CreateFileW(g_prefPath, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
                          FILE_ATTRIBUTE_NORMAL, NULL);
   if (h == INVALID_HANDLE_VALUE) return;
@@ -1249,13 +1256,31 @@ static void layout_children(void) {
   if (g_clipEdit) MoveWindow(g_clipEdit, gut, th, cw - gut - pad - clrW - gap, clipH, TRUE);
   if (g_clipClr) MoveWindow(g_clipClr, cw - pad - clrW, th, clrW, clipH, TRUE);
   MoveWindow(g_edit, gut, th + clipH, cw - gut - pad, ch - th - clipH - fh, TRUE);
-  /* внизу три кнопки: Поиск · Нарды · Настройки; средняя чуть уже */
-  int avail = cw - pad * 2 - gap * 2;
-  int ndW = avail * 3 / 10, side = (avail - ndW) / 2;
+  /* режим поиска: поле со «Спросить», ниже — где искать, три кнопки в ряд */
+  {
+    BOOL srch = g_padMode == 1;
+    ShowWindow(g_edit, srch ? SW_HIDE : SW_SHOW);
+    HWND sc[5] = {g_searchEdit, g_searchGo, g_btnAi, g_btnPlm, g_btnFiles};
+    for (int k = 0; k < 5; k++)
+      if (sc[k]) ShowWindow(sc[k], srch ? SW_SHOW : SW_HIDE);
+    if (srch) {
+      int sy = th + clipH + MulDiv(8, dpi, 96), sh = MulDiv(26, dpi, 96);
+      int goW = MulDiv(84, dpi, 96), left = gut, right = cw - pad;
+      if (g_searchEdit) MoveWindow(g_searchEdit, left, sy, right - left - goW - gap, sh, TRUE);
+      if (g_searchGo) MoveWindow(g_searchGo, right - goW, sy, goW, sh, TRUE);
+      sy += sh + MulDiv(22, dpi, 96); /* место под подпись «где искать» */
+      int w3 = (right - left - gap * 2) / 3;
+      if (g_btnAi) MoveWindow(g_btnAi, left, sy, w3, sh, TRUE);
+      if (g_btnPlm) MoveWindow(g_btnPlm, left + w3 + gap, sy, w3, sh, TRUE);
+      if (g_btnFiles) MoveWindow(g_btnFiles, left + (w3 + gap) * 2, sy, right - left - (w3 + gap) * 2, sh, TRUE);
+    }
+  }
+  /* внизу три кнопки поровну: Блокнот · Поиск (режимы окна) · Настройки */
+  int third = (cw - pad * 2 - gap * 2) / 3;
   int fy = ch - fh + (fh - btnH) / 2;
-  if (g_btnAsk) MoveWindow(g_btnAsk, pad, fy, side, btnH, TRUE);
-  if (g_btnNd) MoveWindow(g_btnNd, pad + side + gap, fy, ndW, btnH, TRUE);
-  if (g_btnSet) MoveWindow(g_btnSet, cw - pad - side, fy, side, btnH, TRUE);
+  if (g_btnNotes) MoveWindow(g_btnNotes, pad, fy, third, btnH, TRUE);
+  if (g_btnAsk) MoveWindow(g_btnAsk, pad + third + gap, fy, third, btnH, TRUE);
+  if (g_btnSet) MoveWindow(g_btnSet, pad + (third + gap) * 2, fy, cw - pad * 2 - (third + gap) * 2, btnH, TRUE);
 }
 
 static void round_corners(HWND hwnd) {
@@ -1283,7 +1308,7 @@ static void apply_follow_state(void) {
   EnableWindow(g_min, !g_follow);
   EnableWindow(g_btnSet, !g_follow);
   if (g_btnAsk) EnableWindow(g_btnAsk, !g_follow);
-  if (g_btnNd) EnableWindow(g_btnNd, !g_follow);
+  if (g_btnNotes) EnableWindow(g_btnNotes, !g_follow);
   if (g_searchEdit) EnableWindow(g_searchEdit, !g_follow);
   if (g_searchGo) EnableWindow(g_searchGo, !g_follow);
   if (g_ocr) EnableWindow(g_ocr, !g_follow);
@@ -1936,8 +1961,8 @@ static void draw_pad_button(const DRAWITEMSTRUCT *dis) {
   BOOL themeBtn = id >= ID_THEME_BASE && id < ID_THEME_BASE + THEME_COUNT;
   int ti = themeBtn ? id - ID_THEME_BASE : -1;
   BOOL on = t[0] == 0x25CF || (themeBtn && g_theme == ti);
-  BOOL primary = id == ID_SETTINGS || id == ID_SEARCH_GO || id == ID_UPDATE || id == ID_PIN ||
-                 id == ID_ANS_OPEN || id == ID_ANS_OPENTP || (id == ID_ASK_TAB && g_askOpen) ||
+  BOOL primary = id == ID_SEARCH_GO || id == ID_UPDATE || id == ID_PIN ||
+                 id == ID_ANS_OPEN || id == ID_ANS_OPENTP || (id == ID_ASK_TAB && g_padMode == 1) || (id == ID_NOTES_TAB && g_padMode == 0) ||
                  id == ID_ND_INVITE || id == ID_ND_ACCEPT || id == ID_ND_ROLL || id == ID_ND_DONE;
   BOOL quiet = id == ID_CLOSE || id == ID_MIN || id == ID_PANEL_CLOSE;
   COLORREF fill, fg, bd;
@@ -2442,6 +2467,9 @@ static void layout_settings(void) {
   }
   y += btnH + gap;
   if (g_chkServe) MoveWindow(g_chkServe, pad, y, cw - pad, btnH, TRUE);
+  y += btnH + gap;
+  /* нарды идут через ту же общую папку — поэтому здесь */
+  if (g_btnNd) MoveWindow(g_btnNd, pad, y, cw - pad, btnH, TRUE);
   y += btnH + gap + 22;
   {
     /* три набора в ряд: Мечник, Рукавица, Фея */
@@ -2614,6 +2642,10 @@ static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
       return 0;
     }
     if (LOWORD(wParam) == ID_SHARE_EDIT && HIWORD(wParam) == EN_KILLFOCUS) share_apply_root();
+    if (LOWORD(wParam) == ID_NARDY_BTN) {
+      nardy_show();
+      return 0;
+    }
     if (LOWORD(wParam) == ID_SHARE_SERVE) {
       save_plm_pref(); /* логин могли вписать только что */
       BOOL want = SendMessageW(g_chkServe, BM_GETCHECK, 0, 0) == BST_CHECKED;
@@ -2732,21 +2764,9 @@ static void refresh_search_cue(void) {
 }
 
 static void layout_ask(void) {
-  if (!g_askHwnd) return;
-  RECT rc;
-  GetClientRect(g_askHwnd, &rc);
-  int pad = 14, gap = 7, btnH = 28, y = PANEL_TITLE_H + 12;
-  int cw = rc.right - pad;
-  int goW = 88;
-  place_panel_close(g_askHwnd);
-  if (g_searchEdit) MoveWindow(g_searchEdit, pad, y, cw - pad - goW - gap, btnH, TRUE);
-  if (g_searchGo) MoveWindow(g_searchGo, cw - goW, y, goW, btnH, TRUE);
-  y += btnH + gap + 20;
-  if (g_btnAi) MoveWindow(g_btnAi, pad, y, cw - pad, btnH, TRUE);
-  y += btnH + gap;
-  int half = (cw - pad - gap) / 2;
-  if (g_btnPlm) MoveWindow(g_btnPlm, pad, y, half, btnH, TRUE);
-  if (g_btnFiles) MoveWindow(g_btnFiles, pad + half + gap, y, half, btnH, TRUE);
+  /* поле и кнопки поиска теперь в окне курсора — их расставляет layout_children */
+  if (g_askHwnd) place_panel_close(g_askHwnd);
+  layout_children();
 }
 
 static void place_ask(void) {
@@ -2767,11 +2787,34 @@ static void toggle_settings(void) {
 
 static void sync_ask_btn(void) {
   g_askOpen = g_askHwnd && IsWindowVisible(g_askHwnd);
-  if (g_btnAsk) SetWindowTextW(g_btnAsk, g_askOpen ? L"● Поиск" : L"Поиск");
+  if (g_btnAsk) InvalidateRect(g_btnAsk, NULL, FALSE);
   if (g_hwnd) InvalidateRect(g_hwnd, NULL, FALSE);
 }
 
 static void toggle_ask(void);
+/* «Спросить» и выбор, где искать — из окна курсора (режим «Поиск») */
+static void ask_command(int id) {
+  if (id == ID_SEARCH_GO) search_clipboard_or_edit();
+  if (id == ID_ENG_AI || id == ID_ENG_PLM || id == ID_ENG_FILES) {
+    g_engine = id == ID_ENG_AI ? 3 : (id == ID_ENG_PLM ? 4 : 5);
+    save_cursor_pref();
+    if (g_engine == 5) files_apply_root(FALSE);
+    update_engine_buttons();
+    refresh_search_cue();
+    if (g_searchEdit && !g_follow) SetFocus(g_searchEdit);
+  }
+}
+
+static void set_pad_mode(int mode) {
+  g_padMode = mode ? 1 : 0;
+  save_cursor_pref();
+  layout_children();
+  if (g_btnAsk) InvalidateRect(g_btnAsk, NULL, FALSE);
+  if (g_btnNotes) InvalidateRect(g_btnNotes, NULL, FALSE);
+  if (g_hwnd) InvalidateRect(g_hwnd, NULL, TRUE);
+  if (!g_follow) SetFocus(g_padMode ? g_searchEdit : g_edit);
+}
+
 static LRESULT CALLBACK AskProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
   switch (msg) {
   case WM_PAINT: {
@@ -2832,26 +2875,7 @@ static LRESULT CALLBACK AskProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
       toggle_ask();
       return 0;
     }
-    if (LOWORD(wParam) == ID_SEARCH_GO) search_clipboard_or_edit();
-    if (LOWORD(wParam) == ID_ENG_AI) {
-      g_engine = 3;
-      save_cursor_pref();
-      update_engine_buttons();
-      refresh_search_cue();
-    }
-    if (LOWORD(wParam) == ID_ENG_PLM) {
-      g_engine = 4;
-      save_cursor_pref();
-      update_engine_buttons();
-      refresh_search_cue();
-    }
-    if (LOWORD(wParam) == ID_ENG_FILES) {
-      g_engine = 5;
-      save_cursor_pref();
-      files_apply_root(FALSE);
-      update_engine_buttons();
-      refresh_search_cue();
-    }
+    ask_command(LOWORD(wParam));
     return 0;
   case WM_SIZE:
     layout_ask();
@@ -2894,13 +2918,19 @@ static void create_ask(HWND owner) {
       ASK_W, ASK_H, owner, NULL, g_inst, NULL);
   mk_btn(g_askHwnd, L"×", ID_PANEL_CLOSE);
   round_corners(g_askHwnd);
-  g_searchEdit = CreateWindowExW(0, L"EDIT", L"",
-                                 WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
-                                 0, 0, 160, 26, g_askHwnd, (HMENU)(INT_PTR)ID_SEARCH_EDIT, NULL, NULL);
-  g_searchGo = mk_btn(g_askHwnd, L"Спросить", ID_SEARCH_GO);
-  g_btnAi = mk_btn(g_askHwnd, L"Мини-ИИ", ID_ENG_AI);
-  g_btnPlm = mk_btn(g_askHwnd, L"PLM", ID_ENG_PLM);
-  g_btnFiles = mk_btn(g_askHwnd, L"Файлы", ID_ENG_FILES);
+  /* поле и кнопки поиска живут в самом окне курсора (режим «Поиск»);
+     отдельное окно «Поиск» осталось пустой оболочкой и не показывается */
+  g_searchEdit = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | ES_AUTOHSCROLL,
+                                 0, 0, 160, 26, owner, (HMENU)(INT_PTR)ID_SEARCH_EDIT, NULL, NULL);
+  g_searchGo = mk_btn(owner, L"Спросить", ID_SEARCH_GO);
+  g_btnAi = mk_btn(owner, L"Мини-ИИ", ID_ENG_AI);
+  g_btnPlm = mk_btn(owner, L"PLM", ID_ENG_PLM);
+  g_btnFiles = mk_btn(owner, L"Файлы", ID_ENG_FILES);
+  {
+    HWND sc[4] = {g_searchGo, g_btnAi, g_btnPlm, g_btnFiles};
+    for (int k = 0; k < 4; k++)
+      if (sc[k]) ShowWindow(sc[k], SW_HIDE);
+  }
   if (g_searchEdit) {
     SendMessageW(g_searchEdit, WM_SETFONT, (WPARAM)g_fontBody, TRUE);
     g_oldSearch = (WNDPROC)SetWindowLongPtrW(g_searchEdit, GWLP_WNDPROC, (LONG_PTR)SearchEditProc);
@@ -2966,6 +2996,7 @@ static void create_settings(HWND owner) {
   g_chkServe = CreateWindowExW(0, L"BUTTON", L"Раздавать PLM коллегам через меня",
                                WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 0, 0, 240, 26,
                                g_setHwnd, (HMENU)(INT_PTR)ID_SHARE_SERVE, NULL, NULL);
+  g_btnNd = mk_btn(g_setHwnd, L"Нарды", ID_NARDY_BTN);
   g_btnK2 = mk_btn(g_setHwnd, L"Мечник", ID_CUR_K2);
   g_btnK3 = mk_btn(g_setHwnd, L"Рукавица", ID_CUR_K3);
   g_btnK4 = mk_btn(g_setHwnd, L"Фея", ID_CUR_K4);
@@ -3073,7 +3104,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                                  WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
                                  0, 0, 100, 24, hwnd, (HMENU)(INT_PTR)ID_CLIP, NULL, NULL);
     g_btnAsk = mk_btn(hwnd, L"Поиск", ID_ASK_TAB);
-    g_btnNd = mk_btn(hwnd, L"Нарды", ID_NARDY_BTN);
+    g_btnNotes = mk_btn(hwnd, L"Блокнот", ID_NOTES_TAB);
     g_btnSet = mk_btn(hwnd, L"Настройки", ID_SETTINGS);
     SendMessageW(g_pin, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
     if (g_clipClr) SendMessageW(g_clipClr, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
@@ -3086,7 +3117,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     }
     SendMessageW(g_btnSet, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
     if (g_btnAsk) SendMessageW(g_btnAsk, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
-    if (g_btnNd) SendMessageW(g_btnNd, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
+    if (g_btnNotes) SendMessageW(g_btnNotes, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
     SendMessageW(g_edit, EM_SETLIMITTEXT, 200000, 0);
     g_oldEdit = (WNDPROC)SetWindowLongPtrW(g_edit, GWLP_WNDPROC, (LONG_PTR)EditProc);
 
@@ -3103,6 +3134,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     if (g_autostart) autostart_set(TRUE);
     create_settings(hwnd);
     create_ask(hwnd);
+    layout_children(); /* поле поиска создано — расставить по режиму окна */
     create_answer(hwnd);
     create_card(hwnd);
     create_ocr(hwnd);
@@ -3221,7 +3253,20 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
       if (g_fontSmall) SelectObject(hdc, g_fontSmall);
       DrawTextW(hdc, APP_VERSION_STR, -1, &vtext, DT_LEFT | DT_TOP | DT_SINGLELINE);
     }
-    draw_gutter_thumbs(hdc, dpi, th, fh);
+    if (g_padMode == 0) {
+      draw_gutter_thumbs(hdc, dpi, th, fh);
+    } else if (g_btnAi) {
+      /* режим поиска: подпись над кнопками «где искать» и подсказка внизу */
+      RECT wr;
+      GetWindowRect(g_btnAi, &wr);
+      MapWindowPoints(HWND_DESKTOP, hwnd, (POINT *)&wr, 2);
+      if (g_fontSmall) SelectObject(hdc, g_fontSmall);
+      SetTextColor(hdc, COL_MUTED);
+      RECT a = {wr.left, wr.top - MulDiv(18, dpi, 96), rc.right - padx, wr.top - 2};
+      DrawTextW(hdc, L"где искать", -1, &a, DT_LEFT | DT_SINGLELINE);
+      RECT hnt = {wr.left, wr.bottom + MulDiv(6, dpi, 96), rc.right - padx, rc.bottom - fh - 2};
+      DrawTextW(hdc, L"Enter — спросить · F3 по буферу копии", -1, &hnt, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+    }
 
     if (pth->ornate) {
       draw_knight_frame(hdc, rc);
@@ -3256,8 +3301,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     if (LOWORD(wParam) == ID_CLOSE) DestroyWindow(hwnd);
     if (LOWORD(wParam) == ID_MIN) toggle_hidden();
     if (LOWORD(wParam) == ID_SETTINGS) toggle_settings();
-    if (LOWORD(wParam) == ID_ASK_TAB) toggle_ask();
-    if (LOWORD(wParam) == ID_NARDY_BTN) nardy_show();
+    if (LOWORD(wParam) == ID_ASK_TAB) set_pad_mode(1);
+    if (LOWORD(wParam) == ID_NOTES_TAB) set_pad_mode(0);
+    if (LOWORD(wParam) == ID_SEARCH_GO || LOWORD(wParam) == ID_ENG_AI || LOWORD(wParam) == ID_ENG_PLM ||
+        LOWORD(wParam) == ID_ENG_FILES)
+      ask_command(LOWORD(wParam));
     if (LOWORD(wParam) == ID_EDIT && HIWORD(wParam) == EN_CHANGE) {
       g_dirty = TRUE;
       InvalidateRect(hwnd, NULL, FALSE);
