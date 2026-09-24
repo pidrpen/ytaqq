@@ -1963,7 +1963,8 @@ static void draw_pad_button(const DRAWITEMSTRUCT *dis) {
   BOOL on = t[0] == 0x25CF || (themeBtn && g_theme == ti);
   BOOL primary = id == ID_SEARCH_GO || id == ID_UPDATE || id == ID_PIN ||
                  id == ID_ANS_OPEN || id == ID_ANS_OPENTP || (id == ID_ASK_TAB && g_padMode == 1) || (id == ID_NOTES_TAB && g_padMode == 0) ||
-                 id == ID_ND_INVITE || id == ID_ND_ACCEPT || id == ID_ND_ROLL || id == ID_ND_DONE;
+                 id == ID_ND_INVITE || id == ID_ND_ACCEPT || id == ID_ND_ROLL || id == ID_ND_DONE ||
+                 id == ID_ANS_DRAW || id == ID_ANS_SHOW; /* чертёж нашёлся — кнопки синие */
   BOOL quiet = id == ID_CLOSE || id == ID_MIN || id == ID_PANEL_CLOSE;
   COLORREF fill, fg, bd;
   /* рыцарская тема рисует кнопки целиком по-своему; кнопка выбора
@@ -3410,6 +3411,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
       }
       show_answer_text(text);
       free(text);
+      ans_draw_from_text(g_quickDraw); /* PLM строк не дал — кнопки чертежа по первому из архива */
     }
     pf_start_async(); /* находки уже на экране — заготовки к ним досчитаются следом */
     return 0;

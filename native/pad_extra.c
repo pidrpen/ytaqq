@@ -435,7 +435,15 @@ static void open_plm_link(const wchar_t *link) {
 static void ans_zoom(int delta);
 static WNDPROC g_oldAnsEdit;
 
+static void ans_text_line_draw(HWND edit);
 static LRESULT CALLBACK AnsEditProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+  /* щелчок по строке-пути — это и есть «выбранный чертёж»: для кнопок
+     «Открыть чертёж» и «Открыть файл в проводнике» */
+  if (msg == WM_LBUTTONUP) {
+    LRESULT r = CallWindowProcW(g_oldAnsEdit, hwnd, msg, wParam, lParam);
+    ans_text_line_draw(hwnd);
+    return r;
+  }
   if (msg == WM_MOUSEWHEEL && (GetKeyState(VK_CONTROL) & 0x8000)) {
     ans_zoom(GET_WHEEL_DELTA_WPARAM(wParam) > 0 ? 1 : -1);
     return 0;
@@ -2196,6 +2204,43 @@ static void request_row_draw(void) {
    чертёж — они больше не перепутываются. */
 static const wchar_t *ans_draw_file(void) {
   return g_selDraw[0] ? g_selDraw : NULL;
+}
+
+/* строка текста похожа на путь к файлу: «Z:\…» или «\\сервер\…» */
+static BOOL ans_is_path(const wchar_t *s) {
+  return (s[0] && s[1] == L':' && s[2] == L'\\') || (s[0] == L'\\' && s[1] == L'\\');
+}
+
+/* Чертежи из архива в тексте ответа (пока PLM ищет, или PLM ничего не дал):
+   первый из них сразу становится «выбранным» — кнопки «Открыть чертёж» и
+   «Открыть файл в проводнике» загораются, не дожидаясь списка PLM. */
+static void ans_draw_from_text(const wchar_t *list) {
+  if (!list || g_plmCount > 0) return;
+  for (const wchar_t *p = list; p && *p;) {
+    const wchar_t *nl = wcschr(p, L'\n');
+    size_t len = nl ? (size_t)(nl - p) : wcslen(p);
+    if (len > 3 && len < PLM_LINK && ans_is_path(p)) {
+      memcpy(g_selDraw, p, len * sizeof(wchar_t));
+      g_selDraw[len] = 0;
+      while (len > 0 && (g_selDraw[len - 1] == L'\r' || g_selDraw[len - 1] == L' ')) g_selDraw[--len] = 0;
+      InterlockedIncrement(&g_drawGen); /* запоздалый ответ прежней строки не перетрёт */
+      ans_sync_buttons();
+      return;
+    }
+    p = nl ? nl + 1 : NULL;
+  }
+}
+
+static void ans_text_line_draw(HWND edit) {
+  if (g_plmCount > 0) return;
+  int line = (int)SendMessageW(edit, EM_LINEFROMCHAR, (WPARAM)-1, 0);
+  wchar_t buf[PLM_LINK + 8];
+  *(WORD *)buf = PLM_LINK;
+  int n = (int)SendMessageW(edit, EM_GETLINE, (WPARAM)line, (LPARAM)buf);
+  if (n <= 3 || n >= PLM_LINK) return;
+  buf[n] = 0;
+  if (!ans_is_path(buf)) return;
+  ans_draw_from_text(buf);
 }
 
 /* Нижний ряд находок всегда один и тот же. Чего сейчас нет — то потухшее,
@@ -5125,6 +5170,7 @@ static void start_lookup(const wchar_t *q) {
   }
   show_answer_text(wait);
   free(wait);
+  ans_draw_from_text(g_quickDraw);
   SearchJob *job = (SearchJob *)calloc(1, sizeof(SearchJob));
   if (!job) {
     InterlockedExchange(&g_netBusy, 0);
