@@ -49,6 +49,5 @@
 273 CURSOR "cursors/k4_person.cur"
 306 RCDATA "cursors/k4_wait.ani"
 307 RCDATA "cursors/k4_app.ani"
-321 RCDATA "tools/tiff-merge.html"
 322 RCDATA "tools/tiff-a4-a3.html"
 323 RCDATA "webview2/WebView2Loader.dll"

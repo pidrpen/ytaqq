@@ -5,7 +5,7 @@
 CDN. На рабочем ПК без интернета они бы не открылись, поэтому здесь каждая
 <script src="https://…"> заменяется самим скриптом, и страница становится
 одним файлом. Готовое кладётся в native/tools/, а оттуда build.sh вшивает
-страницы в exe (cursorpad.rc, RCDATA 320–322): у курсора они всегда с собой,
+страницы в exe (cursorpad.rc, RCDATA 322): у курсора они всегда с собой,
 сеть не нужна.
 
 Запуск:  python3 native/make_tools.py [путь к клону giriaja-hall]
@@ -24,8 +24,8 @@ HUB = "https://pidrpen.github.io/giriaja-hall/"
 
 # файл в giriaja-hall → имя у нас (его же знает CursorPad, см. tools.c)
 PAGES = [
-    # расчёт резки переписан своим окном CursorPad (cutting.c, нормы — make_cutting.py)
-    ("tiff_merger.html", "tiff-merge.html"),
+    # расчёт резки и объединение TIFF / PDF переписаны своими окнами CursorPad
+    # (cutting.c, tiffmerge.c) — страницы для них больше не нужны
     ("tiff-a4-a3.html", "tiff-a4-a3.html"),
 ]
 

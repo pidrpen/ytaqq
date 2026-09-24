@@ -1,9 +1,10 @@
 /* ---- «Ещё»: страницы из pidrpen/giriaja-hall ----------------------------------
 
-   Кнопка «Ещё» внизу окна — список страниц: расчёт резки и газов,
-   объединение TIFF / PDF, сортировка TIFF A4/A3. Сами страницы — HTML с
+   Кнопка «Ещё» внизу окна — список: расчёт резки и газов, объединение
+   TIFF / PDF (оба — свои окна CursorPad: cutting.c, tiffmerge.c),
+   сортировка TIFF A4/A3 — пока страница. Страницы — HTML с
    библиотеками внутри (собирает native/make_tools.py в native/tools/), и
-   они вшиты в exe (cursorpad.rc, RCDATA 320–322): сеть не нужна вовсе.
+   они вшиты в exe (cursorpad.rc, RCDATA 322): сеть не нужна вовсе.
 
    При выборе страница выкладывается из exe в %LOCALAPPDATA%\CursorPad\tools\
    (каждый раз заново — так у неё всегда та версия, что в этом exe) и
@@ -17,21 +18,22 @@
 #define ID_MORE_BTN 193
 
 typedef struct {
-  int res;
+  int res; /* 0 — переписана своим окном: native */
   const wchar_t *file, *title;
+  void (*native)(void);
 } ToolPage;
 
 static const ToolPage kTools[] = {
-    {0, NULL, L"Расчёт резки и газов"}, /* своё окно: cutting.c (с 2026.09.23.34) */
-    {321, L"tiff-merge.html", L"Объединение TIFF / PDF"},
-    {322, L"tiff-a4-a3.html", L"Сортировка TIFF A4 / A3"},
+    {0, NULL, L"Расчёт резки и газов", cutting_show},     /* cutting.c (с 2026.09.23.34) */
+    {0, NULL, L"Объединение TIFF / PDF", tiffmerge_show}, /* tiffmerge.c (с 2026.09.23.37) */
+    {322, L"tiff-a4-a3.html", L"Сортировка TIFF A4 / A3", NULL},
 };
 #define TOOLS_N ((int)(sizeof(kTools) / sizeof(kTools[0])))
 
 static void tools_open(int k) {
   if (k < 0 || k >= TOOLS_N || !g_dataDir[0]) return;
-  if (kTools[k].res == 0) { /* переписан своим окном — без Edge, открывается сразу */
-    cutting_show();
+  if (kTools[k].native) { /* переписана своим окном — без Edge, открывается сразу */
+    kTools[k].native();
     return;
   }
   wchar_t dir[MAX_PATH], path[MAX_PATH];

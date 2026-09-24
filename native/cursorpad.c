@@ -3100,6 +3100,7 @@ static void create_settings(HWND owner) {
 }
 
 #include "cutting.c"
+#include "tiffmerge.c"
 #include "webview.c"
 #include "tools.c"
 #include "nardy.c"
