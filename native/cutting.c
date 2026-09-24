@@ -40,7 +40,10 @@ static BOOL g_cutHave, g_cutCopied;
 static wchar_t g_cutHint[400];
 static const int kCutQuick[6] = {1000, 2500, 5000, 10000, 25000, 50000};
 static int g_cutScroll, g_cutContentH;
-static float g_cutS = 1.0f;
+static float g_cutS = 1.0f;    /* итоговый масштаб рисования: экран × Ctrl+колесо × подгонка под окно */
+static float g_cutDpi = 1.0f;  /* масштаб экрана Windows (100 % — 1.0) */
+static float g_cutZoom = 1.0f; /* свой, Ctrl+колесо */
+static BOOL g_cutTwo = TRUE;   /* две колонки или одна под другой */
 static HFONT g_cf[10]; /* шрифты окна, см. cut_fonts */
 enum { CF_H1, CF_SUB, CF_TITLE, CF_LABEL, CF_BODY, CF_BIG, CF_BOLD, CF_MONO, CF_SMALLB, CF_INPUT };
 static HBRUSH g_cutSurfBrush;
@@ -623,7 +626,7 @@ static int cut_draw(HDC dc, int cw, BOOL paint) {
   y = hh + CS(24);
   int m = CS(24), gap = CS(20);
   int avail = cw - m * 2;
-  if (avail >= CS(820)) { /* две колонки */
+  if (g_cutTwo) { /* две колонки */
     int lw = CS(380);
     int yl = cut_left(dc, m, lw, y, paint);
     int yr = cut_right(dc, m + lw + gap, avail - lw - gap, y, paint);
@@ -635,10 +638,45 @@ static int cut_draw(HDC dc, int cw, BOOL paint) {
 
 /* ---- полотно: рисование с прокруткой, щелчки ---------------------------------- */
 
+/* Подгонка под ширину окна. Всё окно нарисовано в «макетных» пикселях:
+   две колонки — 1150 в ширину, одна — 620. Окно уже макета — всё
+   уменьшается целиком, в тех же пропорциях (шрифты вместе с рамками и
+   отступами), но не мельче 72 %; дальше двум колонкам тесно — встают одна
+   под другой. Так размер букв и раскладка не расходятся ни при каком окне. */
+static void cut_fit(int cw) {
+  const float W2 = 1150.0f, W1 = 620.0f, MINF = 0.72f;
+  float want = g_cutDpi * g_cutZoom, ns; /* сколько хочется: экран × Ctrl+колесо */
+  if (cw >= W2 * want) { /* две колонки влезают как есть */
+    g_cutTwo = TRUE;
+    ns = want;
+  } else if (cw >= W2 * want * MINF) { /* влезают, если чуть уменьшить */
+    g_cutTwo = TRUE;
+    ns = cw / W2;
+  } else { /* одна колонка; не влезает — тоже уменьшаем, но не мельче 72 % */
+    g_cutTwo = FALSE;
+    ns = cw / W1;
+    if (ns > want) ns = want;
+    if (ns < want * MINF) ns = want * MINF;
+  }
+  if (ns - g_cutS > 0.004f || g_cutS - ns > 0.004f) {
+    g_cutS = ns;
+    cut_fonts();
+    if (g_cutMat) {
+      SendMessageW(g_cutMat, WM_SETFONT, (WPARAM)g_cf[CF_INPUT], FALSE);
+      SendMessageW(g_cutThick, WM_SETFONT, (WPARAM)g_cf[CF_INPUT], FALSE);
+      SendMessageW(g_cutLen, WM_SETFONT, (WPARAM)g_cf[CF_INPUT], FALSE);
+      SendMessageW(g_cutMat, CB_SETITEMHEIGHT, (WPARAM)-1, CS(32));
+      SendMessageW(g_cutMat, CB_SETITEMHEIGHT, 0, CS(26));
+    }
+  }
+}
+
+static void cut_save_pref(void);
 static void cut_relayout(void) {
   if (!g_cutCanvas) return;
   RECT rc;
   GetClientRect(g_cutCanvas, &rc);
+  cut_fit(rc.right);
   HDC dc = GetDC(g_cutCanvas);
   g_cutContentH = cut_draw(dc, rc.right, FALSE);
   /* поля ввода расставляет второй проход cut_left — он идёт и при измерении */
@@ -817,6 +855,14 @@ static LRESULT CALLBACK CutCanvasProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
     return 0;
   }
   case WM_MOUSEWHEEL:
+    if (GetKeyState(VK_CONTROL) & 0x8000) { /* Ctrl+колесо — свой масштаб, как в браузере */
+      g_cutZoom *= GET_WHEEL_DELTA_WPARAM(wParam) > 0 ? 1.1f : 1 / 1.1f;
+      if (g_cutZoom < 0.6f) g_cutZoom = 0.6f;
+      if (g_cutZoom > 1.6f) g_cutZoom = 1.6f;
+      cut_relayout();
+      cut_save_pref();
+      return 0;
+    }
     cut_scroll_to(g_cutScroll - GET_WHEEL_DELTA_WPARAM(wParam) * CS(60) / WHEEL_DELTA);
     return 0;
   case WM_SETCURSOR:
@@ -874,14 +920,59 @@ static LRESULT CALLBACK CutCanvasProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
   return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
+/* масштаб (Ctrl+колесо) и место окна — между запусками, в cutting.txt */
+static void cut_pref_path(wchar_t *p) {
+  _snwprintf(p, MAX_PATH, L"%s\\cutting.txt", g_dataDir);
+  p[MAX_PATH - 1] = 0;
+}
+
+static void cut_save_pref(void) {
+  if (!g_dataDir[0] || !g_cutWnd) return;
+  WINDOWPLACEMENT wp;
+  wp.length = sizeof(wp);
+  if (!GetWindowPlacement(g_cutWnd, &wp)) return;
+  RECT r = wp.rcNormalPosition;
+  char b[120];
+  int n = snprintf(b, sizeof(b), "%d %ld %ld %ld %ld\n", (int)(g_cutZoom * 100 + 0.5f), r.left, r.top,
+                   r.right - r.left, r.bottom - r.top);
+  wchar_t p[MAX_PATH];
+  cut_pref_path(p);
+  HANDLE f = CreateFileW(p, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+  if (f == INVALID_HANDLE_VALUE) return;
+  DWORD w = 0;
+  WriteFile(f, b, (DWORD)n, &w, NULL);
+  CloseHandle(f);
+}
+
+/* FALSE — сохранённого нет или оно не на этом экране */
+static BOOL cut_load_pref(RECT *out) {
+  if (!g_dataDir[0]) return FALSE;
+  wchar_t p[MAX_PATH];
+  cut_pref_path(p);
+  char *b = NULL;
+  DWORD n = 0;
+  if (!read_file_bytes(p, &b, &n, 200)) return FALSE;
+  int z = 100;
+  long x = 0, y = 0, w = 0, h = 0;
+  int k = sscanf(b, "%d %ld %ld %ld %ld", &z, &x, &y, &w, &h);
+  free(b);
+  if (k >= 1 && z >= 60 && z <= 160) g_cutZoom = z / 100.0f;
+  if (k < 5 || w < 300 || h < 250) return FALSE;
+  RECT r = {x, y, x + w, y + h};
+  /* окно должно хоть частью попасть на какой-нибудь монитор */
+  if (!MonitorFromRect(&r, MONITOR_DEFAULTTONULL)) return FALSE;
+  *out = r;
+  return TRUE;
+}
+
 static LRESULT CALLBACK CutProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
   switch (msg) {
   case WM_ERASEBKGND:
     return 1;
   case WM_GETMINMAXINFO: {
     MINMAXINFO *mm = (MINMAXINFO *)lParam;
-    mm->ptMinTrackSize.x = CS(520);
-    mm->ptMinTrackSize.y = CS(420);
+    mm->ptMinTrackSize.x = (int)(480 * g_cutDpi);
+    mm->ptMinTrackSize.y = (int)(380 * g_cutDpi);
     return 0;
   }
   case WM_SIZE:
@@ -897,7 +988,11 @@ static LRESULT CALLBACK CutProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
       cut_relayout();
     }
     return 0;
+  case WM_EXITSIZEMOVE:
+    cut_save_pref();
+    return 0;
   case WM_CLOSE:
+    cut_save_pref();
     ShowWindow(hwnd, SW_HIDE); /* прячем: в следующий раз — с тем же, что вводили */
     return 0;
   }
@@ -907,7 +1002,8 @@ static LRESULT CALLBACK CutProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 static void cutting_show(void) {
   if (!g_cutWnd) {
     HDC s = GetDC(NULL);
-    g_cutS = s ? GetDeviceCaps(s, LOGPIXELSX) / 96.0f : 1.0f;
+    g_cutDpi = s ? GetDeviceCaps(s, LOGPIXELSX) / 96.0f : 1.0f;
+    g_cutS = g_cutDpi;
     if (s) ReleaseDC(NULL, s);
     cut_fonts();
     g_cutSurfBrush = CreateSolidBrush(CC_SURF);
@@ -926,13 +1022,23 @@ static void cutting_show(void) {
     RegisterClassExW(&wc);
     RECT wa;
     SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0);
-    int ww = CS(1200), wh = CS(900);
-    if (ww > wa.right - wa.left) ww = wa.right - wa.left;
-    if (wh > wa.bottom - wa.top) wh = wa.bottom - wa.top;
+    /* не во весь экран: около трёх четвертей ширины и чуть меньше высоты;
+       содержимое само подгонится под то, что вышло (cut_fit) */
+    int waw = wa.right - wa.left, wah = wa.bottom - wa.top;
+    int ww = (int)(1060 * g_cutDpi), wh = (int)(800 * g_cutDpi);
+    if (ww > waw * 3 / 4) ww = waw * 3 / 4;
+    if (wh > wah * 7 / 8) wh = wah * 7 / 8;
+    int wx = wa.left + (waw - ww) / 2, wy = wa.top + (wah - wh) / 2;
+    RECT saved;
+    if (cut_load_pref(&saved)) { /* как оставили в прошлый раз */
+      wx = saved.left;
+      wy = saved.top;
+      ww = saved.right - saved.left;
+      wh = saved.bottom - saved.top;
+    }
     /* поверх всех окон, со «свернуть» и «развернуть» */
     g_cutWnd = CreateWindowExW(WS_EX_TOPMOST | WS_EX_APPWINDOW, L"CursorPadCutting", L"Расчёт резки и газов — CursorPad",
-                               WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, wa.left + (wa.right - wa.left - ww) / 2,
-                               wa.top + (wa.bottom - wa.top - wh) / 2, ww, wh, NULL, NULL, g_inst, NULL);
+                               WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, wx, wy, ww, wh, NULL, NULL, g_inst, NULL);
     if (!g_cutWnd) return;
     RECT rc;
     GetClientRect(g_cutWnd, &rc);
