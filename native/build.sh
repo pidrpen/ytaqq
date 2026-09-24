@@ -43,7 +43,7 @@ cd "$HERE"
 $CC $CFLAGS -o CursorPadOcr.exe ocr_module.c -lole32 -lruntimeobject -luser32 -municode
 $RC cursorpad.rc -O coff -o "$TMP/cursorpad.res"
 $CC $CFLAGS -finput-charset=UTF-8 -o "$PUB/CursorPad.exe" cursorpad.c "$TMP/cursorpad.res" \
-  -luser32 -lgdi32 -lshell32 -lole32 -lcomctl32 -lwinhttp -ladvapi32 -lodbc32 -lcrypt32 \
+  -luser32 -lgdi32 -lshell32 -lole32 -lcomctl32 -lwinhttp -ladvapi32 -lodbc32 -lcrypt32 -lcomdlg32 \
   -Wl,--subsystem,windows -municode
 
 cp -f cursorpad.manifest "$PUB/CursorPad.exe.manifest"

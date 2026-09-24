@@ -397,7 +397,7 @@ static BOOL webview_open(const wchar_t *path, const wchar_t *title) {
   wchar_t cap[160];
   _snwprintf(cap, 160, L"%s — CursorPad", title);
   cap[159] = 0;
-  HWND h = CreateWindowExW(WS_EX_APPWINDOW, L"CursorPadWebView", cap, WS_OVERLAPPEDWINDOW,
+  HWND h = CreateWindowExW(WS_EX_TOPMOST | WS_EX_APPWINDOW, L"CursorPadWebView", cap, WS_OVERLAPPEDWINDOW,
                            wa.left + (wa.right - wa.left - ww) / 2, wa.top + (wa.bottom - wa.top - wh) / 2,
                            ww, wh, NULL, NULL, g_inst, NULL);
   if (!h) return FALSE;

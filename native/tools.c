@@ -22,7 +22,7 @@ typedef struct {
 } ToolPage;
 
 static const ToolPage kTools[] = {
-    {320, L"cutting.html", L"Расчёт резки и газов"},
+    {0, NULL, L"Расчёт резки и газов"}, /* своё окно: cutting.c (с 2026.09.23.34) */
     {321, L"tiff-merge.html", L"Объединение TIFF / PDF"},
     {322, L"tiff-a4-a3.html", L"Сортировка TIFF A4 / A3"},
 };
@@ -30,6 +30,10 @@ static const ToolPage kTools[] = {
 
 static void tools_open(int k) {
   if (k < 0 || k >= TOOLS_N || !g_dataDir[0]) return;
+  if (kTools[k].res == 0) { /* переписан своим окном — без Edge, открывается сразу */
+    cutting_show();
+    return;
+  }
   wchar_t dir[MAX_PATH], path[MAX_PATH];
   _snwprintf(dir, MAX_PATH, L"%s\\tools", g_dataDir);
   dir[MAX_PATH - 1] = 0;

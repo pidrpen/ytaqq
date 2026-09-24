@@ -24,7 +24,7 @@ HUB = "https://pidrpen.github.io/giriaja-hall/"
 
 # файл в giriaja-hall → имя у нас (его же знает CursorPad, см. tools.c)
 PAGES = [
-    ("cutting-calculator.html", "cutting.html"),
+    # расчёт резки переписан своим окном CursorPad (cutting.c, нормы — make_cutting.py)
     ("tiff_merger.html", "tiff-merge.html"),
     ("tiff-a4-a3.html", "tiff-a4-a3.html"),
 ]
