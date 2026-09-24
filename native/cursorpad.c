@@ -216,6 +216,7 @@ static HWND g_btnSet;
 static HWND g_btnAsk;
 static HWND g_btnNd; /* кнопка «Нарды» в Настройках */
 static HWND g_btnNotes; /* «Блокнот» внизу окна */
+static HWND g_btnMore;  /* «Ещё» внизу окна: страницы из giriaja-hall */
 /* Режим окна: 0 — блокнот (заметки), 1 — поиск (поле, «Спросить» и где
    искать — прямо в окне, без отдельного окна «Поиск»). Запоминается. */
 static int g_padMode;
@@ -1275,12 +1276,15 @@ static void layout_children(void) {
       if (g_btnFiles) MoveWindow(g_btnFiles, left + (w3 + gap) * 2, sy, right - left - (w3 + gap) * 2, sh, TRUE);
     }
   }
-  /* внизу три кнопки поровну: Блокнот · Поиск (режимы окна) · Настройки */
-  int third = (cw - pad * 2 - gap * 2) / 3;
+  /* внизу: Блокнот · Поиск (режимы окна) · Ещё · Настройки; «Ещё» узкая */
+  int moreW = MulDiv(50, dpi, 96);
+  int third = (cw - pad * 2 - gap * 3 - moreW) / 3;
   int fy = ch - fh + (fh - btnH) / 2;
   if (g_btnNotes) MoveWindow(g_btnNotes, pad, fy, third, btnH, TRUE);
   if (g_btnAsk) MoveWindow(g_btnAsk, pad + third + gap, fy, third, btnH, TRUE);
-  if (g_btnSet) MoveWindow(g_btnSet, pad + (third + gap) * 2, fy, cw - pad * 2 - (third + gap) * 2, btnH, TRUE);
+  if (g_btnMore) MoveWindow(g_btnMore, pad + (third + gap) * 2, fy, moreW, btnH, TRUE);
+  int sx = pad + (third + gap) * 2 + moreW + gap;
+  if (g_btnSet) MoveWindow(g_btnSet, sx, fy, cw - pad - sx, btnH, TRUE);
 }
 
 static void round_corners(HWND hwnd) {
@@ -1309,6 +1313,7 @@ static void apply_follow_state(void) {
   EnableWindow(g_btnSet, !g_follow);
   if (g_btnAsk) EnableWindow(g_btnAsk, !g_follow);
   if (g_btnNotes) EnableWindow(g_btnNotes, !g_follow);
+  if (g_btnMore) EnableWindow(g_btnMore, !g_follow);
   if (g_searchEdit) EnableWindow(g_searchEdit, !g_follow);
   if (g_searchGo) EnableWindow(g_searchGo, !g_follow);
   if (g_ocr) EnableWindow(g_ocr, !g_follow);
@@ -3093,6 +3098,7 @@ static void create_settings(HWND owner) {
   layout_settings();
 }
 
+#include "tools.c"
 #include "nardy.c"
 
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -3128,6 +3134,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                                  0, 0, 100, 24, hwnd, (HMENU)(INT_PTR)ID_CLIP, NULL, NULL);
     g_btnAsk = mk_btn(hwnd, L"Поиск", ID_ASK_TAB);
     g_btnNotes = mk_btn(hwnd, L"Блокнот", ID_NOTES_TAB);
+    g_btnMore = mk_btn(hwnd, L"Ещё", ID_MORE_BTN);
     g_btnSet = mk_btn(hwnd, L"Настройки", ID_SETTINGS);
     SendMessageW(g_pin, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
     if (g_clipClr) SendMessageW(g_clipClr, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
@@ -3141,6 +3148,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     SendMessageW(g_btnSet, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
     if (g_btnAsk) SendMessageW(g_btnAsk, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
     if (g_btnNotes) SendMessageW(g_btnNotes, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
+    if (g_btnMore) SendMessageW(g_btnMore, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
     SendMessageW(g_edit, EM_SETLIMITTEXT, 200000, 0);
     g_oldEdit = (WNDPROC)SetWindowLongPtrW(g_edit, GWLP_WNDPROC, (LONG_PTR)EditProc);
 
@@ -3326,6 +3334,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     if (LOWORD(wParam) == ID_SETTINGS) toggle_settings();
     if (LOWORD(wParam) == ID_ASK_TAB) set_pad_mode(1);
     if (LOWORD(wParam) == ID_NOTES_TAB) set_pad_mode(0);
+    if (LOWORD(wParam) == ID_MORE_BTN && g_btnMore) tools_menu(hwnd, g_btnMore);
     if (LOWORD(wParam) == ID_SEARCH_GO || LOWORD(wParam) == ID_ENG_AI || LOWORD(wParam) == ID_ENG_PLM ||
         LOWORD(wParam) == ID_ENG_FILES)
       ask_command(LOWORD(wParam));
@@ -3393,6 +3402,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     if (wParam == TIMER_FILES) files_start_index(FALSE);
     if (wParam == TIMER_FILES_TICK) files_refresh_status();
     if (wParam == TIMER_FILES_PLAN) files_plan_tick();
+    return 0;
+  case WM_TOOLS_DONE:
+    tools_on_done((int)wParam, (BOOL)lParam);
     return 0;
   case WM_SEARCH_DONE: {
     wchar_t *text = (wchar_t *)lParam;
