@@ -3098,6 +3098,7 @@ static void create_settings(HWND owner) {
   layout_settings();
 }
 
+#include "webview.c"
 #include "tools.c"
 #include "nardy.c"
 

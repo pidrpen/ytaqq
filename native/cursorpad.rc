@@ -52,3 +52,4 @@
 320 RCDATA "tools/cutting.html"
 321 RCDATA "tools/tiff-merge.html"
 322 RCDATA "tools/tiff-a4-a3.html"
+323 RCDATA "webview2/WebView2Loader.dll"

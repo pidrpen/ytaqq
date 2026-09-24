@@ -7,7 +7,8 @@
 
    При выборе страница выкладывается из exe в %LOCALAPPDATA%\CursorPad\tools\
    (каждый раз заново — так у неё всегда та версия, что в этом exe) и
-   открывается в браузере по умолчанию.
+   открывается в окне CursorPad со встроенным Edge (webview.c); нет WebView2
+   на ПК — отдельным окном Edge без вкладок, нет Edge — браузером.
 
    В 2026.09.23.29 страницы скачивались с GitHub, но проверка скачанного
    читала не больше 4 КБ файла и браковала любую страницу — «скачать не
@@ -40,8 +41,8 @@ static void tools_open(int k) {
     show_status(L"Не удалось выложить страницу");
     return;
   }
-  HINSTANCE r = ShellExecuteW(NULL, L"open", path, NULL, NULL, SW_SHOWNORMAL);
-  if ((INT_PTR)r <= 32) show_status(L"Нет браузера для HTML");
+  /* своё окно со встроенным Edge; нет WebView2 — отдельное окно Edge без вкладок */
+  if (!webview_open(path, kTools[k].title)) wv_open_outside(path);
 }
 
 /* список под кнопкой «Ещё» */
