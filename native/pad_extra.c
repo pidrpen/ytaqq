@@ -440,6 +440,23 @@ static LRESULT CALLBACK AnsEditProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
     ans_zoom(GET_WHEEL_DELTA_WPARAM(wParam) > 0 ? 1 : -1);
     return 0;
   }
+  /* двойной щелчок по строке-пути (чертежи, найденные пока PLM ищет) —
+     открыть этот файл */
+  if (msg == WM_LBUTTONDBLCLK) {
+    LRESULT r = CallWindowProcW(g_oldAnsEdit, hwnd, msg, wParam, lParam);
+    int line = (int)SendMessageW(hwnd, EM_LINEFROMCHAR, (WPARAM)-1, 0);
+    wchar_t buf[MAX_PATH + 8];
+    *(WORD *)buf = MAX_PATH;
+    int n = (int)SendMessageW(hwnd, EM_GETLINE, (WPARAM)line, (LPARAM)buf);
+    if (n > 0 && n < MAX_PATH + 8) {
+      buf[n] = 0;
+      while (n > 0 && (buf[n - 1] == L'\r' || buf[n - 1] == L' ')) buf[--n] = 0;
+      DWORD at = GetFileAttributesW(buf);
+      if (n > 3 && at != INVALID_FILE_ATTRIBUTES && !(at & FILE_ATTRIBUTE_DIRECTORY))
+        ShellExecuteW(NULL, L"open", buf, NULL, NULL, SW_SHOWNORMAL);
+    }
+    return r;
+  }
   return CallWindowProcW(g_oldAnsEdit, hwnd, msg, wParam, lParam);
 }
 
@@ -5051,6 +5068,10 @@ static void show_ocr_text(const wchar_t *text) {
   if (g_ocrEdit) SetFocus(g_ocrEdit);
 }
 
+/* чертежи, показанные пока PLM искал: если PLM ничего не дал (не нашёл,
+   нет связи), они остаются под его ответом, а не пропадают */
+static wchar_t *g_quickDraw;
+
 static void start_lookup(const wchar_t *q) {
   if (!q) return;
   /* пароль ввели и сразу ищут, не уходя из поля, — берём его и так */
@@ -5074,11 +5095,36 @@ static void start_lookup(const wchar_t *q) {
      находками и только потом менялось на новые */
   g_plmCount = 0;
   InterlockedIncrement(&g_pfGen);
-  wchar_t wait[440];
-  _snwprintf(wait, 440,
-             g_engine == 4 ? L"Ищу в PLM «%.80s»…" :
-             (g_engine == 5 ? L"Ищу файлы «%.80s»…" : L"Мини-ИИ «%.80s»…"), q);
+  wchar_t *wait = (wchar_t *)malloc(4400 * sizeof(wchar_t));
+  if (!wait) {
+    InterlockedExchange(&g_netBusy, 0);
+    return;
+  }
+  int wl = _snwprintf(wait, 440,
+                      g_engine == 4 ? L"Ищу в PLM «%.80s»…" :
+                      (g_engine == 5 ? L"Ищу файлы «%.80s»…" : L"Мини-ИИ «%.80s»…"), q);
+  /* Чертёж находится быстрее всего: он в индексе архива, в памяти. Пока PLM
+     ищет, показываем найденные чертежи сразу — список PLM потом встанет
+     на их место. */
+  free(g_quickDraw);
+  g_quickDraw = NULL;
+  if (g_engine == 4 && wl > 0) {
+    wchar_t *dr = (wchar_t *)malloc(3800 * sizeof(wchar_t));
+    if (dr) {
+      int nd = files_quick_list(q, dr, 3800, 20);
+      if (nd > 0) {
+        _snwprintf(wait + wl, 4400 - wl,
+                   L"\r\n\r\nЧертежи в архиве — уже нашлись (двойной щелчок по строке открывает):\r\n%s",
+                   dr);
+        g_quickDraw = dr;
+        dr = NULL;
+      }
+      wait[4399] = 0;
+      free(dr);
+    }
+  }
   show_answer_text(wait);
+  free(wait);
   SearchJob *job = (SearchJob *)calloc(1, sizeof(SearchJob));
   if (!job) {
     InterlockedExchange(&g_netBusy, 0);

@@ -1793,6 +1793,42 @@ static BOOL files_search(const wchar_t *query, wchar_t *out, int cap) {
   return TRUE;
 }
 
+/* Чертежи из архива (JSON-индекс в памяти) по тексту поиска — сразу, пока
+   PLM ещё думает: индекс в памяти, перебор занимает миллисекунды. Общие
+   массивы находок не трогаем (их в это время заполняет поток PLM) — только
+   текст: по строке на файл, полный путь, двойной щелчок его открывает. */
+static int files_quick_list(const wchar_t *query, wchar_t *out, int cap, int maxn) {
+  out[0] = 0;
+  if (!g_filesRoot[0] || g_filesN == 0 || !query || !query[0]) return 0;
+  wchar_t q[200];
+  lstrcpynW(q, query, 200);
+  flatten_clip_line(q);
+  if (!q[0]) return 0;
+  int n = 0, total = 0, l = 0;
+  files_lock();
+  FileIdx *ix = g_idx;
+  if (ix) {
+    for (int i = 0; i < ix->n; i++) {
+      if (!wcs_istr(ix->ent[i].name, q)) continue;
+      total++;
+      if (n >= maxn || l >= cap - 1) continue;
+      const wchar_t *dir = ix->ent[i].dir < ix->dirsN ? ix->dirs[ix->ent[i].dir] : L"";
+      int w = _snwprintf(out + l, cap - l, L"%s\\%s\r\n", dir, ix->ent[i].name);
+      if (w < 0) {
+        out[l] = 0;
+        break;
+      }
+      l += w;
+      n++;
+    }
+  }
+  files_unlock();
+  out[cap - 1] = 0;
+  if (total > n && l < cap - 40) _snwprintf(out + l, cap - l, L"… и ещё %d\r\n", total - n);
+  out[cap - 1] = 0;
+  return n;
+}
+
 /* ---- preferences --------------------------------------------------------- */
 
 static void load_files_pref(void) {

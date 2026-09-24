@@ -3396,6 +3396,18 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
   case WM_SEARCH_DONE: {
     wchar_t *text = (wchar_t *)lParam;
     if (text) {
+      /* PLM строк не дал — чертежи, найденные пока он искал, оставляем ниже */
+      if (g_plmCount == 0 && g_quickDraw && g_quickDraw[0]) {
+        size_t n = wcslen(text) + wcslen(g_quickDraw) + 120;
+        wchar_t *both = (wchar_t *)malloc(n * sizeof(wchar_t));
+        if (both) {
+          _snwprintf(both, n, L"%s\r\n\r\nЧертежи в архиве (двойной щелчок по строке открывает):\r\n%s", text,
+                     g_quickDraw);
+          both[n - 1] = 0;
+          free(text);
+          text = both;
+        }
+      }
       show_answer_text(text);
       free(text);
     }
