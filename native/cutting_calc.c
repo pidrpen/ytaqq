@@ -508,69 +508,6 @@ static void cut_copy_text(const CutPack *p, wchar_t *out, int cap) {
   }
 }
 
-/* текст в окне: по технологиям, внутри — оснастка, газы с итогом, прочее */
-static void cut_view_text(const CutPack *p, wchar_t *out, int cap) {
-  CutBuf b = {out, 0, cap};
-  out[0] = 0;
-  wchar_t t[40], L[40], ml[200], sp[40], tm[40];
-  cut_fmt(p->thickness, 2, t, 40);
-  cut_fmt(p->lengthMm, 0, L, 40);
-  cut_add(&b, L"%ls · %ls мм · %ls мм реза · %ls\r\n", p->material, t, L,
-          p->n > 1 ? L"несколько технологий" : L"расчёт по нормам");
-  static const wchar_t *const titles[3] = {L"Оснастка и расходники", L"Газы", L"Вспомогательные"};
-  static const int order[3] = {0, 1, 2};
-  for (int i = 0; i < p->n; i++) {
-    const CutMethod *m = &p->m[i];
-    cut_mode_label(m, ml, 200);
-    const wchar_t *eq = m->str[CS_EQUIP] && m->str[CS_EQUIP][0] ? m->str[CS_EQUIP] : L"Не указано";
-    if (!cut_na(m->num[CN_SPEED])) {
-      cut_fmt(m->num[CN_SPEED], 2, sp, 40);
-      wcscat(sp, L" м/мин");
-    } else {
-      swprintf(sp, 40, L"—");
-    }
-    cut_fmt_time(cut_na(m->timeMin) ? 0 : m->timeMin, tm, 40);
-    cut_add(&b, L"\r\n■ %ls · %ls\r\n   %ls\r\n   Скорость %ls · Время %ls\r\n", m->kind, eq, ml, sp, tm);
-    if (m->incomplete) cut_add(&b, L"   ! Для этой позиции нормы в таблице не заполнены.\r\n");
-    if (!m->nlines) cut_add(&b, L"   Нет заполненных норм расхода\r\n");
-    for (int gi = 0; gi < 3; gi++) {
-      int g = order[gi], cnt = 0;
-      double vol = 0, kg = 0;
-      for (int k = 0; k < m->nlines; k++)
-        if (m->lines[k].group == g) {
-          cnt++;
-          vol += m->lines[k].quantityVol;
-          kg += m->lines[k].quantity;
-        }
-      if (!cnt) continue;
-      if (g == 1) {
-        wchar_t a[48], c[48];
-        cut_fmt(vol, 4, a, 48);
-        cut_fmt(kg, 4, c, 48);
-        cut_add(&b, L"\r\n   %ls · итого %ls м³ / %ls кг\r\n", titles[g], a, c);
-      } else {
-        cut_add(&b, L"\r\n   %ls\r\n", titles[g]);
-      }
-      for (int k = 0; k < m->nlines; k++) {
-        const CutLine *l = &m->lines[k];
-        if (l->group != g) continue;
-        wchar_t q[48], r[48], qv[48], rv[48];
-        cut_fmt(l->quantity, 4, q, 48);
-        cut_fmt(l->ratePerM, 4, r, 48);
-        if (g == 1) {
-          cut_fmt(l->quantityVol, 4, qv, 48);
-          cut_fmt(l->ratePerMVol, 4, rv, 48);
-          cut_add(&b, L"   • %ls — %ls м³ / %ls кг\r\n       норма %ls м³ / %ls кг на метр · %ls\r\n", l->label, qv, q,
-                  rv, r, l->detail);
-        } else {
-          cut_add(&b, L"   • %ls — %ls %ls\r\n       норма %ls %ls на метр%ls%ls\r\n", l->label, q, l->unit, r,
-                  l->unit, l->detail && l->detail[0] ? L" · " : L"", l->detail ? l->detail : L"");
-        }
-      }
-    }
-  }
-}
-
 /* подсказка под толщиной: какие толщины есть в нормах по видам резки */
 static void cut_hint(const wchar_t *mat, wchar_t *out, int cap) {
   static CutGroup g[8];
