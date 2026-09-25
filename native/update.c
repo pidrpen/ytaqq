@@ -93,6 +93,21 @@ static wchar_t g_updHostUsed[80];
 static int g_updAuthWall; /* something in this network demanded a login */
 static wchar_t g_updPin[96]; /* immutable ref (tag or commit) the CDN can't stale */
 static BOOL g_updPinned;
+/* С 2026.09.23.39 version.txt длиннее: 3-я строка «sha256 …» — отпечаток
+   CursorPad.bin, дальше — «что нового». Старые версии читают только две
+   первые строки, им это не мешает. */
+static char g_updVerText[16384]; /* version.txt самого свежего зеркала */
+static char g_updSha[65];        /* ожидаемый sha256 скачанного, "" — не указан */
+static BOOL g_updAuto;           /* проверка сама, по таймеру: молча, без окон */
+static BOOL g_updReady;          /* новая версия скачана и проверена, ждёт установки */
+static long g_updRemoteNum;
+static wchar_t g_updNotes[3000]; /* «что нового» скачанной версии */
+static DWORD upd_read_text(const wchar_t *path, char *buf, DWORD cap);
+
+#define TIMER_UPD_AUTO 30    /* проверить обновление: через 1,5 мин после запуска, потом раз в 3 часа */
+#define TIMER_UPD_IDLE 31    /* скачано — ждём, когда человек отойдёт, и ставим */
+#define TIMER_UPD_CONFIRM 32 /* новая версия проработала 45 с — годная */
+#define TIMER_UPD_NOTE 33    /* после запуска: был ли откат */
 
 typedef struct {
   const wchar_t *host;
@@ -780,9 +795,252 @@ static BOOL launch_open(const wchar_t *path) {
   return (INT_PTR)r > 32;
 }
 
+/* version.txt целиком (до 16 КБ) в buf */
+static DWORD upd_read_text(const wchar_t *path, char *buf, DWORD cap) {
+  buf[0] = 0;
+  HANDLE fh = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+  if (fh == INVALID_HANDLE_VALUE) return 0;
+  DWORD got = 0;
+  ReadFile(fh, buf, cap - 1, &got, NULL);
+  CloseHandle(fh);
+  buf[got] = 0;
+  return got;
+}
+
+/* из version.txt: sha256 (3-я строка) */
+static void upd_parse_extra(const char *t) {
+  g_updSha[0] = 0;
+  const char *p = t;
+  for (int line = 0; line < 2 && p; line++) {
+    p = strchr(p, '\n');
+    if (p) p++;
+  }
+  if (p && !strncmp(p, "sha256 ", 7)) {
+    int n = 0;
+    for (const char *q = p + 7; n < 64 && ((*q >= '0' && *q <= '9') || (*q >= 'a' && *q <= 'f')); q++) g_updSha[n++] = *q;
+    g_updSha[n] = 0;
+    if (n != 64) g_updSha[0] = 0;
+  }
+}
+
+/* «что нового» из version.txt: всё после строки sha256, в UTF-16 */
+static void upd_notes_from_text(const char *t, wchar_t *out, int cap) {
+  out[0] = 0;
+  const char *p = t;
+  for (int line = 0; line < 3 && p; line++) {
+    p = strchr(p, '\n');
+    if (p) p++;
+  }
+  if (!p || !*p) return;
+  int n = MultiByteToWideChar(CP_UTF8, 0, p, -1, out, cap);
+  if (n <= 0) out[0] = 0;
+  out[cap - 1] = 0;
+}
+
+/* sha256 файла — строкой из 64 шестнадцатеричных знаков */
+static BOOL upd_file_sha256(const wchar_t *path, char out[65]) {
+  out[0] = 0;
+  HCRYPTPROV prov = 0;
+  HCRYPTHASH h = 0;
+  BOOL ok = FALSE;
+  HANDLE f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+  if (f == INVALID_HANDLE_VALUE) return FALSE;
+  if (CryptAcquireContextW(&prov, NULL, NULL, PROV_RSA_AES, CRYPT_VERIFYCONTEXT) &&
+      CryptCreateHash(prov, CALG_SHA_256, 0, 0, &h)) {
+    static BYTE buf[65536];
+    DWORD got = 0;
+    ok = TRUE;
+    while (ReadFile(f, buf, sizeof(buf), &got, NULL) && got)
+      if (!CryptHashData(h, buf, got, 0)) {
+        ok = FALSE;
+        break;
+      }
+    BYTE d[32];
+    DWORD dn = 32;
+    if (ok && CryptGetHashParam(h, HP_HASHVAL, d, &dn, 0) && dn == 32) {
+      for (int i = 0; i < 32; i++) snprintf(out + i * 2, 3, "%02x", d[i]);
+    } else {
+      ok = FALSE;
+    }
+  }
+  if (h) CryptDestroyHash(h);
+  if (prov) CryptReleaseContext(prov, 0);
+  CloseHandle(f);
+  return ok;
+}
+
+/* скачанное — ровно тот выпуск, что объявлен (если отпечаток указан) */
+static BOOL upd_sha_ok(const wchar_t *path) {
+  if (!g_updSha[0]) return TRUE;
+  char got[65];
+  if (!upd_file_sha256(path, got)) {
+    upd_log(L"  не удалось посчитать отпечаток файла");
+    return FALSE;
+  }
+  if (strcmp(got, g_updSha)) {
+    upd_log(L"  отпечаток не совпал с выпуском — файл скачался не тот или не целиком");
+    return FALSE;
+  }
+  upd_log(L"  отпечаток sha256 совпал с выпуском");
+  return TRUE;
+}
+
+/* ---- откат: новая версия не запустилась — возвращается прежняя ------------------
+
+   Перед заменой прежняя программа копируется в CursorPad-prev.exe, а в
+   update-trial.txt пишется, что ставим и куда. Дальше две страховки:
+   · старая программа, уходя, ещё полторы минуты сторожит новую: та упала
+     при запуске или повисла — старая возвращает себя на место и запускается;
+   · новая считает свои запуски: трижды запустилась и ни разу не проработала
+     45 секунд — возвращает прежнюю сама.
+   Проработала 45 секунд — выпуск признан годным, пометка стирается.
+   Откатившаяся версия записывается в update-skip.txt: сама она больше не
+   ставится (кнопкой «Проверить обновления» — можно). */
+
+#define UPD_OK_EVENT L"Local\\CursorPadUpdateOK"
+
+static void upd_data_file(wchar_t *out, const wchar_t *name) {
+  _snwprintf(out, MAX_PATH, L"%s\\%s", g_dataDir, name);
+  out[MAX_PATH - 1] = 0;
+}
+
+static BOOL upd_is_skipped(long v) {
+  if (!g_dataDir[0]) return FALSE;
+  wchar_t p[MAX_PATH];
+  upd_data_file(p, L"update-skip.txt");
+  char t[4096];
+  if (!upd_read_text(p, t, sizeof(t))) return FALSE;
+  for (char *q = t; *q;) {
+    long x = strtol(q, &q, 10);
+    if (x == v) return TRUE;
+    while (*q && (*q < '0' || *q > '9')) q++;
+  }
+  return FALSE;
+}
+
+static void upd_append_file(const wchar_t *name, const char *line) {
+  wchar_t p[MAX_PATH];
+  upd_data_file(p, name);
+  HANDLE f = CreateFileW(p, FILE_APPEND_DATA, FILE_SHARE_READ, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+  if (f == INVALID_HANDLE_VALUE) return;
+  DWORD w = 0;
+  WriteFile(f, line, (DWORD)strlen(line), &w, NULL);
+  CloseHandle(f);
+}
+
+static void upd_write_file(const wchar_t *name, const char *text) {
+  wchar_t p[MAX_PATH];
+  upd_data_file(p, name);
+  write_all(p, text, (DWORD)strlen(text));
+}
+
+/* update-trial.txt: версия, прежняя версия, путь программы, сколько раз запускалась */
+typedef struct {
+  long ver, prev;
+  wchar_t path[MAX_PATH];
+  int starts;
+} UpdTrial;
+
+static BOOL upd_trial_read(UpdTrial *t) {
+  memset(t, 0, sizeof(*t));
+  if (!g_dataDir[0]) return FALSE;
+  wchar_t p[MAX_PATH];
+  upd_data_file(p, L"update-trial.txt");
+  char b[2048], path8[MAX_PATH * 3] = "";
+  if (!upd_read_text(p, b, sizeof(b))) return FALSE;
+  if (sscanf(b, "%ld\n%ld\n%*[^\n]\n%d", &t->ver, &t->prev, &t->starts) < 2) return FALSE;
+  const char *l3 = strchr(b, '\n');
+  if (l3) l3 = strchr(l3 + 1, '\n');
+  if (l3) {
+    l3++;
+    int n = 0;
+    while (l3[n] && l3[n] != '\n' && l3[n] != '\r' && n < (int)sizeof(path8) - 1) {
+      path8[n] = l3[n];
+      n++;
+    }
+    path8[n] = 0;
+  }
+  MultiByteToWideChar(CP_UTF8, 0, path8, -1, t->path, MAX_PATH);
+  return t->ver > 0;
+}
+
+static void upd_trial_write(const UpdTrial *t) {
+  char path8[MAX_PATH * 3], b[MAX_PATH * 3 + 80];
+  WideCharToMultiByte(CP_UTF8, 0, t->path, -1, path8, sizeof(path8), NULL, NULL);
+  snprintf(b, sizeof(b), "%ld\n%ld\n%s\n%d\n", t->ver, t->prev, path8, t->starts);
+  upd_write_file(L"update-trial.txt", b);
+}
+
+static void upd_trial_clear(void) {
+  wchar_t p[MAX_PATH];
+  upd_data_file(p, L"update-trial.txt");
+  DeleteFileW(p);
+}
+
+/* Вернуть прежнюю программу на место target. Новая при этом не должна
+   работать (упала или её закрыли) — или это она сама, тогда её файл
+   переименовывается (работающую программу Windows переименовать даёт). */
+static BOOL upd_rollback(const wchar_t *target, long badVer) {
+  wchar_t prev[MAX_PATH], bad[MAX_PATH + 8];
+  upd_data_file(prev, L"CursorPad-prev.exe");
+  if (!target[0] || GetFileAttributesW(prev) == INVALID_FILE_ATTRIBUTES) return FALSE;
+  _snwprintf(bad, MAX_PATH + 8, L"%s.bad", target);
+  bad[MAX_PATH + 7] = 0;
+  DeleteFileW(bad);
+  MoveFileExW(target, bad, MOVEFILE_REPLACE_EXISTING);
+  if (!CopyFileW(prev, target, FALSE)) {
+    MoveFileExW(bad, target, MOVEFILE_REPLACE_EXISTING);
+    return FALSE;
+  }
+  char line[40];
+  snprintf(line, sizeof(line), "%ld\n", badVer);
+  upd_append_file(L"update-skip.txt", line);
+  upd_write_file(L"update-rollback.txt", line); /* прежняя при запуске скажет, что случилось */
+  upd_trial_clear();
+  return TRUE;
+}
+
+/* Проверка при запуске новой версии (до окна). TRUE — откатились, выходим. */
+static BOOL upd_trial_on_start(void) {
+  UpdTrial t;
+  if (!upd_trial_read(&t)) return FALSE;
+  if (t.ver != APP_VERSION) { /* пометка не наша: откат уже был или стара */
+    if (t.ver < APP_VERSION) upd_trial_clear();
+    return FALSE;
+  }
+  t.starts++;
+  if (t.starts >= 3) { /* третий запуск, а 45 секунд так ни разу и не проработала */
+    wchar_t self[MAX_PATH];
+    GetModuleFileNameW(NULL, self, MAX_PATH);
+    if (upd_rollback(self, t.ver)) return TRUE; /* запустит вызвавший, отпустив «уже запущено» */
+  }
+  upd_trial_write(&t);
+  return FALSE;
+}
+
+/* Проработала 45 секунд — выпуск годный. TRUE — это было первое подтверждение
+   (значит, только что обновились: пора сказать «что нового»). */
+static BOOL upd_trial_confirm(void) {
+  HANDLE e = OpenEventW(EVENT_MODIFY_STATE, FALSE, UPD_OK_EVENT);
+  if (e) { /* прежняя ещё сторожит — пусть уходит спокойно */
+    SetEvent(e);
+    CloseHandle(e);
+  }
+  UpdTrial t;
+  if (!upd_trial_read(&t) || t.ver != APP_VERSION) return FALSE;
+  upd_trial_clear();
+  return TRUE;
+}
+
+static HANDLE g_updOkEvt; /* новая версия подаст знак, что жива */
+
 static void apply_update(const wchar_t *newexe) {
   wchar_t self[MAX_PATH] = {0};
   GetModuleFileNameW(NULL, self, MAX_PATH);
+  /* прежняя — в запас, на случай отката */
+  wchar_t prev[MAX_PATH];
+  upd_data_file(prev, L"CursorPad-prev.exe");
+  BOOL backed = g_dataDir[0] && CopyFileW(self, prev, FALSE);
   wchar_t target[MAX_PATH];
   lstrcpynW(target, self, MAX_PATH);
   BOOL relocated = FALSE;
@@ -798,6 +1056,15 @@ static void apply_update(const wchar_t *newexe) {
   }
   if (relocated && g_autostart) autostart_write(TRUE, target);
   lstrcpynW(g_updLaunch, target, MAX_PATH);
+  if (backed) {
+    UpdTrial t;
+    memset(&t, 0, sizeof(t));
+    t.ver = g_updRemoteNum > 0 ? g_updRemoteNum : APP_VERSION + 1;
+    t.prev = APP_VERSION;
+    lstrcpynW(t.path, target, MAX_PATH);
+    upd_trial_write(&t);
+    if (!g_updOkEvt) g_updOkEvt = CreateEventW(NULL, TRUE, FALSE, UPD_OK_EVENT);
+  }
   if (g_hwnd) PostMessageW(g_hwnd, WM_CLOSE, 0, 0);
   else {
     launch_open(target);
@@ -810,7 +1077,41 @@ static void finish_update_launch(void) {
     CloseHandle(g_mutex);
     g_mutex = NULL;
   }
-  launch_open(g_updLaunch);
+  if (!g_updOkEvt) { /* запаса нет — просто запускаем */
+    launch_open(g_updLaunch);
+    g_updLaunch[0] = 0;
+    return;
+  }
+  /* Сторожим новую полторы минуты: окна уже нет, мы только ждём её знака. */
+  SHELLEXECUTEINFOW sei;
+  memset(&sei, 0, sizeof(sei));
+  sei.cbSize = sizeof(sei);
+  sei.fMask = SEE_MASK_NOASYNC | SEE_MASK_FLAG_NO_UI | SEE_MASK_NOZONECHECKS | SEE_MASK_NOCLOSEPROCESS;
+  sei.lpVerb = L"open";
+  sei.lpFile = g_updLaunch;
+  sei.nShow = SW_SHOWNORMAL;
+  UpdTrial t;
+  BOOL haveTrial = upd_trial_read(&t);
+  BOOL bad = FALSE;
+  if (!ShellExecuteExW(&sei) || !sei.hProcess) {
+    bad = !launch_open(g_updLaunch); /* запасной способ — без присмотра */
+  } else {
+    HANDLE hs[2] = {g_updOkEvt, sei.hProcess};
+    DWORD r = WaitForMultipleObjects(2, hs, FALSE, 90000);
+    if (r == WAIT_OBJECT_0 + 1) { /* новая закончилась, знака не подав */
+      DWORD code = 0;
+      GetExitCodeProcess(sei.hProcess, &code);
+      bad = code >= 0xC0000000u; /* упала; просто закрыли — не беда */
+    } else if (r == WAIT_TIMEOUT) { /* повисла на запуске */
+      TerminateProcess(sei.hProcess, 1);
+      WaitForSingleObject(sei.hProcess, 5000);
+      bad = TRUE;
+    }
+    CloseHandle(sei.hProcess);
+  }
+  if (bad && haveTrial && upd_rollback(g_updLaunch, t.ver)) launch_open(g_updLaunch);
+  CloseHandle(g_updOkEvt);
+  g_updOkEvt = NULL;
   g_updLaunch[0] = 0;
 }
 
@@ -818,6 +1119,8 @@ static void cleanup_old_bins(void) {
   wchar_t self[MAX_PATH], bak[MAX_PATH];
   GetModuleFileNameW(NULL, self, MAX_PATH);
   _snwprintf(bak, MAX_PATH, L"%s.old", self);
+  DeleteFileW(bak);
+  _snwprintf(bak, MAX_PATH, L"%s.bad", self); /* откатившаяся версия */
   DeleteFileW(bak);
   if (g_dataDir[0]) {
     _snwprintf(bak, MAX_PATH, L"%s\\CursorPad.exe.old", g_dataDir);
@@ -876,25 +1179,22 @@ static DWORD WINAPI update_thread(LPVOID param) {
      "уже последняя". Ask everybody and believe the newest. */
   char buf[128] = {0};
   long remote = 0;
+  g_updVerText[0] = 0;
+  g_updSha[0] = 0;
   int answered = 0;
   if (g_updPin[0]) {
     upd_log(L"");
     upd_log(L"Шаг 2 — читаю version.txt по метке:");
     if (fetch_pinned(L"version.txt", tmpv, 256 * 1024)) {
-      char one[128] = {0};
-      DWORD got = 0;
-      HANDLE fh = CreateFileW(tmpv, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
-                              FILE_ATTRIBUTE_NORMAL, NULL);
-      if (fh != INVALID_HANDLE_VALUE) {
-        ReadFile(fh, one, 120, &got, NULL);
-        CloseHandle(fh);
-      }
+      static char one[16384];
+      upd_read_text(tmpv, one, sizeof(one));
       long v = parse_ver_file(one);
       if (v > 0) {
         remote = v;
         answered = 1;
         g_updPinned = TRUE;
-        memcpy(buf, one, sizeof(buf));
+        memcpy(buf, one, sizeof(buf) - 1);
+        memcpy(g_updVerText, one, sizeof(g_updVerText));
         upd_log(L"  %s → %ld (кэш тут ни при чём)", g_updHostUsed, v);
       }
     }
@@ -904,16 +1204,10 @@ static DWORD WINAPI update_thread(LPVOID param) {
   upd_log(L"");
   if (!g_updPinned) upd_log(L"Шаг 2 — читаю version.txt (спрашиваю все зеркала):");
   for (int i = 0; !g_updPinned && i < (int)(sizeof(kUpdSrc) / sizeof(kUpdSrc[0])); i++) {
-    char one[128] = {0};
-    DWORD got = 0;
+    static char one[16384];
     upd_log(L"  пробую %s", kUpdSrc[i].host);
     if (!fetch_from(i, L"v", tmpv, 256 * 1024)) continue;
-    HANDLE fh = CreateFileW(tmpv, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
-                            FILE_ATTRIBUTE_NORMAL, NULL);
-    if (fh != INVALID_HANDLE_VALUE) {
-      ReadFile(fh, one, 120, &got, NULL);
-      CloseHandle(fh);
-    }
+    upd_read_text(tmpv, one, sizeof(one));
     DeleteFileW(tmpv);
     long v = parse_ver_file(one);
     if (v <= 0) {
@@ -925,7 +1219,8 @@ static DWORD WINAPI update_thread(LPVOID param) {
     if (v > remote) {
       remote = v;
       g_updPrefer = i;
-      memcpy(buf, one, sizeof(buf));
+      memcpy(buf, one, sizeof(buf) - 1);
+      memcpy(g_updVerText, one, sizeof(g_updVerText));
     }
   }
   if (!answered) {
@@ -974,8 +1269,15 @@ static DWORD WINAPI update_thread(LPVOID param) {
     code = 0;
     goto done;
   }
+  g_updRemoteNum = remote;
+  upd_parse_extra(g_updVerText);
   if (remote <= APP_VERSION) {
     upd_log(L"Итог: на GitHub не новее установленной — обновлять нечего.");
+    code = 1;
+    goto done;
+  }
+  if (g_updAuto && upd_is_skipped(remote)) { /* эта версия уже не запустилась у нас — сама не ставим */
+    upd_log(L"Итог: версия %ld уже откатывалась на этом ПК — сама не ставится.", remote);
     code = 1;
     goto done;
   }
@@ -983,10 +1285,10 @@ static DWORD WINAPI update_thread(LPVOID param) {
   upd_log(L"Шаг 3 — качаю программу:");
   BOOL got_exe = FALSE;
   if (g_updPinned) got_exe = fetch_pinned(L"CursorPad.bin", tmpe, 16 * 1024 * 1024) &&
-                             file_is_pe(tmpe);
-  if (!got_exe) got_exe = http_get_any(L"e", tmpe, 16 * 1024 * 1024) && file_is_pe(tmpe);
+                             file_is_pe(tmpe) && upd_sha_ok(tmpe);
+  if (!got_exe) got_exe = http_get_any(L"e", tmpe, 16 * 1024 * 1024) && file_is_pe(tmpe) && upd_sha_ok(tmpe);
   if (!got_exe) {
-    upd_log(L"Итог: файл не скачался или это не программа для Windows.");
+    upd_log(L"Итог: файл не скачался, повреждён или это не программа для Windows.");
     DeleteFileW(tmpe);
     if (!g_updErr[0]) upd_fail(L"Не скачался CursorPad.exe", 0);
     code = 0;
@@ -1014,7 +1316,51 @@ static void start_update(void) {
   }
 }
 
+/* всплывашка у часов; kind — куда ведёт щелчок (см. WM_TRAY) */
+static void upd_balloon(int kind, const wchar_t *title, const wchar_t *text) {
+  if (!g_trayAdded) return;
+  NOTIFYICONDATAW n = g_nid;
+  n.uFlags = NIF_INFO;
+  g_balloonKind = kind;
+  lstrcpynW(n.szInfoTitle, title, 64);
+  lstrcpynW(n.szInfo, text, 256);
+  n.dwInfoFlags = NIIF_INFO;
+  Shell_NotifyIconW(NIM_MODIFY, &n);
+}
+
+/* первые строки «что нового» — для всплывашки (в ней мало места) */
+static void upd_notes_head(const wchar_t *notes, wchar_t *out, int cap, int lines) {
+  int k = 0, ln = 0;
+  for (const wchar_t *p = notes; *p && k < cap - 1 && ln < lines; p++) {
+    if (*p == L'\r') continue;
+    if (*p == L'\n') {
+      ln++;
+      if (ln < lines && k < cap - 1) out[k++] = L'\n';
+      continue;
+    }
+    out[k++] = *p;
+  }
+  out[k] = 0;
+}
+
 static void on_update_done(int code) {
+  if (g_updAuto) { /* сама по таймеру: молчим, пока нечего сказать */
+    g_updAuto = FALSE;
+    if (code == 2 && g_updPath[0]) {
+      g_updReady = TRUE;
+      upd_notes_from_text(g_updVerText, g_updNotes, 3000);
+      wchar_t head[160], title[64], t[256];
+      upd_notes_head(g_updNotes, head, 160, 2);
+      _snwprintf(title, 64, L"Вышла новая версия CursorPad %s", g_updRemote);
+      _snwprintf(t, 256, L"%s%sУстановится сама, когда отойдёте от компьютера. Нажмите — обновить сейчас.", head,
+                 head[0] ? L"\n" : L"");
+      title[63] = 0;
+      t[255] = 0;
+      upd_balloon(2, title, t);
+      if (g_hwnd) SetTimer(g_hwnd, TIMER_UPD_IDLE, 30000, NULL);
+    }
+    return;
+  }
   if (code == 1) {
     /* naming both versions saves the "it keeps saying latest" puzzlement */
     wchar_t m[160];
@@ -1035,13 +1381,65 @@ static void on_update_done(int code) {
     show_status(g_updErr[0] ? g_updErr : L"GitHub недоступен");
     return;
   }
-  wchar_t msg[360];
-  _snwprintf(msg, 360,
-             L"На GitHub версия %s (сейчас %s).\r\n"
+  upd_notes_from_text(g_updVerText, g_updNotes, 3000);
+  wchar_t msg[3600];
+  _snwprintf(msg, 3600,
+             L"На GitHub версия %s (сейчас %s).%s%s\r\n\r\n"
              L"Скачать, заменить файл и перезапустить?\r\n"
              L"Права администратора не нужны.",
-             g_updRemote, APP_VERSION_STR);
+             g_updRemote, APP_VERSION_STR, g_updNotes[0] ? L"\r\n\r\nЧто нового:\r\n" : L"", g_updNotes);
+  msg[3599] = 0;
   int r = MessageBoxW(g_hwnd, msg, L"CursorPad — обновление", MB_YESNO | MB_ICONQUESTION);
-  if (r == IDYES) apply_update(g_updPath);
-  else DeleteFileW(g_updPath);
+  if (r == IDYES) {
+    g_updReady = FALSE;
+    apply_update(g_updPath);
+  } else {
+    g_updReady = FALSE;
+    DeleteFileW(g_updPath);
+  }
+}
+
+/* ---- сама: проверка по таймеру ------------------------------------------------ */
+
+/* выключено — если есть update-off.txt (пункт в меню значка у часов) */
+static BOOL upd_auto_off(void) {
+  wchar_t p[MAX_PATH];
+  if (!g_dataDir[0]) return TRUE;
+  upd_data_file(p, L"update-off.txt");
+  return GetFileAttributesW(p) != INVALID_FILE_ATTRIBUTES;
+}
+
+static void upd_auto_set(BOOL on) {
+  wchar_t p[MAX_PATH];
+  upd_data_file(p, L"update-off.txt");
+  if (on) DeleteFileW(p);
+  else write_all(p, "0", 1);
+}
+
+static void start_update_auto(void) {
+  if (g_updReady || upd_auto_off()) return;
+  if (InterlockedCompareExchange(&g_updBusy, 1, 0) != 0) return;
+  g_updAuto = TRUE;
+  HANDLE th = CreateThread(NULL, 0, update_thread, NULL, 0, NULL);
+  if (th) CloseHandle(th);
+  else {
+    g_updAuto = FALSE;
+    InterlockedExchange(&g_updBusy, 0);
+  }
+}
+
+/* «что нового» этой версии — вшито в exe (RCDATA 330, native/whatsnew.txt) */
+static void upd_own_notes(wchar_t *out, int cap) {
+  out[0] = 0;
+  HRSRC r = FindResourceW(NULL, MAKEINTRESOURCEW(330), (LPCWSTR)RT_RCDATA);
+  HGLOBAL g = r ? LoadResource(NULL, r) : NULL;
+  const char *p = g ? (const char *)LockResource(g) : NULL;
+  DWORD n = r ? SizeofResource(NULL, r) : 0;
+  if (!p || !n) return;
+  if (n >= 3 && (unsigned char)p[0] == 0xEF) { /* BOM */
+    p += 3;
+    n -= 3;
+  }
+  int k = MultiByteToWideChar(CP_UTF8, 0, p, (int)n, out, cap - 1);
+  out[k > 0 ? k : 0] = 0;
 }

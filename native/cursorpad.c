@@ -2184,7 +2184,8 @@ static void tray_menu(HWND hwnd) {
   AppendMenuW(menu, MF_STRING, 14, g_hidden ? L"Показать окно (F9)" : L"Свернуть (F9)");
   AppendMenuW(menu, MF_STRING, 16, L"Настройки");
   AppendMenuW(menu, MF_STRING, 15, L"Выделить и прочитать (F6)");
-  AppendMenuW(menu, MF_STRING, 17, L"Обновить с GitHub");
+  AppendMenuW(menu, MF_STRING, 17, L"Проверить обновления");
+  AppendMenuW(menu, MF_STRING | (upd_auto_off() ? 0 : MF_CHECKED), 22, L"   обновляться самостоятельно");
   AppendMenuW(menu, MF_STRING, 18, L"Что нового в папке");
   AppendMenuW(menu, MF_STRING, 21, L"Нарды");
   AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
@@ -2224,6 +2225,11 @@ static void tray_menu(HWND hwnd) {
     else hide_to_tray();
   } else if (cmd == 15) run_ocr_test();
   else if (cmd == 17) start_update();
+  else if (cmd == 22) {
+    BOOL on = upd_auto_off();
+    upd_auto_set(on);
+    show_status(on ? L"Обновления ставятся сами" : L"Обновления — только по кнопке");
+  }
   else if (cmd == 18) files_show_changes();
   else if (cmd == 21) nardy_show();
   else if (cmd == 16) {
@@ -3036,7 +3042,7 @@ static void create_settings(HWND owner) {
                                 WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 0, 0, 240, 26,
                                 g_setHwnd, (HMENU)(INT_PTR)ID_ANSPIN, NULL, NULL);
   g_ocr = mk_btn(g_setHwnd, L"Выделить и прочитать (F6)", ID_OCR);
-  g_btnUp = mk_btn(g_setHwnd, L"Обновить с GitHub", ID_UPDATE);
+  g_btnUp = mk_btn(g_setHwnd, L"Проверить обновления", ID_UPDATE);
   for (int i = 0; i < THEME_COUNT; i++)
     g_btnTheme[i] = mk_btn(g_setHwnd, kThemes[i].name, ID_THEME_BASE + i);
   g_tbBg = CreateWindowExW(0, TRACKBAR_CLASSW, L"", WS_CHILD | WS_VISIBLE | TBS_NOTICKS | TBS_TOOLTIPS,
@@ -3101,8 +3107,8 @@ static void create_settings(HWND owner) {
 #include "cutting.c"
 #include "tiffmerge.c"
 #include "tiffsort.c"
-#include "tools.c"
 #include "nardy.c"
+#include "tools.c" /* после нардов: автообновление смотрит, не открыты ли они */
 
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
   switch (msg) {
@@ -3181,6 +3187,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     layout_children();
     SetTimer(hwnd, TIMER_FOLLOW, 10, NULL);
     tools_cleanup_old(); /* страницы и Edge прежних версий */
+    SetTimer(hwnd, TIMER_UPD_AUTO, 90000, NULL);   /* обновление — само, через полторы минуты */
+    SetTimer(hwnd, TIMER_UPD_CONFIRM, 45000, NULL); /* проработали 45 с — версия годная */
+    SetTimer(hwnd, TIMER_UPD_NOTE, 8000, NULL);     /* не было ли отката */
     SetTimer(hwnd, TIMER_SAVE, 2000, NULL);
     SetTimer(hwnd, TIMER_CURSOR_KEEP, 4000, NULL);
     /* раз в пять минут спрашиваем, не исполнился ли индексу час: так час
@@ -3358,6 +3367,44 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
       paste_line((int)(wParam - HOTKEY_SNIP_BASE + 1));
     return 0;
   case WM_TIMER:
+    if (wParam == TIMER_UPD_AUTO) {
+      SetTimer(hwnd, TIMER_UPD_AUTO, 3 * 3600 * 1000, NULL); /* дальше — раз в три часа */
+      start_update_auto();
+      return 0;
+    }
+    if (wParam == TIMER_UPD_IDLE) {
+      upd_idle_tick();
+      return 0;
+    }
+    if (wParam == TIMER_UPD_CONFIRM) {
+      KillTimer(hwnd, TIMER_UPD_CONFIRM);
+      if (upd_trial_confirm()) { /* только что обновились — сказать, что нового */
+        wchar_t notes[3000], head[200], title[64];
+        upd_own_notes(notes, 3000);
+        upd_notes_head(notes, head, 200, 3);
+        _snwprintf(title, 64, L"CursorPad обновлён до %s", APP_VERSION_STR);
+        title[63] = 0;
+        upd_balloon(3, title, head[0] ? head : L"Нажмите, чтобы посмотреть, что нового");
+      }
+      return 0;
+    }
+    if (wParam == TIMER_UPD_NOTE) {
+      KillTimer(hwnd, TIMER_UPD_NOTE);
+      wchar_t p[MAX_PATH];
+      char b[64];
+      upd_data_file(p, L"update-rollback.txt");
+      if (g_dataDir[0] && upd_read_text(p, b, sizeof(b))) {
+        DeleteFileW(p);
+        long v = strtol(b, NULL, 10);
+        wchar_t t[256];
+        _snwprintf(t, 256,
+                   L"Новая версия (%ld) не запустилась — вернул прежнюю, %s. Сама она больше не ставится.", v,
+                   APP_VERSION_STR);
+        t[255] = 0;
+        upd_balloon(4, L"CursorPad: обновление откатено", t);
+      }
+      return 0;
+    }
     if (wParam == TIMER_FOLLOW) {
       if (!g_follow || g_hidden) {
         /* двигать нечего — редкий тик только чтобы заметить, когда снова
@@ -3508,7 +3555,22 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     /* щелчок по всплывашке «Новое в папке» */
     if (lParam == NIN_BALLOONUSERCLICK) {
       if (g_balloonKind == 1) nardy_show();
-      else files_show_changes();
+      else if (g_balloonKind == 2) { /* «вышла новая версия» — поставить сейчас */
+        if (g_updReady && g_updPath[0]) {
+          KillTimer(hwnd, TIMER_UPD_IDLE);
+          g_updReady = FALSE;
+          apply_update(g_updPath);
+        }
+      } else if (g_balloonKind == 3) { /* «обновлён» — показать, что нового */
+        static wchar_t notes[3000];
+        upd_own_notes(notes, 3000);
+        g_resultFiles = FALSE;
+        g_plmCount = 0;
+        g_ansTitle = L"Что нового";
+        show_answer_text(notes[0] ? notes : L"Описания нет.");
+      } else if (g_balloonKind == 4) {
+        /* откат — сказано всё во всплывашке */
+      } else files_show_changes();
     }
     if (lParam == WM_RBUTTONUP || lParam == WM_CONTEXTMENU) tray_menu(hwnd);
     if (lParam == WM_LBUTTONUP || lParam == WM_LBUTTONDBLCLK) {
@@ -3610,7 +3672,19 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
     if (argv) LocalFree(argv);
   }
   clear_runas_layer();
+#ifdef UPD_CRASH /* только проверочная сборка: «новая версия, которая падает при запуске» */
+  *(volatile int *)0 = 1;
+#endif
   if (!ensure_single_instance()) return 0;
+  notes_path(); /* папка данных — для проверки ниже */
+  if (upd_trial_on_start()) { /* новая версия трижды не проработала и 45 секунд — вернули прежнюю */
+    wchar_t self[MAX_PATH];
+    GetModuleFileNameW(NULL, self, MAX_PATH);
+    if (g_mutex) CloseHandle(g_mutex);
+    g_mutex = NULL;
+    launch_open(self);
+    return 0;
+  }
   enable_dpi();
 
   INITCOMMONCONTROLSEX icc;
@@ -3650,6 +3724,25 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
   SetWindowPos(hwnd, HWND_TOPMOST, (int)g_x, (int)g_y, g_ww, g_hh, SWP_NOACTIVATE);
   ShowWindow(hwnd, SW_SHOWNOACTIVATE);
   UpdateWindow(hwnd);
+#ifdef UPD_TEST /* только проверочная сборка: --upd-apply файл версия — поставить как обновление */
+  {
+    int argc = 0;
+    LPWSTR *argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    if (argv && argc >= 4 && !wcscmp(argv[1], L"--upd-apply")) {
+      g_updRemoteNum = wcstol(argv[3], NULL, 10);
+      apply_update(argv[2]);
+    }
+    if (argv && argc >= 3 && !wcscmp(argv[1], L"--upd-sha")) {
+      char h[65];
+      g_updSha[0] = 0;
+      upd_file_sha256(argv[2], h);
+      wchar_t p[MAX_PATH];
+      upd_data_file(p, L"sha-test.txt");
+      write_all(p, h, (DWORD)strlen(h));
+    }
+    if (argv) LocalFree(argv);
+  }
+#endif
 
   MSG msg;
   while (GetMessageW(&msg, NULL, 0, 0) > 0) {

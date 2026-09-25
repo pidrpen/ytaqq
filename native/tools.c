@@ -62,3 +62,25 @@ static void tools_cleanup_old(void) {
   HANDLE t = CreateThread(NULL, 0, tools_cleanup_thread, NULL, 0, NULL);
   if (t) CloseHandle(t);
 }
+
+/* ---- автообновление: когда ставить скачанное ----------------------------------
+
+   Новая версия скачана и проверена (update.c) — ставим, когда человек отошёл:
+   3 минуты без мыши и клавиатуры, и не открыто ни одно окно «Ещё» с работой
+   в нём и не идёт сохранение. Перезапуск занимает пару секунд, заметки
+   сохранены. Щелчок по всплывашке — поставить сразу. */
+static void upd_idle_tick(void) {
+  if (!g_updReady || !g_updPath[0]) {
+    KillTimer(g_hwnd, TIMER_UPD_IDLE);
+    return;
+  }
+  LASTINPUTINFO li = {sizeof(li), 0};
+  if (!GetLastInputInfo(&li) || GetTickCount() - li.dwTime < 180000) return;
+  if (g_tmExporting || g_tsExporting || g_tmLoadPending || g_tsLoadPending) return;
+  HWND busy[] = {g_cutWnd, g_tmWnd, g_tsWnd, g_ndWnd};
+  for (size_t i = 0; i < sizeof(busy) / sizeof(busy[0]); i++)
+    if (busy[i] && IsWindowVisible(busy[i]) && !IsIconic(busy[i])) return; /* открыто — не мешаем */
+  KillTimer(g_hwnd, TIMER_UPD_IDLE);
+  g_updReady = FALSE;
+  apply_update(g_updPath);
+}

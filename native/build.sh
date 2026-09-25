@@ -64,7 +64,14 @@ PY
 # jsDelivr не отдаёт .exe, поэтому зеркала получают те же байты как .bin.
 # Сам .exe в public не публикуется (он в .gitignore): это копия .bin.
 cp -f "$PUB/CursorPad.exe" "$PUB/CursorPad.bin"
-cp -f "$HERE/version.txt" "$PUB/version.txt"
+# version.txt для обновления: номер, версия, отпечаток sha256 программы (по нему
+# CursorPad проверяет скачанное) и «что нового» из whatsnew.txt (его же видно
+# во всплывашке «вышла новая версия»; старые версии читают только 2 строки)
+{
+  sed -n '1,2p' "$HERE/version.txt"
+  echo "sha256 $(sha256sum "$PUB/CursorPad.bin" | cut -c1-64)"
+  cat "$HERE/whatsnew.txt"
+} > "$PUB/version.txt"
 
 echo "CursorPad $V_STR"
 ls -l "$PUB/CursorPad.bin" "$PUB/CursorPad.zip" | awk '{print "  " $9 "  " $5}'
