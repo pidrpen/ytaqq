@@ -69,6 +69,12 @@
 #define ID_CLIP 131
 #define ID_CLIPCLR 153
 #define ID_CLIPHIST 199 /* «▾» у буфера копии: пять последних копирований */
+#define ID_MSG_LIST 210 /* окна сообщений коллегам, см. msg.c */
+#define ID_MSG_TEXT 211
+#define ID_MSG_TTL0 212 /* 212..214 — 30 с / 1 мин / 5 мин */
+#define ID_MSG_SEND 215
+#define ID_MSG_REPLY 216
+#define ID_MSG_DISMISS 217
 #define ID_ANSPIN 154
 #define TIMER_FOLLOW 1
 #define TIMER_SAVE 2
@@ -2119,7 +2125,8 @@ static void draw_pad_button(const DRAWITEMSTRUCT *dis) {
   BOOL primary = id == ID_SEARCH_GO || id == ID_UPDATE || (id == ID_PIN && !g_follow) ||
                  id == ID_ANS_OPEN || id == ID_ANS_OPENTP || (id == ID_ASK_TAB && g_padMode == 1) || (id == ID_NOTES_TAB && g_padMode == 0) ||
                  id == ID_ND_INVITE || id == ID_ND_ACCEPT || id == ID_ND_ROLL || id == ID_ND_DONE ||
-                 id == ID_ANS_DRAW || id == ID_ANS_SHOW; /* чертёж нашёлся — кнопки синие */
+                 id == ID_ANS_DRAW || id == ID_ANS_SHOW || /* чертёж нашёлся — кнопки синие */
+                 id == ID_MSG_SEND || id == ID_MSG_REPLY;
   BOOL quiet = id == ID_CLOSE || id == ID_MIN || id == ID_PANEL_CLOSE;
   COLORREF fill, fg, bd;
   /* рыцарская тема рисует кнопки целиком по-своему; кнопка выбора
@@ -2356,6 +2363,7 @@ static void add_tray(HWND hwnd) {
   g_trayAdded = Shell_NotifyIconW(NIM_ADD, &g_nid);
 }
 
+static void msg_compose_show(void); /* msg.c */
 static void tray_menu(HWND hwnd) {
   POINT pt;
   GetCursorPos(&pt);
@@ -2367,6 +2375,7 @@ static void tray_menu(HWND hwnd) {
   AppendMenuW(menu, MF_STRING, 17, L"Проверить обновления");
   AppendMenuW(menu, MF_STRING | (upd_auto_off() ? 0 : MF_CHECKED), 22, L"   обновляться самостоятельно");
   AppendMenuW(menu, MF_STRING, 18, L"Что нового в папке");
+  AppendMenuW(menu, MF_STRING, 23, L"Написать коллеге");
   AppendMenuW(menu, MF_STRING, 21, L"Нарды");
   AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
   AppendMenuW(menu, MF_STRING | (g_skin == 1 ? MF_CHECKED : 0), 10, L"Курсор: Мечник");
@@ -2405,6 +2414,7 @@ static void tray_menu(HWND hwnd) {
     else hide_to_tray();
   } else if (cmd == 15) run_ocr_test();
   else if (cmd == 17) start_update();
+  else if (cmd == 23) msg_compose_show();
   else if (cmd == 22) {
     BOOL on = upd_auto_off();
     upd_auto_set(on);
@@ -3428,6 +3438,8 @@ static void create_settings(HWND owner) {
 #include "tiffmerge.c"
 #include "tiffsort.c"
 #include "nardy.c"
+#include "layout_fix.c" /* Pause: «ghbdtn» → «привет» */
+#include "msg.c"        /* исчезающие сообщения коллегам — через ту же папку, что нарды */
 #include "tools.c" /* после нардов: автообновление смотрит, не открыты ли они */
 
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -3492,6 +3504,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     load_plm_pref();
     share_start();
     nardy_start(); /* «я в сети» для нард и приглашения — пока задана общая папка */
+    msg_start();   /* сообщения коллегам: забирать пришедшие */
     load_files_pref();
     if (g_autostart) autostart_set(TRUE);
     create_settings(hwnd);
@@ -3529,6 +3542,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     RegisterHotKey(hwnd, HOTKEY_OCR, MOD_NOREPEAT, VK_F6);
     RegisterHotKey(hwnd, HOTKEY_MIN, MOD_NOREPEAT, VK_F9);
     RegisterHotKey(hwnd, HOTKEY_SEARCH, MOD_NOREPEAT, VK_F3);
+    layout_fix_register(hwnd); /* после «закрепить»: та могла взять Pause */
     register_snip_hotkeys(hwnd);
     add_tray(hwnd);
     AddClipboardFormatListener(hwnd);
@@ -3716,10 +3730,15 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     else if (wParam == HOTKEY_OCR) run_ocr_test();
     else if (wParam == HOTKEY_MIN) toggle_hidden();
     else if (wParam == HOTKEY_SEARCH) search_clip_buf();
+    else if (wParam == HOTKEY_LAYOUT) layout_fix();
     else if (wParam >= HOTKEY_SNIP_BASE && wParam < HOTKEY_SNIP_BASE + SNIP_COUNT)
       paste_line((int)(wParam - HOTKEY_SNIP_BASE + 1));
     return 0;
   case WM_TIMER:
+    if (wParam == TIMER_LF_RESTORE) {
+      layout_fix_timer();
+      return 0;
+    }
     if (wParam == TIMER_UPD_AUTO) {
       SetTimer(hwnd, TIMER_UPD_AUTO, 3 * 3600 * 1000, NULL); /* дальше — раз в три часа */
       start_update_auto();
@@ -3878,6 +3897,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     if (g_skin > 0) apply_scheme_slots();
     return 0;
   case WM_CLIPBOARDUPDATE:
+    if (lf_quiet()) return 0; /* это исправление раскладки гоняет буфер — не копирование человека */
     /* своё мы помечаем флажком; без него — скопировал человек */
     if (!g_ownClip) onec_foreign_copy();
     grab_last_copy();
@@ -3936,6 +3956,13 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     return 0;
   case WM_NARDY_POLL:
     nd_on_poll((NdPoll *)lParam);
+    msg_refresh_list(); /* «кто в сети» — и для сообщений */
+    return 0;
+  case WM_MSG_IN:
+    msg_show_in((MsgIn *)lParam);
+    return 0;
+  case WM_MSG_SENT:
+    msg_on_sent((wchar_t *)lParam);
     return 0;
   case WM_FAIRY_CLICK:
     fx_burst((int)(LONG_PTR)wParam, (int)(LONG_PTR)lParam);
@@ -3971,6 +3998,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     UnregisterHotKey(hwnd, HOTKEY_OCR);
     UnregisterHotKey(hwnd, HOTKEY_MIN);
     UnregisterHotKey(hwnd, HOTKEY_SEARCH);
+    UnregisterHotKey(hwnd, HOTKEY_LAYOUT);
     RemoveClipboardFormatListener(hwnd);
     unregister_snip_hotkeys(hwnd);
     if (g_trayAdded) Shell_NotifyIconW(NIM_DELETE, &g_nid);
