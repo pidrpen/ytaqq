@@ -67,6 +67,7 @@
 #define ID_ND_CANCEL 189
 #define ID_CLIP 131
 #define ID_CLIPCLR 153
+#define ID_CLIPHIST 199 /* «▾» у буфера копии: пять последних копирований */
 #define ID_ANSPIN 154
 #define TIMER_FOLLOW 1
 #define TIMER_SAVE 2
@@ -200,6 +201,11 @@ static HWND g_hwnd;
 static HWND g_edit;
 static HWND g_clipEdit;
 static HWND g_clipClr;
+static HWND g_clipHistBtn;
+/* пять последних копирований (только в памяти: в буфер копируют и пароли) */
+#define CLIP_HIST 5
+static wchar_t g_clipHist[CLIP_HIST][400];
+static int g_clipHistN;
 static HWND g_pin;
 static HWND g_close;
 static HWND g_btnK2;
@@ -376,6 +382,7 @@ static void create_card(HWND owner);
 static void create_ocr(HWND owner);
 static void show_ocr_text(const wchar_t *text);
 static void show_answer_text(const wchar_t *text);
+static void note_margins(void);
 
 static void apply_dpi(HWND hwnd) {
   UINT dpi = 96;
@@ -1254,9 +1261,12 @@ static void layout_children(void) {
 
   int clipH = MulDiv(CLIP_H, dpi, 96);
   int clrW = MulDiv(56, dpi, 96);
-  if (g_clipEdit) MoveWindow(g_clipEdit, gut, th, cw - gut - pad - clrW - gap, clipH, TRUE);
+  int histW = MulDiv(26, dpi, 96);
+  if (g_clipEdit) MoveWindow(g_clipEdit, gut, th, cw - gut - pad - clrW - gap - histW - gap, clipH, TRUE);
+  if (g_clipHistBtn) MoveWindow(g_clipHistBtn, cw - pad - clrW - gap - histW, th, histW, clipH, TRUE);
   if (g_clipClr) MoveWindow(g_clipClr, cw - pad - clrW, th, clrW, clipH, TRUE);
   MoveWindow(g_edit, gut, th + clipH, cw - gut - pad, ch - th - clipH - fh, TRUE);
+  note_margins();
   /* режим поиска: поле со «Спросить», ниже — где искать, три кнопки в ряд */
   {
     BOOL srch = g_padMode == 1;
@@ -1307,6 +1317,7 @@ static void apply_follow_state(void) {
   EnableWindow(g_edit, !g_follow);
   if (g_clipEdit) EnableWindow(g_clipEdit, !g_follow);
   if (g_clipClr) EnableWindow(g_clipClr, !g_follow);
+  if (g_clipHistBtn) EnableWindow(g_clipHistBtn, !g_follow);
   EnableWindow(g_pin, !g_follow);
   EnableWindow(g_close, !g_follow);
   EnableWindow(g_min, !g_follow);
@@ -1459,7 +1470,51 @@ static void grab_last_copy(void) {
   if (!clipboard_text(q, 400)) return;
   flatten_clip_line(q);
   if (!q[0]) return;
+  /* в начало списка; уже был — поднимаем наверх, а не дублируем */
+  int at = g_clipHistN < CLIP_HIST ? g_clipHistN : CLIP_HIST - 1;
+  for (int k = 0; k < g_clipHistN; k++)
+    if (!wcscmp(g_clipHist[k], q)) {
+      at = k;
+      break;
+    }
+  if (at == g_clipHistN) g_clipHistN++;
+  memmove(g_clipHist[1], g_clipHist[0], sizeof(g_clipHist[0]) * (size_t)at);
+  lstrcpynW(g_clipHist[0], q, 400);
   if (g_clipEdit) SetWindowTextW(g_clipEdit, q);
+}
+
+/* «▾» у буфера копии: список пяти последних; выбранное — снова в буфер Windows */
+static void clip_hist_menu(void) {
+  if (!g_clipHistN) {
+    show_status(L"Пока ничего не копировали");
+    return;
+  }
+  HMENU m = CreatePopupMenu();
+  for (int k = 0; k < g_clipHistN; k++) {
+    wchar_t t[96];
+    _snwprintf(t, 96, L"&%d   %.70s%s", k + 1, g_clipHist[k], wcslen(g_clipHist[k]) > 70 ? L"…" : L"");
+    t[95] = 0;
+    AppendMenuW(m, MF_STRING | (k == 0 ? MF_DEFAULT : 0), 1 + k, t);
+  }
+  RECT r;
+  GetWindowRect(g_clipHistBtn ? g_clipHistBtn : g_clipEdit, &r);
+  int cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTALIGN | TPM_TOPALIGN, r.right, r.bottom, 0, g_hwnd, NULL);
+  DestroyMenu(m);
+  if (cmd < 1 || cmd > g_clipHistN) return;
+  wchar_t q[400];
+  lstrcpynW(q, g_clipHist[cmd - 1], 400);
+  if (!clipboard_set(q)) {
+    show_status(L"Буфер занят другой программой");
+    return;
+  }
+  /* выбранное — наверх списка и в поле */
+  memmove(g_clipHist[1], g_clipHist[0], sizeof(g_clipHist[0]) * (size_t)(cmd - 1));
+  lstrcpynW(g_clipHist[0], q, 400);
+  if (g_clipEdit) SetWindowTextW(g_clipEdit, q);
+  wchar_t msg[120];
+  _snwprintf(msg, 120, L"В буфере: %.60s", q);
+  msg[119] = 0;
+  show_status(msg);
 }
 
 static void search_clip_buf(void) {
@@ -1955,6 +2010,24 @@ static void draw_knight_button(HWND item, HDC dc, RECT rc, const wchar_t *label,
   DrawTextW(dc, label, -1, &tr, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 }
 
+/* стрелка вниз на кнопке «▾» у буфера: рисуем сами — знака ▾ нет не во
+   всех шрифтах тем */
+static void draw_down_arrow(HDC dc, RECT rc, COLORREF c) {
+  int h = rc.bottom - rc.top, w = h * 2 / 5, hh = h / 5;
+  if (w < 6) w = 6;
+  if (hh < 3) hh = 3;
+  int cx = (rc.left + rc.right) / 2, cy = (rc.top + rc.bottom) / 2;
+  POINT p[3] = {{cx - w / 2, cy - hh / 2}, {cx + w / 2 + 1, cy - hh / 2}, {cx, cy + hh / 2 + 1}};
+  HBRUSH b = CreateSolidBrush(c);
+  HPEN pn = CreatePen(PS_SOLID, 1, c);
+  HGDIOBJ ob = SelectObject(dc, b), op = SelectObject(dc, pn);
+  Polygon(dc, p, 3);
+  SelectObject(dc, ob);
+  SelectObject(dc, op);
+  DeleteObject(b);
+  DeleteObject(pn);
+}
+
 static void draw_pad_button(const DRAWITEMSTRUCT *dis) {
   if (!dis || dis->CtlType != ODT_BUTTON) return;
   RECT rc = dis->rcItem;
@@ -1978,8 +2051,9 @@ static void draw_pad_button(const DRAWITEMSTRUCT *dis) {
       (!themeBtn && kThemes[g_theme].btn == BTN_KNIGHT)) {
     const wchar_t *kl = themeBtn ? kThemes[ti].name
                                  : ((t[0] == 0x25CF && t[1] == L' ') ? t + 2 : t);
-    draw_knight_button(dis->hwndItem, dis->hDC, rc, kl, press, disab, on, primary || themeBtn,
-                       quiet);
+    draw_knight_button(dis->hwndItem, dis->hDC, rc, id == ID_CLIPHIST ? L"" : kl, press, disab, on,
+                       primary || themeBtn, quiet);
+    if (id == ID_CLIPHIST) draw_down_arrow(dis->hDC, rc, COL_INK);
     return;
   }
   if (themeBtn && ti >= 0) {
@@ -2059,6 +2133,10 @@ static void draw_pad_button(const DRAWITEMSTRUCT *dis) {
   const wchar_t *label = t;
   if (themeBtn) label = kThemes[ti].name;
   else if (t[0] == 0x25CF && t[1] == L' ') label = t + 2;
+  if (id == ID_CLIPHIST) {
+    draw_down_arrow(dis->hDC, rc, fg);
+    return;
+  }
   DrawTextW(dis->hDC, label, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 }
 
@@ -2087,6 +2165,7 @@ static void clear_copied(void) {
     }
   }
   if (g_clipEdit) SetWindowTextW(g_clipEdit, L"");
+  g_clipHistN = 0; /* и пять последних копирований */
   /* «Сброс» заодно останавливает перенос в 1С — отдельная кнопка не нужна */
   onec_stop(NULL);
   /* и очищает весь блокнот. Спрашиваем: заметки пропадут разом. Прежние
@@ -2250,8 +2329,40 @@ static HFONT make_font(const wchar_t *face, int px, int weight) {
 
 /* Ctrl+1…9 копируют первые девять непустых строк заметок. Какая строка под
    каким номером — приходилось держать в голове и пересчитывать после каждой
-   правки. Теперь они обведены и пронумерованы прямо в тексте. */
+   правки. Теперь они обведены и пронумерованы прямо в тексте.
+   С 2026.09.23.40 у каждой непустой строки справа ещё и кнопка «копировать»
+   (два листка): щёлкнул — строка в буфере, кнопка на миг зеленеет. Под
+   кнопки у поля оставлено поле справа (note_margins). */
+typedef struct {
+  RECT r;          /* кнопка, в координатах поля */
+  int start, end;  /* строка в тексте поля */
+} NoteCopyBtn;
+static NoteCopyBtn g_noteBtn[96];
+static int g_noteBtnN;
+static int g_noteFlash = -1; /* какая кнопка только что скопировала — зелёная */
+static int g_noteHot = -1;   /* над какой мышь */
+#define TIMER_NOTE_FLASH 77  /* таймер у самого поля */
+
+/* ширина правого поля под номер и кнопку — от высоты строки */
+static int note_gutter(HWND ed) {
+  HDC dc = GetDC(ed);
+  if (!dc) return 40;
+  HFONT ef = (HFONT)SendMessageW(ed, WM_GETFONT, 0, 0);
+  HGDIOBJ of = ef ? SelectObject(dc, ef) : NULL;
+  TEXTMETRICW tm;
+  GetTextMetricsW(dc, &tm);
+  if (of) SelectObject(dc, of);
+  ReleaseDC(ed, dc);
+  return tm.tmHeight + 22; /* кнопка в высоту строки + номер */
+}
+
+static void note_margins(void) {
+  if (!g_edit) return;
+  SendMessageW(g_edit, EM_SETMARGINS, EC_RIGHTMARGIN, MAKELONG(0, note_gutter(g_edit)));
+}
+
 static void draw_slot_marks(HWND ed) {
+  g_noteBtnN = 0;
   if (!ed) return;
   int len = GetWindowTextLengthW(ed);
   if (len <= 0) return;
@@ -2270,15 +2381,20 @@ static void draw_slot_marks(HWND ed) {
   TEXTMETRICW tm;
   GetTextMetricsW(dc, &tm);
   int lh = tm.tmHeight;
-  int gutter = 16;
+  int bw = lh;                       /* кнопка — квадрат в высоту строки */
+  int numW = 18;                     /* место под номер */
+  int bx = cl.right - bw - 2;        /* кнопка у самого края */
+  int textRight = bx - numW - 2;     /* дальше текста рамки не заходят */
   HPEN pen = CreatePen(PS_SOLID, 1, blend_rgb(COL_SAGE, COL_PAPER, 205));
+  HPEN glyph = CreatePen(PS_SOLID, 1, blend_rgb(COL_SAGE, COL_PAPER, 110));
+  HPEN glyphOk = CreatePen(PS_SOLID, 2, RGB(0x1F, 0x9D, 0x55));
   HGDIOBJ prevPen = SelectObject(dc, pen);
   HGDIOBJ prevBrush = SelectObject(dc, GetStockObject(NULL_BRUSH));
   int prevBk = SetBkMode(dc, TRANSPARENT);
   COLORREF prevCol = SetTextColor(dc, blend_rgb(COL_SAGE, COL_PAPER, 140));
 
   int slot = 0, i = 0;
-  while (i < len && slot < 9) {
+  while (i < len) {
     int start = i;
     while (i < len && buf[i] != L'\n' && buf[i] != L'\r') i++;
     int end = i;
@@ -2291,28 +2407,65 @@ static void draw_slot_marks(HWND ed) {
     if (p1 == -1 || p2 == -1) continue; /* строка прокручена за край */
     int x1 = (short)LOWORD(p1), y1 = (short)HIWORD(p1);
     int y2 = (short)HIWORD(p2);
+    if (y1 > cl.bottom) break; /* дальше — ниже края поля */
     /* только целиком видимые: обрезанная снизу рамка налезает на кнопки */
-    if (y1 < 0 || y2 + lh + 2 > cl.bottom) continue;
-    int right;
-    if (y1 == y2) {
-      SIZE sz;
-      sz.cx = 0;
-      GetTextExtentPoint32W(dc, buf + start, end - start, &sz);
-      right = x1 + sz.cx + 4;
-    } else {
-      right = cl.right - gutter - 4; /* строка перенеслась — рамка во всю ширину */
+    if (y1 < 0 || y1 + lh > cl.bottom) continue;
+    if (slot <= 9 && y2 + lh + 2 <= cl.bottom) { /* рамка и номер — Ctrl+1…9 */
+      SelectObject(dc, pen);
+      int right;
+      if (y1 == y2) {
+        SIZE sz;
+        sz.cx = 0;
+        GetTextExtentPoint32W(dc, buf + start, end - start, &sz);
+        right = x1 + sz.cx + 4;
+      } else {
+        right = textRight; /* строка перенеслась — рамка во всю ширину */
+      }
+      if (right > textRight) right = textRight;
+      if (right <= x1 + 6) right = x1 + 6;
+      RoundRect(dc, x1 - 4, y1 - 1, right, y2 + lh + 1, 7, 7);
+      wchar_t d[4];
+      _snwprintf(d, 4, L"%d", slot);
+      RECT nr = {bx - numW - 2, y1 - 1, bx - 3, y1 + lh};
+      DrawTextW(dc, d, -1, &nr, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
     }
-    if (right > cl.right - gutter - 4) right = cl.right - gutter - 4;
-    if (right <= x1 + 6) right = x1 + 6;
-    RoundRect(dc, x1 - 4, y1 - 1, right, y2 + lh + 1, 7, 7);
-    wchar_t d[4];
-    _snwprintf(d, 4, L"%d", slot);
-    RECT nr;
-    nr.left = cl.right - gutter;
-    nr.right = cl.right - 2;
-    nr.top = y1 - 1;
-    nr.bottom = y1 + lh;
-    DrawTextW(dc, d, -1, &nr, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+    /* кнопка «копировать»: два листка; скопировала — зелёная галочка */
+    if (g_noteBtnN < 96) {
+      int k = g_noteBtnN++;
+      RECT br = {bx, y1, bx + bw, y1 + lh};
+      g_noteBtn[k].r = br;
+      g_noteBtn[k].start = start;
+      g_noteBtn[k].end = end;
+      /* подложка кнопки — всегда видна, над мышью темнее, скопировала — зелёная */
+      COLORREF bgc = k == g_noteFlash ? RGB(0xDC, 0xF5, 0xE3)
+                     : k == g_noteHot ? blend_rgb(COL_SAGE, COL_PAPER, 215)
+                                      : blend_rgb(COL_SAGE, COL_PAPER, 238);
+      HBRUSH hb = CreateSolidBrush(bgc);
+      HGDIOBJ ob = SelectObject(dc, hb);
+      HGDIOBJ op = SelectObject(dc, GetStockObject(NULL_PEN));
+      RoundRect(dc, br.left, br.top, br.right + 1, br.bottom + 1, 6, 6);
+      SelectObject(dc, op);
+      SelectObject(dc, ob);
+      DeleteObject(hb);
+      int gs = lh - 6; /* рисунок: квадрат внутри кнопки */
+      if (gs < 8) gs = 8;
+      int gx = br.left + (bw - gs) / 2, gy = br.top + (lh - gs) / 2;
+      if (k == g_noteFlash) { /* галочка */
+        SelectObject(dc, glyphOk);
+        MoveToEx(dc, gx + gs / 6, gy + gs / 2, NULL);
+        LineTo(dc, gx + gs * 2 / 5, gy + gs * 3 / 4);
+        LineTo(dc, gx + gs * 5 / 6, gy + gs / 5);
+      } else { /* два листка: задний справа сверху, передний слева снизу */
+        int sw = gs * 2 / 3;
+        SelectObject(dc, glyph);
+        HBRUSH pb = CreateSolidBrush(bgc);
+        HGDIOBJ ob2 = SelectObject(dc, pb);
+        Rectangle(dc, gx + gs - sw, gy, gx + gs, gy + sw);
+        Rectangle(dc, gx, gy + gs - sw, gx + sw, gy + gs);
+        SelectObject(dc, ob2);
+        DeleteObject(pb);
+      }
+    }
   }
 
   SetTextColor(dc, prevCol);
@@ -2320,8 +2473,44 @@ static void draw_slot_marks(HWND ed) {
   SelectObject(dc, prevBrush);
   SelectObject(dc, prevPen);
   DeleteObject(pen);
+  DeleteObject(glyph);
+  DeleteObject(glyphOk);
   if (prevFont) SelectObject(dc, prevFont);
   ReleaseDC(ed, dc);
+  free(buf);
+}
+
+static int note_btn_at(int x, int y) {
+  POINT p = {x, y};
+  for (int k = 0; k < g_noteBtnN; k++)
+    if (PtInRect(&g_noteBtn[k].r, p)) return k;
+  return -1;
+}
+
+/* щелчок по кнопке у строки: строка — в буфер (картинка — картинкой) */
+static void note_copy_btn(HWND ed, int k) {
+  int len = GetWindowTextLengthW(ed);
+  NoteCopyBtn b = g_noteBtn[k];
+  if (b.start < 0 || b.end > len || b.end <= b.start) return;
+  wchar_t *buf = (wchar_t *)malloc(((size_t)len + 1) * sizeof(wchar_t));
+  if (!buf) return;
+  GetWindowTextW(ed, buf, len + 1);
+  buf[b.end] = 0;
+  const wchar_t *line = buf + b.start;
+  int img = parse_img_id(line);
+  BOOL ok = img ? clipboard_set_image(img) : clipboard_set(line);
+  if (ok) {
+    wchar_t msg[160];
+    if (img) lstrcpynW(msg, L"Картинка скопирована", 160);
+    else _snwprintf(msg, 160, L"Скопировано: %.60s", line);
+    msg[159] = 0;
+    show_status(msg);
+    g_noteFlash = k;
+    SetTimer(ed, TIMER_NOTE_FLASH, 900, NULL);
+    InvalidateRect(ed, NULL, FALSE);
+  } else {
+    show_status(L"Буфер занят другой программой");
+  }
   free(buf);
 }
 
@@ -2341,6 +2530,47 @@ static LRESULT CALLBACK EditProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
   if (msg == WM_PAINT) {
     LRESULT r = CallWindowProcW(g_oldEdit, hwnd, msg, wParam, lParam);
     draw_slot_marks(hwnd);
+    return r;
+  }
+  /* кнопки «копировать» у строк: поле их не знает — ловим мышь раньше него */
+  if (msg == WM_LBUTTONDOWN || msg == WM_LBUTTONDBLCLK) {
+    int k = note_btn_at(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
+    if (k >= 0) {
+      if (msg == WM_LBUTTONDOWN) note_copy_btn(hwnd, k);
+      return 0; /* курсор в тексте не прыгает */
+    }
+  }
+  if (msg == WM_SETCURSOR && LOWORD(lParam) == HTCLIENT) {
+    POINT p;
+    GetCursorPos(&p);
+    ScreenToClient(hwnd, &p);
+    if (note_btn_at(p.x, p.y) >= 0) {
+      SetCursor(LoadCursorW(NULL, IDC_HAND));
+      return TRUE;
+    }
+  }
+  if (msg == WM_MOUSEMOVE) {
+    int k = note_btn_at(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
+    if (k != g_noteHot) {
+      g_noteHot = k;
+      InvalidateRect(hwnd, NULL, FALSE);
+      TRACKMOUSEEVENT te = {sizeof(te), TME_LEAVE, hwnd, 0};
+      TrackMouseEvent(&te);
+    }
+  }
+  if (msg == WM_MOUSELEAVE && g_noteHot >= 0) {
+    g_noteHot = -1;
+    InvalidateRect(hwnd, NULL, FALSE);
+  }
+  if (msg == WM_TIMER && wParam == TIMER_NOTE_FLASH) {
+    KillTimer(hwnd, TIMER_NOTE_FLASH);
+    g_noteFlash = -1;
+    InvalidateRect(hwnd, NULL, FALSE);
+    return 0;
+  }
+  if (msg == WM_SETFONT) { /* шрифт сбрасывает поля — вернуть место под кнопки */
+    LRESULT r = CallWindowProcW(g_oldEdit, hwnd, msg, wParam, lParam);
+    note_margins();
     return r;
   }
   return CallWindowProcW(g_oldEdit, hwnd, msg, wParam, lParam);
@@ -3132,6 +3362,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
     g_pin = mk_btn(hwnd, L"Закрепить", ID_PIN);
     g_clipClr = mk_btn(hwnd, L"Сброс", ID_CLIPCLR);
+    g_clipHistBtn = mk_btn(hwnd, L"▾", ID_CLIPHIST);
     g_close = mk_btn(hwnd, L"×", ID_CLOSE);
     g_min = mk_btn(hwnd, L"–", ID_MIN);
     g_edit = CreateWindowExW(0, L"EDIT", L"",
@@ -3147,6 +3378,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     g_btnSet = mk_btn(hwnd, L"Настройки", ID_SETTINGS);
     SendMessageW(g_pin, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
     if (g_clipClr) SendMessageW(g_clipClr, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
+    if (g_clipHistBtn) SendMessageW(g_clipHistBtn, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
     SendMessageW(g_close, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
     SendMessageW(g_min, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
     SendMessageW(g_edit, WM_SETFONT, (WPARAM)g_fontBody, TRUE);
@@ -3342,6 +3574,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
   case WM_COMMAND:
     if (LOWORD(wParam) == ID_PIN) toggle_follow();
     if (LOWORD(wParam) == ID_CLIPCLR) clear_copied();
+    if (LOWORD(wParam) == ID_CLIPHIST) clip_hist_menu();
     if (LOWORD(wParam) == ID_CLOSE) DestroyWindow(hwnd);
     if (LOWORD(wParam) == ID_MIN) toggle_hidden();
     if (LOWORD(wParam) == ID_SETTINGS) toggle_settings();
@@ -3507,9 +3740,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
   case WM_OCR_DONE: {
     wchar_t *text = (wchar_t *)lParam;
     if (text && text[0]) {
-      append_notes(text);
+      /* только в своё окно: в блокнот — кнопкой «В блокнот», если нужно */
       show_ocr_text(text);
-      show_status(L"OCR: текст добавлен в блокнот");
+      show_status(L"Распознано — текст в отдельном окне");
     } else {
       show_status(g_ocrNote[0] ? g_ocrNote : L"Текст не распознан");
     }

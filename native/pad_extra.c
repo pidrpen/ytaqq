@@ -29,6 +29,7 @@
 #define ID_OCR_FIND 165
 #define ID_OCR_AGAIN 166
 #define ID_OCR_CLOSE 167
+#define ID_OCR_NOTES 198 /* «В блокнот»: распознанное — в заметки, только если попросили */
 #define ID_CARD_1C 168
 #define ID_ANS_OPENTP 170
 #define TIMER_1C 21
@@ -3711,7 +3712,7 @@ static int btn_row_width(HWND parent, const int *ids, int n) {
 static const int kAnsBtns[6] = {ID_ANS_OPEN, ID_ANS_OPENTP, ID_ANS_CARD, ID_ANS_DRAW, ID_ANS_SHOW,
                                 ID_ANS_CLOSE};
 static const int kCardBtns[5] = {ID_CARD_OPEN, ID_CARD_DRAW, ID_CARD_SHOW, ID_CARD_1C, ID_CARD_CLOSE};
-static const int kOcrBtns[4] = {ID_OCR_COPY, ID_OCR_FIND, ID_OCR_AGAIN, ID_OCR_CLOSE};
+static const int kOcrBtns[5] = {ID_OCR_COPY, ID_OCR_NOTES, ID_OCR_FIND, ID_OCR_AGAIN, ID_OCR_CLOSE};
 
 /* Дотянуть открытое окно до ширины ряда кнопок — сразу после смены темы.
    Сузить руками потом можно: кнопки тогда пожмутся. */
@@ -3733,7 +3734,7 @@ static void widen_to_row(HWND w, const int *ids, int n) {
 static void theme_fit_windows(void) {
   widen_to_row(g_answer, kAnsBtns, 6);
   widen_to_row(g_card, kCardBtns, 5);
-  widen_to_row(g_ocrWnd, kOcrBtns, 4);
+  widen_to_row(g_ocrWnd, kOcrBtns, 5);
 }
 
 static void layout_answer(void) {
@@ -4777,16 +4778,13 @@ static void layout_ocr(void) {
   int top = PANEL_TITLE_H + 6;
   int by = rc.bottom - pad - btnH;
   if (g_ocrEdit) MoveWindow(g_ocrEdit, pad, top, rc.right - pad * 2, by - top - 6, TRUE);
-  HWND btns[4];
-  btns[0] = GetDlgItem(g_ocrWnd, ID_OCR_COPY);
-  btns[1] = GetDlgItem(g_ocrWnd, ID_OCR_FIND);
-  btns[2] = GetDlgItem(g_ocrWnd, ID_OCR_AGAIN);
-  btns[3] = GetDlgItem(g_ocrWnd, ID_OCR_CLOSE);
-  int bwid[4] = {0, 0, 0, 0};
+  HWND btns[5];
+  for (int k = 0; k < 5; k++) btns[k] = GetDlgItem(g_ocrWnd, kOcrBtns[k]);
+  int bwid[5] = {0, 0, 0, 0, 0};
   int total = 0, vis = 0;
   HDC dc = GetDC(g_ocrWnd);
   HGDIOBJ oldFont = (dc && g_fontUi) ? SelectObject(dc, g_fontUi) : NULL;
-  for (int k = 0; k < 4; k++) {
+  for (int k = 0; k < 5; k++) {
     if (!btns[k]) continue;
     wchar_t t[96];
     t[0] = 0;
@@ -4806,9 +4804,9 @@ static void layout_ocr(void) {
     int avail = rc.right - pad * 2 - gap * (vis - 1);
     if (avail < vis * 40) avail = vis * 40;
     if (total > avail && total > 0)
-      for (int k = 0; k < 4; k++) bwid[k] = bwid[k] * avail / total;
+      for (int k = 0; k < 5; k++) bwid[k] = bwid[k] * avail / total;
     int bx = pad;
-    for (int k = 0; k < 4; k++) {
+    for (int k = 0; k < 5; k++) {
       if (!btns[k]) continue;
       MoveWindow(btns[k], bx, by, bwid[k], btnH, TRUE);
       ShowWindow(btns[k], SW_SHOW);
@@ -5009,6 +5007,18 @@ static LRESULT CALLBACK OcrProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         show_status(L"Распознанное скопировано");
       }
     }
+    if (LOWORD(wParam) == ID_OCR_NOTES && g_ocrEdit) {
+      int len = GetWindowTextLengthW(g_ocrEdit);
+      wchar_t *w = (wchar_t *)malloc((size_t)(len + 1) * sizeof(wchar_t));
+      if (w) {
+        GetWindowTextW(g_ocrEdit, w, len + 1);
+        if (w[0]) {
+          append_notes(w);
+          show_status(L"Распознанное добавлено в блокнот");
+        }
+        free(w);
+      }
+    }
     if (LOWORD(wParam) == ID_OCR_FIND) ocr_find_selected();
     if (LOWORD(wParam) == ID_OCR_AGAIN) start_ocr_pick();
     return 0;
@@ -5065,12 +5075,14 @@ static void create_ocr(HWND owner) {
                               0, 0, 100, 100, g_ocrWnd, NULL, NULL, NULL);
   g_oldOcrEdit = (WNDPROC)SetWindowLongPtrW(g_ocrEdit, GWLP_WNDPROC, (LONG_PTR)OcrEditProc);
   HWND copy = mk_btn(g_ocrWnd, L"Копировать", ID_OCR_COPY);
+  HWND notes = mk_btn(g_ocrWnd, L"В блокнот", ID_OCR_NOTES);
   HWND find = mk_btn(g_ocrWnd, L"Найти это", ID_OCR_FIND);
   HWND again = mk_btn(g_ocrWnd, L"Распознать ещё", ID_OCR_AGAIN);
   HWND cls = mk_btn(g_ocrWnd, L"Закрыть", ID_OCR_CLOSE);
   SendMessageW(g_ocrEdit, WM_SETFONT, (WPARAM)ocr_font(), TRUE);
   if (g_fontUi) {
     SendMessageW(copy, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
+    SendMessageW(notes, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
     SendMessageW(find, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
     SendMessageW(again, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
     SendMessageW(cls, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
@@ -5092,7 +5104,7 @@ static void show_ocr_text(const wchar_t *text) {
   int ah = g_ocrH > 0 ? g_ocrH : 300;
   if (aw < 420) aw = 420;
   {
-    int row = btn_row_width(g_ocrWnd, kOcrBtns, 4);
+    int row = btn_row_width(g_ocrWnd, kOcrBtns, 5);
     if (aw < row) aw = row;
   }
   if (aw > wa.right - wa.left) aw = wa.right - wa.left;
