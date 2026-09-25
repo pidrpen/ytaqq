@@ -54,7 +54,8 @@
 #define ID_SEARCH_GO 113
 #define ID_ASK_TAB 114
 #define ID_NARDY_BTN 190 /* «Нарды» — в Настройках */
-#define ID_NOTES_TAB 191 /* «Блокнот» внизу окна: режим заметок */
+#define ID_NOTES_TAB 191 /* «Блокнот»: режим заметок */
+#define ID_MORE_BTN 193  /* «Ещё» (⋯): инструменты и действия, см. tools.c */
 #define ID_ND_LIST 180
 #define ID_ND_INVITE 181
 #define ID_ND_ACCEPT 182
@@ -108,9 +109,10 @@
 #define OCR_PERSON_ID 32672
 
 #define WND_W 312
-#define WND_H 228
+#define WND_H 250
 #define TITLE_H 44
-#define FOOT_H 36
+#define MODE_H 38 /* ряд под шапкой: «Блокнот | Поиск», ⋯ и ⚙ (с 2026.09.23.41) */
+#define FOOT_H 22 /* внизу — строка подсказки */
 #define CLIP_H 26
 #define PAD 12
 #define GUTTER 26
@@ -1257,14 +1259,26 @@ static void layout_children(void) {
   MoveWindow(g_close, cw - pad - closeW, (th - btnH) / 2, closeW, btnH, TRUE);
   if (g_min)
     MoveWindow(g_min, cw - pad - closeW - gap - closeW, (th - btnH) / 2, closeW, btnH, TRUE);
-  MoveWindow(g_pin, cw - pad - closeW * 2 - gap * 2 - pinW, (th - btnH) / 2, pinW, btnH, TRUE);
+  (void)pinW;
+  MoveWindow(g_pin, cw - pad - closeW * 2 - gap * 2 - btnH - gap, (th - btnH) / 2, btnH + gap, btnH, TRUE);
+
+  /* ряд режимов: «Блокнот | Поиск» — переключатель слева, ⋯ и ⚙ справа */
+  int mh = MulDiv(MODE_H, dpi, 96);
+  {
+    int segH = MulDiv(28, dpi, 96), in = MulDiv(3, dpi, 96), tabW = MulDiv(84, dpi, 96);
+    int my = th + (mh - segH) / 2;
+    if (g_btnNotes) MoveWindow(g_btnNotes, pad + in, my, tabW, segH, TRUE);
+    if (g_btnAsk) MoveWindow(g_btnAsk, pad + in + tabW, my, tabW, segH, TRUE);
+    int ib = MulDiv(30, dpi, 96), iy = th + (mh - ib) / 2;
+    if (g_btnSet) MoveWindow(g_btnSet, cw - pad - ib, iy, ib, ib, TRUE);
+    if (g_btnMore) MoveWindow(g_btnMore, cw - pad - ib * 2 - gap, iy, ib, ib, TRUE);
+  }
+  th += mh; /* дальше всё — под рядом режимов */
 
   int clipH = MulDiv(CLIP_H, dpi, 96);
-  int clrW = MulDiv(56, dpi, 96);
   int histW = MulDiv(26, dpi, 96);
-  if (g_clipEdit) MoveWindow(g_clipEdit, gut, th, cw - gut - pad - clrW - gap - histW - gap, clipH, TRUE);
-  if (g_clipHistBtn) MoveWindow(g_clipHistBtn, cw - pad - clrW - gap - histW, th, histW, clipH, TRUE);
-  if (g_clipClr) MoveWindow(g_clipClr, cw - pad - clrW, th, clrW, clipH, TRUE);
+  if (g_clipEdit) MoveWindow(g_clipEdit, gut, th, cw - gut - pad - histW - gap, clipH, TRUE);
+  if (g_clipHistBtn) MoveWindow(g_clipHistBtn, cw - pad - histW, th, histW, clipH, TRUE);
   MoveWindow(g_edit, gut, th + clipH, cw - gut - pad, ch - th - clipH - fh, TRUE);
   note_margins();
   /* режим поиска: поле со «Спросить», ниже — где искать, три кнопки в ряд */
@@ -1275,26 +1289,31 @@ static void layout_children(void) {
     for (int k = 0; k < 5; k++)
       if (sc[k]) ShowWindow(sc[k], srch ? SW_SHOW : SW_HIDE);
     if (srch) {
-      int sy = th + clipH + MulDiv(8, dpi, 96), sh = MulDiv(26, dpi, 96);
-      int goW = MulDiv(84, dpi, 96), left = gut, right = cw - pad;
+      /* поле и «Найти», под ним «Где:» и три ярлыка по ширине надписи */
+      int sy = th + clipH + MulDiv(10, dpi, 96), sh = MulDiv(30, dpi, 96);
+      int goW = MulDiv(72, dpi, 96), left = gut, right = cw - pad;
       if (g_searchEdit) MoveWindow(g_searchEdit, left, sy, right - left - goW - gap, sh, TRUE);
       if (g_searchGo) MoveWindow(g_searchGo, right - goW, sy, goW, sh, TRUE);
-      sy += sh + MulDiv(22, dpi, 96); /* место под подпись «где искать» */
-      int w3 = (right - left - gap * 2) / 3;
-      if (g_btnAi) MoveWindow(g_btnAi, left, sy, w3, sh, TRUE);
-      if (g_btnPlm) MoveWindow(g_btnPlm, left + w3 + gap, sy, w3, sh, TRUE);
-      if (g_btnFiles) MoveWindow(g_btnFiles, left + (w3 + gap) * 2, sy, right - left - (w3 + gap) * 2, sh, TRUE);
+      sy += sh + MulDiv(10, dpi, 96);
+      int chH = MulDiv(26, dpi, 96), cx = left + MulDiv(34, dpi, 96); /* место под «Где:» */
+      HWND chips[3] = {g_btnAi, g_btnPlm, g_btnFiles};
+      HDC dc = GetDC(g_hwnd);
+      HGDIOBJ of = (dc && g_fontUi) ? SelectObject(dc, g_fontUi) : NULL;
+      for (int k = 0; k < 3; k++) {
+        if (!chips[k]) continue;
+        wchar_t t[64];
+        GetWindowTextW(chips[k], t, 64);
+        const wchar_t *lbl = (t[0] == 0x25CF && t[1] == L' ') ? t + 2 : t;
+        SIZE sz = {60, 0};
+        if (dc) GetTextExtentPoint32W(dc, lbl, (int)wcslen(lbl), &sz);
+        int w = sz.cx + MulDiv(24, dpi, 96);
+        MoveWindow(chips[k], cx, sy, w, chH, TRUE);
+        cx += w + gap;
+      }
+      if (of) SelectObject(dc, of);
+      if (dc) ReleaseDC(g_hwnd, dc);
     }
   }
-  /* внизу: Блокнот · Поиск (режимы окна) · Ещё · Настройки; «Ещё» узкая */
-  int moreW = MulDiv(50, dpi, 96);
-  int third = (cw - pad * 2 - gap * 3 - moreW) / 3;
-  int fy = ch - fh + (fh - btnH) / 2;
-  if (g_btnNotes) MoveWindow(g_btnNotes, pad, fy, third, btnH, TRUE);
-  if (g_btnAsk) MoveWindow(g_btnAsk, pad + third + gap, fy, third, btnH, TRUE);
-  if (g_btnMore) MoveWindow(g_btnMore, pad + (third + gap) * 2, fy, moreW, btnH, TRUE);
-  int sx = pad + (third + gap) * 2 + moreW + gap;
-  if (g_btnSet) MoveWindow(g_btnSet, sx, fy, cw - pad - sx, btnH, TRUE);
 }
 
 static void round_corners(HWND hwnd) {
@@ -2028,6 +2047,64 @@ static void draw_down_arrow(HDC dc, RECT rc, COLORREF c) {
   DeleteObject(pn);
 }
 
+/* подложка переключателя «Блокнот | Поиск» — чуть темнее шапки */
+static COLORREF seg_fill_color(void) {
+  return blend_rgb(COL_PAPER_DARK, COL_INK, 18);
+}
+
+/* значки кнопок шапки (с 2026.09.23.41): булавка, ⋯, шестерёнка — линиями,
+   чтобы были в любой теме и без шрифта значков */
+enum { GL_PIN, GL_DOTS, GL_GEAR };
+static void draw_ui_glyph(HDC dc, RECT rc, int kind, COLORREF c) {
+  int w = rc.right - rc.left, h = rc.bottom - rc.top;
+  int s = (w < h ? w : h) * 7 / 10; /* рисунок — большая часть кнопки */
+  int cx = (rc.left + rc.right) / 2, cy = (rc.top + rc.bottom) / 2;
+  int pw = s >= 18 ? 2 : 1;
+  HPEN pn = CreatePen(PS_SOLID, pw, c);
+  HBRUSH br = CreateSolidBrush(c);
+  HGDIOBJ op = SelectObject(dc, pn), ob = SelectObject(dc, GetStockObject(NULL_BRUSH));
+  if (kind == GL_PIN) { /* канцелярская кнопка: шляпка, ножка, площадка, игла */
+    int u = s / 8 > 1 ? s / 8 : 1, top = cy - s / 2;
+    SelectObject(dc, br);
+    Ellipse(dc, cx - u * 2 - 1, top, cx + u * 2 + 2, top + u * 3 + 1);          /* шляпка */
+    Rectangle(dc, cx - u, top + u * 2, cx + u + 1, top + u * 5);                /* ножка */
+    RoundRect(dc, cx - u * 3, top + u * 5 - 1, cx + u * 3 + 1, top + u * 6, 2, 2); /* площадка */
+    MoveToEx(dc, cx, top + u * 6, NULL);                                         /* игла */
+    LineTo(dc, cx, cy + s / 2 + 1);
+  } else if (kind == GL_DOTS) {
+    SelectObject(dc, br);
+    int r = s / 8 > 1 ? s / 8 : 1;
+    for (int k = -1; k <= 1; k++) {
+      int x = cx + k * (s / 3 + 1);
+      Ellipse(dc, x - r, cy - r, x + r + 1, cy + r + 1);
+    }
+  } else { /* шестерёнка: толстое кольцо и восемь коротких зубцов вплотную */
+    int r = s * 5 / 18, r1 = r, r2 = s * 9 / 20;
+    HPEN ring = CreatePen(PS_SOLID, pw + 1, c);
+    SelectObject(dc, ring);
+    Ellipse(dc, cx - r, cy - r, cx + r + 1, cy + r + 1);
+    SelectObject(dc, pn);
+    DeleteObject(ring);
+    static const int dx[8] = {100, 71, 0, -71, -100, -71, 0, 71}, dy[8] = {0, 71, 100, 71, 0, -71, -100, -71};
+    HPEN pn2 = CreatePen(PS_SOLID, pw + 1, c);
+    SelectObject(dc, pn2);
+    for (int k = 0; k < 8; k++) {
+      MoveToEx(dc, cx + dx[k] * r1 / 100, cy + dy[k] * r1 / 100, NULL);
+      LineTo(dc, cx + dx[k] * r2 / 100, cy + dy[k] * r2 / 100);
+    }
+    SelectObject(dc, pn);
+    DeleteObject(pn2);
+  }
+  SelectObject(dc, op);
+  SelectObject(dc, ob);
+  DeleteObject(pn);
+  DeleteObject(br);
+}
+
+static int ui_glyph_of(int id) {
+  return id == ID_PIN ? GL_PIN : id == ID_MORE_BTN ? GL_DOTS : id == ID_SETTINGS ? GL_GEAR : -1;
+}
+
 static void draw_pad_button(const DRAWITEMSTRUCT *dis) {
   if (!dis || dis->CtlType != ODT_BUTTON) return;
   RECT rc = dis->rcItem;
@@ -2039,7 +2116,7 @@ static void draw_pad_button(const DRAWITEMSTRUCT *dis) {
   BOOL themeBtn = id >= ID_THEME_BASE && id < ID_THEME_BASE + THEME_COUNT;
   int ti = themeBtn ? id - ID_THEME_BASE : -1;
   BOOL on = t[0] == 0x25CF || (themeBtn && g_theme == ti);
-  BOOL primary = id == ID_SEARCH_GO || id == ID_UPDATE || id == ID_PIN ||
+  BOOL primary = id == ID_SEARCH_GO || id == ID_UPDATE || (id == ID_PIN && !g_follow) ||
                  id == ID_ANS_OPEN || id == ID_ANS_OPENTP || (id == ID_ASK_TAB && g_padMode == 1) || (id == ID_NOTES_TAB && g_padMode == 0) ||
                  id == ID_ND_INVITE || id == ID_ND_ACCEPT || id == ID_ND_ROLL || id == ID_ND_DONE ||
                  id == ID_ANS_DRAW || id == ID_ANS_SHOW; /* чертёж нашёлся — кнопки синие */
@@ -2051,9 +2128,29 @@ static void draw_pad_button(const DRAWITEMSTRUCT *dis) {
       (!themeBtn && kThemes[g_theme].btn == BTN_KNIGHT)) {
     const wchar_t *kl = themeBtn ? kThemes[ti].name
                                  : ((t[0] == 0x25CF && t[1] == L' ') ? t + 2 : t);
-    draw_knight_button(dis->hwndItem, dis->hDC, rc, id == ID_CLIPHIST ? L"" : kl, press, disab, on,
-                       primary || themeBtn, quiet);
+    BOOL tab = id == ID_NOTES_TAB || id == ID_ASK_TAB;
+    BOOL tabOn = (id == ID_NOTES_TAB && g_padMode == 0) || (id == ID_ASK_TAB && g_padMode == 1);
+    int gl = ui_glyph_of(id);
+    draw_knight_button(dis->hwndItem, dis->hDC, rc, (id == ID_CLIPHIST || gl >= 0) ? L"" : kl, press, disab,
+                       tab ? tabOn : on, (primary && !tab) || themeBtn, quiet);
     if (id == ID_CLIPHIST) draw_down_arrow(dis->hDC, rc, COL_INK);
+    if (gl >= 0) draw_ui_glyph(dis->hDC, rc, gl, COL_INK);
+    return;
+  }
+  /* «Блокнот | Поиск» — половинки одного переключателя: выбранная — светлая
+     «таблетка» на тёмной подложке, другая — просто надпись */
+  if (id == ID_NOTES_TAB || id == ID_ASK_TAB) {
+    BOOL act = (id == ID_NOTES_TAB && g_padMode == 0) || (id == ID_ASK_TAB && g_padMode == 1);
+    HBRUSH sb = CreateSolidBrush(seg_fill_color());
+    FillRect(dis->hDC, &rc, sb);
+    DeleteObject(sb);
+    int tr = kThemes[g_theme].radius, hh = rc.bottom - rc.top;
+    int rad = tr < 0 ? hh / 2 : tr == 0 ? 0 : tr;
+    if (act) fill_round_rect(dis->hDC, rc, press ? COL_PAPER_DARK : COL_PAPER, COL_LINE, rad);
+    SetBkMode(dis->hDC, TRANSPARENT);
+    SetTextColor(dis->hDC, disab ? COL_MUTED : act ? COL_INK : blend_rgb(COL_INK, COL_PAPER, 110));
+    if (g_fontUi) SelectObject(dis->hDC, g_fontUi);
+    DrawTextW(dis->hDC, t, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     return;
   }
   if (themeBtn && ti >= 0) {
@@ -2135,6 +2232,10 @@ static void draw_pad_button(const DRAWITEMSTRUCT *dis) {
   else if (t[0] == 0x25CF && t[1] == L' ') label = t + 2;
   if (id == ID_CLIPHIST) {
     draw_down_arrow(dis->hDC, rc, fg);
+    return;
+  }
+  if (ui_glyph_of(id) >= 0) {
+    draw_ui_glyph(dis->hDC, rc, ui_glyph_of(id), fg);
     return;
   }
   DrawTextW(dis->hDC, label, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
@@ -2410,20 +2511,9 @@ static void draw_slot_marks(HWND ed) {
     if (y1 > cl.bottom) break; /* дальше — ниже края поля */
     /* только целиком видимые: обрезанная снизу рамка налезает на кнопки */
     if (y1 < 0 || y1 + lh > cl.bottom) continue;
-    if (slot <= 9 && y2 + lh + 2 <= cl.bottom) { /* рамка и номер — Ctrl+1…9 */
-      SelectObject(dc, pen);
-      int right;
-      if (y1 == y2) {
-        SIZE sz;
-        sz.cx = 0;
-        GetTextExtentPoint32W(dc, buf + start, end - start, &sz);
-        right = x1 + sz.cx + 4;
-      } else {
-        right = textRight; /* строка перенеслась — рамка во всю ширину */
-      }
-      if (right > textRight) right = textRight;
-      if (right <= x1 + 6) right = x1 + 6;
-      RoundRect(dc, x1 - 4, y1 - 1, right, y2 + lh + 1, 7, 7);
+    if (slot <= 9 && y2 + lh + 2 <= cl.bottom) { /* номер для Ctrl+1…9 (рамок с .41 нет — вид «A») */
+      (void)x1;
+      (void)textRight;
       wchar_t d[4];
       _snwprintf(d, 4, L"%d", slot);
       RECT nr = {bx - numW - 2, y1 - 1, bx - 3, y1 + lh};
@@ -3186,7 +3276,7 @@ static void create_ask(HWND owner) {
      отдельное окно «Поиск» осталось пустой оболочкой и не показывается */
   g_searchEdit = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | ES_AUTOHSCROLL,
                                  0, 0, 160, 26, owner, (HMENU)(INT_PTR)ID_SEARCH_EDIT, NULL, NULL);
-  g_searchGo = mk_btn(owner, L"Спросить", ID_SEARCH_GO);
+  g_searchGo = mk_btn(owner, L"Найти", ID_SEARCH_GO);
   g_btnAi = mk_btn(owner, L"Мини-ИИ", ID_ENG_AI);
   g_btnPlm = mk_btn(owner, L"PLM", ID_ENG_PLM);
   g_btnFiles = mk_btn(owner, L"Файлы", ID_ENG_FILES);
@@ -3361,7 +3451,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     if (!g_fontSmall) g_fontSmall = make_font(L"Segoe UI", 8, FW_NORMAL);
 
     g_pin = mk_btn(hwnd, L"Закрепить", ID_PIN);
-    g_clipClr = mk_btn(hwnd, L"Сброс", ID_CLIPCLR);
+    /* «Сброс» с 2026.09.23.41 — пункт «Очистить блокнот…» в меню «Ещё» */
     g_clipHistBtn = mk_btn(hwnd, L"▾", ID_CLIPHIST);
     g_close = mk_btn(hwnd, L"×", ID_CLOSE);
     g_min = mk_btn(hwnd, L"–", ID_MIN);
@@ -3374,8 +3464,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                                  0, 0, 100, 24, hwnd, (HMENU)(INT_PTR)ID_CLIP, NULL, NULL);
     g_btnAsk = mk_btn(hwnd, L"Поиск", ID_ASK_TAB);
     g_btnNotes = mk_btn(hwnd, L"Блокнот", ID_NOTES_TAB);
-    g_btnMore = mk_btn(hwnd, L"Ещё", ID_MORE_BTN);
-    g_btnSet = mk_btn(hwnd, L"Настройки", ID_SETTINGS);
+    g_btnMore = mk_btn(hwnd, L"Ещё", ID_MORE_BTN);       /* рисуется значком ⋯ */
+    g_btnSet = mk_btn(hwnd, L"Настройки", ID_SETTINGS); /* рисуется значком ⚙ */
     SendMessageW(g_pin, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
     if (g_clipClr) SendMessageW(g_clipClr, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
     if (g_clipHistBtn) SendMessageW(g_clipHistBtn, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
@@ -3450,8 +3540,15 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
   case WM_SIZE:
     layout_children();
     return 0;
+  case WM_MEASUREITEM: /* меню «Ещё» рисуется само */
+    if (((MEASUREITEMSTRUCT *)lParam)->CtlType == ODT_MENU) {
+      tools_menu_measure((MEASUREITEMSTRUCT *)lParam);
+      return TRUE;
+    }
+    break;
   case WM_DRAWITEM:
-    draw_pad_button((const DRAWITEMSTRUCT *)lParam);
+    if (((const DRAWITEMSTRUCT *)lParam)->CtlType == ODT_MENU) tools_menu_draw((const DRAWITEMSTRUCT *)lParam);
+    else draw_pad_button((const DRAWITEMSTRUCT *)lParam);
     return TRUE;
   case WM_ERASEBKGND:
     return 1;
@@ -3469,7 +3566,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
       if (fn) dpi = (int)fn(hwnd);
     }
     int th = MulDiv(TITLE_H, dpi, 96);
+    int mh = MulDiv(MODE_H, dpi, 96);
     int fh = MulDiv(FOOT_H, dpi, 96);
+    int th0 = th; /* сама шапка — название и версия */
+    th += mh;     /* полоса шапки — вместе с рядом режимов */
     RECT title = {0, 0, rc.right, th};
     RECT foot = {0, rc.bottom - fh, rc.right, rc.bottom};
     const PadTheme *pth = &kThemes[g_theme];
@@ -3506,12 +3606,34 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
     SetBkMode(hdc, TRANSPARENT);
     int padx = MulDiv(PAD, dpi, 96);
-    RECT ttext = {padx + MulDiv(6, dpi, 96), MulDiv(4, dpi, 96), rc.right / 2, th - MulDiv(14, dpi, 96)};
-    RECT vtext = {padx + MulDiv(6, dpi, 96), th - MulDiv(18, dpi, 96), rc.right / 2, th - 2};
+    RECT ttext = {padx + MulDiv(6, dpi, 96), MulDiv(4, dpi, 96), rc.right / 2, th0 - MulDiv(14, dpi, 96)};
+    RECT vtext = {padx + MulDiv(6, dpi, 96), th0 - MulDiv(18, dpi, 96), rc.right / 2, th0 - 2};
+    /* подложка переключателя «Блокнот | Поиск» */
+    if (g_btnNotes && g_btnAsk && !pth->ornate) {
+      RECT a, b;
+      GetWindowRect(g_btnNotes, &a);
+      GetWindowRect(g_btnAsk, &b);
+      MapWindowPoints(HWND_DESKTOP, hwnd, (POINT *)&a, 2);
+      MapWindowPoints(HWND_DESKTOP, hwnd, (POINT *)&b, 2);
+      int in = MulDiv(3, dpi, 96);
+      RECT seg = {a.left - in, a.top - in, b.right + in, b.bottom + in};
+      int tr = kThemes[g_theme].radius;
+      int rad = tr < 0 ? (seg.bottom - seg.top) / 2 : tr == 0 ? 0 : tr + 1;
+      fill_round_rect(hdc, seg, seg_fill_color(), seg_fill_color(), rad);
+    }
+    /* строка подсказки внизу */
+    {
+      if (g_fontSmall) SelectObject(hdc, g_fontSmall);
+      SetTextColor(hdc, COL_MUTED);
+      RECT ft = {padx + MulDiv(6, dpi, 96), rc.bottom - fh, rc.right - padx, rc.bottom};
+      DrawTextW(hdc, g_padMode == 1 ? L"Enter — найти · пусто — ищу скопированное (F3)"
+                                    : L"Ctrl+1…9 — вставить строку · F8 — закрепить",
+                -1, &ft, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    }
     if (g_statusOn) {
       SetTextColor(hdc, COL_INK);
       if (g_fontUi) SelectObject(hdc, g_fontUi);
-      RECT st = {padx + MulDiv(6, dpi, 96), 0, rc.right / 2, th};
+      RECT st = {padx + MulDiv(6, dpi, 96), 0, rc.right / 2, th0};
       DrawTextW(hdc, g_status, -1, &st, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     } else {
       SetTextColor(hdc, COL_INK);
@@ -3532,16 +3654,14 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     if (g_padMode == 0) {
       draw_gutter_thumbs(hdc, dpi, th, fh);
     } else if (g_btnAi) {
-      /* режим поиска: подпись над кнопками «где искать» и подсказка внизу */
+      /* режим поиска: «Где:» перед ярлыками */
       RECT wr;
       GetWindowRect(g_btnAi, &wr);
       MapWindowPoints(HWND_DESKTOP, hwnd, (POINT *)&wr, 2);
       if (g_fontSmall) SelectObject(hdc, g_fontSmall);
       SetTextColor(hdc, COL_MUTED);
-      RECT a = {wr.left, wr.top - MulDiv(18, dpi, 96), rc.right - padx, wr.top - 2};
-      DrawTextW(hdc, L"где искать", -1, &a, DT_LEFT | DT_SINGLELINE);
-      RECT hnt = {wr.left, wr.bottom + MulDiv(6, dpi, 96), rc.right - padx, rc.bottom - fh - 2};
-      DrawTextW(hdc, L"Enter — спросить · F3 по буферу копии", -1, &hnt, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+      RECT a = {MulDiv(GUTTER, dpi, 96), wr.top, wr.left - 2, wr.bottom};
+      DrawTextW(hdc, L"Где:", -1, &a, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     }
 
     if (pth->ornate) {
@@ -3774,7 +3894,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
       GetDpiForWindowFn fn = (GetDpiForWindowFn)GetProcAddress(user32, "GetDpiForWindow");
       if (fn) dpi = (int)fn(hwnd);
     }
-    int th = MulDiv(TITLE_H, dpi, 96);
+    int th = MulDiv(TITLE_H, dpi, 96) + MulDiv(MODE_H, dpi, 96);
     if (!g_follow && pt.y < th) {
       HWND child = ChildWindowFromPoint(hwnd, pt);
       if (child == hwnd || child == NULL) return HTCAPTION;
