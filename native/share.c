@@ -262,7 +262,7 @@ static int share_serve_child(const wchar_t *reqPath, const wchar_t *ansPath) {
   load_plm_pref();
   wchar_t *req = share_read(reqPath);
   if (!req) return 1;
-  wchar_t kind[16] = L"", q[400] = L"", from[200] = L"", idl[1400] = L"";
+  wchar_t kind[16] = L"", q[400] = L"", from[200] = L"", idl[1400] = L"", rdes[200] = L"", rorder[120] = L"";
   long id = 0;
   BOOL verbose = FALSE;
   wchar_t *p = req, *line;
@@ -276,6 +276,8 @@ static int share_serve_child(const wchar_t *reqPath, const wchar_t *ansPath) {
     else if (!wcscmp(f[0], L"verbose")) verbose = f[1][0] == L'1';
     else if (!wcscmp(f[0], L"from")) lstrcpynW(from, f[1], 200);
     else if (!wcscmp(f[0], L"ids")) lstrcpynW(idl, f[1], 1400);
+    else if (!wcscmp(f[0], L"des")) lstrcpynW(rdes, f[1], 200);
+    else if (!wcscmp(f[0], L"order")) lstrcpynW(rorder, f[1], 120);
   }
   free(req);
   wchar_t user[128], pc[64];
@@ -346,6 +348,28 @@ static int share_serve_child(const wchar_t *reqPath, const wchar_t *ansPath) {
         sb_add(&b, L"\n");
       }
       free(j);
+    }
+  } else if (!wcscmp(kind, L"route") && rdes[0]) {
+    /* маршрутная ведомость коллеги: весь сбор здесь, ответ — строками */
+    RtJob *j = rt_job_new();
+    if (j) {
+      lstrcpynW(j->des, rdes, 200);
+      lstrcpynW(j->order, rorder, 120);
+      j->deadline = GetTickCount64() + 80000; /* исполнителя снимают через 90 с */
+      rt_log(j, L"Маршрутная ведомость: %s (сбор у коллеги)\r\n", rdes);
+      rt_build(j);
+      if (j->err[0]) {
+        sb_add(&b, L"rterr");
+        sb_field(&b, j->err);
+        sb_add(&b, L"\n");
+      }
+      for (int r = 0; r < j->n; r++) {
+        sb_add(&b, L"rt\t%d", j->rows[r].level);
+        for (int c = 0; c < RT_NCOL; c++) sb_field(&b, j->rows[r].f[c]);
+        sb_add(&b, L"\n");
+      }
+      lstrcpynW(out, j->log, 160000);
+      rt_job_free(j);
     }
   } else {
     lstrcpynW(out, L"PLM\r\n\r\nНепонятный запрос.", 160000);
@@ -421,6 +445,7 @@ static void share_run_one(const wchar_t *work, const wchar_t *ans) {
       else if (!wcscmp(f[0], L"kind")) lstrcpynW(kind, f[1], 16);
       else if (!wcscmp(f[0], L"q")) _snwprintf(what, 440, L"поиск «%.300s»", f[1]);
       else if (!wcscmp(f[0], L"id")) _snwprintf(what, 440, L"карточка IO.%.20s", f[1]);
+      else if (!wcscmp(f[0], L"des")) _snwprintf(what, 440, L"маршрутная ведомость «%.200s»", f[1]);
     }
     what[439] = 0;
     free(req);
@@ -746,6 +771,46 @@ static void share_card(long id, BOOL verbose, wchar_t *out, int cap) {
       lstrcpynW(g_cardDraw, f[1], PLM_LINK);
   }
   ans_printf(out, cap, L"%s\r\n\r\n  PLM через компьютер: %s", p ? p : L"", via[0] ? via : L"коллеги");
+  free(a);
+}
+
+/* Маршрутная ведомость через раздающего: сбор целиком у него (route.c) */
+static void share_route(RtJob *j) {
+  wchar_t body[400];
+  wchar_t d[200], o[120];
+  lstrcpynW(d, j->des, 200);
+  lstrcpynW(o, j->order, 120);
+  for (wchar_t *c = d; *c; c++)
+    if (*c == L'\t' || *c == L'\r' || *c == L'\n') *c = L' ';
+  for (wchar_t *c = o; *c; c++)
+    if (*c == L'\t' || *c == L'\r' || *c == L'\n') *c = L' ';
+  _snwprintf(body, 400, L"kind\troute\ndes\t%s\norder\t%s", d, o);
+  body[399] = 0;
+  wchar_t out[600];
+  wchar_t *a = share_ask(body, L"-rt", 100, out, 600);
+  if (!a) {
+    wchar_t *t = out; /* «PLM\r\n\r\n…» — первую строку долой */
+    if (!wcsncmp(t, L"PLM\r\n\r\n", 7)) t += 7;
+    lstrcpynW(j->err, t, 400);
+    return;
+  }
+  wchar_t via[200] = L"";
+  wchar_t *p = a, *line;
+  while ((line = share_next_line(&p)) != NULL) {
+    if (!wcscmp(line, L"text")) break;
+    wchar_t *f[RT_NCOL + 2];
+    int k = share_split(line, f, RT_NCOL + 2);
+    if (!wcscmp(f[0], L"via") && k >= 2) lstrcpynW(via, f[1], 200);
+    else if (!wcscmp(f[0], L"rterr") && k >= 2) lstrcpynW(j->err, f[1], 400);
+    else if (!wcscmp(f[0], L"rt") && k >= RT_NCOL + 2 && j->n < RT_MAX) {
+      RtRow *r = &j->rows[j->n++];
+      memset(r, 0, sizeof(*r));
+      r->level = (int)wcstol(f[1], NULL, 10);
+      for (int c = 0; c < RT_NCOL; c++) lstrcpynW(r->f[c], f[c + 2], 200);
+    }
+  }
+  if (p) rt_log(j, L"%s", p);
+  rt_log(j, L"\r\nPLM через компьютер: %s\r\n", via[0] ? via : L"коллеги");
   free(a);
 }
 

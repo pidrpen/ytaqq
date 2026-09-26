@@ -3559,7 +3559,9 @@ done:
   SQLFreeHandle(SQL_HANDLE_ENV, env);
 }
 
+#include "route.c" /* маршрутная ведомость: тем же путём по PLM, что карточка */
 #include "share.c"
+#include "route_ui.c"
 
 /* ---- столбец «Заготовка» в фоне ------------------------------------------- */
 #define WM_PF_DONE (WM_APP + 16) /* lParam — PfJob*, освобождает получатель */

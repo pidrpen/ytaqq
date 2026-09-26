@@ -75,6 +75,10 @@
 #define ID_MSG_SEND 215
 #define ID_MSG_REPLY 216
 #define ID_MSG_DISMISS 217
+#define ID_RT_BUILD 220 /* маршрутная ведомость, см. route.c */
+#define ID_RT_SAVE 221
+#define ID_RT_COPY 222
+#define ID_RT_LOG 223
 #define ID_ANSPIN 154
 #define TIMER_FOLLOW 1
 #define TIMER_SAVE 2
@@ -2126,7 +2130,7 @@ static void draw_pad_button(const DRAWITEMSTRUCT *dis) {
                  id == ID_ANS_OPEN || id == ID_ANS_OPENTP || (id == ID_ASK_TAB && g_padMode == 1) || (id == ID_NOTES_TAB && g_padMode == 0) ||
                  id == ID_ND_INVITE || id == ID_ND_ACCEPT || id == ID_ND_ROLL || id == ID_ND_DONE ||
                  id == ID_ANS_DRAW || id == ID_ANS_SHOW || /* чертёж нашёлся — кнопки синие */
-                 id == ID_MSG_SEND || id == ID_MSG_REPLY;
+                 id == ID_MSG_SEND || id == ID_MSG_REPLY || id == ID_RT_BUILD || id == ID_RT_SAVE;
   BOOL quiet = id == ID_CLOSE || id == ID_MIN || id == ID_PANEL_CLOSE;
   COLORREF fill, fg, bd;
   /* рыцарская тема рисует кнопки целиком по-своему; кнопка выбора
