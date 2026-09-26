@@ -16,8 +16,23 @@
 
    Вид — как у расчёта резки (бежевый фон, карточки, крупные цифры). Всё, что
    ввели, и нормы хранятся в paint.txt рядом с заметками: после закрытия и
-   после обновления программы список на месте. */
+   после обновления программы список на месте.
 
+   С 2026.09.23.44:
+     • профили квадрат, шестигранник, уголок, швеллер и двутавр (номер по
+       ГОСТ 8240 / 8239 подставляет размеры) и «своя площадь»;
+     • способ нанесения — множитель потерь к эмали и грунтовке: кисть 5 %,
+       валик 8 %, безвоздушное 30 %, пневматическое 40 % (по умолчанию «как
+       в норме», ×1 — нормы из файла могут уже включать потери); проценты
+       правятся; множитель = 1 / (1 − потери);
+     • у каждого материала — тара (какими банками берут: «0,8; 2,7; 20») и
+       разбавитель с процентом: в итоге — сколько банок и сколько
+       разбавителя;
+     • материалы с паспортными нормами по ГОСТ (ГФ-021, ХС-010, ХВ-124,
+       ХВ-785, ЭП-140, МЛ-12, КО-8101) — добавляются и к уже сохранённым
+       нормам, один раз. */
+
+#include <limits.h>
 #include "paint_calc.c"
 
 #define ID_PN_DESC 720
@@ -29,7 +44,14 @@
 #define ID_PN_LAY0 728 /* 728..730 — слоёв */
 #define ID_PN_NEWNAME 731
 #define ID_PN_NEWNORM 732
+#define ID_PN_D3 733
+#define ID_PN_D4 734
+#define ID_PN_GOST 735
+#define ID_PN_LOSS0 736 /* 736..739 — потери, % для способов 1..4 */
 #define ID_PN_NORM0 740 /* 740..759 — нормы */
+#define ID_PN_TARE 760
+#define ID_PN_THIN 761
+#define ID_PN_PCT 762
 #define TIMER_PN_COPIED 1
 #define WM_PN_ADD (WM_APP + 60) /* Enter в поле — добавить деталь */
 
@@ -38,15 +60,68 @@
 
 typedef struct {
   wchar_t name[PN_NAME];
-  double norm; /* кг/м² за один слой */
+  double norm;       /* кг/м² за один слой */
+  wchar_t src[80];   /* откуда норма — мелко под названием */
+  wchar_t tare[40];  /* тара, кг: «0,8; 2,7; 20» */
+  wchar_t thin[40];  /* разбавитель, можно пусто */
+  double thinPct;    /* его % к массе материала */
 } PnMat;
 
 /* лист «Нормы» файла */
+#define PN_SRC_XLSX L"из «Краска — расчёт.xlsx»"
 static const PnMat kPnDefMats[] = {
-    {L"Эмаль ПФ-115(к)", 0.27}, {L"Эмаль ПФ-231", 0.13}, {L"Эмаль ПФ-115(ж)", 0.15}, {L"Эмаль ПФ-118", 0.10},
-    {L"Лак ЛБС", 0.12},         {L"Эмаль ПФ-223", 0.27}, {L"Грунтовка ФЛ-03К", 0.09}, {L"Клей К300-61", 0.35},
+    {L"Эмаль ПФ-115(к)", 0.27, PN_SRC_XLSX, L"", L"", 0},  {L"Эмаль ПФ-231", 0.13, PN_SRC_XLSX, L"", L"", 0},
+    {L"Эмаль ПФ-115(ж)", 0.15, PN_SRC_XLSX, L"", L"", 0},  {L"Эмаль ПФ-118", 0.10, PN_SRC_XLSX, L"", L"", 0},
+    {L"Лак ЛБС", 0.12, PN_SRC_XLSX, L"", L"", 0},          {L"Эмаль ПФ-223", 0.27, PN_SRC_XLSX, L"", L"", 0},
+    {L"Грунтовка ФЛ-03К", 0.09, PN_SRC_XLSX, L"", L"", 0}, {L"Клей К300-61", 0.35, PN_SRC_XLSX, L"", L"", 0},
 };
-static const wchar_t *const kPnProf[PN_NPROF] = {L"Круг", L"Лист", L"Труба", L"Кв. труба"};
+/* с 2026.09.23.44: паспортные нормы на один слой, без потерь; взята верхняя
+   граница диапазона из ГОСТ / паспорта — в запас */
+#define PN_DEFS 2
+static const PnMat kPnDefMats2[] = {
+    {L"Грунтовка ГФ-021", 0.10, L"ГОСТ 25129-82: 60–100 г/м² за слой, без потерь", L"", L"", 0},
+    {L"Грунтовка ХС-010", 0.125, L"ГОСТ 9355-81, паспорт: 95–125 г/м², без потерь", L"", L"", 0},
+    {L"Эмаль ХВ-124", 0.12, L"ГОСТ 10144-89, паспорт: 80–120 г/м², без потерь", L"", L"", 0},
+    {L"Эмаль ХВ-785", 0.12, L"ГОСТ 7313-75, паспорт: 80–120 г/м², без потерь", L"", L"", 0},
+    {L"Эмаль ЭП-140", 0.125, L"ГОСТ 24709-81, паспорт: 70–125 г/м², без потерь", L"", L"", 0},
+    {L"Эмаль МЛ-12", 0.10, L"ГОСТ 9754-76: 70–100 г/м², без потерь", L"", L"", 0},
+    {L"Эмаль КО-8101", 0.18, L"паспорт: 150–180 г/м², без потерь", L"", L"", 0},
+};
+static const wchar_t *const kPnProf[PN_NPROF] = {L"Круг",     L"Лист",    L"Труба",   L"Кв. труба", L"Квадрат",
+                                                 L"Шестигр.", L"Уголок",  L"Швеллер", L"Двутавр",   L"Своя площадь"};
+
+/* способ нанесения: потери, % (ВСН 447-84 и справочники: кисть 5, валик 8,
+   безвоздушное 30, пневматическое 30–50 → 40); множитель 1/(1 − потери) */
+#define PN_NMETH 5
+static const wchar_t *const kPnMeth[PN_NMETH] = {L"Как в норме", L"Кисть", L"Валик", L"Безвоздушное",
+                                                 L"Пистолет (пневмо)"};
+static const double kPnLossDef[PN_NMETH] = {0, 5, 8, 30, 40};
+static int g_pnMeth;
+static double g_pnLoss[PN_NMETH] = {0, 5, 8, 30, 40};
+
+/* швеллеры ГОСТ 8240-97 (серия У) и двутавры ГОСТ 8239-89: h, b, s, t, мм */
+typedef struct {
+  const wchar_t *no;
+  double h, b, s, t;
+} PnRolled;
+static const PnRolled kPnChan[] = {
+    {L"5У", 50, 32, 4.4, 7.0},     {L"6,5У", 65, 36, 4.4, 7.2},   {L"8У", 80, 40, 4.5, 7.4},
+    {L"10У", 100, 46, 4.5, 7.6},   {L"12У", 120, 52, 4.8, 7.8},   {L"14У", 140, 58, 4.9, 8.1},
+    {L"16У", 160, 64, 5.0, 8.4},   {L"18У", 180, 70, 5.1, 8.7},   {L"20У", 200, 76, 5.2, 9.0},
+    {L"22У", 220, 82, 5.4, 9.5},   {L"24У", 240, 90, 5.6, 10.0},  {L"27У", 270, 95, 6.0, 10.5},
+    {L"30У", 300, 100, 6.5, 11.0}, {L"33У", 330, 105, 7.0, 11.7}, {L"36У", 360, 110, 7.5, 12.6},
+    {L"40У", 400, 115, 8.0, 13.5},
+};
+static const PnRolled kPnBeam[] = {
+    {L"10", 100, 55, 4.5, 7.2},    {L"12", 120, 64, 4.8, 7.3},    {L"14", 140, 73, 4.9, 7.5},
+    {L"16", 160, 81, 5.0, 7.8},    {L"18", 180, 90, 5.1, 8.1},    {L"20", 200, 100, 5.2, 8.4},
+    {L"22", 220, 110, 5.4, 8.7},   {L"24", 240, 115, 5.6, 9.5},   {L"27", 270, 125, 6.0, 9.8},
+    {L"30", 300, 135, 6.5, 10.2},  {L"33", 330, 140, 7.0, 11.2},  {L"36", 360, 145, 7.5, 12.3},
+    {L"40", 400, 155, 8.3, 13.0},  {L"45", 450, 160, 9.0, 14.2},  {L"50", 500, 170, 10.0, 15.2},
+    {L"55", 550, 180, 11.0, 16.5}, {L"60", 600, 190, 12.0, 17.8},
+};
+#define PN_NCHAN ((int)(sizeof(kPnChan) / sizeof(kPnChan[0])))
+#define PN_NBEAM ((int)(sizeof(kPnBeam) / sizeof(kPnBeam[0])))
 static const wchar_t *const kPnCoat[PN_NCOAT] = {L"Эмаль / лак", L"Грунтовка", L"Клей"};
 
 static PnMat g_pnMat[PN_MAXMAT];
@@ -59,6 +134,8 @@ static BOOL g_pnCopied;
 static HWND g_pnWnd, g_pnCanvas;
 static HWND g_pnDesc, g_pnD1, g_pnD2, g_pnLen, g_pnQty, g_pnMatCb[PN_NCOAT], g_pnLay[PN_NCOAT];
 static HWND g_pnNorm[PN_MAXMAT], g_pnNewName, g_pnNewNorm;
+static HWND g_pnD3, g_pnD4, g_pnGost, g_pnLossEd[PN_NMETH - 1], g_pnTare, g_pnThin, g_pnPct;
+static int g_pnSel = -1; /* у какого материала раскрыты тара и разбавитель */
 static BOOL g_pnFilling; /* сами пишем в поля — EN_CHANGE не считать вводом */
 static BOOL g_pnPlace;   /* проход раскладки: двигать поля */
 static WNDPROC g_pnOldEdit, g_pnOldCombo;
@@ -73,12 +150,13 @@ typedef struct {
   RECT r;
   int what;
 } PnHot;
-#define PN_MAXHOT (PN_MAXPART + PN_MAXMAT + 40)
+#define PN_MAXHOT (PN_MAXPART + PN_MAXMAT * 2 + 60)
 static PnHot g_pnHot[PN_MAXHOT];
 static int g_pnNHot;
-/* что где: 1..4 — профиль, 20 — торцы, 21 — внутри, 30 — добавить, 31 — копировать,
-   32 — очистить список, 40 — добавить материал, 41 — исходные нормы,
-   100+i — убрать деталь i, 1000+j — убрать материал j */
+/* что где: 1..10 — профиль, 20 — торцы, 21 — внутри, 30 — добавить, 31 — копировать,
+   32 — очистить список, 40 — добавить материал, 41 — исходные нормы, 42 — исходные
+   потери, 50..54 — способ нанесения, 100+i — убрать деталь i, 1000+j — убрать
+   материал j, 2000+j — раскрыть тару и разбавитель материала j */
 
 static int PS(int v) { return (int)(v * g_pnS + 0.5f); }
 
@@ -168,9 +246,23 @@ static int pn_find_mat(const wchar_t *name) {
   return -1;
 }
 
+/* паспортные материалы, которых ещё нет (по названию) — в конец норм */
+static void pn_add_defs2(void) {
+  for (size_t i = 0; i < sizeof(kPnDefMats2) / sizeof(kPnDefMats2[0]); i++)
+    if (g_pnNMat < PN_MAXMAT && pn_find_mat(kPnDefMats2[i].name) < 0) g_pnMat[g_pnNMat++] = kPnDefMats2[i];
+}
+
 static void pn_default_mats(void) {
   g_pnNMat = (int)(sizeof(kPnDefMats) / sizeof(kPnDefMats[0]));
   memcpy(g_pnMat, kPnDefMats, sizeof(kPnDefMats));
+  pn_add_defs2();
+}
+
+/* множитель потерь выбранного способа — к эмали и грунтовке (клей — нет) */
+static double pn_coef(void) {
+  double l = g_pnMeth > 0 && g_pnMeth < PN_NMETH ? g_pnLoss[g_pnMeth] : 0;
+  if (!(l > 0) || l >= 95) return 1;
+  return 1.0 / (1.0 - l / 100.0);
 }
 
 static void pn_default_cur(void) {
@@ -194,7 +286,110 @@ static double pn_layer(const PnPart *p, int k, int *state) {
   double v = pn_kg(p, k, g_pnMat[j].norm);
   if (v < 0) return 0;
   *state = 1;
-  return v;
+  return k < 2 ? v * pn_coef() : v;
+}
+
+/* швеллер или двутавр по ГОСТ с такими размерами; -1 — свои размеры */
+static int pn_rolled_find(const PnPart *p) {
+  const PnRolled *t = p->prof == PN_CHANNEL ? kPnChan : kPnBeam;
+  int n = p->prof == PN_CHANNEL ? PN_NCHAN : (p->prof == PN_BEAM ? PN_NBEAM : 0);
+  for (int i = 0; i < n; i++)
+    if (fabs(t[i].h - p->d1) < 1e-6 && fabs(t[i].b - p->d2) < 1e-6 && fabs(t[i].s - p->d3) < 1e-6 &&
+        fabs(t[i].t - p->d4) < 1e-6)
+      return i;
+  return -1;
+}
+
+/* ---- тара ------------------------------------------------------------------------- */
+
+/* «0,8; 2,7; 20» → размеры банок по убыванию; сколько разобрали (до 4) */
+static int pn_tare_parse(const wchar_t *s, double *sz) {
+  int n = 0;
+  const wchar_t *p = s;
+  while (*p && n < 4) {
+    while (*p && wcschr(L"; /+\t", *p)) p++; /* запятая — не разделитель: это дробь */
+    if (!*p) break;
+    wchar_t t[24];
+    int k = 0;
+    while (*p && !wcschr(L"; /+\t", *p) && k < 23) t[k++] = *p++;
+    t[k] = 0;
+    while (*p && !wcschr(L"; /+\t", *p)) p++;
+    double v = pn_parse_str(t);
+    if (v >= 0.01 && v <= 5000) sz[n++] = v;
+  }
+  for (int i = 0; i < n; i++) /* по убыванию */
+    for (int j = i + 1; j < n; j++)
+      if (sz[j] > sz[i]) {
+        double x = sz[i];
+        sz[i] = sz[j];
+        sz[j] = x;
+      }
+  return n;
+}
+
+/* Набрать банками не меньше need кг: меньше всего лишнего, при равном — меньше
+   банок. Перебор масс с шагом 10 г (размеры тары до сотых кг). cnt[i] — сколько
+   банок размера sz[i]; возвращает FALSE, если тары нет или слишком много. */
+static BOOL pn_packs(double need, const double *sz, int n, int *cnt) {
+  for (int i = 0; i < n; i++) cnt[i] = 0;
+  if (n <= 0 || !(need > 0) || need > 100000) return FALSE;
+  int u[4], maxu = 0;
+  for (int i = 0; i < n; i++) {
+    u[i] = (int)(sz[i] * 100 + 0.5);
+    if (u[i] < 1) return FALSE;
+    if (u[i] > maxu) maxu = u[i];
+  }
+  int want = (int)ceil(need * 100 - 1e-6), top = want + maxu;
+  int *best = (int *)malloc(sizeof(int) * (size_t)(top + 1));
+  signed char *last = (signed char *)malloc((size_t)top + 1);
+  if (!best || !last) {
+    free(best);
+    free(last);
+    return FALSE;
+  }
+  best[0] = 0;
+  for (int m = 1; m <= top; m++) {
+    best[m] = INT_MAX;
+    last[m] = -1;
+    for (int i = 0; i < n; i++)
+      if (m >= u[i] && best[m - u[i]] != INT_MAX && best[m - u[i]] + 1 < best[m]) {
+        best[m] = best[m - u[i]] + 1;
+        last[m] = (signed char)i;
+      }
+  }
+  int m = want;
+  while (m <= top && best[m] == INT_MAX) m++;
+  BOOL ok = m <= top;
+  for (; ok && m > 0; m -= u[(int)last[m]]) cnt[(int)last[m]]++;
+  free(best);
+  free(last);
+  return ok;
+}
+
+/* «2 × 2,7 + 1 × 0,8 кг (6,2 кг)»; пусто — тара не задана */
+static void pn_packs_text(const PnMat *m, double kg, wchar_t *out, int cap) {
+  out[0] = 0;
+  double sz[4];
+  int cnt[4], n = pn_tare_parse(m->tare, sz);
+  if (!n || !pn_packs(kg, sz, n, cnt)) return;
+  double tot = 0;
+  int parts = 0;
+  for (int i = 0; i < n; i++) {
+    if (!cnt[i]) continue;
+    wchar_t v[32], one[64];
+    pn_num(sz[i], 3, v, 32);
+    _snwprintf(one, 64, L"%s%d × %s", parts ? L" + " : L"", cnt[i], v);
+    one[63] = 0;
+    wcsncat(out, one, (size_t)cap - wcslen(out) - 1);
+    tot += cnt[i] * sz[i];
+    parts++;
+  }
+  wchar_t v[32], tail[64];
+  pn_num(tot, 3, v, 32);
+  if (parts == 1) _snwprintf(tail, 64, L" кг");
+  else _snwprintf(tail, 64, L" кг (%s кг)", v);
+  tail[63] = 0;
+  wcsncat(out, tail, (size_t)cap - wcslen(out) - 1);
 }
 
 /* «Круг Ø40, L=1200 — 3 шт» */
@@ -214,7 +409,31 @@ static void pn_describe(const PnPart *p, wchar_t *out, int cap) {
     if (p->d2 > 0) _snwprintf(out, cap, L"Труба Ø%s×%s, L=%s%s", a, b, l, q);
     else _snwprintf(out, cap, L"Труба Ø%s, L=%s%s", a, l, q);
     break;
-  default: _snwprintf(out, cap, L"Кв. труба %s×%s, L=%s%s", a, b, l, q); break;
+  case PN_SQPIPE: _snwprintf(out, cap, L"Кв. труба %s×%s, L=%s%s", a, b, l, q); break;
+  case PN_BAR: _snwprintf(out, cap, L"Квадрат %s, L=%s%s", a, l, q); break;
+  case PN_HEX: _snwprintf(out, cap, L"Шестигранник S%s, L=%s%s", a, l, q); break;
+  case PN_ANGLE: {
+    wchar_t c[32];
+    cut_fmt(p->d3 > 0 ? p->d3 : p->d1, 2, c, 32);
+    _snwprintf(out, cap, L"Уголок %s×%s×%s, L=%s%s", a, c, b, l, q);
+    break;
+  }
+  case PN_CHANNEL:
+  case PN_BEAM: {
+    int g = pn_rolled_find(p);
+    const wchar_t *nm = p->prof == PN_CHANNEL ? L"Швеллер" : L"Двутавр";
+    if (g >= 0)
+      _snwprintf(out, cap, L"%s %s, L=%s%s", nm, p->prof == PN_CHANNEL ? kPnChan[g].no : kPnBeam[g].no, l, q);
+    else
+      _snwprintf(out, cap, L"%s h%s b%s, L=%s%s", nm, a, b, l, q);
+    break;
+  }
+  default: {
+    wchar_t ar[32];
+    pn_fmt(p->d1, ar, 32);
+    _snwprintf(out, cap, L"Своя площадь %s м²%s", ar, q);
+    break;
+  }
   }
   out[cap - 1] = 0;
 }
@@ -236,8 +455,10 @@ static void pn_part_line(ShareBuf *b, const wchar_t *tag, const PnPart *p) {
   wchar_t m[PN_NCOAT][PN_NAME], d[80];
   for (int k = 0; k < PN_NCOAT; k++) pn_clean(p->mat[k], m[k], PN_NAME);
   pn_clean(p->desc, d, 80);
-  sb_add(b, L"%s\t%d\t%.10g\t%.10g\t%.10g\t%d\t%d\t%d\t%s\t%d\t%s\t%d\t%s\t%d\t%s\n", tag, p->prof, p->d1, p->d2,
-         p->len, p->qty, p->ends, p->inside, m[0], p->lay[0], m[1], p->lay[1], m[2], p->lay[2], d);
+  /* d3, d4 — в конце строки (с 2026.09.23.44): старые строки читаются как были */
+  sb_add(b, L"%s\t%d\t%.10g\t%.10g\t%.10g\t%d\t%d\t%d\t%s\t%d\t%s\t%d\t%s\t%d\t%s\t%.10g\t%.10g\n", tag, p->prof,
+         p->d1, p->d2, p->len, p->qty, p->ends, p->inside, m[0], p->lay[0], m[1], p->lay[1], m[2], p->lay[2], d, p->d3,
+         p->d4);
 }
 
 static void pn_save(void) {
@@ -252,10 +473,18 @@ static void pn_save(void) {
   }
   sb_add(&b, L"view\t%d\t%ld\t%ld\t%ld\t%ld\n", (int)(g_pnZoom * 100 + 0.5f), r.left, r.top, r.right - r.left,
          r.bottom - r.top);
+  sb_add(&b, L"defs\t%d\n", PN_DEFS);
+  sb_add(&b, L"meth\t%d", g_pnMeth);
+  for (int i = 1; i < PN_NMETH; i++) sb_add(&b, L"\t%.10g", g_pnLoss[i]);
+  sb_add(&b, L"\n");
   for (int j = 0; j < g_pnNMat; j++) {
-    wchar_t n[PN_NAME];
-    pn_clean(g_pnMat[j].name, n, PN_NAME);
-    sb_add(&b, L"norm\t%s\t%.10g\n", n, g_pnMat[j].norm);
+    const PnMat *m = &g_pnMat[j];
+    wchar_t n[PN_NAME], src[80], tare[40], thin[40];
+    pn_clean(m->name, n, PN_NAME);
+    pn_clean(m->src, src, 80);
+    pn_clean(m->tare, tare, 40);
+    pn_clean(m->thin, thin, 40);
+    sb_add(&b, L"norm\t%s\t%.10g\t%s\t%s\t%.10g\t%s\n", n, m->norm, tare, thin, m->thinPct, src);
   }
   pn_part_line(&b, L"cur", &g_pnCur);
   for (int i = 0; i < g_pnN; i++) pn_part_line(&b, L"item", &g_pnList[i]);
@@ -281,6 +510,10 @@ static BOOL pn_read_part(wchar_t **f, int n, PnPart *p) {
     p->lay[k] = _wtoi(f[9 + k * 2]);
   }
   if (n > 14) lstrcpynW(p->desc, f[14], 80);
+  if (n > 16) {
+    p->d3 = pn_parse_str(f[15]);
+    p->d4 = pn_parse_str(f[16]);
+  }
   return TRUE;
 }
 
@@ -295,6 +528,7 @@ static BOOL pn_load(RECT *place) {
   wchar_t *t = share_read(p);
   if (!t) return FALSE;
   BOOL havePlace = FALSE, normsSeen = FALSE;
+  int defs = 1;
   wchar_t *pp = t, *line;
   while ((line = share_next_line(&pp)) != NULL) {
     wchar_t *f[20];
@@ -315,9 +549,29 @@ static BOOL pn_load(RECT *place) {
         g_pnNMat = 0;
       }
       if (g_pnNMat < PN_MAXMAT && f[1][0] && pn_find_mat(f[1]) < 0) {
-        lstrcpynW(g_pnMat[g_pnNMat].name, f[1], PN_NAME);
-        g_pnMat[g_pnNMat].norm = pn_parse_str(f[2]);
+        PnMat *m = &g_pnMat[g_pnNMat];
+        memset(m, 0, sizeof(*m));
+        lstrcpynW(m->name, f[1], PN_NAME);
+        m->norm = pn_parse_str(f[2]);
+        if (n >= 7) { /* с 2026.09.23.44: тара, разбавитель, %, откуда */
+          lstrcpynW(m->tare, f[3], 40);
+          lstrcpynW(m->thin, f[4], 40);
+          m->thinPct = pn_parse_str(f[5]);
+          lstrcpynW(m->src, f[6], 80);
+        } else { /* старый файл: «откуда» — от исходной нормы с тем же названием */
+          for (size_t i = 0; i < sizeof(kPnDefMats) / sizeof(kPnDefMats[0]); i++)
+            if (!wcscmp(kPnDefMats[i].name, m->name)) lstrcpynW(m->src, kPnDefMats[i].src, 80);
+        }
         g_pnNMat++;
+      }
+    } else if (!wcscmp(f[0], L"defs") && n >= 2) {
+      defs = _wtoi(f[1]);
+    } else if (!wcscmp(f[0], L"meth") && n >= 2) {
+      g_pnMeth = _wtoi(f[1]);
+      if (g_pnMeth < 0 || g_pnMeth >= PN_NMETH) g_pnMeth = 0;
+      for (int i = 1; i < PN_NMETH && i + 1 < n; i++) {
+        double v = pn_parse_str(f[i + 1]);
+        if (v >= 0 && v < 95) g_pnLoss[i] = v;
       }
     } else if (!wcscmp(f[0], L"cur")) {
       pn_read_part(f, n, &g_pnCur);
@@ -326,6 +580,7 @@ static BOOL pn_load(RECT *place) {
     }
   }
   free(t);
+  if (normsSeen && defs < PN_DEFS) pn_add_defs2(); /* новые паспортные — один раз, к своим нормам */
   return havePlace;
 }
 
@@ -352,24 +607,81 @@ static void pn_fill_combo(int k) {
   SendMessageW(c, CB_SETCURSEL, (WPARAM)sel, 0);
 }
 
+/* сколько размеров у профиля (поля D1..D4) */
+static int pn_ndims(int prof) {
+  static const int n[PN_NPROF] = {1, 2, 2, 2, 1, 1, 3, 4, 4, 1};
+  return prof >= 0 && prof < PN_NPROF ? n[prof] : 1;
+}
+
+/* список номеров ГОСТ — у швеллера и двутавра; выбран тот, что совпал по размерам */
+static void pn_fill_gost(void) {
+  if (!g_pnGost) return;
+  BOOL beam = g_pnCur.prof == PN_BEAM;
+  const PnRolled *t = beam ? kPnBeam : kPnChan;
+  int n = beam ? PN_NBEAM : PN_NCHAN;
+  BOOL was = g_pnFilling;
+  g_pnFilling = TRUE;
+  SendMessageW(g_pnGost, CB_RESETCONTENT, 0, 0);
+  SendMessageW(g_pnGost, CB_ADDSTRING, 0, (LPARAM)L"— свои размеры —");
+  for (int i = 0; i < n; i++) {
+    wchar_t e[64];
+    _snwprintf(e, 64, L"№ %s   (h %g, b %g)", t[i].no, t[i].h, t[i].b);
+    e[63] = 0;
+    SendMessageW(g_pnGost, CB_ADDSTRING, 0, (LPARAM)e);
+  }
+  SendMessageW(g_pnGost, CB_SETCURSEL, (WPARAM)(pn_rolled_find(&g_pnCur) + 1), 0);
+  g_pnFilling = was;
+}
+
+/* номер выбран — размеры из таблицы в поля */
+static void pn_gost_pick(void) {
+  int i = (int)SendMessageW(g_pnGost, CB_GETCURSEL, 0, 0) - 1;
+  BOOL beam = g_pnCur.prof == PN_BEAM;
+  if (i < 0 || i >= (beam ? PN_NBEAM : PN_NCHAN)) return;
+  const PnRolled *r = beam ? &kPnBeam[i] : &kPnChan[i];
+  g_pnFilling = TRUE;
+  pn_set_num(g_pnD1, r->h);
+  pn_set_num(g_pnD2, r->b);
+  pn_set_num(g_pnD3, r->s);
+  pn_set_num(g_pnD4, r->t);
+  g_pnFilling = FALSE;
+}
+
+/* тара и разбавитель раскрытого материала — в поля */
+static void pn_sel_to_fields(void) {
+  if (g_pnSel < 0 || g_pnSel >= g_pnNMat) return;
+  g_pnFilling = TRUE;
+  SetWindowTextW(g_pnTare, g_pnMat[g_pnSel].tare);
+  SetWindowTextW(g_pnThin, g_pnMat[g_pnSel].thin);
+  pn_set_num(g_pnPct, g_pnMat[g_pnSel].thinPct);
+  g_pnFilling = FALSE;
+}
+
 static void pn_to_fields(void) {
   g_pnFilling = TRUE;
   SetWindowTextW(g_pnDesc, g_pnCur.desc);
   pn_set_num(g_pnD1, g_pnCur.d1);
   pn_set_num(g_pnD2, g_pnCur.d2);
+  pn_set_num(g_pnD3, g_pnCur.d3);
+  pn_set_num(g_pnD4, g_pnCur.d4);
   pn_set_num(g_pnLen, g_pnCur.len);
   pn_set_num(g_pnQty, g_pnCur.qty);
   for (int k = 0; k < PN_NCOAT; k++) {
     pn_fill_combo(k);
     pn_set_num(g_pnLay[k], g_pnCur.lay[k]);
   }
+  for (int i = 1; i < PN_NMETH; i++) pn_set_num(g_pnLossEd[i - 1], g_pnLoss[i]);
   g_pnFilling = FALSE;
+  pn_fill_gost();
 }
 
 static void pn_from_fields(void) {
   GetWindowTextW(g_pnDesc, g_pnCur.desc, 80);
+  int nd = pn_ndims(g_pnCur.prof);
   g_pnCur.d1 = pn_parse(g_pnD1);
-  g_pnCur.d2 = g_pnCur.prof == PN_ROUND ? 0 : pn_parse(g_pnD2);
+  g_pnCur.d2 = nd >= 2 ? pn_parse(g_pnD2) : 0;
+  g_pnCur.d3 = nd >= 3 ? pn_parse(g_pnD3) : 0;
+  g_pnCur.d4 = nd >= 4 ? pn_parse(g_pnD4) : 0;
   g_pnCur.len = pn_parse(g_pnLen);
   double q = pn_parse(g_pnQty);
   g_pnCur.qty = q >= 1 ? (int)(q + 0.5) : 0;
@@ -464,51 +776,110 @@ static const wchar_t *pn_formula(int prof) {
   case PN_ROUND: return L"Площадь: π·D·L, с торцами ещё 2·πD²/4";
   case PN_SHEET: return L"Площадь: 2·Ш·L (обе стороны), с кромками ещё 2·(Ш+L)·Т";
   case PN_PIPE: return L"Площадь: π·D·L; внутри ещё π·(D−2s)·L; торцы — кольца";
-  default: return L"Площадь: 4·a·L; внутри ещё 4·(a−2s)·L; торцы — рамки";
+  case PN_SQPIPE: return L"Площадь: 4·a·L; внутри ещё 4·(a−2s)·L; торцы — рамки";
+  case PN_BAR: return L"Площадь: 4·a·L, с торцами ещё 2·a²";
+  case PN_HEX: return L"S — размер под ключ. Площадь: 2·√3·S·L, с торцами ещё √3·S²";
+  case PN_ANGLE: return L"Площадь: 2·(a+b)·L — обе стороны полок и кромки. Вторая полка пусто — равнополочный";
+  case PN_CHANNEL:
+  case PN_BEAM: return L"Выберите номер — размеры подставятся. Площадь: (2h + 4b − 2s)·L, скругления не считаются";
+  default: return L"Площадь одной детали, если её уже знаете (из чертежа, КОМПАС)";
   }
+}
+
+/* «пилюли» в несколько рядов, по ширине текста; возвращает низ */
+static int pn_pills(HDC dc, int x, int w, int y, const wchar_t *const *t, int n, int sel, int hot, BOOL paint) {
+  int gap = PS(6), ph = PS(34), px = x;
+  for (int i = 0; i < n; i++) {
+    int pw = pn_text_w(dc, CF_SMALLB, t[i]) + PS(26);
+    if (px > x && px + pw > x + w) {
+      px = x;
+      y += ph + gap;
+    }
+    RECT r = {px, y, px + pw, y + ph};
+    BOOL on = sel == i;
+    if (paint) {
+      cc_round(dc, r, ph / 2, on ? CC_PRIM : CC_PILL, on ? CC_PRIM : CC_BORDER);
+      pn_text(dc, CF_SMALLB, on ? RGB(0xFF, 0xFF, 0xFF) : CC_MUTED, t[i], r, DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+              TRUE);
+    }
+    pn_hot(r, hot + i);
+    px += pw + gap;
+  }
+  return y + ph;
 }
 
 /* левая колонка: деталь и покрытие */
 static int pn_left_body(HDC dc, int x, int w, int y, BOOL paint) {
+  int prof = g_pnCur.prof;
   y += pn_text(dc, CF_TITLE, CC_INK, L"Какая деталь?", (RECT){x, y, x + w, y + 60}, DT_LEFT | DT_SINGLELINE, paint) +
        PS(4);
   y += pn_text(dc, CF_SUB, CC_MUTED, L"Размеры в мм — площадь и расход считаются сразу",
                (RECT){x, y, x + w, y + 200}, DT_LEFT | DT_WORDBREAK, paint) + PS(16);
-  /* профиль — четыре «пилюли» */
   y += pn_text(dc, CF_LABEL, CC_MUTED, L"Профиль", (RECT){x, y, x + w, y + 40}, DT_LEFT | DT_SINGLELINE, paint) +
        PS(6);
-  int gap = PS(6), pw = (w - gap * 3) / 4, ph = PS(36);
-  for (int i = 0; i < PN_NPROF; i++) {
-    RECT r = {x + i * (pw + gap), y, x + i * (pw + gap) + pw, y + ph};
-    BOOL on = g_pnCur.prof == i;
-    if (paint) {
-      cc_round(dc, r, ph / 2, on ? CC_PRIM : CC_PILL, on ? CC_PRIM : CC_BORDER);
-      pn_text(dc, CF_SMALLB, on ? RGB(0xFF, 0xFF, 0xFF) : CC_MUTED, kPnProf[i], r,
-              DT_CENTER | DT_VCENTER | DT_SINGLELINE, TRUE);
-    }
-    pn_hot(r, 1 + i);
-  }
-  y += ph + PS(8);
-  y += pn_text(dc, CF_SMALLB, CC_FAINT, pn_formula(g_pnCur.prof), (RECT){x, y, x + w, y + 200},
-               DT_LEFT | DT_WORDBREAK, paint) + PS(14);
+  y = pn_pills(dc, x, w, y, kPnProf, PN_NPROF, prof, 1, paint) + PS(8);
+  y += pn_text(dc, CF_SMALLB, CC_FAINT, pn_formula(prof), (RECT){x, y, x + w, y + 200}, DT_LEFT | DT_WORDBREAK,
+               paint) + PS(14);
   y = pn_field(dc, x, w, y, L"Обозначение (можно пусто)", g_pnDesc, paint) + PS(12);
   int hw = (w - PS(12)) / 2;
-  static const wchar_t *const l1[PN_NPROF] = {L"Диаметр, мм", L"Ширина, мм", L"Наружный Ø, мм", L"Сторона, мм"};
-  static const wchar_t *const l2[PN_NPROF] = {L"", L"Толщина, мм", L"Стенка, мм", L"Стенка, мм"};
-  if (g_pnCur.prof == PN_ROUND) {
-    y = pn_field(dc, x, w, y, l1[0], g_pnD1, paint) + PS(12);
-    if (g_pnPlace) ShowWindow(g_pnD2, SW_HIDE);
-  } else {
-    pn_field(dc, x, hw, y, l1[g_pnCur.prof], g_pnD1, paint);
-    y = pn_field(dc, x + hw + PS(12), hw, y, l2[g_pnCur.prof], g_pnD2, paint) + PS(12);
+  /* номер по ГОСТ — у швеллера и двутавра */
+  BOOL rolled = prof == PN_CHANNEL || prof == PN_BEAM;
+  if (rolled) {
+    y += pn_text(dc, CF_LABEL, CC_MUTED, prof == PN_CHANNEL ? L"Номер по ГОСТ 8240-97" : L"Номер по ГОСТ 8239-89",
+                 (RECT){x, y, x + w, y + 40}, DT_LEFT | DT_SINGLELINE, paint) + PS(6);
+    if (g_pnPlace) {
+      MoveWindow(g_pnGost, x, y - g_pnScroll, w, PS(360), TRUE);
+      ShowWindow(g_pnGost, SW_SHOWNA);
+    }
+    y += PS(40) + PS(12);
+  } else if (g_pnPlace) {
+    ShowWindow(g_pnGost, SW_HIDE);
   }
-  pn_field(dc, x, hw, y, L"Длина, мм", g_pnLen, paint);
-  y = pn_field(dc, x + hw + PS(12), hw, y, L"Кол-во, шт", g_pnQty, paint) + PS(14);
-  int cw = 0;
-  pn_check(dc, x, y, g_pnCur.prof == PN_SHEET ? L"Кромки (торцы)" : L"Торцы", g_pnCur.ends, 20, paint, &cw);
-  if (g_pnCur.prof == PN_PIPE || g_pnCur.prof == PN_SQPIPE)
-    pn_check(dc, x + cw + PS(24), y, L"Внутри", g_pnCur.inside, 21, paint, &cw);
-  y += PS(26) + PS(20);
+  /* размеры: подписи по профилю, по два в ряд */
+  static const wchar_t *const lab[PN_NPROF][4] = {
+      {L"Диаметр, мм"},
+      {L"Ширина, мм", L"Толщина, мм"},
+      {L"Наружный Ø, мм", L"Стенка, мм"},
+      {L"Сторона, мм", L"Стенка, мм"},
+      {L"Сторона, мм"},
+      {L"Под ключ S, мм"},
+      {L"Полка a, мм", L"Толщина t, мм", L"Полка b, мм (пусто — = a)"},
+      {L"Высота h, мм", L"Ширина полки b, мм", L"Стенка s, мм", L"Полка t, мм"},
+      {L"Высота h, мм", L"Ширина полки b, мм", L"Стенка s, мм", L"Полка t, мм"},
+      {L"Площадь 1 шт, м²"},
+  };
+  HWND dims[4] = {g_pnD1, g_pnD2, g_pnD3, g_pnD4};
+  int nd = pn_ndims(prof);
+  BOOL area = prof == PN_AREA;
+  /* «своя площадь»: площадь и кол-во в один ряд, длины нет */
+  if (area) {
+    pn_field(dc, x, hw, y, lab[prof][0], g_pnD1, paint);
+    y = pn_field(dc, x + hw + PS(12), hw, y, L"Кол-во, шт", g_pnQty, paint) + PS(14);
+    if (g_pnPlace) ShowWindow(g_pnLen, SW_HIDE);
+  } else if (nd == 1) {
+    y = pn_field(dc, x, w, y, lab[prof][0], g_pnD1, paint) + PS(12);
+  } else {
+    for (int i = 0; i < nd; i += 2) {
+      if (i + 1 < nd) {
+        pn_field(dc, x, hw, y, lab[prof][i], dims[i], paint);
+        y = pn_field(dc, x + hw + PS(12), hw, y, lab[prof][i + 1], dims[i + 1], paint) + PS(12);
+      } else {
+        y = pn_field(dc, x, w, y, lab[prof][i], dims[i], paint) + PS(12);
+      }
+    }
+  }
+  if (g_pnPlace)
+    for (int i = nd; i < 4; i++) ShowWindow(dims[i], SW_HIDE);
+  if (!area) {
+    pn_field(dc, x, hw, y, L"Длина, мм", g_pnLen, paint);
+    y = pn_field(dc, x + hw + PS(12), hw, y, L"Кол-во, шт", g_pnQty, paint) + PS(14);
+    int cw = 0;
+    pn_check(dc, x, y, prof == PN_SHEET ? L"Кромки (торцы)" : L"Торцы", g_pnCur.ends, 20, paint, &cw);
+    if (prof == PN_PIPE || prof == PN_SQPIPE) pn_check(dc, x + cw + PS(24), y, L"Внутри", g_pnCur.inside, 21, paint, &cw);
+    y += PS(26) + PS(20);
+  } else {
+    y += PS(6);
+  }
   /* покрытие */
   if (paint) cc_fill(dc, (RECT){x, y, x + w, y + 1}, CC_BORDER);
   y += PS(14);
@@ -527,7 +898,23 @@ static int pn_left_body(HDC dc, int x, int w, int y, BOOL paint) {
       MoveWindow(g_pnLay[k], lr.left + PS(10), lr.top + PS(8) - g_pnScroll, lr.right - lr.left - PS(20), PS(24), TRUE);
     y += PS(40) + PS(12);
   }
-  return y;
+  /* способ нанесения — для всего списка */
+  y += PS(4);
+  y += pn_text(dc, CF_LABEL, CC_MUTED, L"Способ нанесения эмали и грунтовки (для всего списка)",
+               (RECT){x, y, x + w, y + 60}, DT_LEFT | DT_WORDBREAK, paint) + PS(6);
+  y = pn_pills(dc, x, w, y, kPnMeth, PN_NMETH, g_pnMeth, 50, paint) + PS(8);
+  wchar_t hint[200];
+  if (g_pnMeth == 0) {
+    lstrcpynW(hint, L"Расход — ровно по норме. Выберите способ, если норма без потерь (паспортная)", 200);
+  } else {
+    wchar_t c[32], l[32];
+    pn_num(pn_coef(), 2, c, 32);
+    pn_num(g_pnLoss[g_pnMeth], 1, l, 32);
+    _snwprintf(hint, 200, L"Потери %s %% → норма × %s. Клей — без множителя", l, c);
+    hint[199] = 0;
+  }
+  y += pn_text(dc, CF_SMALLB, CC_FAINT, hint, (RECT){x, y, x + w, y + 200}, DT_LEFT | DT_WORDBREAK, paint);
+  return y + PS(4);
 }
 
 /* правая колонка, карточка 1: эта деталь */
@@ -536,8 +923,11 @@ static int pn_cur_body(HDC dc, int x, int w, int y, BOOL paint) {
        PS(12);
   double a1 = pn_area1(&g_pnCur);
   if (a1 < 0) {
-    const wchar_t *why = a1 < -1.5 ? L"Стенка толще половины размера — проверьте числа"
-                                   : (g_pnCur.prof == PN_ROUND ? L"Введите диаметр и длину" : L"Введите размер и длину");
+    const wchar_t *why = a1 < -1.5                       ? L"Размеры не сходятся (стенка или полка толще, чем можно) — проверьте числа"
+                         : g_pnCur.prof == PN_AREA      ? L"Введите площадь одной детали"
+                         : g_pnCur.prof == PN_ROUND     ? L"Введите диаметр и длину"
+                         : g_pnCur.prof == PN_CHANNEL || g_pnCur.prof == PN_BEAM ? L"Выберите номер или введите h, b и длину"
+                                                                                 : L"Введите размеры и длину";
     y += pn_text(dc, CF_BODY, a1 < -1.5 ? CC_WARN : CC_MUTED, why, (RECT){x, y, x + w, y + 200},
                  DT_LEFT | DT_WORDBREAK, paint) + PS(8);
     return y;
@@ -578,7 +968,13 @@ static int pn_cur_body(HDC dc, int x, int w, int y, BOOL paint) {
     } else {
       pn_num(g_pnMat[j].norm, 4, n, 32);
       int lay = g_pnCur.lay[k] > 0 ? g_pnCur.lay[k] : 1;
-      _snwprintf(left, 160, L"%s   ·   %s кг/м² × %d сл.", g_pnCur.mat[k], n, lay);
+      if (k < 2 && pn_coef() > 1) {
+        wchar_t c[32];
+        pn_num(pn_coef(), 2, c, 32);
+        _snwprintf(left, 160, L"%s   ·   %s кг/м² × %d сл. × %s", g_pnCur.mat[k], n, lay, c);
+      } else {
+        _snwprintf(left, 160, L"%s   ·   %s кг/м² × %d сл.", g_pnCur.mat[k], n, lay);
+      }
       pn_fmt(kg, v, 40);
       _snwprintf(right, 48, L"%s кг", v);
     }
@@ -616,6 +1012,99 @@ static int pn_totals(double *kg, double *area) {
     }
   }
   return nbad;
+}
+
+/* разбавители: по названию, % от массы материала */
+static int pn_thinners(const double *kg, wchar_t (*name)[40], double *tk) {
+  int n = 0;
+  for (int j = 0; j < g_pnNMat; j++) {
+    const PnMat *m = &g_pnMat[j];
+    if (!(kg[j] > 0) || !m->thin[0] || !(m->thinPct > 0)) continue;
+    int g = -1;
+    for (int i = 0; i < n && g < 0; i++)
+      if (!_wcsicmp(name[i], m->thin)) g = i;
+    if (g < 0) {
+      g = n++;
+      lstrcpynW(name[g], m->thin, 40);
+      tk[g] = 0;
+    }
+    tk[g] += kg[j] * m->thinPct / 100.0;
+  }
+  return n;
+}
+
+/* плашка «Итого по материалам»: материалы (и сколько банок), разбавители,
+   всего, площадь; возвращает низ */
+static int pn_tot_body(HDC dc, int x0, int w0, int y, BOOL paint) {
+  double kg[PN_MAXMAT], area;
+  int nbad = pn_totals(kg, &area);
+  int x = x0 + PS(16), w = w0 - PS(32), rh = PS(28);
+  y += PS(14);
+  y += pn_text(dc, CF_TITLE, CC_PRIM, L"Итого по материалам", (RECT){x, y, x + w, y + 60}, DT_LEFT | DT_SINGLELINE,
+               paint) + PS(4);
+  if (g_pnMeth > 0) {
+    wchar_t c[32], t[160];
+    pn_num(pn_coef(), 2, c, 32);
+    _snwprintf(t, 160, L"с потерями: %s, эмаль и грунтовка × %s", kPnMeth[g_pnMeth], c);
+    t[159] = 0;
+    y += pn_text(dc, CF_SMALLB, CC_MUTED, t, (RECT){x, y, x + w, y + 60}, DT_LEFT | DT_SINGLELINE, paint);
+  }
+  y += PS(6);
+  double all = 0;
+  for (int j = 0; j < g_pnNMat; j++) {
+    if (!(kg[j] > 0)) continue;
+    all += kg[j];
+    wchar_t v[40], r[48], pk[160];
+    pn_fmt(kg[j], v, 40);
+    _snwprintf(r, 48, L"%s кг", v);
+    pn_text(dc, CF_BODY, CC_INK, g_pnMat[j].name, (RECT){x, y, x + w - PS(120), y + rh},
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS, paint);
+    pn_text(dc, CF_BOLD, CC_INK, r, (RECT){x, y, x + w, y + rh}, DT_RIGHT | DT_VCENTER | DT_SINGLELINE, paint);
+    y += rh;
+    pn_packs_text(&g_pnMat[j], kg[j], pk, 160);
+    if (pk[0]) { /* сколько банок взять */
+      wchar_t t[180];
+      _snwprintf(t, 180, L"взять: %s", pk);
+      t[179] = 0;
+      y += pn_text(dc, CF_SMALLB, CC_PRIM, t, (RECT){x + PS(12), y - PS(4), x + w, y + rh},
+                   DT_RIGHT | DT_SINGLELINE | DT_END_ELLIPSIS, paint) + PS(2);
+    }
+  }
+  wchar_t tn[PN_MAXMAT][40];
+  double tk[PN_MAXMAT];
+  int nt = pn_thinners(kg, tn, tk);
+  for (int i = 0; i < nt; i++) {
+    wchar_t v[40], r[48], l[80];
+    pn_fmt(tk[i], v, 40);
+    _snwprintf(r, 48, L"%s кг", v);
+    _snwprintf(l, 80, L"%s (разбавитель)", tn[i]);
+    l[79] = 0;
+    pn_text(dc, CF_BODY, CC_MUTED, l, (RECT){x, y, x + w - PS(120), y + rh},
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS, paint);
+    pn_text(dc, CF_BOLD, CC_MUTED, r, (RECT){x, y, x + w, y + rh}, DT_RIGHT | DT_VCENTER | DT_SINGLELINE, paint);
+    y += rh;
+  }
+  if (paint) cc_fill(dc, (RECT){x, y + PS(2), x + w, y + PS(3)}, CC_BORDER);
+  y += PS(8);
+  wchar_t v[40], r[64];
+  pn_fmt(all, v, 40);
+  _snwprintf(r, 64, L"%s кг", v);
+  pn_text(dc, CF_BOLD, CC_INK, L"Всего материалов", (RECT){x, y, x + w, y + rh}, DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+          paint);
+  pn_text(dc, CF_BOLD, CC_PRIM, r, (RECT){x, y, x + w, y + rh}, DT_RIGHT | DT_VCENTER | DT_SINGLELINE, paint);
+  y += rh;
+  pn_fmt(area, v, 40);
+  _snwprintf(r, 64, L"%s м²", v);
+  pn_text(dc, CF_BODY, CC_MUTED, L"Площадь всех деталей", (RECT){x, y, x + w, y + rh},
+          DT_LEFT | DT_VCENTER | DT_SINGLELINE, paint);
+  pn_text(dc, CF_BODY, CC_MUTED, r, (RECT){x, y, x + w, y + rh}, DT_RIGHT | DT_VCENTER | DT_SINGLELINE, paint);
+  y += rh;
+  if (nbad) {
+    _snwprintf(r, 64, L"Без нормы (не в итоге): %d", nbad);
+    pn_text(dc, CF_SMALLB, CC_WARN, r, (RECT){x, y, x + w, y + rh}, DT_LEFT | DT_VCENTER | DT_SINGLELINE, paint);
+    y += rh;
+  }
+  return y + PS(10);
 }
 
 /* карточка 2: список деталей и итог */
@@ -674,62 +1163,12 @@ static int pn_list_body(HDC dc, int x, int w, int y, BOOL paint) {
                  paint) + PS(8);
   }
   /* итог */
-  double kg[PN_MAXMAT], area;
-  int nbad = pn_totals(kg, &area);
   y += PS(10);
-  RECT box = {x, y, x + w, y};
-  int by = y + PS(14), bx = x + PS(16), bw = w - PS(32);
-  int yy = by;
-  yy += pn_text(dc, CF_TITLE, CC_PRIM, L"Итого по материалам", (RECT){bx, yy, bx + bw, yy + 60},
-                DT_LEFT | DT_SINGLELINE, FALSE) + PS(10);
-  double all = 0;
-  int rows = 0;
-  for (int j = 0; j < g_pnNMat; j++)
-    if (kg[j] > 0) {
-      all += kg[j];
-      rows++;
-    }
-  yy += (rows + 2) * PS(28) + PS(8) + (nbad ? PS(28) : 0);
-  box.bottom = yy + PS(10);
   if (paint) {
-    cc_round(dc, box, PS(12), CC_TIMEBG, CC_BORDER);
-    yy = by;
-    yy += pn_text(dc, CF_TITLE, CC_PRIM, L"Итого по материалам", (RECT){bx, yy, bx + bw, yy + 60},
-                  DT_LEFT | DT_SINGLELINE, TRUE) + PS(10);
-    for (int j = 0; j < g_pnNMat; j++) {
-      if (!(kg[j] > 0)) continue;
-      wchar_t v[40], r[48];
-      pn_fmt(kg[j], v, 40);
-      _snwprintf(r, 48, L"%s кг", v);
-      pn_text(dc, CF_BODY, CC_INK, g_pnMat[j].name, (RECT){bx, yy, bx + bw - PS(120), yy + PS(28)},
-              DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS, TRUE);
-      pn_text(dc, CF_BOLD, CC_INK, r, (RECT){bx, yy, bx + bw, yy + PS(28)}, DT_RIGHT | DT_VCENTER | DT_SINGLELINE,
-              TRUE);
-      yy += PS(28);
-    }
-    cc_fill(dc, (RECT){bx, yy + PS(2), bx + bw, yy + PS(3)}, CC_BORDER);
-    yy += PS(8);
-    wchar_t v[40], r[64];
-    pn_fmt(all, v, 40);
-    _snwprintf(r, 64, L"%s кг", v);
-    pn_text(dc, CF_BOLD, CC_INK, L"Всего материалов", (RECT){bx, yy, bx + bw, yy + PS(28)},
-            DT_LEFT | DT_VCENTER | DT_SINGLELINE, TRUE);
-    pn_text(dc, CF_BOLD, CC_PRIM, r, (RECT){bx, yy, bx + bw, yy + PS(28)}, DT_RIGHT | DT_VCENTER | DT_SINGLELINE,
-            TRUE);
-    yy += PS(28);
-    pn_fmt(area, v, 40);
-    _snwprintf(r, 64, L"%s м²", v);
-    pn_text(dc, CF_BODY, CC_MUTED, L"Площадь всех деталей", (RECT){bx, yy, bx + bw, yy + PS(28)},
-            DT_LEFT | DT_VCENTER | DT_SINGLELINE, TRUE);
-    pn_text(dc, CF_BODY, CC_MUTED, r, (RECT){bx, yy, bx + bw, yy + PS(28)}, DT_RIGHT | DT_VCENTER | DT_SINGLELINE,
-            TRUE);
-    yy += PS(28);
-    if (nbad) {
-      _snwprintf(r, 64, L"Без нормы (не в итоге): %d", nbad);
-      pn_text(dc, CF_SMALLB, CC_WARN, r, (RECT){bx, yy, bx + bw, yy + PS(28)}, DT_LEFT | DT_VCENTER | DT_SINGLELINE,
-              TRUE);
-    }
+    int h = pn_tot_body(dc, x, w, y, FALSE);
+    cc_round(dc, (RECT){x, y, x + w, h}, PS(12), CC_TIMEBG, CC_BORDER);
   }
+  RECT box = {x, y, x + w, pn_tot_body(dc, x, w, y, paint)};
   y = box.bottom + PS(14);
   int bw1 = pn_button(dc, g_pnCopied ? L"Скопировано ✓" : L"Копировать для Excel", x, y, FALSE, 31, paint);
   pn_button(dc, L"Очистить список", x + bw1 + PS(10), y, FALSE, 32, paint);
@@ -741,20 +1180,77 @@ static int pn_norm_body(HDC dc, int x, int w, int y, BOOL paint) {
   y += pn_text(dc, CF_TITLE, CC_INK, L"Нормы расхода", (RECT){x, y, x + w, y + 60}, DT_LEFT | DT_SINGLELINE, paint) +
        PS(4);
   y += pn_text(dc, CF_SUB, CC_MUTED,
-               L"Кг на 1 м² за один слой. Поменяете — всё выше пересчитается само. Исходные — из «Краска — расчёт.xlsx».",
+               L"Кг на 1 м² за один слой. Поменяете — всё выше пересчитается само. «Тара, разбавитель» у материала — "
+               L"какими банками берёте и чем разбавляете: в итоге появится, сколько банок и сколько разбавителя.",
                (RECT){x, y, x + w, y + 200}, DT_LEFT | DT_WORDBREAK, paint) + PS(12);
-  int fw = PS(110), xw = PS(26);
+  int fw = PS(96), xw = PS(26), lk = PS(150);
+  BOOL selShown = FALSE;
   for (int j = 0; j < g_pnNMat; j++) {
-    RECT fr = {x + w - xw - PS(8) - fw, y, x + w - xw - PS(8), y + PS(36)};
-    pn_text(dc, CF_BODY, CC_INK, g_pnMat[j].name, (RECT){x, y, fr.left - PS(10), y + PS(36)},
-            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS, paint);
+    const PnMat *m = &g_pnMat[j];
+    RECT del = {x + w - xw, y, x + w, y + PS(36)};
+    RECT lr = {del.left - PS(6) - lk, y, del.left - PS(6), y + PS(36)};
+    RECT fr = {lr.left - PS(10) - fw, y, lr.left - PS(10), y + PS(36)};
+    int nameW = fr.left - PS(10) - x;
+    pn_text(dc, CF_BODY, CC_INK, m->name, (RECT){x, y + PS(1), x + nameW, y + PS(22)},
+            DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS, paint);
+    if (m->src[0])
+      pn_text(dc, CF_SMALLB, CC_FAINT, m->src, (RECT){x, y + PS(20), x + nameW, y + PS(38)},
+              DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS, paint);
     if (paint) cc_round(dc, fr, PS(8), CC_SURF, GetFocus() == g_pnNorm[j] ? CC_PRIM : CC_BORDER);
     if (g_pnPlace && g_pnNorm[j])
       MoveWindow(g_pnNorm[j], fr.left + PS(8), fr.top + PS(6) - g_pnScroll, fw - PS(16), PS(24), TRUE);
-    RECT del = {x + w - xw, y, x + w, y + PS(36)};
+    /* «тара, разбав. ›» — или то, что уже задано */
+    wchar_t sum[80];
+    BOOL open = g_pnSel == j;
+    if (m->tare[0] || (m->thin[0] && m->thinPct > 0)) {
+      wchar_t pct[16] = L"";
+      if (m->thin[0] && m->thinPct > 0) pn_num(m->thinPct, 1, pct, 16);
+      _snwprintf(sum, 80, L"%s%s%s%s%s", m->tare[0] ? L"тара " : L"", m->tare, (m->tare[0] && pct[0]) ? L" · " : L"",
+                 pct[0] ? pct : L"", pct[0] ? L"% разб." : L"");
+    } else {
+      lstrcpynW(sum, L"тара, разбав.", 80);
+    }
+    sum[79] = 0;
+    wcsncat(sum, open ? L" ‹" : L" ›", 80 - wcslen(sum) - 1); /* «›» есть в любом шрифте, «▸» — не везде */
+    pn_text(dc, CF_SMALLB, CC_PRIM, sum, lr, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS, paint);
+    pn_hot(lr, 2000 + j);
     if (paint) pn_text(dc, CF_BOLD, CC_FAINT, L"×", del, DT_CENTER | DT_VCENTER | DT_SINGLELINE, TRUE);
     pn_hot(del, 1000 + j);
-    y += PS(36) + PS(6);
+    y += PS(36) + PS(8);
+    if (open) { /* раскрыто: тара, разбавитель, % */
+      selShown = TRUE;
+      int pw = PS(70), gap = PS(10);
+      int tw = (w - pw - gap * 2) / 2;
+      RECT r1 = {x, y, x + tw, y + PS(36)}, r2 = {r1.right + gap, y, r1.right + gap + tw, y + PS(36)},
+           r3 = {r2.right + gap, y, x + w, y + PS(36)};
+      pn_text(dc, CF_LABEL, CC_MUTED, L"Тара, кг (через ;)", (RECT){r1.left, y, r1.right, y + PS(18)},
+              DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS, paint);
+      pn_text(dc, CF_LABEL, CC_MUTED, L"Разбавитель", (RECT){r2.left, y, r2.right, y + PS(18)},
+              DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS, paint);
+      pn_text(dc, CF_LABEL, CC_MUTED, L"%", (RECT){r3.left, y, r3.right, y + PS(18)}, DT_LEFT | DT_SINGLELINE,
+              paint);
+      int yy = y + PS(22);
+      HWND ed[3] = {g_pnTare, g_pnThin, g_pnPct};
+      RECT rr[3] = {r1, r2, r3};
+      for (int i = 0; i < 3; i++) {
+        rr[i].top = yy;
+        rr[i].bottom = yy + PS(36);
+        if (paint) cc_round(dc, rr[i], PS(8), CC_SURF, GetFocus() == ed[i] ? CC_PRIM : CC_BORDER);
+        if (g_pnPlace) {
+          MoveWindow(ed[i], rr[i].left + PS(8), rr[i].top + PS(6) - g_pnScroll, rr[i].right - rr[i].left - PS(16),
+                     PS(24), TRUE);
+          ShowWindow(ed[i], SW_SHOWNA);
+        }
+      }
+      y = yy + PS(36) + PS(6);
+      y += pn_text(dc, CF_SMALLB, CC_FAINT, L"Например: тара 0,8; 2,7; 20 — разбавитель уайт-спирит, 10 %",
+                   (RECT){x, y, x + w, y + 60}, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS, paint) + PS(12);
+    }
+  }
+  if (g_pnPlace && !selShown) {
+    ShowWindow(g_pnTare, SW_HIDE);
+    ShowWindow(g_pnThin, SW_HIDE);
+    ShowWindow(g_pnPct, SW_HIDE);
   }
   y += PS(8);
   /* новый материал */
@@ -785,6 +1281,33 @@ static int pn_norm_body(HDC dc, int x, int w, int y, BOOL paint) {
   RECT lr = {x, y, x + lw, y + PS(22)};
   pn_text(dc, CF_SMALLB, CC_PRIM, lnk, lr, DT_LEFT | DT_VCENTER | DT_SINGLELINE, paint);
   pn_hot(lr, 41);
+  y += PS(22) + PS(18);
+  /* потери при нанесении */
+  if (paint) cc_fill(dc, (RECT){x, y, x + w, y + 1}, CC_BORDER);
+  y += PS(14);
+  y += pn_text(dc, CF_TITLE, CC_INK, L"Потери при нанесении, %", (RECT){x, y, x + w, y + 60},
+               DT_LEFT | DT_SINGLELINE, paint) + PS(4);
+  y += pn_text(dc, CF_SUB, CC_MUTED,
+               L"Сколько краски уходит мимо детали. Норма умножается на 1 / (1 − потери): 30 % → × 1,43. "
+               L"Исходные — по справочникам (ВСН 447-84): кисть 5, валик 8, безвоздушное 30, пневматическое 30–50.",
+               (RECT){x, y, x + w, y + 200}, DT_LEFT | DT_WORDBREAK, paint) + PS(10);
+  int hw = (w - PS(12)) / 2;
+  for (int i = 1; i < PN_NMETH; i++) {
+    int col = (i - 1) % 2, cx = x + col * (hw + PS(12));
+    RECT fr = {cx + hw - fw, y, cx + hw, y + PS(36)};
+    pn_text(dc, CF_BODY, CC_INK, kPnMeth[i], (RECT){cx, y, fr.left - PS(8), y + PS(36)},
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS, paint);
+    if (paint) cc_round(dc, fr, PS(8), CC_SURF, GetFocus() == g_pnLossEd[i - 1] ? CC_PRIM : CC_BORDER);
+    if (g_pnPlace)
+      MoveWindow(g_pnLossEd[i - 1], fr.left + PS(8), fr.top + PS(6) - g_pnScroll, fw - PS(16), PS(24), TRUE);
+    if (col == 1 || i == PN_NMETH - 1) y += PS(36) + PS(8);
+  }
+  y += PS(4);
+  const wchar_t *lnk2 = L"Вернуть исходные потери";
+  lw = pn_text_w(dc, CF_SMALLB, lnk2);
+  RECT lr2 = {x, y, x + lw, y + PS(22)};
+  pn_text(dc, CF_SMALLB, CC_PRIM, lnk2, lr2, DT_LEFT | DT_VCENTER | DT_SINGLELINE, paint);
+  pn_hot(lr2, 42);
   return y + PS(22);
 }
 
@@ -857,16 +1380,19 @@ static void pn_fit(int cw) {
   if (ns - g_pnS > 0.004f || g_pnS - ns > 0.004f) {
     g_pnS = ns;
     pn_fonts();
-    HWND all[] = {g_pnDesc, g_pnD1, g_pnD2, g_pnLen, g_pnQty, g_pnLay[0], g_pnLay[1], g_pnLay[2],
-                  g_pnNewName, g_pnNewNorm, g_pnMatCb[0], g_pnMatCb[1], g_pnMatCb[2]};
+    HWND all[] = {g_pnDesc,     g_pnD1,       g_pnD2,       g_pnD3,       g_pnD4,       g_pnLen,     g_pnQty,
+                  g_pnLay[0],   g_pnLay[1],   g_pnLay[2],   g_pnNewName,  g_pnNewNorm,  g_pnMatCb[0], g_pnMatCb[1],
+                  g_pnMatCb[2], g_pnGost,     g_pnTare,     g_pnThin,     g_pnPct,      g_pnLossEd[0], g_pnLossEd[1],
+                  g_pnLossEd[2], g_pnLossEd[3]};
     for (size_t i = 0; i < sizeof(all) / sizeof(all[0]); i++)
       if (all[i]) SendMessageW(all[i], WM_SETFONT, (WPARAM)g_pf[9], FALSE);
     for (int j = 0; j < g_pnNMat; j++)
       if (g_pnNorm[j]) SendMessageW(g_pnNorm[j], WM_SETFONT, (WPARAM)g_pf[9], FALSE);
-    for (int k = 0; k < PN_NCOAT; k++)
-      if (g_pnMatCb[k]) {
-        SendMessageW(g_pnMatCb[k], CB_SETITEMHEIGHT, (WPARAM)-1, PS(32));
-        SendMessageW(g_pnMatCb[k], CB_SETITEMHEIGHT, 0, PS(26));
+    HWND cb[PN_NCOAT + 1] = {g_pnMatCb[0], g_pnMatCb[1], g_pnMatCb[2], g_pnGost};
+    for (int k = 0; k < PN_NCOAT + 1; k++)
+      if (cb[k]) {
+        SendMessageW(cb[k], CB_SETITEMHEIGHT, (WPARAM)-1, PS(32));
+        SendMessageW(cb[k], CB_SETITEMHEIGHT, 0, PS(26));
       }
   }
 }
@@ -943,7 +1469,12 @@ static void pn_add(void) {
     MessageBoxW(g_pnWnd, L"В списке уже 300 деталей — скопируйте его и очистите.", L"Расчёт краски", MB_ICONWARNING);
     return;
   }
-  g_pnList[g_pnN++] = g_pnCur;
+  g_pnList[g_pnN] = g_pnCur;
+  /* «внутри» бывает только у труб, торцы — не у «своей площади»: скрытая
+     галочка от прошлого профиля в список не идёт */
+  if (g_pnCur.prof != PN_PIPE && g_pnCur.prof != PN_SQPIPE) g_pnList[g_pnN].inside = 0;
+  if (g_pnCur.prof == PN_AREA) g_pnList[g_pnN].ends = 0;
+  g_pnN++;
   /* дальше обычно похожая деталь: профиль, размеры и покрытие остаются —
      поправить, что отличается; обозначение — заново */
   g_pnCur.desc[0] = 0;
@@ -961,8 +1492,12 @@ static void pn_copy(void) {
   memset(&b, 0, sizeof(b));
   sb_add(&b, L"№\tОбозначение / наименование\tПрофиль\tРазмер 1, мм\tРазмер 2, мм\tДлина, мм\tКол-во, шт\t"
              L"Торцы\tВнутри\tПлощадь 1 шт, м²\tПлощадь всего, м²\tЭмаль / лак\tСлоёв\tЭмаль, кг\t"
-             L"Грунтовка\tСлоёв\tГрунтовка, кг\tКлей\tСлоёв\tКлей, кг\r\n");
-  static const wchar_t *const prof[PN_NPROF] = {L"Круг", L"Лист", L"Труба", L"Квадратная труба"};
+             L"Грунтовка\tСлоёв\tГрунтовка, кг\tКлей\tСлоёв\tКлей, кг\tРазмер 3, мм\tРазмер 4, мм\r\n");
+  /* первые 20 столбцов — как лист «Расчёт» файла; размеры 3 и 4 (уголок,
+     швеллер, двутавр) — в конце, чтобы вставка в файл не съезжала */
+  static const wchar_t *const prof[PN_NPROF] = {L"Круг",         L"Лист",    L"Труба",   L"Квадратная труба",
+                                                L"Квадрат",      L"Шестигранник", L"Уголок", L"Швеллер",
+                                                L"Двутавр",      L"Своя площадь, м²"};
   int n = g_pnN ? g_pnN : 1;
   for (int i = 0; i < n; i++) {
     const PnPart *p = g_pnN ? &g_pnList[i] : &g_pnCur;
@@ -980,7 +1515,8 @@ static void pn_copy(void) {
       a1[0] = at[0] = 0;
     }
     sb_add(&b, L"%d\t%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s", i + 1, d, prof[p->prof], a, s2, l,
-           p->qty > 0 ? p->qty : 1, p->ends ? L"да" : L"нет", p->inside ? L"да" : L"нет", a1, at);
+           p->qty > 0 ? p->qty : 1, p->ends && p->prof != PN_AREA ? L"да" : L"нет",
+           p->inside && (p->prof == PN_PIPE || p->prof == PN_SQPIPE) ? L"да" : L"нет", a1, at);
     for (int k = 0; k < PN_NCOAT; k++) {
       int st;
       double kg = pn_layer(p, k, &st);
@@ -989,22 +1525,41 @@ static void pn_copy(void) {
       if (p->mat[k][0]) sb_add(&b, L"\t%s\t%d\t%s", p->mat[k], p->lay[k] > 0 ? p->lay[k] : 1, v);
       else sb_add(&b, L"\t\t\t");
     }
-    sb_add(&b, L"\r\n");
+    wchar_t s3[32] = L"", s4[32] = L"";
+    if (p->d3 > 0) pn_num(p->d3, 6, s3, 32);
+    if (p->d4 > 0) pn_num(p->d4, 6, s4, 32);
+    sb_add(&b, L"\t%s\t%s\r\n", s3, s4);
   }
   if (g_pnN) {
     double kg[PN_MAXMAT], area, all = 0;
     pn_totals(kg, &area);
-    sb_add(&b, L"\r\nИтого по материалам\r\nМатериал\tРасход, кг\r\n");
+    sb_add(&b, L"\r\nИтого по материалам\r\n");
+    if (g_pnMeth > 0) {
+      wchar_t c[32], l[32];
+      pn_num(pn_coef(), 4, c, 32);
+      pn_num(g_pnLoss[g_pnMeth], 2, l, 32);
+      sb_add(&b, L"С потерями: %s, %s %% — эмаль и грунтовка × %s\r\n", kPnMeth[g_pnMeth], l, c);
+    }
+    sb_add(&b, L"Материал\tРасход, кг\tВзять\r\n");
     for (int j = 0; j < g_pnNMat; j++)
       if (kg[j] > 0) {
-        wchar_t v[32];
+        wchar_t v[32], pk[160];
         pn_num(kg[j], 6, v, 32);
-        sb_add(&b, L"%s\t%s\r\n", g_pnMat[j].name, v);
+        pn_packs_text(&g_pnMat[j], kg[j], pk, 160);
+        sb_add(&b, L"%s\t%s\t%s\r\n", g_pnMat[j].name, v, pk);
         all += kg[j];
       }
+    wchar_t tn[PN_MAXMAT][40];
+    double tk[PN_MAXMAT];
+    int nt = pn_thinners(kg, tn, tk);
+    for (int i = 0; i < nt; i++) {
+      wchar_t v[32];
+      pn_num(tk[i], 6, v, 32);
+      sb_add(&b, L"%s (разбавитель)\t%s\r\n", tn[i], v);
+    }
     wchar_t v[32];
     pn_num(all, 6, v, 32);
-    sb_add(&b, L"Всего\t%s\r\n", v);
+    sb_add(&b, L"Всего материалов\t%s\r\n", v);
   }
   if (b.w && clipboard_set(b.w)) {
     g_pnCopied = TRUE;
@@ -1023,6 +1578,8 @@ static int pn_mat_uses(const wchar_t *name) {
 }
 
 static void pn_mats_changed(void) {
+  if (g_pnSel >= g_pnNMat) g_pnSel = -1;
+  pn_sel_to_fields();
   pn_make_norm_fields();
   g_pnFilling = TRUE;
   for (int k = 0; k < PN_NCOAT; k++) pn_fill_combo(k);
@@ -1043,6 +1600,8 @@ static void pn_del_mat(int j) {
   if (MessageBoxW(g_pnWnd, q, L"Расчёт краски", MB_YESNO | MB_ICONQUESTION) != IDYES) return;
   memmove(&g_pnMat[j], &g_pnMat[j + 1], sizeof(PnMat) * (size_t)(g_pnNMat - j - 1));
   g_pnNMat--;
+  if (g_pnSel == j) g_pnSel = -1;
+  else if (g_pnSel > j) g_pnSel--;
   pn_mats_changed();
 }
 
@@ -1070,7 +1629,9 @@ static void pn_add_mat(void) {
     return;
   }
   if (g_pnNMat >= PN_MAXMAT) return;
+  memset(&g_pnMat[g_pnNMat], 0, sizeof(PnMat));
   lstrcpynW(g_pnMat[g_pnNMat].name, s, PN_NAME);
+  lstrcpynW(g_pnMat[g_pnNMat].src, L"добавлен вручную", 80);
   g_pnMat[g_pnNMat].norm = v;
   g_pnNMat++;
   SetWindowTextW(g_pnNewName, L"");
@@ -1079,32 +1640,63 @@ static void pn_add_mat(void) {
 }
 
 static void pn_reset_norms(void) {
-  if (MessageBoxW(g_pnWnd, L"Вернуть нормы как в «Краска — расчёт.xlsx»? Свои изменения норм пропадут.",
+  if (MessageBoxW(g_pnWnd,
+                  L"Вернуть исходные нормы (из «Краска — расчёт.xlsx» и паспортные)? Изменённые нормы и "
+                  L"добавленные вручную материалы пропадут; тара и разбавители останутся.",
                   L"Расчёт краски", MB_YESNO | MB_ICONQUESTION) != IDYES)
     return;
+  PnMat old[PN_MAXMAT];
+  int nold = g_pnNMat;
+  memcpy(old, g_pnMat, sizeof(old));
   pn_default_mats();
+  for (int j = 0; j < g_pnNMat; j++)
+    for (int i = 0; i < nold; i++)
+      if (!wcscmp(old[i].name, g_pnMat[j].name)) {
+        lstrcpynW(g_pnMat[j].tare, old[i].tare, 40);
+        lstrcpynW(g_pnMat[j].thin, old[i].thin, 40);
+        g_pnMat[j].thinPct = old[i].thinPct;
+      }
   pn_mats_changed();
+}
+
+static void pn_reset_loss(void) {
+  memcpy(g_pnLoss, kPnLossDef, sizeof(g_pnLoss));
+  g_pnFilling = TRUE;
+  for (int i = 1; i < PN_NMETH; i++) pn_set_num(g_pnLossEd[i - 1], g_pnLoss[i]);
+  g_pnFilling = FALSE;
+  pn_changed();
 }
 
 /* ---- поля: Enter — добавить, Tab — дальше, колесо — листать ---------------------- */
 
 static HWND pn_tab_next(HWND cur, BOOL back) {
-  HWND order[16 + PN_MAXMAT];
-  int n = 0;
+  HWND order[32 + PN_MAXMAT];
+  int n = 0, nd = pn_ndims(g_pnCur.prof);
   order[n++] = g_pnDesc;
+  if (g_pnCur.prof == PN_CHANNEL || g_pnCur.prof == PN_BEAM) order[n++] = g_pnGost;
   order[n++] = g_pnD1;
-  if (g_pnCur.prof != PN_ROUND) order[n++] = g_pnD2;
-  order[n++] = g_pnLen;
+  if (nd >= 2) order[n++] = g_pnD2;
+  if (nd >= 3) order[n++] = g_pnD3;
+  if (nd >= 4) order[n++] = g_pnD4;
+  if (g_pnCur.prof != PN_AREA) order[n++] = g_pnLen;
   order[n++] = g_pnQty;
   for (int k = 0; k < PN_NCOAT; k++) {
     order[n++] = g_pnMatCb[k];
     order[n++] = g_pnLay[k];
   }
-  for (int j = 0; j < g_pnNMat; j++) order[n++] = g_pnNorm[j];
+  for (int j = 0; j < g_pnNMat; j++) {
+    order[n++] = g_pnNorm[j];
+    if (j == g_pnSel) {
+      order[n++] = g_pnTare;
+      order[n++] = g_pnThin;
+      order[n++] = g_pnPct;
+    }
+  }
   if (g_pnNMat < PN_MAXMAT) {
     order[n++] = g_pnNewName;
     order[n++] = g_pnNewNorm;
   }
+  for (int i = 1; i < PN_NMETH; i++) order[n++] = g_pnLossEd[i - 1];
   for (int i = 0; i < n; i++)
     if (order[i] == cur) return order[(i + (back ? n - 1 : 1)) % n];
   return order[0];
@@ -1134,7 +1726,7 @@ static LRESULT CALLBACK PnFieldProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
   if (msg == WM_KEYDOWN && wParam == VK_RETURN && !(combo && SendMessageW(hwnd, CB_GETDROPPEDSTATE, 0, 0))) {
     int id = GetDlgCtrlID(hwnd);
     if (id == ID_PN_NEWNAME || id == ID_PN_NEWNORM) pn_add_mat();
-    else if (id < ID_PN_NORM0) PostMessageW(g_pnCanvas, WM_PN_ADD, 0, 0);
+    else if (id <= ID_PN_GOST) PostMessageW(g_pnCanvas, WM_PN_ADD, 0, 0); /* поля детали; нормы и потери — нет */
     return 0;
   }
   if (msg == WM_CHAR && (wParam == L'\r' || wParam == L'\t' || wParam == L'\n')) return 0; /* без писка */
@@ -1225,10 +1817,23 @@ static LRESULT CALLBACK PnCanvasProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
     SetFocus(hwnd);
     if (w >= 1 && w <= PN_NPROF) {
       pn_from_fields();
+      int was = g_pnCur.prof;
       g_pnCur.prof = w - 1;
       if (g_pnCur.prof == PN_ROUND) SetWindowTextW(g_pnD2, L"");
+      /* у швеллера, двутавра и «своей площади» размеры значат другое — не
+         переносим их с прошлого профиля (и обратно) */
+      int gw = was == PN_CHANNEL || was == PN_BEAM ? was : (was == PN_AREA ? 2 : 1);
+      int gn = g_pnCur.prof == PN_CHANNEL || g_pnCur.prof == PN_BEAM ? g_pnCur.prof : (g_pnCur.prof == PN_AREA ? 2 : 1);
+      if (gw != gn) {
+        g_pnFilling = TRUE;
+        HWND d[4] = {g_pnD1, g_pnD2, g_pnD3, g_pnD4};
+        for (int i = 0; i < 4; i++) SetWindowTextW(d[i], L"");
+        g_pnFilling = FALSE;
+      }
+      pn_from_fields(); /* лишние для этого профиля размеры — в ноль */
+      pn_fill_gost();
       pn_changed();
-      SetFocus(g_pnD1);
+      SetFocus(g_pnCur.prof == PN_CHANNEL || g_pnCur.prof == PN_BEAM ? g_pnGost : g_pnD1);
     } else if (w == 20 || w == 21) {
       pn_from_fields();
       if (w == 20) g_pnCur.ends = !g_pnCur.ends;
@@ -1248,6 +1853,16 @@ static LRESULT CALLBACK PnCanvasProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
       pn_add_mat();
     } else if (w == 41) {
       pn_reset_norms();
+    } else if (w == 42) {
+      pn_reset_loss();
+    } else if (w >= 50 && w < 50 + PN_NMETH) {
+      g_pnMeth = w - 50;
+      pn_changed();
+    } else if (w >= 2000 && w < 2000 + PN_MAXMAT) {
+      g_pnSel = g_pnSel == w - 2000 ? -1 : w - 2000;
+      pn_sel_to_fields();
+      pn_relayout();
+      if (g_pnSel >= 0) SetFocus(g_pnTare);
     } else if (w >= 100 && w < 100 + PN_MAXPART) {
       int i = w - 100;
       if (i < g_pnN) {
@@ -1285,7 +1900,32 @@ static LRESULT CALLBACK PnCanvasProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
         g_pnMat[j].norm = pn_parse((HWND)lParam);
         pn_changed();
       }
-    } else if (code == EN_CHANGE && id >= ID_PN_DESC && id <= ID_PN_LAY0 + PN_NCOAT - 1) {
+    } else if (code == EN_CHANGE && ((id >= ID_PN_DESC && id <= ID_PN_LAY0 + PN_NCOAT - 1) || id == ID_PN_D3 ||
+                                     id == ID_PN_D4)) {
+      pn_from_fields();
+      if (g_pnGost && ((id >= ID_PN_D1 && id <= ID_PN_D2) || id == ID_PN_D3 || id == ID_PN_D4)) {
+        g_pnFilling = TRUE; /* размеры поменяли руками — номер ГОСТ по ним */
+        SendMessageW(g_pnGost, CB_SETCURSEL, (WPARAM)(pn_rolled_find(&g_pnCur) + 1), 0);
+        g_pnFilling = FALSE;
+      }
+      pn_changed();
+    } else if (code == EN_CHANGE && id >= ID_PN_LOSS0 && id < ID_PN_LOSS0 + PN_NMETH - 1) {
+      double v = pn_parse((HWND)lParam);
+      g_pnLoss[id - ID_PN_LOSS0 + 1] = v >= 0 && v < 95 ? v : 0;
+      pn_changed();
+    } else if (code == EN_CHANGE && (id == ID_PN_TARE || id == ID_PN_THIN || id == ID_PN_PCT) && g_pnSel >= 0 &&
+               g_pnSel < g_pnNMat) {
+      PnMat *m = &g_pnMat[g_pnSel];
+      if (id == ID_PN_TARE) GetWindowTextW(g_pnTare, m->tare, 40);
+      if (id == ID_PN_THIN) GetWindowTextW(g_pnThin, m->thin, 40);
+      if (id == ID_PN_PCT) {
+        double v = pn_parse(g_pnPct);
+        m->thinPct = v >= 0 && v <= 100 ? v : 0;
+      }
+      pn_changed();
+    }
+    if (code == CBN_SELCHANGE && id == ID_PN_GOST) {
+      pn_gost_pick();
       pn_from_fields();
       pn_changed();
     }
@@ -1382,6 +2022,14 @@ static void paint_show(void) {
     SendMessageW(g_pnDesc, EM_SETLIMITTEXT, 78, 0);
     g_pnD1 = pn_edit(L"", ID_PN_D1);
     g_pnD2 = pn_edit(L"", ID_PN_D2);
+    g_pnD3 = pn_edit(L"", ID_PN_D3);
+    g_pnD4 = pn_edit(L"", ID_PN_D4);
+    g_pnGost = CreateWindowExW(0, L"COMBOBOX", L"", WS_CHILD | WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL, 0, 0, 100, 300,
+                               g_pnCanvas, (HMENU)(INT_PTR)ID_PN_GOST, g_inst, NULL);
+    SendMessageW(g_pnGost, WM_SETFONT, (WPARAM)g_pf[9], FALSE);
+    SendMessageW(g_pnGost, CB_SETITEMHEIGHT, (WPARAM)-1, PS(32));
+    SendMessageW(g_pnGost, CB_SETITEMHEIGHT, 0, PS(26));
+    g_pnOldCombo = (WNDPROC)SetWindowLongPtrW(g_pnGost, GWLP_WNDPROC, (LONG_PTR)PnFieldProc);
     g_pnLen = pn_edit(L"", ID_PN_LEN);
     g_pnQty = pn_edit(L"", ID_PN_QTY);
     for (int k = 0; k < PN_NCOAT; k++) {
@@ -1396,6 +2044,15 @@ static void paint_show(void) {
     g_pnNewName = pn_edit(L"", ID_PN_NEWNAME);
     SendMessageW(g_pnNewName, EM_SETLIMITTEXT, PN_NAME - 2, 0);
     g_pnNewNorm = pn_edit(L"", ID_PN_NEWNORM);
+    for (int i = 1; i < PN_NMETH; i++) g_pnLossEd[i - 1] = pn_edit(L"", ID_PN_LOSS0 + i - 1);
+    g_pnTare = pn_edit(L"", ID_PN_TARE);
+    g_pnThin = pn_edit(L"", ID_PN_THIN);
+    g_pnPct = pn_edit(L"", ID_PN_PCT);
+    SendMessageW(g_pnTare, EM_SETLIMITTEXT, 38, 0);
+    SendMessageW(g_pnThin, EM_SETLIMITTEXT, 38, 0);
+    ShowWindow(g_pnTare, SW_HIDE);
+    ShowWindow(g_pnThin, SW_HIDE);
+    ShowWindow(g_pnPct, SW_HIDE);
     pn_make_norm_fields();
     pn_to_fields();
     pn_relayout();
