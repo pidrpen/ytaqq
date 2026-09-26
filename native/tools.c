@@ -1,8 +1,9 @@
 /* ---- «Ещё»: инструменты из pidrpen/giriaja-hall -------------------------------
 
    Кнопка «Ещё» внизу окна — список: расчёт резки и газов, объединение
-   TIFF / PDF, сортировка TIFF A4 / A3. Все три — свои окна CursorPad
-   (cutting.c, tiffmerge.c, tiffsort.c): открываются сразу, сеть не нужна.
+   TIFF / PDF, сортировка TIFF A4 / A3, расчёт краски. Все — свои окна
+   CursorPad (cutting.c, tiffmerge.c, tiffsort.c, paint.c): открываются
+   сразу, сеть не нужна.
 
    Раньше (2026.09.23.29–.37) это были HTML-страницы giriaja-hall, вшитые в
    exe и открывавшиеся во встроенном Edge (WebView2); последней переписана
@@ -18,6 +19,7 @@ static const ToolPage kTools[] = {
     {L"Расчёт резки и газов", cutting_show},      /* с 2026.09.23.34 */
     {L"Объединение TIFF / PDF", tiffmerge_show},  /* с 2026.09.23.37 */
     {L"Сортировка TIFF A4 / A3", tiffsort_show}, /* с 2026.09.23.38 */
+    {L"Расчёт краски", paint_show},              /* с 2026.09.23.43 */
 };
 #define TOOLS_N ((int)(sizeof(kTools) / sizeof(kTools[0])))
 
@@ -40,6 +42,7 @@ static const MoreItem kMore[] = {
     {1, L"Расчёт резки и газов", NULL, RGB(0x1F, 0x6B, 0x5A), 0},
     {2, L"Объединение TIFF / PDF", NULL, RGB(0x25, 0x63, 0xEB), 0},
     {3, L"Сортировка TIFF A4 / A3", NULL, RGB(0xC9, 0xA2, 0x27), 0},
+    {4, L"Расчёт краски", NULL, RGB(0xB4, 0x4B, 0x2A), 0},
     {-1, NULL, NULL, 0, 0}, /* черта */
     {MORE_OCR, L"Выделить и прочитать", L"F6", 0, 0},
     {MORE_LAYOUT, L"Исправить раскладку", g_lfKeyName, 0, 0}, /* с 2026.09.23.42 */
@@ -174,7 +177,7 @@ static void upd_idle_tick(void) {
   if (g_tmExporting || g_tsExporting || g_tmLoadPending || g_tsLoadPending) return;
   for (int i = 0; i < 8; i++)
     if (g_msgInSlots[i]) return; /* на экране сообщение коллеги — перезапуск стёр бы его */
-  HWND busy[] = {g_cutWnd, g_tmWnd, g_tsWnd, g_ndWnd, g_msgOut};
+  HWND busy[] = {g_cutWnd, g_tmWnd, g_tsWnd, g_ndWnd, g_msgOut, g_pnWnd};
   for (size_t i = 0; i < sizeof(busy) / sizeof(busy[0]); i++)
     if (busy[i] && IsWindowVisible(busy[i]) && !IsIconic(busy[i])) return; /* открыто — не мешаем */
   KillTimer(g_hwnd, TIMER_UPD_IDLE);

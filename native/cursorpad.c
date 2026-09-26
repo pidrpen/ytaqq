@@ -3435,6 +3435,7 @@ static void create_settings(HWND owner) {
 }
 
 #include "cutting.c"
+#include "paint.c" /* расчёт краски — после резки: общие кирпичики рисования */
 #include "tiffmerge.c"
 #include "tiffsort.c"
 #include "nardy.c"
