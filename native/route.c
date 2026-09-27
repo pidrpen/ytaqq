@@ -60,6 +60,7 @@ typedef struct {
   volatile LONG *cancel;
   BOOL keysShown; /* поля строки техсостава — в подробности один раз */
   BOOL opsShown;  /* поля операции без цеха — тоже один раз */
+  int diagShown;  /* связи изделия без ТП и заготовки: 1 — сборки, 2 — детали */
   ULONGLONG t0;
 } RtJob;
 
@@ -139,11 +140,11 @@ static void rt_ws_code(const wchar_t *v, wchar_t *out, int cap) {
   L"CROSS APPLY (SELECT x.Id AS H, 0 AS P UNION SELECT x.Par, 2 "                           \
   L"UNION SELECT hc.Link, 1 FROM InfoObjectAttributes AS hc WITH(NOLOCK) "                  \
   L"JOIN NameKeys AS nhc WITH(NOLOCK) ON nhc.NameKeyId=hc.NameKeyId "                       \
-  L"AND nhc.Value=N'ProductConfiguration' "                                                 \
+  L"AND nhc.Value IN (N'ProductConfiguration',N'BaselineConfiguration') "                   \
   L"WHERE hc.OwnerId=x.Id AND hc.Outdated=0 AND ISNULL(hc.Link,0)<>0 "                     \
   L"UNION SELECT hp.Link, 3 FROM InfoObjectAttributes AS hp WITH(NOLOCK) "                  \
   L"JOIN NameKeys AS nhp WITH(NOLOCK) ON nhp.NameKeyId=hp.NameKeyId "                       \
-  L"AND nhp.Value=N'ProductConfiguration' "                                                 \
+  L"AND nhp.Value IN (N'ProductConfiguration',N'BaselineConfiguration') "                   \
   L"WHERE hp.OwnerId=x.Par AND hp.Outdated=0 AND ISNULL(hp.Link,0)<>0) AS h1 "             \
   L"CROSS APPLY (SELECT h1.H AS H, h1.P AS P UNION SELECT hi.Link, h1.P + 1 "               \
   L"FROM InfoObjectAttributes AS hi WITH(NOLOCK) "                                          \
@@ -155,26 +156,32 @@ static void rt_ws_code(const wchar_t *v, wchar_t *out, int cap) {
   L"JOIN NameKeys AS nk WITH(NOLOCK) ON nk.NameKeyId=a.NameKeyId "
 
 typedef struct {
-  wchar_t des[200], name[260], objName[260], section[120], mass[64], massUnit[40];
+  wchar_t des[200], name[260], objName[260], section[120], mass[64], massUnit[40], mat[200];
   long tpCard, pfCard, tcCard, prodConf;
   BOOL desAttr; /* обозначение — свой атрибут, а не из имени */
-  long id;
+  long id, par;
 } RtObj;
+
+static BOOL rt_looks_des(const wchar_t *s);
 
 static BOOL rt_obj(SQLHDBC dbc, long id, RtObj *o, CardRow *rows, RtJob *j) {
   memset(o, 0, sizeof(*o));
   wchar_t sql[3600], err[280];
-  _snwprintf(sql, 3600, L"SELECT TOP 1 o.InfoObjectId, o.Name, N'', 0, 0 FROM InfoObjects AS o WITH(NOLOCK) "
+  _snwprintf(sql, 3600, L"SELECT TOP 1 o.InfoObjectId, o.Name, N'', ISNULL(o.ParentId,0), 0 FROM InfoObjects AS o WITH(NOLOCK) "
                         L"WHERE o.InfoObjectId=%ld",
              id);
-  if (card_query(dbc, sql, rows, 2, err, 280) > 0) lstrcpynW(o->objName, rows[0].s1, 260);
+  if (card_query(dbc, sql, rows, 2, err, 280) > 0) {
+    lstrcpynW(o->objName, rows[0].s1, 260);
+    o->par = rows[0].n2;
+  }
   wchar_t ids[24];
   _snwprintf(ids, 24, L"%ld", id);
   _snwprintf(sql, 3600,
              L"SELECT TOP 80 h2.P, nk.Value, COALESCE(lo.Name, " CARD_VALUE_SQL L", N''), ISNULL(a.Link,0), "
              L"a.DataType " RT_HOLDERS(L"%s")
              L"AND nk.Value IN (N'Designation',N'Name',N'Section',N'Mass',N'MassMeasureUnit',"
-             L"N'TechnologicalProcessesCard',N'ProductPreformsCard',N'TechCompCard',N'ProductConfiguration') "
+             L"N'TechnologicalProcessesCard',N'ProductPreformsCard',N'TechCompCard',N'ProductConfiguration',"
+             L"N'BaselineConfiguration',N'Material',N'MaterialLink') "
              L"LEFT JOIN InfoObjects AS lo WITH(NOLOCK) ON a.DataType=6 AND lo.InfoObjectId=a.Link "
              L"ORDER BY h2.P",
              ids);
@@ -185,13 +192,17 @@ static BOOL rt_obj(SQLHDBC dbc, long id, RtObj *o, CardRow *rows, RtJob *j) {
     return FALSE;
   }
   /* ближнее (само изделие) важнее дальнего (родитель, карта) — берём первое */
+  long desP = 0;
   for (int i = 0; i < n; i++) {
     const wchar_t *k = rows[i].s1, *v = rows[i].s2;
     long link = rows[i].n2;
     if (!_wcsicmp(k, L"Designation") && !o->des[0] && v[0]) {
       lstrcpynW(o->des, v, 200);
       o->desAttr = TRUE;
+      desP = rows[i].n1;
     }
+    else if ((!_wcsicmp(k, L"Material") || !_wcsicmp(k, L"MaterialLink")) && !o->mat[0] && v[0])
+      lstrcpynW(o->mat, v, 200);
     else if (!_wcsicmp(k, L"Name") && !o->name[0] && v[0]) lstrcpynW(o->name, v, 260);
     else if (!_wcsicmp(k, L"Section") && !o->section[0] && v[0]) lstrcpynW(o->section, v, 120);
     else if (!_wcsicmp(k, L"Mass") && !o->mass[0] && v[0]) lstrcpynW(o->mass, v, 64);
@@ -200,8 +211,19 @@ static BOOL rt_obj(SQLHDBC dbc, long id, RtObj *o, CardRow *rows, RtJob *j) {
     else if (!_wcsicmp(k, L"ProductPreformsCard") && !o->pfCard) o->pfCard = link;
     else if (!_wcsicmp(k, L"TechCompCard") && !o->tcCard) o->tcCard = link;
     else if (!_wcsicmp(k, L"ProductConfiguration") && !o->prodConf) o->prodConf = link;
+    else if (!_wcsicmp(k, L"BaselineConfiguration") && !o->prodConf) o->prodConf = link;
   }
   o->id = id;
+  /* обозначение не своё, а родителя или карты («АДЕ … 00.02» у сборки 00.00,
+     «01.00СБ» у кронштейна) — своё имя объекта точнее, если в нём оно есть */
+  if (desP > 0 && o->objName[0]) {
+    wchar_t nd[200];
+    card_des_from_name(o->objName, nd, 200);
+    if (rt_looks_des(nd) && _wcsicmp(nd, o->des)) {
+      rt_log(j, L"    обозначение «%s» — из связанного объекта, по имени «%s»\r\n", o->des, nd);
+      lstrcpynW(o->des, nd, 200);
+    }
+  }
   /* карточки — ещё и тем же запросом, что у карточки и столбца «Заготовка»
      в поиске (PLM_HOLDERS): он на этой базе проверен */
   if (!o->pfCard || !o->tcCard || !o->tpCard || !o->prodConf) {
@@ -221,8 +243,32 @@ static BOOL rt_obj(SQLHDBC dbc, long id, RtObj *o, CardRow *rows, RtJob *j) {
     }
     if (m < 0) rt_log(j, L"    карточки %ld: запрос не выполнился — %s\r\n", id, err);
   }
-  rt_log(j, L"    карточки: ТП %ld, заготовок %ld, техсостава %ld, конфигурация %ld\r\n", o->tpCard, o->pfCard,
-         o->tcCard, o->prodConf);
+  /* карта взаимосвязей сама ссылается на конфигурацию (Product) — ищем с её
+     стороны: так находятся карточки, когда у конфигурации ссылки на карту нет
+     или карт несколько */
+  if (!o->pfCard || !o->tpCard) {
+    _snwprintf(sql, 3600,
+               L"SELECT DISTINCT TOP 20 ca.Link, nkc.Value, N'', 0, 0 "
+               L"FROM InfoObjectAttributes AS pr WITH(NOLOCK) "
+               L"JOIN NameKeys AS nkpr WITH(NOLOCK) ON nkpr.NameKeyId=pr.NameKeyId AND nkpr.Value=N'Product' "
+               L"JOIN InfoObjectAttributes AS ca WITH(NOLOCK) ON ca.OwnerId=pr.OwnerId AND ca.Outdated=0 "
+               L"AND ISNULL(ca.Link,0)<>0 AND ISNULL(ca.CollectionElementId,0)=0 "
+               L"JOIN NameKeys AS nkc WITH(NOLOCK) ON nkc.NameKeyId=ca.NameKeyId "
+               L"AND nkc.Value IN (N'ProductPreformsCard',N'TechCompCard',N'TechnologicalProcessesCard') "
+               L"WHERE pr.Link IN (%ld,%ld,%ld) AND pr.Outdated=0 AND ISNULL(pr.CollectionElementId,0)=0",
+               id, o->prodConf ? o->prodConf : id, o->par ? o->par : id);
+    sql[3599] = 0;
+    int m = card_query(dbc, sql, rows, 20, err, 280);
+    int got = 0;
+    for (int i = 0; i < m; i++) {
+      const wchar_t *k = rows[i].s1;
+      if (!_wcsicmp(k, L"ProductPreformsCard") && !o->pfCard) o->pfCard = rows[i].n1, got++;
+      else if (!_wcsicmp(k, L"TechCompCard") && !o->tcCard) o->tcCard = rows[i].n1, got++;
+      else if (!_wcsicmp(k, L"TechnologicalProcessesCard") && !o->tpCard) o->tpCard = rows[i].n1, got++;
+    }
+    if (got) rt_log(j, L"    карточки %ld: нашлись по обратной ссылке (Product)\r\n", id);
+    if (m < 0) rt_log(j, L"    карточки %ld по Product: запрос не выполнился — %s\r\n", id, err);
+  }
   /* своего обозначения нет (конфигурация версии) — из начала имени */
   if (!o->des[0] && o->objName[0]) card_des_from_name(o->objName, o->des, 200);
   if (!o->name[0] && o->objName[0]) card_title_from_name(o->objName, o->name, 260);
@@ -534,11 +580,17 @@ static int rt_children(SQLHDBC dbc, const RtObj *o, CardRow *rows, RtJob *j, RtE
     RtEl x;
     memset(&x, 0, sizeof(x));
     x.qty = 1;
-    BOOL childDes = FALSE;
+    BOOL childDes = FALSE, childProd = FALSE;
     for (int i = 0; i < m; i++) {
       if (ar[i].n1 != ids[e]) continue;
-      /* ссылок в строке бывает несколько — берём ту, что похожа на изделие */
-      if (ar[i].n3 == 6 && ar[i].n2 && (!x.child || (!childDes && rt_looks_des(ar[i].s2)))) {
+      /* ссылок в строке бывает несколько (изделие, документ, версия) — сперва
+         Product, как в PlmApi; нет его — та, что похожа на обозначение */
+      if (ar[i].n3 == 6 && ar[i].n2 && !_wcsicmp(ar[i].s1, L"Product")) {
+        if (!childProd) x.child = ar[i].n2;
+        childProd = TRUE;
+      }
+      else if (ar[i].n3 == 6 && ar[i].n2 && !childProd &&
+               (!x.child || (!childDes && rt_looks_des(ar[i].s2)))) {
         x.child = ar[i].n2;
         childDes = rt_looks_des(ar[i].s2);
       }
@@ -553,16 +605,66 @@ static int rt_children(SQLHDBC dbc, const RtObj *o, CardRow *rows, RtJob *j, RtE
     }
     if (!j->keysShown) {
       j->keysShown = TRUE;
-      rt_log(j, L"    поля строки техсостава:");
-      for (int i = 0; i < m; i++)
-        if (ar[i].n1 == ids[e]) rt_log(j, L" %s=%s", ar[i].s1, ar[i].s2[0] ? ar[i].s2 : L"·");
-      rt_log(j, L"\r\n");
+      rt_log(j, L"    поля строки техсостава:\r\n");
+      for (int i = 0; i < m; i++) {
+        if (ar[i].n1 != ids[e]) continue;
+        if (ar[i].n3 == 6) rt_log(j, L"      %s = %s (#%ld)\r\n", ar[i].s1, ar[i].s2[0] ? ar[i].s2 : L"·", ar[i].n2);
+        else rt_log(j, L"      %s = %s\r\n", ar[i].s1, ar[i].s2[0] ? ar[i].s2 : L"·");
+      }
     }
     if (x.child) el[out++] = x;
   }
   free(ar);
   rt_log(j, L"    в техсоставе строк %d, со ссылкой %d\r\n", used, out);
   return out;
+}
+
+/* документ (сборочный чертёж и т.п.) — код документа после обозначения:
+   «…00.00СБ», «…ВО», «…Э3» */
+static BOOL rt_is_doc(const wchar_t *des, const wchar_t *objName) {
+  size_t n = wcslen(des), k = n;
+  while (k > 0 && iswdigit(des[k - 1]) && n - k < 2) k--;
+  size_t e = k;
+  while (k > 0 && des[k - 1] >= L'А' && des[k - 1] <= L'Я') k--;
+  size_t letters = e - k;
+  BOOL code = k > 0 && iswdigit(des[k - 1]) && (letters >= 2 ? letters <= 3 : letters == 1 && e < n);
+  wchar_t low[260];
+  lstrcpynW(low, objName, 260);
+  CharLowerBuffW(low, (DWORD)wcslen(low));
+  return code || wcsstr(low, L"чертеж") || wcsstr(low, L"чертёж");
+}
+
+/* ни ТП, ни заготовки — один раз выписать, с чем изделие связано: ссылки
+   его самого и родителя и кто ссылается на него; по этому видно, где карточки */
+static void rt_diag(SQLHDBC dbc, const RtObj *o, CardRow *rows, RtJob *j) {
+  wchar_t sql[2400], err[280];
+  _snwprintf(sql, 2400,
+             L"SELECT TOP 80 a.OwnerId, nk.Value, ISNULL(CAST(lo.Name AS NVARCHAR(200)),N''), ISNULL(a.Link,0), "
+             L"0 FROM InfoObjectAttributes AS a WITH(NOLOCK) "
+             L"JOIN NameKeys AS nk WITH(NOLOCK) ON nk.NameKeyId=a.NameKeyId "
+             L"LEFT JOIN InfoObjects AS lo WITH(NOLOCK) ON lo.InfoObjectId=a.Link "
+             L"WHERE a.OwnerId IN (%ld,%ld,%ld) AND a.Outdated=0 AND a.DataType=6 AND ISNULL(a.Link,0)<>0 "
+             L"AND ISNULL(a.CollectionElementId,0)=0 ORDER BY a.OwnerId, nk.Value",
+             o->id, o->par ? o->par : o->id, o->prodConf ? o->prodConf : o->id);
+  int n = card_query(dbc, sql, rows, 80, err, 280);
+  rt_log(j, L"    связи %ld (родитель %ld, конфигурация %ld):\r\n", o->id, o->par, o->prodConf);
+  if (n < 0) rt_log(j, L"      запрос не выполнился — %s\r\n", err);
+  for (int i = 0; i < n; i++)
+    rt_log(j, L"      %ld · %s → %s (#%ld)\r\n", rows[i].n1, rows[i].s1, rows[i].s2[0] ? rows[i].s2 : L"·",
+           rows[i].n2);
+  _snwprintf(sql, 2400,
+             L"SELECT TOP 30 a.OwnerId, nk.Value, ISNULL(CAST(ow.Name AS NVARCHAR(200)),N''), a.Link, "
+             L"ISNULL(a.CollectionElementId,0) FROM InfoObjectAttributes AS a WITH(NOLOCK) "
+             L"JOIN NameKeys AS nk WITH(NOLOCK) ON nk.NameKeyId=a.NameKeyId "
+             L"JOIN InfoObjects AS ow WITH(NOLOCK) ON ow.InfoObjectId=a.OwnerId AND ow.Erased=0 "
+             L"WHERE a.Link IN (%ld,%ld) AND a.Outdated=0 AND a.DataType=6 ORDER BY nk.Value, a.OwnerId",
+             o->id, o->prodConf ? o->prodConf : o->id);
+  n = card_query(dbc, sql, rows, 30, err, 280);
+  rt_log(j, L"    на него ссылаются:\r\n");
+  if (n < 0) rt_log(j, L"      запрос не выполнился — %s\r\n", err);
+  for (int i = 0; i < n; i++)
+    rt_log(j, L"      %s (#%ld) · %s → #%ld%s\r\n", rows[i].s2[0] ? rows[i].s2 : L"·", rows[i].n1, rows[i].s1,
+           rows[i].n2, rows[i].n3 ? L" (в строке списка)" : L"");
 }
 
 static void rt_walk(SQLHDBC dbc, long id, int level, const wchar_t *parentDes, double qty, BOOL qtyFound,
@@ -575,6 +677,10 @@ static void rt_walk(SQLHDBC dbc, long id, int level, const wchar_t *parentDes, d
   BOOL product = o.desAttr || o.tpCard || o.pfCard || o.tcCard;
   if (level > 0 && (!product || !rt_looks_des(o.des) || (elSection && wcsstr(elSection, L"атериал")))) {
     rt_log(j, L"  %*s· пропуск «%s» — нет обозначения (материал?)\r\n", level * 2, L"", o.objName);
+    return;
+  }
+  if (level > 0 && (rt_is_doc(o.des, o.objName) || (elSection && wcsstr(elSection, L"окумент")))) {
+    rt_log(j, L"  %*s· пропуск «%s» — документ\r\n", level * 2, L"", o.objName);
     return;
   }
   RtRow *r = &j->rows[j->n++];
@@ -593,9 +699,16 @@ static void rt_walk(SQLHDBC dbc, long id, int level, const wchar_t *parentDes, d
   rt_log(j, L"%*s%s %s (%ld), кол-во %s%s\r\n", level * 2, L"", o.des, o.name, id, r->f[RC_QTY],
          level && !qtyFound ? L" (поле количества не найдено — 1)" : L"");
   if (j->notify) PostMessageW(j->notify, WM_RT_PROGRESS, (WPARAM)j->n, 0);
+  rt_log(j, L"    карточки: ТП %ld, заготовок %ld, техсостава %ld, конфигурация %ld\r\n", o.tpCard, o.pfCard,
+         o.tcCard, o.prodConf);
+  if (!o.tpCard && !o.pfCard && !(j->diagShown & (level ? 2 : 1))) {
+    j->diagShown |= level ? 2 : 1;
+    rt_diag(dbc, &o, rows, j);
+  }
   wchar_t notes[3][60] = {L"", L"", L""};
   rt_route(dbc, &o, rows, j, r->f[RC_ROUTE], 200, notes[0], 60);
   rt_preform(dbc, o.pfCard, rows, j, r, notes[1], 60);
+  if (!r->f[RC_MAT][0] && o.mat[0]) lstrcpynW(r->f[RC_MAT], o.mat, 200); /* без заготовки — материал изделия */
   if (r->hasNorm) rt_fmt(r->norm1 * r->qtyTot, 3, r->f[RC_NORMTOT], 200);
   if (level && !qtyFound) lstrcpynW(notes[2], L"кол-во не найдено", 60);
   RtEl *el = (RtEl *)malloc(sizeof(RtEl) * 150);
