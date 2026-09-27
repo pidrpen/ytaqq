@@ -25,7 +25,8 @@
      • материал, сортамент, припуск, норма — заготовка (как в карточке:
        обход pf_explore), масса — Mass изделия;
      • маршрут — цеха операций основного ТП по порядку, через «;»:
-       WorkShop операции или её TSOperation, из названия цеха — номер.
+       участок (Area) операции или её TSOperation, нет участка — цех
+       (WorkShop); из названия — номер.
    Чего не нашлось — пишется в «Примечание», а весь проход — в «Подробности»:
    его можно прислать, если где-то пусто. Через компьютер коллеги
    (раздача PLM) — тот же сбор у него, ответ целиком. */
@@ -357,7 +358,8 @@ static void rt_route(SQLHDBC dbc, const RtObj *o, CardRow *rows, RtJob *j, wchar
              ver);
   int k = card_query(dbc, sql, rows, 2, err, 280);
   long parent = (k > 0 && rows[0].n1) ? rows[0].n1 : ver;
-  /* операции по порядку и цех каждой: свой WorkShop или у TSOperation */
+  /* операции по порядку и участок каждой: Area (с 2026.09.23.49 — прежде
+     цеха: в ведомости маршрут по участкам), нет — WorkShop; своё или у TSOperation */
   _snwprintf(sql, 3600,
              L"SELECT TOP 200 ch.InfoObjectId, ISNULL(ws.V,N''), ch.Name, ISNULL(num.N,0), 0 "
              L"FROM InfoObjects AS ch WITH(NOLOCK) "
@@ -370,7 +372,7 @@ static void rt_route(SQLHDBC dbc, const RtObj *o, CardRow *rows, RtJob *j, wchar
              L"LEFT JOIN InfoObjects AS lo WITH(NOLOCK) ON a.DataType=6 AND lo.InfoObjectId=a.Link "
              L"WHERE a.OwnerId IN (ch.InfoObjectId, ISNULL(op.L,0)) AND a.Outdated=0 "
              L"AND NULLIF(COALESCE(lo.Name, " CARD_VALUE_SQL L", N''), N'') IS NOT NULL "
-             L"ORDER BY CASE WHEN nkw.Value=N'WorkShop' THEN 0 ELSE 1 END, "
+             L"ORDER BY CASE WHEN nkw.Value=N'Area' THEN 0 ELSE 1 END, "
              L"CASE WHEN a.OwnerId=ch.InfoObjectId THEN 0 ELSE 1 END) AS ws "
              L"OUTER APPLY (SELECT TOP 1 ISNULL(nn.IntegerNumber,0) AS N "
              L"FROM InfoObjectAttributes AS nn WITH(NOLOCK) "
@@ -398,10 +400,10 @@ static void rt_route(SQLHDBC dbc, const RtObj *o, CardRow *rows, RtJob *j, wchar
     size_t l = wcslen(out);
     if (l + wcslen(code) + 2 >= (size_t)cap) break;
     _snwprintf(out + l, cap - l, L"%s%s", l ? L";" : L"", code);
-    if (!used) rt_log(j, L"    цех первой операции: «%s» → %s\r\n", rows[i].s1, code);
+    if (!used) rt_log(j, L"    участок первой операции: «%s» → %s\r\n", rows[i].s1, code);
     used++;
   }
-  rt_log(j, L"    операций %d, с цехом %d\r\n", n, used);
+  rt_log(j, L"    операций %d, с участком или цехом %d\r\n", n, used);
   if (!used && n > 0 && !j->opsShown) {
     j->opsShown = TRUE;
     long op0 = rows[0].n1;
@@ -417,11 +419,11 @@ static void rt_route(SQLHDBC dbc, const RtObj *o, CardRow *rows, RtJob *j, wchar
                op0, op0);
     sql[3599] = 0;
     int k2 = card_query(dbc, sql, rows, 60, err, 280);
-    rt_log(j, L"    поля операции %ld (цеха в них не нашлось):", op0);
+    rt_log(j, L"    поля операции %ld (участка и цеха в них не нашлось):", op0);
     for (int i = 0; i < k2; i++) rt_log(j, L" %s=%s", rows[i].s1, rows[i].s2[0] ? rows[i].s2 : L"·");
     rt_log(j, L"\r\n");
   }
-  if (!used) lstrcpynW(note, n ? L"у операций нет цеха" : L"в ТП нет операций", ncap);
+  if (!used) lstrcpynW(note, n ? L"у операций нет участка" : L"в ТП нет операций", ncap);
   (void)blank;
 }
 
