@@ -59,6 +59,7 @@ typedef struct {
   HWND notify;
   volatile LONG *cancel;
   BOOL keysShown; /* поля строки техсостава — в подробности один раз */
+  BOOL opsShown;  /* поля операции без цеха — тоже один раз */
   ULONGLONG t0;
 } RtJob;
 
@@ -139,7 +140,11 @@ static void rt_ws_code(const wchar_t *v, wchar_t *out, int cap) {
   L"UNION SELECT hc.Link, 1 FROM InfoObjectAttributes AS hc WITH(NOLOCK) "                  \
   L"JOIN NameKeys AS nhc WITH(NOLOCK) ON nhc.NameKeyId=hc.NameKeyId "                       \
   L"AND nhc.Value=N'ProductConfiguration' "                                                 \
-  L"WHERE hc.OwnerId=x.Id AND hc.Outdated=0 AND ISNULL(hc.Link,0)<>0) AS h1 "              \
+  L"WHERE hc.OwnerId=x.Id AND hc.Outdated=0 AND ISNULL(hc.Link,0)<>0 "                     \
+  L"UNION SELECT hp.Link, 3 FROM InfoObjectAttributes AS hp WITH(NOLOCK) "                  \
+  L"JOIN NameKeys AS nhp WITH(NOLOCK) ON nhp.NameKeyId=hp.NameKeyId "                       \
+  L"AND nhp.Value=N'ProductConfiguration' "                                                 \
+  L"WHERE hp.OwnerId=x.Par AND hp.Outdated=0 AND ISNULL(hp.Link,0)<>0) AS h1 "             \
   L"CROSS APPLY (SELECT h1.H AS H, h1.P AS P UNION SELECT hi.Link, h1.P + 1 "               \
   L"FROM InfoObjectAttributes AS hi WITH(NOLOCK) "                                          \
   L"JOIN NameKeys AS nhi WITH(NOLOCK) ON nhi.NameKeyId=hi.NameKeyId "                       \
@@ -153,6 +158,7 @@ typedef struct {
   wchar_t des[200], name[260], objName[260], section[120], mass[64], massUnit[40];
   long tpCard, pfCard, tcCard, prodConf;
   BOOL desAttr; /* обозначение — свой атрибут, а не из имени */
+  long id;
 } RtObj;
 
 static BOOL rt_obj(SQLHDBC dbc, long id, RtObj *o, CardRow *rows, RtJob *j) {
@@ -195,6 +201,28 @@ static BOOL rt_obj(SQLHDBC dbc, long id, RtObj *o, CardRow *rows, RtJob *j) {
     else if (!_wcsicmp(k, L"TechCompCard") && !o->tcCard) o->tcCard = link;
     else if (!_wcsicmp(k, L"ProductConfiguration") && !o->prodConf) o->prodConf = link;
   }
+  o->id = id;
+  /* карточки — ещё и тем же запросом, что у карточки и столбца «Заготовка»
+     в поиске (PLM_HOLDERS): он на этой базе проверен */
+  if (!o->pfCard || !o->tcCard || !o->tpCard || !o->prodConf) {
+    _snwprintf(sql, 3600,
+               L"SELECT DISTINCT TOP 20 pa.Link, nkp.Value, N'', 0, 0 " PLM_HOLDERS(L"%s")
+               L"AND nkp.Value IN (N'ProductPreformsCard',N'TechCompCard',N'ProductConfiguration',"
+               L"N'TechnologicalProcessesCard')",
+               ids);
+    sql[3599] = 0;
+    int m = card_query(dbc, sql, rows, 20, err, 280);
+    for (int i = 0; i < m; i++) {
+      const wchar_t *k = rows[i].s1;
+      if (!_wcsicmp(k, L"ProductPreformsCard") && !o->pfCard) o->pfCard = rows[i].n1;
+      else if (!_wcsicmp(k, L"TechCompCard") && !o->tcCard) o->tcCard = rows[i].n1;
+      else if (!_wcsicmp(k, L"ProductConfiguration") && !o->prodConf) o->prodConf = rows[i].n1;
+      else if (!_wcsicmp(k, L"TechnologicalProcessesCard") && !o->tpCard) o->tpCard = rows[i].n1;
+    }
+    if (m < 0) rt_log(j, L"    карточки %ld: запрос не выполнился — %s\r\n", id, err);
+  }
+  rt_log(j, L"    карточки: ТП %ld, заготовок %ld, техсостава %ld, конфигурация %ld\r\n", o->tpCard, o->pfCard,
+         o->tcCard, o->prodConf);
   /* своего обозначения нет (конфигурация версии) — из начала имени */
   if (!o->des[0] && o->objName[0]) card_des_from_name(o->objName, o->des, 200);
   if (!o->name[0] && o->objName[0]) card_title_from_name(o->objName, o->name, 260);
@@ -235,6 +263,37 @@ static void rt_route(SQLHDBC dbc, const RtObj *o, CardRow *rows, RtJob *j, wchar
       rt_log(j, L"    ТП: %s (%ld)%s\r\n", rows[0].s1, tp, _wcsicmp(rows[0].s2, L"да") ? L", не помечен основным" : L"");
     }
   }
+  if (!tp) { /* техпроцесс ссылается на изделие (ManufacturedProducts) — одиночно или списком */
+    _snwprintf(sql, 3600,
+               L"SELECT TOP 10 tp.InfoObjectId, tp.Name, ISNULL(flag.V,N'нет'), ISNULL(av.L,0), 0 "
+               L"FROM (SELECT a.OwnerId AS T FROM InfoObjectAttributes AS a WITH(NOLOCK) "
+               L"JOIN NameKeys AS nk WITH(NOLOCK) ON nk.NameKeyId=a.NameKeyId AND nk.Value=N'ManufacturedProducts' "
+               L"WHERE a.Link IN (%ld,%ld) AND a.Outdated=0 "
+               L"UNION SELECT la.OwnerId FROM InfoObjectAttributes AS ea WITH(NOLOCK) "
+               L"JOIN InfoObjectCollectionElements AS ce WITH(NOLOCK) "
+               L"ON ce.CollectionElementId=ea.CollectionElementId AND ce.Outdated=0 "
+               L"JOIN InfoObjectAttributes AS la WITH(NOLOCK) ON la.AttributeId=ce.AttributeId "
+               L"JOIN NameKeys AS nkl WITH(NOLOCK) ON nkl.NameKeyId=la.NameKeyId AND nkl.Value=N'ManufacturedProducts' "
+               L"WHERE ea.Link IN (%ld,%ld) AND ea.DataType=6 AND ea.Outdated=0) AS m "
+               L"JOIN InfoObjects AS tp WITH(NOLOCK) ON tp.InfoObjectId=m.T AND tp.Erased=0 "
+               L"CROSS APPLY (SELECT TOP 1 ISNULL(iv.Link,0) AS L FROM InfoObjectAttributes AS iv WITH(NOLOCK) "
+               L"JOIN NameKeys AS nkv WITH(NOLOCK) ON nkv.NameKeyId=iv.NameKeyId AND nkv.Value=N'ActualVersion' "
+               L"WHERE iv.OwnerId=tp.InfoObjectId AND iv.Outdated=0) AS av "
+               L"OUTER APPLY (SELECT TOP 1 N'да' AS V FROM InfoObjectAttributes AS ia WITH(NOLOCK) "
+               L"JOIN NameKeys AS nki WITH(NOLOCK) ON nki.NameKeyId=ia.NameKeyId "
+               L"WHERE ia.OwnerId=tp.InfoObjectId AND ia.Outdated=0 "
+               L"AND nki.Value IN (N'MainTP',N'IsActual') AND ia.BoolValue=1) AS flag "
+               L"WHERE av.L>0 ORDER BY CASE WHEN flag.V=N'да' THEN 0 ELSE 1 END, tp.InfoObjectId",
+               o->id, o->prodConf ? o->prodConf : o->id, o->id, o->prodConf ? o->prodConf : o->id);
+    int n = card_query(dbc, sql, rows, 10, err, 280);
+    if (n > 0) {
+      tp = rows[0].n1;
+      ver = rows[0].n2;
+      rt_log(j, L"    ТП по ссылке из техпроцесса: %s (%ld)\r\n", rows[0].s1, tp);
+    } else if (n < 0) {
+      rt_log(j, L"    ТП по ссылке: запрос не выполнился — %s\r\n", err);
+    }
+  }
   if (!tp && o->des[0]) { /* как карточка: по обозначению среди техпроцессов */
     CardOut none = {NULL, 0, 0};
     tp = card_tp_by_designation(dbc, o->des, &none, rows, err, &ver);
@@ -261,10 +320,12 @@ static void rt_route(SQLHDBC dbc, const RtObj *o, CardRow *rows, RtJob *j, wchar
              L"WHERE ts.OwnerId=ch.InfoObjectId AND ts.Outdated=0) AS op "
              L"OUTER APPLY (SELECT TOP 1 COALESCE(lo.Name, " CARD_VALUE_SQL L", N'') AS V "
              L"FROM InfoObjectAttributes AS a WITH(NOLOCK) "
-             L"JOIN NameKeys AS nkw WITH(NOLOCK) ON nkw.NameKeyId=a.NameKeyId AND nkw.Value=N'WorkShop' "
+             L"JOIN NameKeys AS nkw WITH(NOLOCK) ON nkw.NameKeyId=a.NameKeyId AND nkw.Value IN (N'WorkShop',N'Area') "
              L"LEFT JOIN InfoObjects AS lo WITH(NOLOCK) ON a.DataType=6 AND lo.InfoObjectId=a.Link "
              L"WHERE a.OwnerId IN (ch.InfoObjectId, ISNULL(op.L,0)) AND a.Outdated=0 "
-             L"ORDER BY CASE WHEN a.OwnerId=ch.InfoObjectId THEN 0 ELSE 1 END) AS ws "
+             L"AND NULLIF(COALESCE(lo.Name, " CARD_VALUE_SQL L", N''), N'') IS NOT NULL "
+             L"ORDER BY CASE WHEN nkw.Value=N'WorkShop' THEN 0 ELSE 1 END, "
+             L"CASE WHEN a.OwnerId=ch.InfoObjectId THEN 0 ELSE 1 END) AS ws "
              L"OUTER APPLY (SELECT TOP 1 ISNULL(nn.IntegerNumber,0) AS N "
              L"FROM InfoObjectAttributes AS nn WITH(NOLOCK) "
              L"JOIN NameKeys AS nkn WITH(NOLOCK) ON nkn.NameKeyId=nn.NameKeyId "
@@ -295,6 +356,25 @@ static void rt_route(SQLHDBC dbc, const RtObj *o, CardRow *rows, RtJob *j, wchar
     used++;
   }
   rt_log(j, L"    операций %d, с цехом %d\r\n", n, used);
+  if (!used && n > 0 && !j->opsShown) {
+    j->opsShown = TRUE;
+    long op0 = rows[0].n1;
+    _snwprintf(sql, 3600,
+               L"SELECT TOP 60 a.OwnerId, nk.Value, COALESCE(lo.Name, " CARD_VALUE_SQL L", N''), 0, a.DataType "
+               L"FROM InfoObjectAttributes AS a WITH(NOLOCK) "
+               L"JOIN NameKeys AS nk WITH(NOLOCK) ON nk.NameKeyId=a.NameKeyId "
+               L"LEFT JOIN InfoObjects AS lo WITH(NOLOCK) ON a.DataType=6 AND lo.InfoObjectId=a.Link "
+               L"WHERE a.Outdated=0 AND ISNULL(a.CollectionElementId,0)=0 AND a.OwnerId IN (%ld, "
+               L"ISNULL((SELECT TOP 1 ts.Link FROM InfoObjectAttributes AS ts WITH(NOLOCK) "
+               L"JOIN NameKeys AS nkt WITH(NOLOCK) ON nkt.NameKeyId=ts.NameKeyId AND nkt.Value=N'TSOperation' "
+               L"WHERE ts.OwnerId=%ld AND ts.Outdated=0),0)) ORDER BY a.OwnerId, nk.Value",
+               op0, op0);
+    sql[3599] = 0;
+    int k2 = card_query(dbc, sql, rows, 60, err, 280);
+    rt_log(j, L"    поля операции %ld (цеха в них не нашлось):", op0);
+    for (int i = 0; i < k2; i++) rt_log(j, L" %s=%s", rows[i].s1, rows[i].s2[0] ? rows[i].s2 : L"·");
+    rt_log(j, L"\r\n");
+  }
   if (!used) lstrcpynW(note, n ? L"у операций нет цеха" : L"в ТП нет операций", ncap);
   (void)blank;
 }
