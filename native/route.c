@@ -389,6 +389,7 @@ static void rt_route(SQLHDBC dbc, const RtObj *o, CardRow *rows, RtJob *j, wchar
     return;
   }
   int used = 0, blank = 0;
+  wchar_t last[40] = L"";
   for (int i = 0; i < n; i++) {
     if (!rows[i].s1[0]) {
       blank++;
@@ -397,6 +398,11 @@ static void rt_route(SQLHDBC dbc, const RtObj *o, CardRow *rows, RtJob *j, wchar
     wchar_t code[40];
     rt_ws_code(rows[i].s1, code, 40);
     if (!code[0]) continue;
+    if (!wcscmp(code, last)) { /* тот же участок подряд — один раз: «31;31;12» → «31;12» */
+      used++;
+      continue;
+    }
+    lstrcpynW(last, code, 40);
     size_t l = wcslen(out);
     if (l + wcslen(code) + 2 >= (size_t)cap) break;
     _snwprintf(out + l, cap - l, L"%s%s", l ? L";" : L"", code);
