@@ -263,7 +263,7 @@ static int share_serve_child(const wchar_t *reqPath, const wchar_t *ansPath) {
   wchar_t *req = share_read(reqPath);
   if (!req) return 1;
   wchar_t kind[16] = L"", q[400] = L"", from[200] = L"", idl[1400] = L"", rdes[200] = L"", rorder[120] = L"";
-  long id = 0;
+  long id = 0, rid = 0;
   BOOL verbose = FALSE;
   wchar_t *p = req, *line;
   while ((line = share_next_line(&p)) != NULL) {
@@ -278,6 +278,7 @@ static int share_serve_child(const wchar_t *reqPath, const wchar_t *ansPath) {
     else if (!wcscmp(f[0], L"ids")) lstrcpynW(idl, f[1], 1400);
     else if (!wcscmp(f[0], L"des")) lstrcpynW(rdes, f[1], 200);
     else if (!wcscmp(f[0], L"order")) lstrcpynW(rorder, f[1], 120);
+    else if (!wcscmp(f[0], L"rid")) rid = wcstol(f[1], NULL, 10);
   }
   free(req);
   wchar_t user[128], pc[64];
@@ -355,6 +356,7 @@ static int share_serve_child(const wchar_t *reqPath, const wchar_t *ansPath) {
     if (j) {
       lstrcpynW(j->des, rdes, 200);
       lstrcpynW(j->order, rorder, 120);
+      j->rootId = rid;
       j->deadline = GetTickCount64() + 80000; /* исполнителя снимают через 90 с */
       rt_log(j, L"Маршрутная ведомость: %s (сбор у коллеги)\r\n", rdes);
       rt_build(j);
@@ -784,7 +786,7 @@ static void share_route(RtJob *j) {
     if (*c == L'\t' || *c == L'\r' || *c == L'\n') *c = L' ';
   for (wchar_t *c = o; *c; c++)
     if (*c == L'\t' || *c == L'\r' || *c == L'\n') *c = L' ';
-  _snwprintf(body, 400, L"kind\troute\ndes\t%s\norder\t%s", d, o);
+  _snwprintf(body, 400, L"kind\troute\ndes\t%s\norder\t%s\nrid\t%ld", d, o, j->rootId);
   body[399] = 0;
   wchar_t out[600];
   wchar_t *a = share_ask(body, L"-rt", 100, out, 600);

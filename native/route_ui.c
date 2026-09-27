@@ -13,6 +13,8 @@ static RtJob *g_rtJob;  /* последняя собранная ведомос�
 static volatile LONG g_rtBusy, g_rtCancel;
 static wchar_t g_rtStatus[300];
 static float g_rtS = 1.0f;
+static long g_rtPickId;         /* строка, выбранная в поиске PLM */
+static wchar_t g_rtPickDes[200]; /* её обозначение — пока в поле оно же, берём строку */
 
 static int RS(int v) { return (int)(v * g_rtS + 0.5f); }
 
@@ -65,6 +67,7 @@ static void rt_start(void) {
     SetFocus(g_rtDes);
     return;
   }
+  if (g_rtPickId && !_wcsicmp(j->des, g_rtPickDes)) j->rootId = g_rtPickId;
   g_rtCancel = 0;
   j->cancel = &g_rtCancel;
   j->notify = g_rtWnd;
@@ -385,7 +388,11 @@ static void route_show(void) {
   if (i >= 0 && i < g_plmCount && !g_resultFiles && !g_rtBusy) {
     wchar_t des[200];
     card_des_from_name(g_plmEsi[i], des, 200);
-    if (des[0]) SetWindowTextW(g_rtDes, des);
+    if (des[0]) {
+      SetWindowTextW(g_rtDes, des);
+      g_rtPickId = g_plmIds[i];
+      lstrcpynW(g_rtPickDes, des, 200);
+    }
   }
   ShowWindow(g_rtWnd, IsIconic(g_rtWnd) ? SW_RESTORE : SW_SHOWNORMAL);
   SetForegroundWindow(g_rtWnd);

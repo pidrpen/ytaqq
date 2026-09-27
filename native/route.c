@@ -49,6 +49,7 @@ typedef struct {
 
 typedef struct {
   wchar_t des[200], order[120];
+  long rootId; /* строка, выбранная в поиске PLM: искать изделие не нужно */
   int n;
   RtRow *rows;
   wchar_t *log;
@@ -542,71 +543,75 @@ static void rt_walk(SQLHDBC dbc, long id, int level, const wchar_t *parentDes, d
 }
 
 /* найти изделие по обозначению: у кого есть карточки (техсостав, ТП, заготовка) */
+/* Найти изделие по обозначению — тем же запросом, что обычный поиск PLM:
+   только среди объектов-изделий (их шаблоны), по имени или атрибуту
+   Designation. Без отбора по шаблону сервер перебирает атрибуты всей базы и
+   не укладывается в ожидание (так и было в 2026.09.23.45). Из найденного —
+   точное обозначение важнее, потом у кого больше карточек. */
 static long rt_find_root(SQLHDBC dbc, const wchar_t *des, CardRow *rows, RtJob *j) {
-  wchar_t pat[260], exact[260], sql[3600], err[280];
-  /* сперва точное совпадение, потом — «содержит» */
-  int e = 0;
-  for (const wchar_t *c = des; *c && e < 250; c++) {
-    if (*c == L'\'') exact[e++] = L'\'';
-    exact[e++] = *c;
+  wchar_t pat[420], sql[3800], err[280];
+  like_escape(des, pat, 420);
+  _snwprintf(sql, 3800,
+             L"SELECT TOP 60 "
+             L"CASE WHEN o0.TemplateId=1794 AND ISNULL(o0.ParentId,0)<>0 THEN o0.ParentId ELSE o0.InfoObjectId END, "
+             L"o0.Name, N'', o0.TemplateId, 0 "
+             L"FROM InfoObjects AS o0 WITH(NOLOCK) "
+             L"WHERE o0.Erased=0 AND ("
+             L"o0.TemplateId IN (1767) OR o0.TemplateId IN (20,39) OR o0.TemplateId IN (633) "
+             L"OR (o0.TemplateId IN (1794) AND o0.InfoObjectId IN ("
+             L"SELECT a0.OwnerId FROM InfoObjectAttributes AS a0 WITH(NOLOCK) "
+             L"WHERE a0.DataType=3 AND a0.Outdated=0 AND a0.CollectionElementId IS NULL "
+             L"AND a0.NameKeyId=1739 AND a0.Indexed=1 AND a0.BoolValue=1))"
+             L") AND (o0.Name LIKE N'%s' ESCAPE '\\' COLLATE Cyrillic_General_CI_AS "
+             L"OR EXISTS (SELECT 1 FROM InfoObjectAttributes AS ad WITH(NOLOCK) "
+             L"JOIN NameKeys AS nkd WITH(NOLOCK) ON nkd.NameKeyId=ad.NameKeyId "
+             L"WHERE ad.OwnerId=o0.InfoObjectId AND ad.Outdated=0 AND nkd.Value=N'Designation' "
+             L"AND ad.ShortText LIKE N'%s' ESCAPE '\\' COLLATE Cyrillic_General_CI_AS)) "
+             L"OPTION(MAXDOP 0)",
+             pat, pat);
+  sql[3799] = 0;
+  int save = g_qTimeout;
+  g_qTimeout = 90; /* как обычный поиск — он идёт без предела и укладывается */
+  int n = card_query(dbc, sql, rows, 60, err, 280);
+  g_qTimeout = save;
+  if (n < 0) {
+    _snwprintf(j->err, 400, L"Поиск изделия не выполнился: %s", err);
+    return 0;
   }
-  exact[e] = 0;
-  like_escape(des, pat, 240);
-  int n = 0;
-  for (int pass = 0; pass < 3 && n <= 0; pass++) {
-    if (pass == 0)
-      _snwprintf(sql, 3600,
-                 L"SELECT TOP 30 a.OwnerId, o.Name, N'', 0, 0 FROM InfoObjectAttributes AS a WITH(NOLOCK) "
-                 L"JOIN NameKeys AS nk WITH(NOLOCK) ON nk.NameKeyId=a.NameKeyId AND nk.Value=N'Designation' "
-                 L"JOIN InfoObjects AS o WITH(NOLOCK) ON o.InfoObjectId=a.OwnerId AND o.Erased=0 "
-                 L"WHERE a.Outdated=0 AND a.ShortText=N'%s' ORDER BY a.OwnerId DESC",
-                 exact);
-    else if (pass == 1)
-      _snwprintf(sql, 3600,
-                 L"SELECT TOP 30 a.OwnerId, o.Name, N'', 0, 0 FROM InfoObjectAttributes AS a WITH(NOLOCK) "
-                 L"JOIN NameKeys AS nk WITH(NOLOCK) ON nk.NameKeyId=a.NameKeyId AND nk.Value=N'Designation' "
-                 L"JOIN InfoObjects AS o WITH(NOLOCK) ON o.InfoObjectId=a.OwnerId AND o.Erased=0 "
-                 L"WHERE a.Outdated=0 AND a.ShortText LIKE N'%s' ESCAPE '\\' COLLATE Cyrillic_General_CI_AS "
-                 L"ORDER BY a.OwnerId DESC",
-                 pat);
-    else /* обозначения атрибутом нет — по имени объекта */
-      _snwprintf(sql, 3600,
-                 L"SELECT TOP 30 o.InfoObjectId, o.Name, N'', 0, 0 FROM InfoObjects AS o WITH(NOLOCK) "
-                 L"WHERE o.Erased=0 AND o.Name LIKE N'%s' ESCAPE '\\' COLLATE Cyrillic_General_CI_AS "
-                 L"ORDER BY o.InfoObjectId DESC",
-                 pat);
-    sql[3599] = 0;
-    n = card_query(dbc, sql, rows, 30, err, 280);
-    if (n < 0) {
-      _snwprintf(j->err, 400, L"Поиск по обозначению не выполнился: %s", err);
-      return 0;
-    }
-  }
-  if (n <= 0) {
+  if (n == 0) {
     _snwprintf(j->err, 400, L"В PLM нет изделия с обозначением «%s».", des);
     return 0;
   }
-  long cand[30];
-  int nc = n;
-  wchar_t list[800];
+  long cand[60];
+  int exact[60], nc = 0;
+  for (int i = 0; i < n && nc < 60; i++) {
+    BOOL dup = FALSE;
+    for (int k = 0; k < nc && !dup; k++) dup = cand[k] == rows[i].n1;
+    if (dup) continue;
+    wchar_t d[200];
+    card_des_from_name(rows[i].s1, d, 200);
+    exact[nc] = !_wcsicmp(d, des);
+    cand[nc++] = rows[i].n1;
+  }
+  wchar_t list[1400];
   size_t il = 0;
   list[0] = 0;
   for (int i = 0; i < nc; i++) {
-    cand[i] = rows[i].n1;
-    int w = _snwprintf(list + il, 800 - il, il ? L",%ld" : L"%ld", cand[i]);
-    if (w > 0 && il + (size_t)w < 790) il += (size_t)w;
+    int w = _snwprintf(list + il, 1400 - il, il ? L",%ld" : L"%ld", cand[i]);
+    if (w > 0 && il + (size_t)w < 1390) il += (size_t)w;
   }
-  /* у кого больше карточек — то и изделие (а не документ или ТП с тем же номером) */
-  _snwprintf(sql, 3600,
-             L"SELECT TOP 100 x.Id, nkp.Value, N'', 0, 0 " PLM_HOLDERS(L"%s")
+  /* у кого больше карточек — то и изделие (а не документ с тем же номером) */
+  _snwprintf(sql, 3800,
+             L"SELECT TOP 200 x.Id, nkp.Value, N'', 0, 0 " PLM_HOLDERS(L"%s")
              L"AND nkp.Value IN (N'TechCompCard',N'TechnologicalProcessesCard',N'ProductPreformsCard')",
              list);
-  sql[3599] = 0;
-  int m = card_query(dbc, sql, rows, 100, err, 280);
+  sql[3799] = 0;
+  int m = card_query(dbc, sql, rows, 200, err, 280);
+  if (m < 0) rt_log(j, L"Карточки найденных: запрос не выполнился — %s\r\n", err);
   long best = cand[0];
   int bestScore = -1;
   for (int i = 0; i < nc; i++) {
-    int sc = 0;
+    int sc = exact[i] ? 100 : 0;
     for (int k = 0; k < m; k++)
       if (rows[k].n1 == cand[i]) sc += !_wcsicmp(rows[k].s1, L"TechCompCard") ? 3 : 1;
     if (sc > bestScore) {
@@ -614,8 +619,7 @@ static long rt_find_root(SQLHDBC dbc, const wchar_t *des, CardRow *rows, RtJob *
       best = cand[i];
     }
   }
-  rt_log(j, L"Найдено объектов с таким обозначением: %d, взят %ld (карточек %d)\r\n\r\n", nc, best,
-         bestScore < 0 ? 0 : bestScore);
+  rt_log(j, L"Найдено изделий: %d, взят %ld%s\r\n\r\n", nc, best, bestScore >= 100 ? L" (обозначение совпало)" : L"");
   return best;
 }
 
@@ -630,8 +634,10 @@ static void rt_build(RtJob *j) {
   }
   CardRow *rows = (CardRow *)malloc(sizeof(CardRow) * 300);
   if (rows) {
-    g_qTimeout = 15;
-    long root = rt_find_root(dbc, j->des, rows, j);
+    g_qTimeout = 30; /* на один запрос; не уложился — позиция с пометкой, сбор идёт дальше */
+    long root = j->rootId;
+    if (root) rt_log(j, L"Изделие — строка из поиска PLM: %ld\r\n\r\n", root);
+    else root = rt_find_root(dbc, j->des, rows, j);
     if (root) rt_walk(dbc, root, 0, j->order, 1, TRUE, 1, NULL, rows, j);
     g_qTimeout = 0;
     if (rt_late(j) && !(j->cancel && *j->cancel))
