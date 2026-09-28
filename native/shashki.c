@@ -32,6 +32,11 @@ typedef struct {
   wchar_t game[96];
   wchar_t *p0, *p1;
   BOOL partial[2];
+  /* для строки «связь» под доской: когда файл менялся, почему не прочёлся,
+     когда читали */
+  ULONGLONG mt[2];
+  DWORD rerr[2];
+  ULONGLONG readAt;
 } ShPoll;
 
 typedef struct {
@@ -65,6 +70,9 @@ typedef struct {
      в свою, — его приглашение принять сразу, как придёт */
   wchar_t swapFrom[96];
   ULONGLONG swapT;
+  /* своя запись в папку: когда удалась, не сорвалась ли последняя */
+  ULONGLONG wroteAt;
+  BOOL writeFail;
 } ShGame;
 
 static ShGame g_sh;
@@ -159,8 +167,14 @@ static void sh_game_path(const wchar_t *game, int side, wchar_t *out) {
 static BOOL sh_write_mine(void) {
   wchar_t path[SHARE_PATH];
   sh_game_path(g_sh.game, g_sh.me, path);
-  if (!path[0] || !g_sh.log.w) return FALSE;
-  return share_write_ex(path, g_sh.log.w, TRUE);
+  if (!path[0] || !g_sh.log.w) {
+    g_sh.writeFail = TRUE;
+    return FALSE;
+  }
+  BOOL ok = share_write_ex(path, g_sh.log.w, TRUE);
+  g_sh.writeFail = !ok;
+  if (ok) g_sh.wroteAt = ft_now();
+  return ok;
 }
 
 static void sh_log_reset(void) {
@@ -272,6 +286,10 @@ static DWORD WINAPI sh_thread(LPVOID param) {
         wchar_t p[SHARE_PATH];
         sh_game_path(pl->game, s, p);
         wchar_t *t = p[0] ? share_read(p) : NULL;
+        if (!t) pl->rerr[s] = p[0] ? GetLastError() : ERROR_PATH_NOT_FOUND;
+        WIN32_FILE_ATTRIBUTE_DATA fa;
+        if (p[0] && GetFileAttributesExW(p, GetFileExInfoStandard, &fa))
+          pl->mt[s] = ((ULONGLONG)fa.ftLastWriteTime.dwHighDateTime << 32) | fa.ftLastWriteTime.dwLowDateTime;
         /* без перевода строки в конце — застали недописанным: берём прошлое целое */
         size_t l = t ? wcslen(t) : 0;
         if (t && (l == 0 || t[l - 1] != L'\n')) {
@@ -285,6 +303,7 @@ static DWORD WINAPI sh_thread(LPVOID param) {
         if (s == 0) pl->p0 = t;
         else pl->p1 = t;
       }
+      pl->readAt = ft_now();
     }
     unsigned sum = 2166136261u;
 #define SH_MIX(ptr, len)                                                          \
@@ -1112,6 +1131,51 @@ static void shashki_online_changed(void) {
   else sh_mark_btn();
 }
 
+/* сколько ходов («m\t…») в файле */
+static int sh_count_moves(const wchar_t *t) {
+  int n = 0;
+  for (const wchar_t *p = t; p && *p;) {
+    if (p[0] == L'm' && p[1] == L'\t') n++;
+    p = wcschr(p, L'\n');
+    if (p) p++;
+  }
+  return n;
+}
+
+static void sh_hms(ULONGLONG ft, wchar_t *out, int cap) {
+  if (!ft) {
+    lstrcpynW(out, L"—", cap);
+    return;
+  }
+  FILETIME f, lf;
+  f.dwLowDateTime = (DWORD)ft;
+  f.dwHighDateTime = (DWORD)(ft >> 32);
+  SYSTEMTIME st;
+  FileTimeToLocalFileTime(&f, &lf);
+  FileTimeToSystemTime(&lf, &st);
+  _snwprintf(out, cap, L"%02d:%02d:%02d", st.wHour, st.wMinute, st.wSecond);
+  out[cap - 1] = 0;
+}
+
+/* «связь»: что у меня записано и что видно в файле соперника — по этой
+   строке видно, где застряло, если ход не доходит (с 2026.09.23.69) */
+static void sh_diag_text(wchar_t *out, int cap) {
+  ShPoll *pl = g_sh.poll;
+  int opp = 1 - g_sh.me;
+  const wchar_t *theirs = pl && !wcscmp(pl->game, g_sh.game) ? (opp == 0 ? pl->p0 : pl->p1) : NULL;
+  wchar_t w1[16], w2[16], w3[16], nm[128], err[60] = L"";
+  sh_hms(g_sh.wroteAt, w1, 16);
+  sh_hms(pl ? pl->mt[opp] : 0, w2, 16);
+  sh_hms(pl ? pl->readAt : 0, w3, 16);
+  lstrcpynW(nm, g_sh.oppName[0] ? g_sh.oppName : L"соперник", 128);
+  if (pl && !theirs && pl->rerr[opp] == ERROR_FILE_NOT_FOUND) lstrcpynW(err, L" — файла нет", 60);
+  else if (pl && !theirs && pl->rerr[opp]) _snwprintf(err, 60, L" — не читается (ошибка %lu)", pl->rerr[opp]);
+  _snwprintf(out, cap, L"связь: у вас ходов %d, записано %s%s · у %s ходов %d, изменён %s%s · прочитано %s",
+             sh_count_moves(g_sh.log.w), w1, g_sh.writeFail ? L" — НЕ ЗАПИСАЛОСЬ" : L"", nm,
+             sh_count_moves(theirs), w2, err, w3);
+  out[cap - 1] = 0;
+}
+
 static void sh_paint(HWND hwnd, HDC hdc) {
   RECT rc;
   GetClientRect(hwnd, &rc);
@@ -1175,6 +1239,11 @@ static void sh_paint(HWND hwnd, HDC hdc) {
   SetTextColor(hdc, COL_MUTED);
   if (g_fontSmall) SelectObject(hdc, g_fontSmall);
   DrawTextW(hdc, info, -1, &ir, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+  wchar_t dg[400];
+  sh_diag_text(dg, 400);
+  RECT dr = {pad, yb + SS_(82), rc.right - pad, yb + SS_(112)};
+  SetTextColor(hdc, g_sh.writeFail ? RGB(200, 60, 40) : COL_MUTED);
+  DrawTextW(hdc, dg, -1, &dr, DT_LEFT | DT_WORDBREAK | DT_NOPREFIX);
 }
 
 static LRESULT CALLBACK ShashkiProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -1274,7 +1343,7 @@ static void shashki_show(void) {
     wc.lpszClassName = L"CursorPadShashki";
     wc.hIcon = LoadIconW(NULL, IDI_APPLICATION);
     RegisterClassExW(&wc);
-    int w = SS_(SH_LEFT * 2 + SH_SQ * 8 + SH_FRAME * 2), h = SS_(SH_TOP + SH_SQ * 8 + SH_FRAME * 2 + 92);
+    int w = SS_(SH_LEFT * 2 + SH_SQ * 8 + SH_FRAME * 2), h = SS_(SH_TOP + SH_SQ * 8 + SH_FRAME * 2 + 122);
     g_shWnd = CreateWindowExW(WS_EX_APPWINDOW, L"CursorPadShashki", L"Шашки",
                               WS_POPUP | WS_CLIPCHILDREN | WS_MINIMIZEBOX | WS_SYSMENU, 0, 0, w, h, NULL, NULL,
                               g_inst, NULL);
