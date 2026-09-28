@@ -263,12 +263,22 @@ static BOOL xl_save(const wchar_t *path, const wchar_t *title, const XlSheet *sh
   xl_puts(s, "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n"
              "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\">"
              "<sheetPr><pageSetUpPr fitToPage=\"1\"/></sheetPr>"
-             "<sheetViews><sheetView workbookViewId=\"0\">");
+             "<sheetViews>");
   char tmp[160];
-  snprintf(tmp, sizeof(tmp),
-           "<pane ySplit=\"%d\" topLeftCell=\"A%d\" activePane=\"bottomLeft\" state=\"frozen\"/>", hr, hr + 1);
-  xl_puts(s, tmp);
-  xl_puts(s, "</sheetView></sheetViews><cols>");
+  BOOL hf = (sh->header && sh->header[0]) || (sh->footer && sh->footer[0]);
+  if (hf) {
+    /* есть колонтитулы — открывается сразу «Разметкой страницы»: листы как
+       на бумаге, колонтитулы видны (с 2026.09.23.57). Закрепить шапку в
+       этом виде Excel не даёт — она и так повторяется на каждом листе */
+    xl_puts(s, "<sheetView view=\"pageLayout\" zoomScalePageLayoutView=\"70\" workbookViewId=\"0\"/>");
+  } else {
+    xl_puts(s, "<sheetView workbookViewId=\"0\">");
+    snprintf(tmp, sizeof(tmp),
+             "<pane ySplit=\"%d\" topLeftCell=\"A%d\" activePane=\"bottomLeft\" state=\"frozen\"/>", hr, hr + 1);
+    xl_puts(s, tmp);
+    xl_puts(s, "</sheetView>");
+  }
+  xl_puts(s, "</sheetViews><cols>");
   for (int c = 0; c < sh->ncols; c++) {
     snprintf(tmp, sizeof(tmp), "<col min=\"%d\" max=\"%d\" width=\"%d\" customWidth=\"1\"/>", c + 1, c + 1,
              sh->width[c]);
@@ -337,7 +347,6 @@ static BOOL xl_save(const wchar_t *path, const wchar_t *title, const XlSheet *sh
      от края, таблица — с 2,5 см. Колонтитулы ужимаются вместе с таблицей
      при вписывании в ширину, как в шаблоне ведомости (в 2026.09.23.54 было
      scaleWithDoc 0 — на печати выходили огромными рядом с таблицей) */
-  BOOL hf = (sh->header && sh->header[0]) || (sh->footer && sh->footer[0]);
   xl_puts(s, "<printOptions horizontalCentered=\"1\"/>");
   xl_puts(s, hf ? "<pageMargins left=\"0.25\" right=\"0.25\" top=\"1\" bottom=\"1\" header=\"0.3\" "
                   "footer=\"0.3\"/>"
