@@ -224,7 +224,21 @@ static void rt_save(void) {
   /* без строки заголовка над шапкой (с 2026.09.23.52): обозначение и заказ —
      в колонтитулах */
   /* «Н. расх. на изделие» — формулой: норма на 1 деталь × количество на изделие */
-  XlSheet sh = {RT_NCOL, kRtHead, kRtXlWidth, hdr, ftr, RC_NORMTOT + 1, RC_NORM1, RC_QTYTOT};
+  XlSheet sh = {RT_NCOL, kRtHead, kRtXlWidth, hdr, ftr, RC_NORMTOT + 1, RC_NORM1, RC_QTYTOT, 0};
+  /* масштаб «Разметки страницы» — чтобы лист A3 альбомный (420 мм = 1587
+     точек при 100%) встал во всю ширину окна Excel на этом экране: без
+     пустот по бокам (с 2026.09.23.58; было 70% — на широком экране по
+     бокам серые поля). Минус ~110 точек — номера строк и полоса прокрутки */
+  {
+    RECT wa;
+    SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0);
+    HDC dc = GetDC(NULL);
+    int dpi = dc ? GetDeviceCaps(dc, LOGPIXELSX) : 96;
+    if (dc) ReleaseDC(NULL, dc);
+    int w = (int)((wa.right - wa.left) * 96L / (dpi > 0 ? dpi : 96)); /* в точках при 100% */
+    int z = (w - 110) * 100 / 1587;
+    sh.zoom = z < 40 ? 40 : z > 200 ? 200 : z;
+  }
   if (!xl_save(file, NULL, &sh, g_rtJob->n, rt_cell, g_rtJob)) {
     MessageBoxW(g_rtWnd, L"Не удалось записать файл — он не открыт сейчас в Excel?", L"Маршрутная ведомость",
                 MB_ICONWARNING);

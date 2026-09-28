@@ -155,6 +155,7 @@ typedef struct {
   /* столбец-произведение: prodCol (номер + 1, 0 — нет) = prodA × prodB
      формулой Excel — поменяли число в файле, пересчиталось само */
   int prodCol, prodA, prodB;
+  int zoom; /* масштаб «Разметки страницы», %; 0 — 70 */
 } XlSheet;
 
 static BOOL xl_is_num(const wchar_t *s, double *v) {
@@ -270,7 +271,9 @@ static BOOL xl_save(const wchar_t *path, const wchar_t *title, const XlSheet *sh
     /* есть колонтитулы — открывается сразу «Разметкой страницы»: листы как
        на бумаге, колонтитулы видны (с 2026.09.23.57). Закрепить шапку в
        этом виде Excel не даёт — она и так повторяется на каждом листе */
-    xl_puts(s, "<sheetView view=\"pageLayout\" zoomScalePageLayoutView=\"70\" workbookViewId=\"0\"/>");
+    snprintf(tmp, sizeof(tmp), "<sheetView view=\"pageLayout\" zoomScalePageLayoutView=\"%d\" workbookViewId=\"0\"/>",
+             sh->zoom >= 10 && sh->zoom <= 400 ? sh->zoom : 70);
+    xl_puts(s, tmp);
   } else {
     xl_puts(s, "<sheetView workbookViewId=\"0\">");
     snprintf(tmp, sizeof(tmp),
