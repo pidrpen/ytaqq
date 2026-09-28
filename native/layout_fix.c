@@ -24,11 +24,8 @@
    копирований» эти копии не попадают. В окнах самого CursorPad то же самое
    делается напрямую, без нажатий. */
 
-#define HOTKEY_LAYOUT 6
 #define TIMER_LF_RESTORE 34 /* вставили через буфер — вернуть прежний буфер чуть позже */
 
-static UINT g_lfVk;               /* на какой клавише (Pause, если свободна) */
-static wchar_t g_lfKeyName[24];
 static ULONGLONG g_lfQuietUntil;  /* до этого времени перемены буфера — наши */
 
 typedef struct {
@@ -485,27 +482,18 @@ static void layout_fix_timer(void) {
   lf_clip_restore();
 }
 
-static const UINT kLfKeys[] = {VK_PAUSE, VK_SCROLL};
-static const wchar_t *const kLfKeyNames[] = {L"Pause", L"Scroll Lock"};
-
-static void layout_fix_register(HWND hwnd) {
-  g_lfVk = 0;
-  g_lfKeyName[0] = 0;
-  for (int i = 0; i < 2; i++) {
-    if (kLfKeys[i] == g_hotkeyVk) continue; /* её уже взяла «окно за курсором» */
-    if (RegisterHotKey(hwnd, HOTKEY_LAYOUT, MOD_NOREPEAT, kLfKeys[i])) {
-      g_lfVk = kLfKeys[i];
-      lstrcpynW(g_lfKeyName, kLfKeyNames[i], 24);
-      return;
-    }
-  }
-}
+/* клавиша — Pause, а если занята, Scroll Lock; с 2026.09.23.72 её можно
+   сменить или убрать в Настройках (hotkeys.c) */
 
 /* из меню «Ещё»: подсказка — нажимать надо там, где печатали */
 static void layout_fix_hint(void) {
   wchar_t m[400];
-  if (!g_lfVk)
-    _snwprintf(m, 400, L"Клавиша Pause занята другой программой — исправление раскладки выключено.");
+  if (!g_hkName[HK_LAYOUT][0])
+    _snwprintf(m, 400,
+               g_hkOwn[HK_LAYOUT] && !g_hkBusy[HK_LAYOUT]
+                   ? L"У исправления раскладки нет клавиши. Назначить: Настройки → «Горячие клавиши»."
+                   : L"Клавиша исправления раскладки занята другой программой. Выбрать другую: "
+                     L"Настройки → «Горячие клавиши».");
   else
     _snwprintf(m, 400,
                L"Напечатали не в той раскладке («ghbdtn» вместо «привет»)?\n\n"
@@ -513,7 +501,7 @@ static void layout_fix_hint(void) {
                L"• без выделения исправится последнее слово;\n"
                L"• выделенный текст исправится целиком.\n\n"
                L"Раскладка переключится сама. Нажать ещё раз — вернётся как было.",
-               g_lfKeyName);
+               g_hkName[HK_LAYOUT]);
   m[399] = 0;
   MessageBoxW(g_hwnd, m, L"Исправить раскладку", MB_OK | MB_ICONINFORMATION);
 }

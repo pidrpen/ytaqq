@@ -91,6 +91,7 @@
 #define ID_SH_BACK 237
 #define ID_SH_CANCEL 238
 #define ID_SHASHKI_BTN 239 /* «Шашки» — в Настройках, рядом с «Нардами» */
+#define ID_HOTKEYS 240     /* «Горячие клавиши…» — в Настройках */
 #define ID_ANSPIN 154
 #define TIMER_FOLLOW 1
 #define TIMER_SAVE 2
@@ -109,6 +110,10 @@
 #define HOTKEY_OCR 3
 #define HOTKEY_MIN 4
 #define HOTKEY_SEARCH 5
+#define HOTKEY_LAYOUT 6
+/* функции с горячими клавишами (hotkeys.c): клавиши можно сменить или убрать */
+enum { HK_TOGGLE, HK_MIN, HK_SEARCH, HK_OCR, HK_CURSOR, HK_LAYOUT, HK_SNIP, HK_COUNT };
+static wchar_t g_hkName[HK_COUNT][40]; /* на чём работает сейчас: «F6», «Ctrl+Alt+R»; пусто — клавиши нет */
 #define SNIP_COUNT 9
 #define CUR_FRAMES 8
 #define WM_TRAY (WM_APP + 1)
@@ -139,7 +144,7 @@
 #define PAD 12
 #define GUTTER 26
 #define SET_W 312
-#define SET_H 970  /* темы в два ряда: четыре и рыцарская под ними; кнопка «Нарды» */
+#define SET_H 1005 /* темы в два ряда: четыре и рыцарская под ними; «Нарды»; «Горячие клавиши» */
 #define ASK_W 312
 #define ASK_H 224 /* room for the drawn header */
 #define ID_THEME_BASE 140
@@ -238,6 +243,7 @@ static HWND g_btnK4;
 static HWND g_min;
 static HWND g_ocr;
 static HWND g_btnUp;
+static HWND g_btnHk; /* «Горячие клавиши…» — окно hotkeys.c */
 static HWND g_btnTheme[THEME_COUNT];
 static int g_theme = 0;
 static HWND g_tbBg;
@@ -319,8 +325,6 @@ static void follow_rate(HWND h, UINT ms) {
 static double g_x, g_y;
 static int g_ww = WND_W, g_hh = WND_H;
 static int g_offx = 22, g_offy = 28;
-static UINT g_hotkeyVk = VK_F8;
-static wchar_t g_hotkeyName[32] = L"F8";
 static wchar_t g_notesPath[MAX_PATH];
 static wchar_t g_prefPath[MAX_PATH];
 static wchar_t g_dataDir[MAX_PATH];
@@ -1412,8 +1416,6 @@ static void toggle_follow(void) {
   apply_follow_state();
 }
 
-static const UINT kHotkeys[] = {VK_F8, VK_PAUSE, VK_SCROLL};
-static const wchar_t *kHotkeyNames[] = {L"F8", L"Pause", L"Scroll Lock"};
 
 static wchar_t *nth_nonempty_line(int n) {
   if (n < 1 || !g_edit) return NULL;
@@ -1833,7 +1835,13 @@ static void hide_to_tray(void) {
   g_askOpen = FALSE;
   if (g_btnAsk) SetWindowTextW(g_btnAsk, L"Поиск");
   ShowWindow(g_hwnd, SW_HIDE);
-  show_status(L"Свёрнуто · F9");
+  {
+    wchar_t st[64];
+    if (g_hkName[HK_MIN][0]) _snwprintf(st, 64, L"Свёрнуто · %s", g_hkName[HK_MIN]);
+    else lstrcpynW(st, L"Свёрнуто — вернуть через значок у часов", 64);
+    st[63] = 0;
+    show_status(st);
+  }
 }
 
 static void restore_from_tray(void) {
@@ -2338,8 +2346,12 @@ static void paste_line(int n) {
     return;
   }
   wchar_t msg[160];
-  if (img) _snwprintf(msg, 160, L"Ctrl+%d  ·  картинка", n);
-  else _snwprintf(msg, 160, L"Ctrl+%d  ·  в буфере", n);
+  wchar_t pre[40]; /* «Ctrl+» или своё, как назначили: «Alt+1…9» → «Alt+» */
+  lstrcpynW(pre, g_hkName[HK_SNIP], 40);
+  wchar_t *dig = wcsstr(pre, L"1…9");
+  if (dig) *dig = 0;
+  if (img) _snwprintf(msg, 160, L"%s%d  ·  картинка", pre, n);
+  else _snwprintf(msg, 160, L"%s%d  ·  в буфере", pre, n);
   show_status(msg);
   if (!is_our_foreground()) {
     SetTimer(g_hwnd, TIMER_PASTE, 40, NULL);
@@ -2347,28 +2359,12 @@ static void paste_line(int n) {
   free(line);
 }
 
-static void register_snip_hotkeys(HWND hwnd) {
-  for (int i = 0; i < SNIP_COUNT; i++) {
-    RegisterHotKey(hwnd, HOTKEY_SNIP_BASE + i, MOD_CONTROL | MOD_NOREPEAT, (UINT)('1' + i));
-  }
-}
-
-static void unregister_snip_hotkeys(HWND hwnd) {
-  for (int i = 0; i < SNIP_COUNT; i++) {
-    UnregisterHotKey(hwnd, HOTKEY_SNIP_BASE + i);
-  }
-}
-
-static BOOL register_toggle_hotkey(HWND hwnd) {
-  for (int i = 0; i < 3; i++) {
-    if (RegisterHotKey(hwnd, HOTKEY_TOGGLE, MOD_NOREPEAT, kHotkeys[i])) {
-      g_hotkeyVk = kHotkeys[i];
-      lstrcpynW(g_hotkeyName, kHotkeyNames[i], 32);
-      return TRUE;
-    }
-  }
-  return FALSE;
-}
+/* hotkeys.c */
+static void tray_tip_text(wchar_t *out, int n);
+static void hk_with(const wchar_t *text, int f, wchar_t *out, int n);
+static void hk_register_all(HWND hwnd);
+static void hk_unregister_all(HWND hwnd);
+static void hk_show(void);
 
 static void add_tray(HWND hwnd) {
   memset(&g_nid, 0, sizeof(g_nid));
@@ -2378,7 +2374,7 @@ static void add_tray(HWND hwnd) {
   g_nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
   g_nid.uCallbackMessage = WM_TRAY;
   g_nid.hIcon = LoadIconW(NULL, IDI_APPLICATION);
-  _snwprintf(g_nid.szTip, 128, L"CursorPad %s  ·  %s закрепить", APP_VERSION_STR, g_hotkeyName);
+  tray_tip_text(g_nid.szTip, 128);
   g_trayAdded = Shell_NotifyIconW(NIM_ADD, &g_nid);
 }
 
@@ -2388,9 +2384,13 @@ static void tray_menu(HWND hwnd) {
   GetCursorPos(&pt);
   HMENU menu = CreatePopupMenu();
   AppendMenuW(menu, MF_STRING, 1, g_follow ? L"Закрепить" : L"Следовать за курсором");
-  AppendMenuW(menu, MF_STRING, 14, g_hidden ? L"Показать окно (F9)" : L"Свернуть (F9)");
+  wchar_t mMin[64], mOcr[64], mCur[64];
+  hk_with(g_hidden ? L"Показать окно" : L"Свернуть", HK_MIN, mMin, 64);
+  hk_with(L"Выделить и прочитать", HK_OCR, mOcr, 64);
+  hk_with(L"Следующий курсор", HK_CURSOR, mCur, 64);
+  AppendMenuW(menu, MF_STRING, 14, mMin);
   AppendMenuW(menu, MF_STRING, 16, L"Настройки");
-  AppendMenuW(menu, MF_STRING, 15, L"Выделить и прочитать (F6)");
+  AppendMenuW(menu, MF_STRING, 15, mOcr);
   AppendMenuW(menu, MF_STRING, 17, L"Проверить обновления");
   AppendMenuW(menu, MF_STRING | (upd_auto_off() ? 0 : MF_CHECKED), 22, L"   обновляться самостоятельно");
   AppendMenuW(menu, MF_STRING, 18, L"Что нового в папке");
@@ -2404,7 +2404,7 @@ static void tray_menu(HWND hwnd) {
   AppendMenuW(menu, MF_STRING | (g_sparkle ? MF_CHECKED : 0) | (g_skin == 3 ? 0 : MF_GRAYED), 20,
               L"   звёздочки при нажатии");
   AppendMenuW(menu, MF_STRING | (g_skin == 0 ? MF_CHECKED : 0), 12, L"Курсор: обычный Windows");
-  AppendMenuW(menu, MF_STRING, 13, L"Следующий курсор (F7)");
+  AppendMenuW(menu, MF_STRING, 13, mCur);
   AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
   AppendMenuW(menu, MF_STRING, 2, L"Открыть файл заметок");
   AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
@@ -2542,7 +2542,7 @@ static void draw_slot_marks(HWND ed) {
     if (y1 > cl.bottom) break; /* дальше — ниже края поля */
     /* только целиком видимые: обрезанная снизу рамка налезает на кнопки */
     if (y1 < 0 || y1 + lh > cl.bottom) continue;
-    if (slot <= 9 && y2 + lh + 2 <= cl.bottom) { /* номер для Ctrl+1…9 (рамок с .41 нет — вид «A») */
+    if (slot <= 9 && g_hkName[HK_SNIP][0] && y2 + lh + 2 <= cl.bottom) { /* номер для Ctrl+1…9 (рамок с .41 нет — вид «A») */
       (void)x1;
       (void)textRight;
       wchar_t d[4];
@@ -2880,6 +2880,8 @@ static void layout_settings(void) {
   y += btnH + 22;
   if (g_ocr) MoveWindow(g_ocr, pad, y, cw - pad, btnH, TRUE);
   y += btnH + gap;
+  if (g_btnHk) MoveWindow(g_btnHk, pad, y, cw - pad, btnH, TRUE);
+  y += btnH + gap;
   if (g_btnUp) MoveWindow(g_btnUp, pad, y, cw - pad, btnH, TRUE);
   y += btnH + gap + 18;
   {
@@ -3004,6 +3006,7 @@ static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
     if (LOWORD(wParam) == ID_SYS_CUR) set_skin(0);
     if (LOWORD(wParam) == ID_OCR) run_ocr_test();
     if (LOWORD(wParam) == ID_UPDATE) start_update();
+    if (LOWORD(wParam) == ID_HOTKEYS && HIWORD(wParam) == BN_CLICKED) hk_show();
     if (LOWORD(wParam) >= ID_THEME_BASE && LOWORD(wParam) < ID_THEME_BASE + THEME_COUNT)
       set_theme(LOWORD(wParam) - ID_THEME_BASE);
     if (LOWORD(wParam) == ID_ENG_PLM) {
@@ -3229,8 +3232,11 @@ static LRESULT CALLBACK AskProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     }
     {
       RECT hint = {14, rc.bottom - 26, rc.right - 14, rc.bottom - 8};
-      DrawTextW(hdc, L"Enter — спросить · F3 по буферу копии", -1, &hint,
-                DT_LEFT | DT_SINGLELINE);
+      wchar_t ht[96];
+      if (g_hkName[HK_SEARCH][0]) _snwprintf(ht, 96, L"Enter — спросить · %s по буферу копии", g_hkName[HK_SEARCH]);
+      else lstrcpynW(ht, L"Enter — спросить", 96);
+      ht[95] = 0;
+      DrawTextW(hdc, ht, -1, &hint, DT_LEFT | DT_SINGLELINE);
     }
     EndPaint(hwnd, &ps);
     return 0;
@@ -3402,6 +3408,7 @@ static void create_settings(HWND owner) {
                                 WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 0, 0, 240, 26,
                                 g_setHwnd, (HMENU)(INT_PTR)ID_ANSPIN, NULL, NULL);
   g_ocr = mk_btn(g_setHwnd, L"Выделить и прочитать (F6)", ID_OCR);
+  g_btnHk = mk_btn(g_setHwnd, L"Горячие клавиши…", ID_HOTKEYS);
   g_btnUp = mk_btn(g_setHwnd, L"Проверить обновления", ID_UPDATE);
   for (int i = 0; i < THEME_COUNT; i++)
     g_btnTheme[i] = mk_btn(g_setHwnd, kThemes[i].name, ID_THEME_BASE + i);
@@ -3421,6 +3428,7 @@ static void create_settings(HWND owner) {
   SendMessageW(g_btnSys, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
   SendMessageW(g_ocr, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
   if (g_btnUp) SendMessageW(g_btnUp, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
+  if (g_btnHk) SendMessageW(g_btnHk, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
   if (g_filesRootEdit) {
     SendMessageW(g_filesRootEdit, WM_SETFONT, (WPARAM)g_fontBody, TRUE);
     SendMessageW(g_filesRootEdit, 0x1501, TRUE, (LPARAM)L"папка сети \\\\server\\share");
@@ -3470,6 +3478,7 @@ static void create_settings(HWND owner) {
 #include "tiffsort.c"
 #include "nardy.c"
 #include "shashki.c" /* после нард: общий список «кто в сети» и мелочи работы с папкой */
+#include "hotkeys.c"    /* F8, F6, Pause… — какие назначены в Настройках */
 #include "layout_fix.c" /* Pause: «ghbdtn» → «привет» */
 #include "msg.c"        /* исчезающие сообщения коллегам — через ту же папку, что нарды */
 #include "tools.c" /* после нардов: автообновление смотрит, не открыты ли они */
@@ -3518,7 +3527,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     SendMessageW(g_edit, WM_SETFONT, (WPARAM)g_fontBody, TRUE);
     if (g_clipEdit) {
       SendMessageW(g_clipEdit, WM_SETFONT, (WPARAM)g_fontSmall, TRUE);
-      SendMessageW(g_clipEdit, 0x1501, TRUE, (LPARAM)L"буфер копии · F3");
+      SendMessageW(g_clipEdit, 0x1501, TRUE, (LPARAM)L"буфер копии"); /* с клавишей — hk_register_all */
     }
     SendMessageW(g_btnSet, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
     if (g_btnAsk) SendMessageW(g_btnAsk, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
@@ -3565,19 +3574,15 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     SetTimer(hwnd, TIMER_FILES, 300000, NULL);
     SetTimer(hwnd, TIMER_FILES_PLAN, 60000, NULL);
     if (g_filesRoot[0]) files_start_index(FALSE);
-    if (!register_toggle_hotkey(hwnd)) {
+    add_tray(hwnd);
+    /* F8, F9, F3, F6, F7, Pause, Ctrl+1…9 — или какие назначены в Настройках */
+    hk_register_all(hwnd);
+    if (g_hkBusy[HK_TOGGLE] || (!g_hkOwn[HK_TOGGLE] && !g_hkName[HK_TOGGLE][0])) {
       MessageBoxW(hwnd,
-                  L"Не удалось зарегистрировать горячую клавишу. "
-                  L"Закрепляйте окно кнопкой, когда оно не следует за курсором.",
+                  L"Не удалось зарегистрировать горячую клавишу закрепления: её держит другая программа. "
+                  L"Закрепляйте окно кнопкой или выберите другую клавишу: Настройки → «Горячие клавиши».",
                   L"CursorPad", MB_OK | MB_ICONINFORMATION);
     }
-    RegisterHotKey(hwnd, HOTKEY_CURSOR, MOD_NOREPEAT, VK_F7);
-    RegisterHotKey(hwnd, HOTKEY_OCR, MOD_NOREPEAT, VK_F6);
-    RegisterHotKey(hwnd, HOTKEY_MIN, MOD_NOREPEAT, VK_F9);
-    RegisterHotKey(hwnd, HOTKEY_SEARCH, MOD_NOREPEAT, VK_F3);
-    layout_fix_register(hwnd); /* после «закрепить»: та могла взять Pause */
-    register_snip_hotkeys(hwnd);
-    add_tray(hwnd);
     AddClipboardFormatListener(hwnd);
     apply_follow_state();
     if (g_skin != 0) install_scheme_cursors();
@@ -3673,9 +3678,20 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
       if (g_fontSmall) SelectObject(hdc, g_fontSmall);
       SetTextColor(hdc, COL_MUTED);
       RECT ft = {padx + MulDiv(6, dpi, 96), rc.bottom - fh, rc.right - padx, rc.bottom};
-      DrawTextW(hdc, g_padMode == 1 ? L"Enter — найти · пусто — ищу скопированное (F3)"
-                                    : L"Ctrl+1…9 — вставить строку · F8 — закрепить",
-                -1, &ft, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+      wchar_t ht[128];
+      if (g_padMode == 1) {
+        hk_with(L"Enter — найти · пусто — ищу скопированное", HK_SEARCH, ht, 128);
+      } else {
+        /* клавиши — какие назначены; убранные не упоминаем */
+        ht[0] = 0;
+        if (g_hkName[HK_SNIP][0]) _snwprintf(ht, 128, L"%s — вставить строку", g_hkName[HK_SNIP]);
+        if (g_hkName[HK_TOGGLE][0]) {
+          size_t l = wcslen(ht);
+          _snwprintf(ht + l, 128 - l, L"%s%s — закрепить", l ? L" · " : L"", g_hkName[HK_TOGGLE]);
+        }
+        ht[127] = 0;
+      }
+      DrawTextW(hdc, ht, -1, &ft, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     }
     if (g_statusOn) {
       SetTextColor(hdc, COL_INK);
@@ -3851,6 +3867,13 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
       if (g_1cOn) onec_show();
     }
     if (wParam == TIMER_PASTE) {
+      /* строки на Alt+1…9 или с Shift: пока их держат, наш Ctrl+V был бы
+         другим сочетанием — ждём, пока отпустят, не дольше полутора секунд */
+      static int pasteWaits;
+      if (((GetAsyncKeyState(VK_MENU) | GetAsyncKeyState(VK_SHIFT) | GetAsyncKeyState(VK_LWIN) |
+            GetAsyncKeyState(VK_RWIN)) & 0x8000) && pasteWaits++ < 37)
+        return 0;
+      pasteWaits = 0;
       KillTimer(hwnd, TIMER_PASTE);
       send_paste();
     }
@@ -4031,14 +4054,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     save_files_pref();
     files_clear();
     files_on_changes(NULL);
-    UnregisterHotKey(hwnd, HOTKEY_TOGGLE);
-    UnregisterHotKey(hwnd, HOTKEY_CURSOR);
-    UnregisterHotKey(hwnd, HOTKEY_OCR);
-    UnregisterHotKey(hwnd, HOTKEY_MIN);
-    UnregisterHotKey(hwnd, HOTKEY_SEARCH);
-    UnregisterHotKey(hwnd, HOTKEY_LAYOUT);
+    hk_unregister_all(hwnd);
     RemoveClipboardFormatListener(hwnd);
-    unregister_snip_hotkeys(hwnd);
     if (g_trayAdded) Shell_NotifyIconW(NIM_DELETE, &g_nid);
     free_cursor_frames();
     if (g_fontUi) DeleteObject(g_fontUi);

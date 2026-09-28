@@ -45,8 +45,8 @@ static const MoreItem kMore[] = {
     {4, L"Расчёт краски", NULL, RGB(0xB4, 0x4B, 0x2A), 0},
     {MORE_ROUTE, L"Маршрутная ведомость", NULL, RGB(0x5B, 0x4B, 0x8A), 0}, /* с 2026.09.23.45: из PLM в Excel */
     {-1, NULL, NULL, 0, 0}, /* черта */
-    {MORE_OCR, L"Выделить и прочитать", L"F6", 0, 0},
-    {MORE_LAYOUT, L"Исправить раскладку", g_lfKeyName, 0, 0}, /* с 2026.09.23.42 */
+    {MORE_OCR, L"Выделить и прочитать", g_hkName[HK_OCR], 0, 0}, /* клавиши — какие назначены (hotkeys.c) */
+    {MORE_LAYOUT, L"Исправить раскладку", g_hkName[HK_LAYOUT], 0, 0}, /* с 2026.09.23.42 */
     {MORE_MSG, L"Чат с коллегами", NULL, 0, 0}, /* с 2026.09.23.68 — чат вместо исчезающих */
     {MORE_NARDY, L"Нарды", NULL, 0, 0},
     {MORE_SHASHKI, L"Шашки", NULL, 0, 0}, /* с 2026.09.23.65: по сети, как нарды */
@@ -67,11 +67,16 @@ static void tools_menu_measure(MEASUREITEMSTRUCT *mi) {
   if (!it) return;
   HDC dc = GetDC(NULL);
   HGDIOBJ of = (dc && g_fontBody) ? SelectObject(dc, g_fontBody) : NULL;
-  SIZE sz = {160, 16};
+  SIZE sz = {160, 16}, kz = {0, 0};
   if (dc) GetTextExtentPoint32W(dc, it->text, (int)wcslen(it->text), &sz);
+  /* клавиша бывает и длинной — «Ctrl+Alt+R» */
+  if (dc && it->key && it->key[0] && g_fontSmall) {
+    SelectObject(dc, g_fontSmall);
+    GetTextExtentPoint32W(dc, it->key, (int)wcslen(it->key), &kz);
+  }
   if (of) SelectObject(dc, of);
   if (dc) ReleaseDC(NULL, dc);
-  mi->itemWidth = (UINT)(sz.cx + more_px(it->key ? 90 : 60));
+  mi->itemWidth = (UINT)(sz.cx + kz.cx + more_px(it->key ? 90 : 60));
   mi->itemHeight = (UINT)more_px(it->kind == 1 ? 26 : 34);
 }
 
@@ -181,7 +186,7 @@ static void upd_idle_tick(void) {
   if (g_tmExporting || g_tsExporting || g_tmLoadPending || g_tsLoadPending || g_rtBusy) return;
   for (int i = 0; i < 8; i++)
     if (g_msgInSlots[i]) return; /* на экране сообщение коллеги — перезапуск стёр бы его */
-  HWND busy[] = {g_cutWnd, g_tmWnd, g_tsWnd, g_ndWnd, g_shWnd, g_msgOut, g_pnWnd, g_rtWnd};
+  HWND busy[] = {g_cutWnd, g_tmWnd, g_tsWnd, g_ndWnd, g_shWnd, g_msgOut, g_pnWnd, g_rtWnd, g_hkWnd};
   for (size_t i = 0; i < sizeof(busy) / sizeof(busy[0]); i++)
     if (busy[i] && IsWindowVisible(busy[i]) && !IsIconic(busy[i])) return; /* открыто — не мешаем */
   KillTimer(g_hwnd, TIMER_UPD_IDLE);
