@@ -80,6 +80,16 @@
 #define ID_RT_COPY 222
 #define ID_RT_LOG 223
 #define ID_RT_DUMP 224 /* «Выгрузка для проверки» */
+#define ID_SH_LIST 230 /* шашки, см. shashki.c */
+#define ID_SH_INVITE 231
+#define ID_SH_ACCEPT 232
+#define ID_SH_DECLINE 233
+#define ID_SH_DRAW 234
+#define ID_SH_DRAWOK 235
+#define ID_SH_RESIGN 236
+#define ID_SH_BACK 237
+#define ID_SH_CANCEL 238
+#define ID_SHASHKI_BTN 239 /* «Шашки» — в Настройках, рядом с «Нардами» */
 #define ID_ANSPIN 154
 #define TIMER_FOLLOW 1
 #define TIMER_SAVE 2
@@ -234,6 +244,7 @@ static HWND g_tbFg;
 static HWND g_btnSet;
 static HWND g_btnAsk;
 static HWND g_btnNd; /* кнопка «Нарды» в Настройках */
+static HWND g_btnSh; /* и «Шашки» рядом с ней */
 static HWND g_btnNotes; /* «Блокнот» внизу окна */
 static HWND g_btnMore;  /* «Ещё» внизу окна: страницы из giriaja-hall */
 /* Режим окна: 0 — блокнот (заметки), 1 — поиск (поле, «Спросить» и где
@@ -378,6 +389,7 @@ static void save_cursor_pref(void);
 static void set_skin(int skin);
 static void fx_sync(void); /* fairy_fx.c: звёздочки при нажатии у «Феи» */
 static void nardy_show(void); /* nardy.c: короткие нарды через общую папку */
+static void shashki_show(void); /* shashki.c: русские шашки — так же */
 static void start_lookup(const wchar_t *q);
 static BOOL clipboard_text(wchar_t *out, int n);
 static void search_web(const wchar_t *q);
@@ -2130,6 +2142,7 @@ static void draw_pad_button(const DRAWITEMSTRUCT *dis) {
   BOOL primary = id == ID_SEARCH_GO || id == ID_UPDATE || (id == ID_PIN && !g_follow) ||
                  id == ID_ANS_OPEN || id == ID_ANS_OPENTP || (id == ID_ASK_TAB && g_padMode == 1) || (id == ID_NOTES_TAB && g_padMode == 0) ||
                  id == ID_ND_INVITE || id == ID_ND_ACCEPT || id == ID_ND_ROLL || id == ID_ND_DONE ||
+                 id == ID_SH_INVITE || id == ID_SH_ACCEPT || id == ID_SH_DRAWOK ||
                  id == ID_ANS_DRAW || id == ID_ANS_SHOW || /* чертёж нашёлся — кнопки синие */
                  id == ID_MSG_SEND || id == ID_MSG_REPLY || id == ID_RT_BUILD || id == ID_RT_SAVE;
   BOOL quiet = id == ID_CLOSE || id == ID_MIN || id == ID_PANEL_CLOSE;
@@ -2382,6 +2395,7 @@ static void tray_menu(HWND hwnd) {
   AppendMenuW(menu, MF_STRING, 18, L"Что нового в папке");
   AppendMenuW(menu, MF_STRING, 23, L"Написать коллеге");
   AppendMenuW(menu, MF_STRING, 21, L"Нарды");
+  AppendMenuW(menu, MF_STRING, 24, L"Шашки");
   AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
   AppendMenuW(menu, MF_STRING | (g_skin == 1 ? MF_CHECKED : 0), 10, L"Курсор: Мечник");
   AppendMenuW(menu, MF_STRING | (g_skin == 2 ? MF_CHECKED : 0), 11, L"Курсор: Рукавица");
@@ -2427,6 +2441,7 @@ static void tray_menu(HWND hwnd) {
   }
   else if (cmd == 18) files_show_changes();
   else if (cmd == 21) nardy_show();
+  else if (cmd == 24) shashki_show();
   else if (cmd == 16) {
     if (g_follow) toggle_follow();
     toggle_settings();
@@ -2837,8 +2852,12 @@ static void layout_settings(void) {
   y += btnH + gap;
   if (g_chkServe) MoveWindow(g_chkServe, pad, y, cw - pad, btnH, TRUE);
   y += btnH + gap;
-  /* нарды идут через ту же общую папку — поэтому здесь */
-  if (g_btnNd) MoveWindow(g_btnNd, pad, y, cw - pad, btnH, TRUE);
+  /* нарды и шашки идут через ту же общую папку — поэтому здесь, в ряд */
+  {
+    int half = (cw - pad - gap) / 2;
+    if (g_btnNd) MoveWindow(g_btnNd, pad, y, half, btnH, TRUE);
+    if (g_btnSh) MoveWindow(g_btnSh, pad + half + gap, y, cw - pad - half - gap, btnH, TRUE);
+  }
   y += btnH + gap + 22;
   {
     /* три набора в ряд: Мечник, Рукавица, Фея */
@@ -3013,6 +3032,10 @@ static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
     if (LOWORD(wParam) == ID_SHARE_EDIT && HIWORD(wParam) == EN_KILLFOCUS) share_apply_root();
     if (LOWORD(wParam) == ID_NARDY_BTN) {
       nardy_show();
+      return 0;
+    }
+    if (LOWORD(wParam) == ID_SHASHKI_BTN) {
+      shashki_show();
       return 0;
     }
     if (LOWORD(wParam) == ID_SHARE_SERVE) {
@@ -3366,6 +3389,7 @@ static void create_settings(HWND owner) {
                                WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 0, 0, 240, 26,
                                g_setHwnd, (HMENU)(INT_PTR)ID_SHARE_SERVE, NULL, NULL);
   g_btnNd = mk_btn(g_setHwnd, L"Нарды", ID_NARDY_BTN);
+  g_btnSh = mk_btn(g_setHwnd, L"Шашки", ID_SHASHKI_BTN);
   g_btnK2 = mk_btn(g_setHwnd, L"Мечник", ID_CUR_K2);
   g_btnK3 = mk_btn(g_setHwnd, L"Рукавица", ID_CUR_K3);
   g_btnK4 = mk_btn(g_setHwnd, L"Фея", ID_CUR_K4);
@@ -3444,6 +3468,7 @@ static void create_settings(HWND owner) {
 #include "tiffmerge.c"
 #include "tiffsort.c"
 #include "nardy.c"
+#include "shashki.c" /* после нард: общий список «кто в сети» и мелочи работы с папкой */
 #include "layout_fix.c" /* Pause: «ghbdtn» → «привет» */
 #include "msg.c"        /* исчезающие сообщения коллегам — через ту же папку, что нарды */
 #include "tools.c" /* после нардов: автообновление смотрит, не открыты ли они */
@@ -3510,6 +3535,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     load_plm_pref();
     share_start();
     nardy_start(); /* «я в сети» для нард и приглашения — пока задана общая папка */
+    shashki_start(); /* приглашения и партии в шашки — там же */
     msg_start();   /* сообщения коллегам: забирать пришедшие */
     load_files_pref();
     if (g_autostart) autostart_set(TRUE);
@@ -3934,6 +3960,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     /* щелчок по всплывашке «Новое в папке» */
     if (lParam == NIN_BALLOONUSERCLICK) {
       if (g_balloonKind == 1) nardy_show();
+      else if (g_balloonKind == 5) shashki_show();
       else if (g_balloonKind == 2) { /* «вышла новая версия» — поставить сейчас */
         if (g_updReady && g_updPath[0]) {
           KillTimer(hwnd, TIMER_UPD_IDLE);
@@ -3963,6 +3990,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
   case WM_NARDY_POLL:
     nd_on_poll((NdPoll *)lParam);
     msg_refresh_list(); /* «кто в сети» — и для сообщений */
+    shashki_online_changed(); /* и для шашек */
+    return 0;
+  case WM_SHASHKI_POLL:
+    sh_on_poll((ShPoll *)lParam);
     return 0;
   case WM_MSG_IN:
     msg_show_in((MsgIn *)lParam);

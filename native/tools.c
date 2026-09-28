@@ -36,7 +36,7 @@ typedef struct {
   int kind;      /* 0 — пункт, 1 — заголовок раздела, 2 — опасный (красный) */
 } MoreItem;
 
-enum { MORE_OCR = 20, MORE_NARDY, MORE_CHANGES, MORE_CLEAR, MORE_LAYOUT, MORE_MSG, MORE_ROUTE };
+enum { MORE_OCR = 20, MORE_NARDY, MORE_CHANGES, MORE_CLEAR, MORE_LAYOUT, MORE_MSG, MORE_ROUTE, MORE_SHASHKI };
 static const MoreItem kMore[] = {
     {0, L"ИНСТРУМЕНТЫ", NULL, 0, 1},
     {1, L"Расчёт резки и газов", NULL, RGB(0x1F, 0x6B, 0x5A), 0},
@@ -49,6 +49,7 @@ static const MoreItem kMore[] = {
     {MORE_LAYOUT, L"Исправить раскладку", g_lfKeyName, 0, 0}, /* с 2026.09.23.42 */
     {MORE_MSG, L"Написать коллеге", NULL, 0, 0},
     {MORE_NARDY, L"Нарды", NULL, 0, 0},
+    {MORE_SHASHKI, L"Шашки", NULL, 0, 0}, /* с 2026.09.23.65: по сети, как нарды */
     {MORE_CHANGES, L"Что нового в папке", NULL, 0, 0},
     {-1, NULL, NULL, 0, 0},
     {MORE_CLEAR, L"Очистить блокнот…", NULL, 0, 2},
@@ -132,6 +133,7 @@ static void tools_menu(HWND owner, HWND btn) {
   else if (cmd == MORE_LAYOUT) layout_fix_hint();
   else if (cmd == MORE_MSG) msg_compose_show();
   else if (cmd == MORE_NARDY) nardy_show();
+  else if (cmd == MORE_SHASHKI) shashki_show();
   else if (cmd == MORE_CHANGES) files_show_changes();
   else if (cmd == MORE_CLEAR) clear_copied();
 }
@@ -179,7 +181,7 @@ static void upd_idle_tick(void) {
   if (g_tmExporting || g_tsExporting || g_tmLoadPending || g_tsLoadPending || g_rtBusy) return;
   for (int i = 0; i < 8; i++)
     if (g_msgInSlots[i]) return; /* на экране сообщение коллеги — перезапуск стёр бы его */
-  HWND busy[] = {g_cutWnd, g_tmWnd, g_tsWnd, g_ndWnd, g_msgOut, g_pnWnd, g_rtWnd};
+  HWND busy[] = {g_cutWnd, g_tmWnd, g_tsWnd, g_ndWnd, g_shWnd, g_msgOut, g_pnWnd, g_rtWnd};
   for (size_t i = 0; i < sizeof(busy) / sizeof(busy[0]); i++)
     if (busy[i] && IsWindowVisible(busy[i]) && !IsIconic(busy[i])) return; /* открыто — не мешаем */
   KillTimer(g_hwnd, TIMER_UPD_IDLE);
