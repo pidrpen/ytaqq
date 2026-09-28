@@ -774,17 +774,24 @@ static void rt_walk(SQLHDBC dbc, long id, int level, const wchar_t *parentDes, d
   }
   wchar_t notes[3][60] = {L"", L"", L""};
   rt_route(dbc, &o, rows, j, r->f[RC_ROUTE], 200, notes[0], 60);
-  rt_preform(dbc, o.pfCard, rows, j, r, notes[1], 60);
-  if (!r->f[RC_MAT][0] && o.mat[0]) lstrcpynW(r->f[RC_MAT], o.mat, 200); /* без заготовки — материал изделия */
-  if (r->hasNorm) rt_fmt(r->norm1 * r->qtyTot, 3, r->f[RC_NORMTOT], 200);
   if (level && !qtyFound) lstrcpynW(notes[2], L"кол-во не найдено", 60);
   RtEl *el = (RtEl *)malloc(sizeof(RtEl) * 150);
   int ne = el ? rt_children(dbc, &o, rows, j, el, 150) : 0;
   /* вид изделия */
   const wchar_t *kind = o.section[0] ? o.section : (elSection && elSection[0] ? elSection : NULL);
   lstrcpynW(r->f[RC_KIND], kind ? kind : (ne > 0 ? L"Сборочные единицы" : L"Детали"), 200);
-  /* сборке заготовка не нужна — «нет заготовки» у неё не пишем */
-  if (ne > 0 && !wcscmp(notes[1], L"нет заготовки")) notes[1][0] = 0;
+  /* Сборке заготовка не нужна: в ведомости (шаблон КЗ 26-112) у сборок
+     материал, сортамент, припуск и нормы пустые. Карточка заготовки у сборки
+     в PLM бывает (своя или от связанной конфигурации) — с 2026.09.23.53 её
+     не берём: сперва состав, и только у позиции без состава — заготовка. */
+  BOOL assy = ne > 0 || wcsstr(r->f[RC_KIND], L"борочн") || wcsstr(r->f[RC_KIND], L"омплекс");
+  if (assy) {
+    if (o.pfCard) rt_log(j, L"    сборка — заготовку (карточка %ld) не берём\r\n", o.pfCard);
+  } else {
+    rt_preform(dbc, o.pfCard, rows, j, r, notes[1], 60);
+    if (!r->f[RC_MAT][0] && o.mat[0]) lstrcpynW(r->f[RC_MAT], o.mat, 200); /* без заготовки — материал изделия */
+    if (r->hasNorm) rt_fmt(r->norm1 * r->qtyTot, 3, r->f[RC_NORMTOT], 200);
+  }
   for (int i = 0; i < 3; i++) {
     if (!notes[i][0]) continue;
     size_t l = wcslen(r->f[RC_NOTE]);
