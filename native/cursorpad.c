@@ -290,6 +290,10 @@ static HWND g_answer;
 static HWND g_answerList;
 static HWND g_pick;
 static HANDLE g_mutex;
+/* программа закрывается (в том числе ради обновления): фоновые потоки больше
+   ничего не забирают из общей папки — показать это уже некому, а новая
+   версия заберёт сама */
+static volatile LONG g_quitting;
 static WNDPROC g_oldEdit;
 static BOOL g_ownClip = FALSE;
 static HFONT g_fontUi;
@@ -404,6 +408,7 @@ static void restore_if_stale_lock(void);
 static void apply_scheme_slots(void);
 static void update_engine_buttons(void);
 static BOOL ensure_single_instance(void);
+static void close_other_windows(HWND main);
 static LONG WINAPI on_crash(EXCEPTION_POINTERS *ex);
 static BOOL autostart_get(void);
 static void autostart_set(BOOL on);
@@ -4029,6 +4034,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     fx_burst((int)(LONG_PTR)wParam, (int)(LONG_PTR)lParam);
     return 0;
   case WM_DESTROY:
+    InterlockedExchange(&g_quitting, 1);
+    close_other_windows(hwnd);
     fx_shutdown();
     share_stop();
     save_notes();
@@ -4070,6 +4077,31 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     return 0;
   }
   return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+/* Все прочие окна программы — шашки, нарды, чат, окна «Ещё», горячие
+   клавиши — закрыть вместе с главным. Раньше они оставались: при обновлении
+   прежняя программа ещё до полутора минут ждёт знака от новой, и её окна
+   висели на экране и на панели задач, не отвечая, — открывалась «прошлая
+   сессия» (2026.09.23.74). */
+static HWND g_closeList[64];
+static int g_closeN;
+
+static BOOL CALLBACK close_collect(HWND w, LPARAM lp) {
+  wchar_t cls[32];
+  if (w == (HWND)lp || !GetClassNameW(w, cls, 32)) return TRUE;
+  if (!wcscmp(cls, L"IME") || !wcsncmp(cls, L"MSCTFIME", 8)) return TRUE; /* служебные окна ввода — не наши */
+  if (g_closeN < 64) g_closeList[g_closeN++] = w;
+  return TRUE;
+}
+
+static void close_other_windows(HWND main) {
+  g_closeN = 0;
+  EnumThreadWindows(GetCurrentThreadId(), close_collect, (LPARAM)main);
+  for (int i = 0; i < g_closeN; i++)
+    if (IsWindow(g_closeList[i])) ShowWindow(g_closeList[i], SW_HIDE);
+  for (int i = 0; i < g_closeN; i++)
+    if (IsWindow(g_closeList[i])) DestroyWindow(g_closeList[i]);
 }
 
 static void enable_dpi(void) {

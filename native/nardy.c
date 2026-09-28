@@ -365,6 +365,7 @@ static DWORD WINAPI nd_thread(LPVOID param) {
   static int nCache;
   for (;;) {
     Sleep(1000);
+    if (g_quitting) break;
     wchar_t root[MAX_PATH];
     share_root_copy(root);
     if (!root[0]) continue;

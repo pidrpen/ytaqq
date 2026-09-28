@@ -195,6 +195,7 @@ static DWORD WINAPI msg_thread(LPVOID param) {
   int beat = 0;
   for (;;) {
     Sleep(1000);
+    if (g_quitting) break; /* закрываемся — сообщения заберёт следующий запуск */
     /* окно чата открыто — каждую секунду, иначе раз в три */
     if (!g_msgFast && ++beat % 3) continue;
     wchar_t root[MAX_PATH];
@@ -225,7 +226,7 @@ static DWORD WINAPI msg_thread(LPVOID param) {
           }
           /* удалили — значит, наше; не вышло — попробуем в следующий раз,
              иначе показали бы одно и то же дважды */
-          if (!DeleteFileW(full)) {
+          if (g_quitting || !DeleteFileW(full)) {
             msg_wipe(t);
             free(t);
             continue;

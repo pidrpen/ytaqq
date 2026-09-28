@@ -376,6 +376,7 @@ static DWORD WINAPI sh_thread(LPVOID param) {
   }
   for (;;) {
     Sleep(1000);
+    if (g_quitting) break; /* закрываемся — копии ходов заберёт следующий запуск */
     wchar_t root[MAX_PATH];
     share_root_copy(root);
     if (!root[0]) continue;
@@ -464,6 +465,10 @@ static DWORD WINAPI sh_thread(LPVOID param) {
             if (!t) continue;
             wchar_t g[96];
             int sd1 = 0;
+            if (g_quitting) {
+              free(t);
+              break;
+            }
             const wchar_t *body = sh_parse_copy(t, g, &sd1);
             DeleteFileW(full);
             if (body) {
