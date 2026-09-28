@@ -15,6 +15,7 @@
 
 #define SHARE_SUB L"CursorPad-PLM"
 #define SHARE_PATH 1024
+#define SHARE_OUT 520000 /* ответ раздающего, знаков */
 
 /* g_shareRoot, g_shareServe, g_shareEdit, g_chkServe — в cursorpad.c: их читают настройки */
 static CRITICAL_SECTION g_shareCs;
@@ -264,6 +265,7 @@ static int share_serve_child(const wchar_t *reqPath, const wchar_t *ansPath) {
   if (!req) return 1;
   wchar_t kind[16] = L"", q[400] = L"", from[200] = L"", idl[1400] = L"", rdes[200] = L"", rorder[120] = L"";
   long id = 0, rid = 0;
+  BOOL rdump = FALSE;
   BOOL verbose = FALSE;
   wchar_t *p = req, *line;
   while ((line = share_next_line(&p)) != NULL) {
@@ -279,6 +281,7 @@ static int share_serve_child(const wchar_t *reqPath, const wchar_t *ansPath) {
     else if (!wcscmp(f[0], L"des")) lstrcpynW(rdes, f[1], 200);
     else if (!wcscmp(f[0], L"order")) lstrcpynW(rorder, f[1], 120);
     else if (!wcscmp(f[0], L"rid")) rid = wcstol(f[1], NULL, 10);
+    else if (!wcscmp(f[0], L"dump")) rdump = f[1][0] == L'1';
   }
   free(req);
   wchar_t user[128], pc[64];
@@ -289,7 +292,9 @@ static int share_serve_child(const wchar_t *reqPath, const wchar_t *ansPath) {
   _snwprintf(via, 200, L"%s (%s)", user, pc);
   sb_field(&b, via);
   sb_add(&b, L"\n");
-  wchar_t *out = (wchar_t *)malloc(160000 * sizeof(wchar_t));
+  /* ответ целиком: с проверочной выгрузкой ведомости (2026.09.23.59) — до
+     полумиллиона знаков */
+  wchar_t *out = (wchar_t *)malloc(SHARE_OUT * sizeof(wchar_t));
   if (!out) return 1;
   out[0] = 0;
   if (!wcscmp(kind, L"search") && q[0]) {
@@ -312,7 +317,7 @@ static int share_serve_child(const wchar_t *reqPath, const wchar_t *ansPath) {
   } else if (!wcscmp(kind, L"card") && id > 0) {
     load_files_pref(); /* чертёж для карточки ищется в своём индексе */
     g_cardVerbose = verbose;
-    plm_card(id, out, 160000);
+    plm_card(id, out, SHARE_OUT);
     for (int i = 0; i < g_opsPendN; i++) {
       sb_add(&b, L"op");
       sb_field(&b, g_opsPend[i]);
@@ -357,6 +362,7 @@ static int share_serve_child(const wchar_t *reqPath, const wchar_t *ansPath) {
       lstrcpynW(j->des, rdes, 200);
       lstrcpynW(j->order, rorder, 120);
       j->rootId = rid;
+      j->dump = rdump;
       j->deadline = GetTickCount64() + 80000; /* исполнителя снимают через 90 с */
       rt_log(j, L"Маршрутная ведомость: %s (сбор у коллеги)\r\n", rdes);
       rt_build(j);
@@ -370,11 +376,11 @@ static int share_serve_child(const wchar_t *reqPath, const wchar_t *ansPath) {
         for (int c = 0; c < RT_NCOL; c++) sb_field(&b, j->rows[r].f[c]);
         sb_add(&b, L"\n");
       }
-      lstrcpynW(out, j->log, 160000);
+      lstrcpynW(out, j->log, SHARE_OUT);
       rt_job_free(j);
     }
   } else {
-    lstrcpynW(out, L"PLM\r\n\r\nНепонятный запрос.", 160000);
+    lstrcpynW(out, L"PLM\r\n\r\nНепонятный запрос.", SHARE_OUT);
   }
   sb_add(&b, L"text\n%s", out);
   free(out);
@@ -786,7 +792,7 @@ static void share_route(RtJob *j) {
     if (*c == L'\t' || *c == L'\r' || *c == L'\n') *c = L' ';
   for (wchar_t *c = o; *c; c++)
     if (*c == L'\t' || *c == L'\r' || *c == L'\n') *c = L' ';
-  _snwprintf(body, 400, L"kind\troute\ndes\t%s\norder\t%s\nrid\t%ld", d, o, j->rootId);
+  _snwprintf(body, 400, L"kind\troute\ndes\t%s\norder\t%s\nrid\t%ld\ndump\t%d", d, o, j->rootId, j->dump ? 1 : 0);
   body[399] = 0;
   wchar_t out[600];
   wchar_t *a = share_ask(body, L"-rt", 100, out, 600);

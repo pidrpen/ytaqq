@@ -80,7 +80,7 @@ static DWORD WINAPI rt_thread(LPVOID param) {
   return 0;
 }
 
-static void rt_start(void) {
+static void rt_start_ex(BOOL dump) {
   if (InterlockedCompareExchange(&g_rtBusy, 1, 0) != 0) {
     InterlockedExchange(&g_rtCancel, 1); /* второй щелчок — остановить */
     rt_status(L"Останавливаю…");
@@ -107,18 +107,42 @@ static void rt_start(void) {
     return;
   }
   if (g_rtPickId && !_wcsicmp(j->des, g_rtPickDes)) j->rootId = g_rtPickId;
+  j->dump = dump;
   g_rtCancel = 0;
   j->cancel = &g_rtCancel;
   j->notify = g_rtWnd;
   j->deadline = GetTickCount64() + 10 * 60 * 1000; /* своя база — до 10 минут на большую сборку */
   rt_log(j, L"Маршрутная ведомость: %s%s%s\r\n", j->des, j->order[0] ? L", входит в " : L"", j->order);
   SetWindowTextW(GetDlgItem(g_rtWnd, ID_RT_BUILD), L"Стоп");
-  rt_status(L"Собираю из PLM…");
+  rt_status(dump ? L"Собираю из PLM с выгрузкой для проверки…" : L"Собираю из PLM…");
   HANDLE t = CreateThread(NULL, 0, rt_thread, j, 0, NULL);
   if (t) CloseHandle(t);
   else {
     rt_job_free(j);
     InterlockedExchange(&g_rtBusy, 0);
+  }
+}
+
+static void rt_start(void) { rt_start_ex(FALSE); }
+
+/* «Выгрузка для проверки» готова: весь текст — в файл на рабочий стол и
+   открыть; этот файл и присылают, если ведомость где-то пустая */
+static void rt_dump_save(RtJob *j) {
+  wchar_t dir[MAX_PATH], path[MAX_PATH], des[120];
+  if (FAILED(SHGetFolderPathW(NULL, CSIDL_DESKTOPDIRECTORY, NULL, 0, dir))) lstrcpynW(dir, g_dataDir, MAX_PATH);
+  lstrcpynW(des, j->des, 120);
+  for (wchar_t *p = des; *p; p++)
+    if (wcschr(L"\\/:*?\"<>|", *p)) *p = L'_';
+  SYSTEMTIME t;
+  GetLocalTime(&t);
+  _snwprintf(path, MAX_PATH, L"%s\\МВ проверка %s %02d.%02d %02d-%02d.txt", dir, des, t.wDay, t.wMonth, t.wHour,
+             t.wMinute);
+  path[MAX_PATH - 1] = 0;
+  if (share_write_ex(path, j->log, TRUE)) {
+    rt_status(L"Выгрузка для проверки: %s — пришлите этот файл", path);
+    ShellExecuteW(NULL, L"open", path, NULL, NULL, SW_SHOWNORMAL);
+  } else {
+    rt_status(L"Не удалось записать %s", path);
   }
 }
 
@@ -279,6 +303,7 @@ static void rt_show_log(void) {
     if (!g_rtLog) return;
     if (g_fontMono) SendMessageW(g_rtLog, WM_SETFONT, (WPARAM)g_fontMono, FALSE);
   }
+  SendMessageW(g_rtLog, EM_SETLIMITTEXT, RT_LOG, 0); /* проверочная выгрузка длиннее 32 тысяч */
   SetWindowTextW(g_rtLog, g_rtJob->log);
   ShowWindow(g_rtLog, SW_SHOWNORMAL);
   SetForegroundWindow(g_rtLog);
@@ -299,6 +324,7 @@ static void rt_layout(void) {
   MoveWindow(GetDlgItem(g_rtWnd, ID_RT_SAVE), pad, by, RS(170), RS(30), TRUE);
   MoveWindow(GetDlgItem(g_rtWnd, ID_RT_COPY), pad + RS(180), by, RS(120), RS(30), TRUE);
   MoveWindow(GetDlgItem(g_rtWnd, ID_RT_LOG), pad + RS(310), by, RS(120), RS(30), TRUE);
+  MoveWindow(GetDlgItem(g_rtWnd, ID_RT_DUMP), pad + RS(440), by, RS(200), RS(30), TRUE);
 }
 
 static void rt_paint(HWND hwnd, HDC hdc) {
@@ -396,6 +422,7 @@ static LRESULT CALLBACK RtProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
     double sec = (double)(GetTickCount64() - j->t0) / 1000.0;
     if (j->err[0] && !j->n) rt_status(L"%s", j->err);
     else if (g_rtCancel) rt_status(L"Остановлено: собрано %d позиций", j->n);
+    else if (j->dump) rt_dump_save(j);
     else {
       int blanks = 0;
       for (int i = 0; i < j->n; i++)
@@ -419,6 +446,7 @@ static LRESULT CALLBACK RtProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
     if (id == ID_RT_SAVE) rt_save();
     if (id == ID_RT_COPY) rt_copy();
     if (id == ID_RT_LOG) rt_show_log();
+    if (id == ID_RT_DUMP) rt_start_ex(TRUE);
     return 0;
   }
   case WM_KEYDOWN:
@@ -473,6 +501,7 @@ static void route_show(void) {
     mk_btn(g_rtWnd, L"Сохранить в Excel…", ID_RT_SAVE);
     mk_btn(g_rtWnd, L"Копировать", ID_RT_COPY);
     mk_btn(g_rtWnd, L"Подробности", ID_RT_LOG);
+    mk_btn(g_rtWnd, L"Выгрузка для проверки", ID_RT_DUMP);
     g_rtList = CreateWindowExW(0, WC_LISTVIEWW, L"", WS_CHILD | WS_VISIBLE | WS_BORDER | LVS_REPORT | LVS_SHOWSELALWAYS,
                                0, 0, 10, 10, g_rtWnd, NULL, g_inst, NULL);
     SendMessageW(g_rtList, LVM_SETEXTENDEDLISTVIEWSTYLE, 0, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);

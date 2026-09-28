@@ -38,7 +38,7 @@
 #define RT_MAX 400
 #define RT_DEPTH 8
 #define RT_NCOL 15
-#define RT_LOG 30000
+#define RT_LOG 500000 /* с проверочной выгрузкой (2026.09.23.59) — до полумиллиона знаков */
 
 typedef struct {
   long id;
@@ -62,6 +62,9 @@ typedef struct {
   BOOL keysShown; /* поля строки техсостава — в подробности один раз */
   BOOL opsShown;  /* поля операции без цеха — тоже один раз */
   int diagShown;  /* связи изделия без ТП и заготовки: 1 — сборки, 2 — детали */
+  BOOL dump;       /* «Выгрузка для проверки»: всё найденное — в подробности */
+  int dumpDet, dumpAsm;
+  long lastTp, lastTpVer, lastTpVar; /* техпроцесс последней позиции: для выгрузки */
   ULONGLONG t0;
 } RtJob;
 
@@ -285,6 +288,7 @@ static void rt_route(SQLHDBC dbc, const RtObj *o, CardRow *rows, RtJob *j, wchar
   out[0] = 0;
   wchar_t sql[3600], err[280];
   long tp = 0, ver = 0;
+  j->lastTp = j->lastTpVer = j->lastTpVar = 0;
   if (o->tpCard) {
     _snwprintf(sql, 3600,
                L"SELECT TOP 20 tp.InfoObjectId, tp.Name, ISNULL(flag.V,N'нет'), ISNULL(av.L,0), 0 "
@@ -361,6 +365,9 @@ static void rt_route(SQLHDBC dbc, const RtObj *o, CardRow *rows, RtJob *j, wchar
              ver);
   int k = card_query(dbc, sql, rows, 2, err, 280);
   long parent = (k > 0 && rows[0].n1) ? rows[0].n1 : ver;
+  j->lastTp = tp;
+  j->lastTpVer = ver;
+  j->lastTpVar = parent;
   /* операции по порядку и участок каждой: Area (с 2026.09.23.49 — прежде
      цеха: в ведомости маршрут по участкам), нет — WorkShop; своё или у TSOperation */
   _snwprintf(sql, 3600,
@@ -583,22 +590,17 @@ static BOOL rt_is_qty_key(const wchar_t *k) {
   return FALSE;
 }
 
-static int rt_children(SQLHDBC dbc, const RtObj *o, CardRow *rows, RtJob *j, RtEl *el, int max) {
-  if (!o->tcCard) return 0;
-  wchar_t *sql = (wchar_t *)malloc(4000 * sizeof(wchar_t));
-  if (!sql) return 0;
-  wchar_t err[280];
+/* строки TechComposition вариантов версии ver: n1 — строка, n2 — вариант;
+   prodConf — только вариант этой конфигурации (0 — любой) */
+static int rt_tc_rows(SQLHDBC dbc, long ver, long prodConf, CardRow *rows, wchar_t *sql, wchar_t *err) {
   _snwprintf(sql, 4000,
-             L"SELECT DISTINCT TOP 300 ce.CollectionElementId, N'', N'', 0, 0 "
-             L"FROM InfoObjectAttributes AS av WITH(NOLOCK) "
-             L"JOIN NameKeys AS nkv WITH(NOLOCK) ON nkv.NameKeyId=av.NameKeyId "
-             L"AND nkv.Value=N'ActualVersionTechComp' "
-             L"JOIN InfoObjects AS ch WITH(NOLOCK) ON ch.ParentId=av.Link AND ch.Erased=0 "
+             L"SELECT DISTINCT TOP 300 ce.CollectionElementId, N'', N'', ch.InfoObjectId, 0 "
+             L"FROM InfoObjects AS ch WITH(NOLOCK) "
              L"JOIN InfoObjectAttributes AS tc WITH(NOLOCK) ON tc.OwnerId=ch.InfoObjectId AND tc.Outdated=0 "
              L"JOIN NameKeys AS nktc WITH(NOLOCK) ON nktc.NameKeyId=tc.NameKeyId AND nktc.Value=N'TechComposition' "
              L"JOIN InfoObjectCollectionElements AS ce WITH(NOLOCK) ON ce.AttributeId=tc.AttributeId "
              L"AND ce.Outdated=0 "
-             L"WHERE av.OwnerId=%ld AND av.Outdated=0 "
+             L"WHERE ch.ParentId=%ld AND ch.Erased=0 "
              L"AND (%ld=0 OR EXISTS (SELECT 1 FROM InfoObjectAttributes AS pr WITH(NOLOCK) "
              L"JOIN NameKeys AS nkpr WITH(NOLOCK) ON nkpr.NameKeyId=pr.NameKeyId AND nkpr.Value=N'Product' "
              L"WHERE pr.OwnerId=ch.InfoObjectId AND pr.Outdated=0 AND pr.Link=%ld)) "
@@ -606,8 +608,55 @@ static int rt_children(SQLHDBC dbc, const RtObj *o, CardRow *rows, RtJob *j, RtE
              L"JOIN NameKeys AS nkr WITH(NOLOCK) ON nkr.NameKeyId=ir.NameKeyId AND nkr.Value=N'IsRemoved' "
              L"WHERE ir.CollectionElementId=ce.CollectionElementId AND ir.BoolValue=1) "
              L"ORDER BY ce.CollectionElementId",
-             o->tcCard, o->prodConf, o->prodConf);
-  int n = card_query(dbc, sql, rows, 300, err, 280);
+             ver, prodConf, prodConf);
+  return card_query(dbc, sql, rows, 300, err, 280);
+}
+
+static int rt_children(SQLHDBC dbc, const RtObj *o, CardRow *rows, RtJob *j, RtEl *el, int max) {
+  if (!o->tcCard) return 0;
+  wchar_t *sql = (wchar_t *)malloc(4000 * sizeof(wchar_t));
+  if (!sql) return 0;
+  wchar_t err[280];
+  /* Версия техсостава: утверждённая (ActualVersionTechComp); её нет —
+     техсостав не утверждён: последняя версия — из ссылок карточки или её
+     вложенных объектов, у которой есть варианты с TechComposition (с
+     2026.09.23.59; раньше состав тогда не выгружался) */
+  _snwprintf(sql, 4000,
+             L"SELECT TOP 5 c.V, CAST(vo.Name AS NVARCHAR(200)), c.K, 0, 0 "
+             L"FROM (SELECT a.Link AS V, nk.Value AS K FROM InfoObjectAttributes AS a WITH(NOLOCK) "
+             L"JOIN NameKeys AS nk WITH(NOLOCK) ON nk.NameKeyId=a.NameKeyId "
+             L"WHERE a.OwnerId=%ld AND a.Outdated=0 AND a.DataType=6 AND ISNULL(a.Link,0)<>0 "
+             L"AND ISNULL(a.CollectionElementId,0)=0 "
+             L"UNION SELECT o.InfoObjectId, N'' FROM InfoObjects AS o WITH(NOLOCK) "
+             L"WHERE o.ParentId=%ld AND o.Erased=0) AS c "
+             L"JOIN InfoObjects AS vo WITH(NOLOCK) ON vo.InfoObjectId=c.V AND vo.Erased=0 "
+             L"WHERE EXISTS (SELECT 1 FROM InfoObjects AS ch WITH(NOLOCK) "
+             L"JOIN InfoObjectAttributes AS t WITH(NOLOCK) ON t.OwnerId=ch.InfoObjectId AND t.Outdated=0 "
+             L"JOIN NameKeys AS nkt WITH(NOLOCK) ON nkt.NameKeyId=t.NameKeyId AND nkt.Value=N'TechComposition' "
+             L"WHERE ch.ParentId=c.V AND ch.Erased=0) "
+             L"ORDER BY CASE WHEN c.K=N'ActualVersionTechComp' THEN 0 ELSE 1 END, c.V DESC",
+             o->tcCard, o->tcCard);
+  int nv = card_query(dbc, sql, rows, 5, err, 280);
+  if (nv <= 0) {
+    if (nv < 0) rt_log(j, L"    техсостав: версия не прочиталась — %s\r\n", err);
+    else rt_log(j, L"    техсостав: в карточке %ld нет версии с составом\r\n", o->tcCard);
+    free(sql);
+    return 0;
+  }
+  long ver = rows[0].n1;
+  if (_wcsicmp(rows[0].s2, L"ActualVersionTechComp"))
+    rt_log(j, L"    техсостав не утверждён — беру последнюю версию «%s» (#%ld)\r\n", rows[0].s1, ver);
+  int n = rt_tc_rows(dbc, ver, o->prodConf, rows, sql, err);
+  if (n == 0 && o->prodConf) { /* варианта этой конфигурации нет — если вариант один, он и есть */
+    n = rt_tc_rows(dbc, ver, 0, rows, sql, err);
+    for (int i = 1; i < n; i++)
+      if (rows[i].n2 != rows[0].n2) {
+        rt_log(j, L"    техсостав: вариантов несколько, своего (конфигурация %ld) нет\r\n", o->prodConf);
+        n = 0;
+        break;
+      }
+    if (n > 0) rt_log(j, L"    техсостав: вариант не по конфигурации, но он в версии один — беру\r\n");
+  }
   if (n <= 0) {
     if (n < 0) rt_log(j, L"    техсостав: запрос не выполнился — %s\r\n", err);
     free(sql);
@@ -734,6 +783,135 @@ static void rt_diag(SQLHDBC dbc, const RtObj *o, CardRow *rows, RtJob *j) {
            rows[i].n2, rows[i].n3 ? L" (в строке списка)" : L"");
 }
 
+/* ---- «Выгрузка для проверки» ----------------------------------------------
+   Всё, что есть у объекта: имя, шаблон, родитель, атрибуты со значениями и
+   ссылками, строки списков. По такому тексту видно, где на этой базе лежат
+   состав, заготовка, сортамент, припуск, участки, — его присылают, если
+   ведомость где-то пустая. Возвращает ссылку атрибута want (или 0). */
+static long rt_dump_obj(SQLHDBC dbc, long id, const wchar_t *label, CardRow *rows, RtJob *j, const wchar_t *want) {
+  if (!id) return 0;
+  wchar_t sql[3000], err[280];
+  long found = 0;
+  _snwprintf(sql, 3000,
+             L"SELECT TOP 1 o.InfoObjectId, CAST(o.Name AS NVARCHAR(250)), ISNULL(CAST(t.NameUI AS NVARCHAR(200)),N''), "
+             L"ISNULL(o.ParentId,0), o.TemplateId FROM InfoObjects AS o WITH(NOLOCK) "
+             L"LEFT JOIN Templates AS t WITH(NOLOCK) ON t.TemplateId=o.TemplateId WHERE o.InfoObjectId=%ld",
+             id);
+  int n = card_query(dbc, sql, rows, 1, err, 280);
+  if (n > 0)
+    rt_log(j, L"\r\n  ── %s #%ld «%s» [%s, шаблон %ld], родитель #%ld\r\n", label, id, rows[0].s1, rows[0].s2, rows[0].n3,
+           rows[0].n2);
+  else
+    rt_log(j, L"\r\n  ── %s #%ld — не прочитался%s%s\r\n", label, id, n < 0 ? L": " : L"", n < 0 ? err : L"");
+  _snwprintf(sql, 3000,
+             L"SELECT TOP 90 a.AttributeId, nk.Value, LEFT(" PF_VALUE_SQL L", 160), ISNULL(a.Link,0), a.DataType "
+             L"FROM InfoObjectAttributes AS a WITH(NOLOCK) "
+             L"JOIN NameKeys AS nk WITH(NOLOCK) ON nk.NameKeyId=a.NameKeyId "
+             L"LEFT JOIN InfoObjects AS lo WITH(NOLOCK) ON a.DataType=6 AND lo.InfoObjectId=a.Link "
+             L"WHERE a.OwnerId=%ld AND a.Outdated=0 AND ISNULL(a.CollectionElementId,0)=0 ORDER BY nk.Value",
+             id);
+  n = card_query(dbc, sql, rows, 90, err, 280);
+  if (n < 0) rt_log(j, L"     атрибуты не прочитались: %s\r\n", err);
+  for (int i = 0; i < n; i++) {
+    if (!rows[i].s2[0] && !rows[i].n2) continue; /* пустые — мимо */
+    if (rows[i].n2 && rows[i].n3 == 6)
+      rt_log(j, L"     %s = %s (#%ld)\r\n", rows[i].s1, rows[i].s2[0] ? rows[i].s2 : L"·", rows[i].n2);
+    else
+      rt_log(j, L"     %s = %s\r\n", rows[i].s1, rows[i].s2);
+    if (want && !found && !_wcsicmp(rows[i].s1, want) && rows[i].n3 == 6) found = rows[i].n2;
+  }
+  /* строки списков и составных атрибутов */
+  _snwprintf(sql, 3000,
+             L"SELECT TOP 80 a.CollectionElementId, CAST(nkp.Value AS NVARCHAR(100)) + N'|' + CAST(nk.Value AS NVARCHAR(100)), "
+             L"LEFT(" PF_VALUE_SQL L", 120), ISNULL(a.Link,0), a.DataType "
+             L"FROM InfoObjectAttributes AS p WITH(NOLOCK) "
+             L"JOIN NameKeys AS nkp WITH(NOLOCK) ON nkp.NameKeyId=p.NameKeyId "
+             L"JOIN InfoObjectCollectionElements AS ce WITH(NOLOCK) ON ce.AttributeId=p.AttributeId AND ce.Outdated=0 "
+             L"JOIN InfoObjectAttributes AS a WITH(NOLOCK) ON a.CollectionElementId=ce.CollectionElementId "
+             L"AND a.Outdated=0 "
+             L"JOIN NameKeys AS nk WITH(NOLOCK) ON nk.NameKeyId=a.NameKeyId "
+             L"LEFT JOIN InfoObjects AS lo WITH(NOLOCK) ON a.DataType=6 AND lo.InfoObjectId=a.Link "
+             L"WHERE p.OwnerId=%ld AND p.Outdated=0 AND ISNULL(p.CollectionElementId,0)=0 "
+             L"ORDER BY p.AttributeId, a.CollectionElementId, nk.Value",
+             id);
+  n = card_query(dbc, sql, rows, 80, err, 280);
+  long cur = -1;
+  for (int i = 0; i < n; i++) {
+    wchar_t *bar = wcschr(rows[i].s1, L'|');
+    const wchar_t *k = bar ? bar + 1 : rows[i].s1;
+    if (bar) *bar = 0;
+    if (rows[i].n1 != cur) {
+      cur = rows[i].n1;
+      rt_log(j, L"\r\n     [%s] строка #%ld:", rows[i].s1, cur);
+    }
+    if (!rows[i].s2[0] && !rows[i].n2) continue;
+    if (rows[i].n2 && rows[i].n3 == 6) rt_log(j, L" %s=%s(#%ld)", k, rows[i].s2[0] ? rows[i].s2 : L"·", rows[i].n2);
+    else rt_log(j, L" %s=%s", k, rows[i].s2);
+  }
+  if (n > 0) rt_log(j, L"\r\n");
+  return found;
+}
+
+/* вложенные объекты (ParentId): список; ids — первые max */
+static int rt_dump_kids(SQLHDBC dbc, long id, const wchar_t *label, CardRow *rows, RtJob *j, long *ids, int max) {
+  if (!id) return 0;
+  wchar_t sql[800], err[280];
+  _snwprintf(sql, 800,
+             L"SELECT TOP 25 o.InfoObjectId, CAST(o.Name AS NVARCHAR(250)), ISNULL(CAST(t.NameUI AS NVARCHAR(200)),N''), "
+             L"0, o.TemplateId FROM InfoObjects AS o WITH(NOLOCK) "
+             L"LEFT JOIN Templates AS t WITH(NOLOCK) ON t.TemplateId=o.TemplateId "
+             L"WHERE o.ParentId=%ld AND o.Erased=0 ORDER BY o.InfoObjectId",
+             id);
+  int n = card_query(dbc, sql, rows, 25, err, 280);
+  rt_log(j, L"\r\n  ── %s #%ld: вложенных %d\r\n", label, id, n < 0 ? 0 : n);
+  int k = 0;
+  for (int i = 0; i < n; i++) {
+    rt_log(j, L"     #%ld «%s» [%s, шаблон %ld]\r\n", rows[i].n1, rows[i].s1, rows[i].s2, rows[i].n3);
+    if (k < max) ids[k++] = rows[i].n1;
+  }
+  return k;
+}
+
+static void rt_dump_product(SQLHDBC dbc, const RtObj *o, CardRow *rows, RtJob *j) {
+  rt_log(j, L"\r\n===== ПРОВЕРКА: %s %s (#%ld) =====\r\n", o->des, o->name, o->id);
+  rt_dump_obj(dbc, o->id, L"объект", rows, j, NULL);
+  if (o->par) rt_dump_obj(dbc, o->par, L"родитель", rows, j, NULL);
+  long ic = 0;
+  if (o->prodConf) ic = rt_dump_obj(dbc, o->prodConf, L"конфигурация", rows, j, L"ProductInterconnectCard");
+  if (ic) rt_dump_obj(dbc, ic, L"карта взаимосвязей", rows, j, NULL);
+  RtObj tmp = *o;
+  rt_diag(dbc, &tmp, rows, j);
+  long ids[4];
+  if (o->tcCard) {
+    long av = rt_dump_obj(dbc, o->tcCard, L"карточка техсостава", rows, j, L"ActualVersionTechComp");
+    int nk = rt_dump_kids(dbc, o->tcCard, L"в карточке техсостава", rows, j, ids, 4);
+    long ver = av ? av : (nk ? ids[nk - 1] : 0);
+    if (ver) {
+      rt_dump_obj(dbc, ver, av ? L"версия техсостава (утверждённая)" : L"версия техсостава (последняя)", rows, j, NULL);
+      int nv = rt_dump_kids(dbc, ver, L"варианты версии", rows, j, ids, 2);
+      for (int i = 0; i < nv; i++) rt_dump_obj(dbc, ids[i], L"вариант техсостава", rows, j, NULL);
+    }
+  }
+  if (o->pfCard) {
+    rt_dump_obj(dbc, o->pfCard, L"карточка заготовок", rows, j, NULL);
+    int np = rt_dump_kids(dbc, o->pfCard, L"заготовки в карточке", rows, j, ids, 2);
+    for (int i = 0; i < np; i++) rt_dump_obj(dbc, ids[i], L"заготовка", rows, j, NULL);
+  }
+  if (o->tpCard) rt_dump_obj(dbc, o->tpCard, L"карточка ТП", rows, j, NULL);
+  if (j->lastTp) {
+    long tp = j->lastTp, ver = j->lastTpVer, var = j->lastTpVar;
+    rt_dump_obj(dbc, tp, L"техпроцесс", rows, j, NULL);
+    if (ver) rt_dump_obj(dbc, ver, L"версия ТП", rows, j, NULL);
+    if (var && var != ver) rt_dump_obj(dbc, var, L"основной вариант ТП", rows, j, NULL);
+    int no = rt_dump_kids(dbc, var ? var : ver, L"операции", rows, j, ids, 2);
+    for (int i = 0; i < no; i++) {
+      long ts = rt_dump_obj(dbc, ids[i], L"операция", rows, j, L"TSOperation");
+      if (ts) rt_dump_obj(dbc, ts, L"TSOperation операции", rows, j, NULL);
+    }
+  }
+  rt_log(j, L"===== конец проверки #%ld =====\r\n\r\n", o->id);
+}
+
 static void rt_walk(SQLHDBC dbc, long id, int level, const wchar_t *parentDes, double qty, BOOL qtyFound,
                     double parentTot, const wchar_t *elSection, CardRow *rows, RtJob *j) {
   if (j->n >= RT_MAX || rt_late(j)) return; /* по кругу не уйдёт: глубина не больше RT_DEPTH */
@@ -791,6 +969,12 @@ static void rt_walk(SQLHDBC dbc, long id, int level, const wchar_t *parentDes, d
     rt_preform(dbc, o.pfCard, rows, j, r, notes[1], 60);
     if (!r->f[RC_MAT][0] && o.mat[0]) lstrcpynW(r->f[RC_MAT], o.mat, 200); /* без заготовки — материал изделия */
     if (r->hasNorm) rt_fmt(floor(r->norm1 * 1000 + 0.5) / 1000 * r->qtyTot, 3, r->f[RC_NORMTOT], 200); /* как в Excel: показанная норма × кол-во */
+  }
+  /* проверочная выгрузка: сама сборка, первая подсборка и первые две детали */
+  if (j->dump && !rt_late(j) && (level == 0 || (assy && j->dumpAsm < 1) || (!assy && j->dumpDet < 2))) {
+    if (level && assy) j->dumpAsm++;
+    else if (level) j->dumpDet++;
+    rt_dump_product(dbc, &o, rows, j);
   }
   for (int i = 0; i < 3; i++) {
     if (!notes[i][0]) continue;

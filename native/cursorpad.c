@@ -79,6 +79,7 @@
 #define ID_RT_SAVE 221
 #define ID_RT_COPY 222
 #define ID_RT_LOG 223
+#define ID_RT_DUMP 224 /* «Выгрузка для проверки» */
 #define ID_ANSPIN 154
 #define TIMER_FOLLOW 1
 #define TIMER_SAVE 2
