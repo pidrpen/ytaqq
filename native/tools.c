@@ -47,7 +47,7 @@ static const MoreItem kMore[] = {
     {-1, NULL, NULL, 0, 0}, /* черта */
     {MORE_OCR, L"Выделить и прочитать", L"F6", 0, 0},
     {MORE_LAYOUT, L"Исправить раскладку", g_lfKeyName, 0, 0}, /* с 2026.09.23.42 */
-    {MORE_MSG, L"Написать коллеге", NULL, 0, 0},
+    {MORE_MSG, L"Чат с коллегами", NULL, 0, 0}, /* с 2026.09.23.68 — чат вместо исчезающих */
     {MORE_NARDY, L"Нарды", NULL, 0, 0},
     {MORE_SHASHKI, L"Шашки", NULL, 0, 0}, /* с 2026.09.23.65: по сети, как нарды */
     {MORE_CHANGES, L"Что нового в папке", NULL, 0, 0},

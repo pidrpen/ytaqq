@@ -61,6 +61,10 @@ typedef struct {
   wchar_t seenInv[16][96];
   int nSeenInv;
   int notifiedPly;
+  /* встречные приглашения: он отказался от моей партии, потому что звал меня
+     в свою, — его приглашение принять сразу, как придёт */
+  wchar_t swapFrom[96];
+  ULONGLONG swapT;
 } ShGame;
 
 static ShGame g_sh;
@@ -353,7 +357,13 @@ static void sh_replay(const wchar_t *p0, const wchar_t *p1) {
   if (nd_field(theirs, L"name", v, 128) && v[0]) lstrcpynW(g_sh.oppName, v, 128);
   if (g_sh.me == 0 && nd_has_line(theirs, L"decline")) {
     g_sh.mode = SH_LOBBY;
-    sh_status(L"%s отказался от партии", g_sh.oppName);
+    if (nd_has_line(theirs, L"swap")) { /* позвали друг друга — играем в его партии */
+      lstrcpynW(g_sh.swapFrom, g_sh.oppId, 96);
+      g_sh.swapT = GetTickCount64();
+      sh_status(L"%s тоже позвал вас — соединяю в его партии…", g_sh.oppName);
+    } else {
+      sh_status(L"%s отказался от партии", g_sh.oppName);
+    }
     sh_save_local();
     return;
   }
@@ -437,10 +447,21 @@ static BOOL sh_my_turn(void) {
   return g_sh.mode == SH_PLAY && sh_side_of_ply(g_sh.ply) == g_sh.me;
 }
 
+/* соперник в сети — по общему списку нард (отметка «я в сети» раз в минуту) */
+static BOOL sh_opp_online(void) {
+  NdPoll *pl = g_nd.poll;
+  if (!pl) return TRUE; /* ещё не знаем — не пугаем */
+  for (int i = 0; i < pl->nOnline; i++)
+    if (!wcscmp(pl->onId[i], g_sh.oppId)) return TRUE;
+  return FALSE;
+}
+
 static void sh_turn_status(void) {
   if (g_sh.mode != SH_PLAY) return;
   if (!sh_my_turn()) {
     if (g_sh.oppOffersDraw) sh_status(L"%s предлагает ничью — «Согласиться на ничью» или ждите его хода", g_sh.oppName);
+    else if (!sh_opp_online())
+      sh_status(L"Ходит %s — он сейчас не в сети: ход увидит, когда запустит CursorPad", g_sh.oppName);
     else sh_status(L"Ходит %s…%s", g_sh.oppName, g_sh.iOffered ? L" (вы предложили ничью)" : L"");
     return;
   }
@@ -487,9 +508,34 @@ static void sh_after_replay(int prevPly, int prevMode) {
   sh_refresh_view();
 }
 
+static void sh_answer_ex(int idx, BOOL accept, BOOL ask);
+
 static void sh_on_poll(ShPoll *pl) {
   sh_poll_free(g_sh.poll);
   g_sh.poll = pl;
+  /* Позвали друг друга одновременно: я жду ответа от X, а от X пришло его
+     приглашение. Обе программы решают одинаково — остаётся партия с
+     меньшим номером: её приглашённый принимает сам, лишнюю отменяют. */
+  if (g_sh.mode == SH_LOBBY && g_sh.swapFrom[0]) {
+    if (GetTickCount64() - g_sh.swapT > 120000) g_sh.swapFrom[0] = 0; /* две минуты — не пришло */
+    else
+      for (int i = 0; i < pl->nInv; i++)
+        if (!wcscmp(pl->invFrom[i], g_sh.swapFrom)) {
+          g_sh.swapFrom[0] = 0;
+          lstrcpynW(g_sh.seenInv[g_sh.nSeenInv % 16], pl->invGame[i], 96);
+          g_sh.nSeenInv++;
+          sh_answer_ex(i, TRUE, FALSE);
+          return;
+        }
+  }
+  if (g_sh.mode == SH_WAIT)
+    for (int i = 0; i < pl->nInv; i++) {
+      if (wcscmp(pl->invFrom[i], g_sh.oppId) || !wcscmp(pl->invGame[i], g_sh.game)) continue;
+      lstrcpynW(g_sh.seenInv[g_sh.nSeenInv % 16], pl->invGame[i], 96); /* без всплывашки */
+      g_sh.nSeenInv++;
+      sh_answer_ex(i, wcscmp(pl->invGame[i], g_sh.game) < 0, FALSE);
+      return;
+    }
   for (int i = 0; i < pl->nInv; i++) {
     BOOL seen = FALSE;
     for (int k = 0; k < g_sh.nSeenInv && k < 16 && !seen; k++) seen = !wcscmp(g_sh.seenInv[k], pl->invGame[i]);
@@ -576,7 +622,11 @@ static void sh_drop_invite(const wchar_t *game) {
   DeleteFileW(path);
 }
 
-static void sh_answer(int idx, BOOL accept) {
+static void sh_cancel_mine_quiet(void);
+
+/* ask — спрашивать ли, если идёт другая партия (при взаимных приглашениях
+   решает сама программа и не спрашивает) */
+static void sh_answer_ex(int idx, BOOL accept, BOOL ask) {
   ShPoll *pl = g_sh.poll;
   if (!pl || idx < 0 || idx >= pl->nInv) return;
   wchar_t game[96], from[96], name[128], myId[96], myName[128];
@@ -588,17 +638,24 @@ static void sh_answer(int idx, BOOL accept) {
   if (!accept) {
     wchar_t path[SHARE_PATH];
     sh_game_path(game, 1, path);
-    if (path[0]) share_write(path, L"decline\n");
+    /* отказ из-за встречного приглашения — с пометкой: тот примет наше сам */
+    if (path[0]) share_write(path, ask ? L"decline\n" : L"decline\nswap\n");
     sh_refresh_view();
     return;
   }
   if (g_sh.mode == SH_PLAY || g_sh.mode == SH_WAIT) {
-    if (MessageBoxW(g_shWnd, L"Идёт другая партия. Сдать её и начать новую?", L"Шашки",
+    if (ask && g_sh.mode == SH_PLAY &&
+        MessageBoxW(g_shWnd, L"Идёт другая партия. Сдать её и начать новую?", L"Шашки",
                     MB_YESNO | MB_ICONQUESTION) != IDYES)
       return;
     if (g_sh.mode == SH_PLAY) {
       sb_add(&g_sh.log, L"resign\n");
       sh_write_mine();
+    } else {
+      /* ждали ответа на своё приглашение — отменить его, иначе тот, кого
+         звали, мог принять и ждать наших ходов в брошенной партии (так
+         партия и вставала, когда двое звали друг друга одновременно) */
+      sh_cancel_mine_quiet();
     }
   }
   lstrcpynW(g_sh.game, game, 96);
@@ -714,6 +771,22 @@ static void sh_accept_draw(void) {
   ShPoll *pl = g_sh.poll;
   sh_replay(pl ? pl->p0 : NULL, pl ? pl->p1 : NULL);
   sh_after_replay(prevPly, prevMode);
+}
+
+static void sh_answer(int idx, BOOL accept) { sh_answer_ex(idx, accept, TRUE); }
+
+/* своё приглашение — отменить без слов (перед тем как принять чужое) */
+static void sh_cancel_mine_quiet(void) {
+  if (g_sh.mode != SH_WAIT || !g_sh.game[0]) return;
+  sb_add(&g_sh.log, L"cancel\n");
+  sh_write_mine();
+  wchar_t root[MAX_PATH], sub[160], dir[SHARE_PATH], path[SHARE_PATH];
+  share_root_copy(root);
+  _snwprintf(sub, 160, L"inv\\%s", g_sh.oppId);
+  if (sh_dir(root, sub, dir)) {
+    _snwprintf(path, SHARE_PATH, L"%s\\%s.txt", dir, g_sh.game);
+    DeleteFileW(path);
+  }
 }
 
 static void sh_cancel_wait(void) {
@@ -1034,7 +1107,8 @@ static void sh_refresh_view(void) {
 
 /* список «кто в сети» у нард обновился — и у шашек */
 static void shashki_online_changed(void) {
-  if (g_shWnd && IsWindowVisible(g_shWnd) && g_sh.mode == SH_LOBBY) sh_refresh_view();
+  if (g_sh.mode == SH_PLAY) sh_turn_status(); /* соперник пропал из сети или вернулся */
+  if (g_shWnd && IsWindowVisible(g_shWnd) && (g_sh.mode == SH_LOBBY || g_sh.mode == SH_PLAY)) sh_refresh_view();
   else sh_mark_btn();
 }
 

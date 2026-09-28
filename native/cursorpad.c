@@ -75,6 +75,7 @@
 #define ID_MSG_SEND 215
 #define ID_MSG_REPLY 216
 #define ID_MSG_DISMISS 217
+#define ID_MSG_CLEAR 218 /* «Очистить переписку» в чате */
 #define ID_RT_BUILD 220 /* маршрутная ведомость, см. route.c */
 #define ID_RT_SAVE 221
 #define ID_RT_COPY 222
@@ -2393,7 +2394,7 @@ static void tray_menu(HWND hwnd) {
   AppendMenuW(menu, MF_STRING, 17, L"Проверить обновления");
   AppendMenuW(menu, MF_STRING | (upd_auto_off() ? 0 : MF_CHECKED), 22, L"   обновляться самостоятельно");
   AppendMenuW(menu, MF_STRING, 18, L"Что нового в папке");
-  AppendMenuW(menu, MF_STRING, 23, L"Написать коллеге");
+  AppendMenuW(menu, MF_STRING, 23, L"Чат с коллегами");
   AppendMenuW(menu, MF_STRING, 21, L"Нарды");
   AppendMenuW(menu, MF_STRING, 24, L"Шашки");
   AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
