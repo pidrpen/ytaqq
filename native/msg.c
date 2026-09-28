@@ -952,6 +952,10 @@ static void msg_out_layout(void) {
   MoveWindow(g_msgView, rx, top + MS_(30), rw, bottom - top - MS_(30) - ih - MS_(8), TRUE);
   MoveWindow(g_msgEdit, rx, bottom - ih, rw - MS_(110), ih, TRUE);
   MoveWindow(GetDlgItem(g_msgOut, ID_MSG_SEND), rc.right - pad - MS_(102), bottom - ih, MS_(102), ih, TRUE);
+  /* текст пузырей переносится по новой ширине — перерисовать всю переписку
+     (с 2026.09.23.70: раньше при растягивании старые пузыри оставались на
+     месте и новые ложились поверх) */
+  if (g_msgView) InvalidateRect(g_msgView, NULL, FALSE);
 }
 
 static void msg_out_paint(HWND hwnd, HDC hdc) {
@@ -1047,7 +1051,9 @@ static LRESULT CALLBACK MsgOutProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
   }
   case WM_SIZE:
     msg_out_layout();
-    InvalidateRect(hwnd, NULL, FALSE);
+    /* и кнопки: скруглённые углы берут фон окна — без этого после растягивания
+       оставались чёрные уголки */
+    RedrawWindow(hwnd, NULL, NULL, RDW_INVALIDATE | RDW_ALLCHILDREN);
     return 0;
   case WM_ACTIVATE:
     /* вернулись в чат — открытая переписка прочитана */
@@ -1102,6 +1108,7 @@ static void msg_open_chat(const wchar_t *id) {
     WNDCLASSEXW wc;
     memset(&wc, 0, sizeof(wc));
     wc.cbSize = sizeof(wc);
+    wc.style = CS_HREDRAW | CS_VREDRAW; /* растянули — перерисовать целиком, а не только новую полосу */
     wc.lpfnWndProc = MsgOutProc;
     wc.hInstance = g_inst;
     wc.hCursor = LoadCursorW(NULL, IDC_ARROW);
@@ -1112,7 +1119,7 @@ static void msg_open_chat(const wchar_t *id) {
     WNDCLASSEXW vc;
     memset(&vc, 0, sizeof(vc));
     vc.cbSize = sizeof(vc);
-    vc.style = CS_DBLCLKS;
+    vc.style = CS_DBLCLKS | CS_HREDRAW | CS_VREDRAW; /* пузыри привязаны к низу — при смене размера все сдвигаются */
     vc.lpfnWndProc = ChatViewProc;
     vc.hInstance = g_inst;
     vc.hCursor = LoadCursorW(NULL, IDC_ARROW);
