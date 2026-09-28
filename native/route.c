@@ -453,11 +453,57 @@ static void rt_preform(SQLHDBC dbc, long pfCard, CardRow *rows, RtJob *j, RtRow 
     rt_log(j, L"    заготовки в карточке %ld нет\r\n", pfCard);
     return;
   }
+  /* сортамент заготовки — PreformSize, припуск — ZSizeAdd: прямо у заготовок
+     карточки (и у самой карточки), своим запросом. Обход ниже их тоже
+     собирает, но может остановиться раньше (по времени или найдя «всё») —
+     так было до 2026.09.23.52: столбцы выходили пустыми. Значение — своё у
+     атрибута или, у составного, в поле Value его строки. */
+  wchar_t list[200], psz[200] = L"", padd[40] = L"";
+  int il = _snwprintf(list, 200, L"%ld", pfCard);
+  for (int i = 0; i < n && il > 0 && il < 180; i++) il += _snwprintf(list + il, 200 - il, L",%ld", rows[i].n1);
+  long pf0 = rows[0].n1;
+  wchar_t pfName[260];
+  lstrcpynW(pfName, rows[0].s1, 260);
+  _snwprintf(sql, 3000,
+             L"SELECT TOP 40 a.OwnerId, nk.Value, " PF_VALUE_SQL L", 0, a.DataType "
+             L"FROM InfoObjectAttributes AS a WITH(NOLOCK) "
+             L"JOIN NameKeys AS nk WITH(NOLOCK) ON nk.NameKeyId=a.NameKeyId AND nk.Value IN (N'PreformSize',N'ZSizeAdd') "
+             L"LEFT JOIN InfoObjects AS lo WITH(NOLOCK) ON a.DataType=6 AND lo.InfoObjectId=a.Link "
+             L"WHERE a.OwnerId IN (%s) AND a.Outdated=0 AND ISNULL(a.CollectionElementId,0)=0 "
+             L"UNION ALL SELECT TOP 40 p.OwnerId, nkp.Value, " PF_VALUE_SQL L", 1, a.DataType "
+             L"FROM InfoObjectAttributes AS p WITH(NOLOCK) "
+             L"JOIN NameKeys AS nkp WITH(NOLOCK) ON nkp.NameKeyId=p.NameKeyId "
+             L"AND nkp.Value IN (N'PreformSize',N'ZSizeAdd') "
+             L"JOIN InfoObjectCollectionElements AS ce WITH(NOLOCK) ON ce.AttributeId=p.AttributeId AND ce.Outdated=0 "
+             L"JOIN InfoObjectAttributes AS a WITH(NOLOCK) ON a.CollectionElementId=ce.CollectionElementId "
+             L"AND a.Outdated=0 "
+             L"JOIN NameKeys AS nk WITH(NOLOCK) ON nk.NameKeyId=a.NameKeyId "
+             L"AND nk.Value IN (N'Value',N'NumberValue',N'DoubleValue',N'TextValue',N'StringValue') "
+             L"LEFT JOIN InfoObjects AS lo WITH(NOLOCK) ON a.DataType=6 AND lo.InfoObjectId=a.Link "
+             L"WHERE p.OwnerId IN (%s) AND p.Outdated=0",
+             list, list);
+  sql[2999] = 0;
+  int nd = card_query(dbc, sql, rows, 40, err, 280);
+  if (nd < 0) rt_log(j, L"    PreformSize / ZSizeAdd: запрос не выполнился — %s\r\n", err);
+  /* что важнее: у самой заготовки, потом у других из карточки, потом строка
+     составного атрибута (меньше — важнее) */
+  int bestSz = 9, bestAdd = 9;
+  for (int i = 0; i < nd; i++) {
+    if (!rows[i].s2[0] || !wcscmp(rows[i].s2, L"0")) continue;
+    int pri = (int)rows[i].n2 * 2 + (rows[i].n1 == pf0 ? 0 : 1);
+    if (!_wcsicmp(rows[i].s1, L"PreformSize") && pri < bestSz) {
+      lstrcpynW(psz, rows[i].s2, 200);
+      bestSz = pri;
+    } else if (!_wcsicmp(rows[i].s1, L"ZSizeAdd") && pri < bestAdd) {
+      pf_num(rows[i].s2, padd, 40);
+      bestAdd = pri;
+    }
+  }
   PfSum *sm = (PfSum *)calloc(1, sizeof(PfSum));
   if (!sm) return;
   ULONGLONG one = GetTickCount64() + 6000;
   sm->deadline = j->deadline && j->deadline < one ? j->deadline : one;
-  pf_explore(dbc, rows[0].n1, 3, NULL, L"", sm);
+  pf_explore(dbc, pf0, 3, NULL, L"", sm);
   wchar_t mt[480];
   pf_material_text(sm, mt, 480);
   lstrcpynW(r->f[RC_MAT], mt, 200);
@@ -486,6 +532,16 @@ static void rt_preform(SQLHDBC dbc, long pfCard, CardRow *rows, RtJob *j, RtRow 
     lstrcpynW(r->f[RC_SORT], dv, 200);
   }
   if (sm->za[0]) pf_num(sm->za, r->f[RC_ALLOW], 200);
+  if (psz[0]) { /* PreformSize — как есть; без вида проката впереди («Ø40 L=35») — вид из сортамента */
+    const wchar_t *q = psz;
+    while (*q == L' ') q++;
+    BOOL word = (*q >= L'А' && *q <= L'я') || *q == L'Ё' || *q == L'ё';
+    if (!word && kind[0]) _snwprintf(r->f[RC_SORT], 200, L"%s %s", kind, q);
+    else lstrcpynW(r->f[RC_SORT], q, 200);
+    r->f[RC_SORT][199] = 0;
+  }
+  if (padd[0]) lstrcpynW(r->f[RC_ALLOW], padd, 200);
+  rt_log(j, L"    PreformSize: %s · ZSizeAdd: %s\r\n", psz[0] ? psz : L"не нашлось", padd[0] ? padd : L"не нашлось");
   double v;
   if (sm->mass[0] && rt_num(sm->mass, &v)) {
     r->norm1 = v;
@@ -493,7 +549,7 @@ static void rt_preform(SQLHDBC dbc, long pfCard, CardRow *rows, RtJob *j, RtRow 
     rt_fmt(v, 3, r->f[RC_NORM1], 200);
     lstrcpynW(r->f[RC_UNIT], L"кг", 200);
   }
-  rt_log(j, L"    заготовка %s: %s · %s · норма %s\r\n", rows[0].s1, mt[0] ? mt : L"—",
+  rt_log(j, L"    заготовка %s: %s · %s · норма %s\r\n", pfName, mt[0] ? mt : L"—",
          r->f[RC_SORT][0] ? r->f[RC_SORT] : L"—", r->f[RC_NORM1][0] ? r->f[RC_NORM1] : L"—");
   if (!mt[0] && !r->hasNorm) lstrcpynW(note, L"в заготовке нет материала и массы", ncap);
   free(sm);

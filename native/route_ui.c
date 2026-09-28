@@ -8,7 +8,7 @@
 /* ---- окно ------------------------------------------------------------------- */
 
 
-static HWND g_rtWnd, g_rtDes, g_rtOrder, g_rtList, g_rtLog;
+static HWND g_rtWnd, g_rtDes, g_rtOrder, g_rtNum, g_rtList, g_rtLog;
 static RtJob *g_rtJob;  /* последняя собранная ведомость */
 static volatile LONG g_rtBusy, g_rtCancel;
 static wchar_t g_rtStatus[300];
@@ -17,6 +17,44 @@ static long g_rtPickId;         /* строка, выбранная в поис�
 static wchar_t g_rtPickDes[200]; /* её обозначение — пока в поле оно же, берём строку */
 
 static int RS(int v) { return (int)(v * g_rtS + 0.5f); }
+
+/* «Входит в» и «Заказ №» помнятся между запусками: route.txt рядом с
+   заметками, строки «order» и «num» через табуляцию */
+static void rt_prefs_path(wchar_t *p) {
+  _snwprintf(p, MAX_PATH, L"%s\\route.txt", g_dataDir);
+  p[MAX_PATH - 1] = 0;
+}
+
+static void rt_prefs_save(void) {
+  if (!g_dataDir[0] || !g_rtOrder || !g_rtNum) return;
+  wchar_t o[120], n[120], buf[300], p[MAX_PATH];
+  GetWindowTextW(g_rtOrder, o, 120);
+  GetWindowTextW(g_rtNum, n, 120);
+  for (wchar_t *c = o; *c; c++)
+    if (*c == L'\t' || *c == L'\r' || *c == L'\n') *c = L' ';
+  for (wchar_t *c = n; *c; c++)
+    if (*c == L'\t' || *c == L'\r' || *c == L'\n') *c = L' ';
+  _snwprintf(buf, 300, L"order\t%s\nnum\t%s\n", o, n);
+  buf[299] = 0;
+  rt_prefs_path(p);
+  share_write_ex(p, buf, TRUE);
+}
+
+static void rt_prefs_load(void) {
+  if (!g_dataDir[0]) return;
+  wchar_t p[MAX_PATH];
+  rt_prefs_path(p);
+  wchar_t *t = share_read(p);
+  if (!t) return;
+  wchar_t *pp = t, *line;
+  while ((line = share_next_line(&pp)) != NULL) {
+    wchar_t *f[4];
+    int n = share_split(line, f, 4);
+    if (n >= 2 && !wcscmp(f[0], L"order")) SetWindowTextW(g_rtOrder, f[1]);
+    if (n >= 2 && !wcscmp(f[0], L"num")) SetWindowTextW(g_rtNum, f[1]);
+  }
+  free(t);
+}
 
 static void rt_status(const wchar_t *fmt, ...) {
   va_list ap;
@@ -55,6 +93,7 @@ static void rt_start(void) {
   }
   GetWindowTextW(g_rtDes, j->des, 200);
   GetWindowTextW(g_rtOrder, j->order, 120);
+  rt_prefs_save();
   wchar_t *s = j->des; /* пробелы по краям — мимо */
   while (*s == L' ') s++;
   memmove(j->des, s, (wcslen(s) + 1) * sizeof(wchar_t));
@@ -121,6 +160,43 @@ static void rt_title(wchar_t *out, int cap) {
   out[cap - 1] = 0;
 }
 
+/* текст для колонтитула Excel: «&» там — начало кода, пишется «&&» */
+static void rt_hf_text(const wchar_t *in, wchar_t *out, int cap) {
+  int k = 0;
+  for (; *in && k < cap - 2; in++) {
+    if (*in == L'&') out[k++] = L'&';
+    out[k++] = *in;
+  }
+  out[k] = 0;
+}
+
+/* Колонтитулы, как просили для печати ведомости:
+   слева вверху (18) — «МВ по <обозначение>» и «Заказ № <номер>»;
+   справа вверху (24) — «Заказ № <номер>»;
+   справа внизу (18) — то же, что слева вверху;
+   внизу по центру (18) — «МВ по <обозначение> Страница N из M». */
+static void rt_header_footer(wchar_t *hdr, wchar_t *ftr, int cap) {
+  wchar_t des[200], num[120], d[420], z[260];
+  const wchar_t *src = g_rtJob->n && g_rtJob->rows[0].f[RC_DES][0] ? g_rtJob->rows[0].f[RC_DES] : g_rtJob->des;
+  rt_hf_text(src, des, 200);
+  GetWindowTextW(g_rtNum, num, 120);
+  wchar_t *q = num;
+  while (*q == L' ') q++;
+  size_t l = wcslen(q);
+  while (l && q[l - 1] == L' ') q[--l] = 0;
+  wchar_t zq[260];
+  rt_hf_text(q, zq, 260);
+  z[0] = 0;
+  if (zq[0]) _snwprintf(z, 260, L"Заказ %s%s", zq[0] == L'№' ? L"" : L"№ ", zq);
+  z[259] = 0;
+  _snwprintf(d, 420, L"МВ по %s%s%s", des, z[0] ? L"\n" : L"", z);
+  d[419] = 0;
+  if (z[0]) _snwprintf(hdr, cap, L"&L&18%s&R&24%s", d, z);
+  else _snwprintf(hdr, cap, L"&L&18%s", d);
+  _snwprintf(ftr, cap, L"&C&18МВ по %s Страница &P из &N&R&18%s", des, d);
+  hdr[cap - 1] = ftr[cap - 1] = 0;
+}
+
 static void rt_save(void) {
   if (!g_rtJob || !g_rtJob->n) {
     rt_status(L"Сначала «Собрать»");
@@ -142,8 +218,13 @@ static void rt_save(void) {
   of.lpstrDefExt = L"xlsx";
   of.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
   if (!GetSaveFileNameW(&of)) return;
-  XlSheet sh = {RT_NCOL, kRtHead, kRtXlWidth};
-  if (!xl_save(file, title, &sh, g_rtJob->n, rt_cell, g_rtJob)) {
+  rt_prefs_save();
+  wchar_t hdr[1200], ftr[1200];
+  rt_header_footer(hdr, ftr, 1200);
+  /* без строки заголовка над шапкой (с 2026.09.23.52): обозначение и заказ —
+     в колонтитулах */
+  XlSheet sh = {RT_NCOL, kRtHead, kRtXlWidth, hdr, ftr};
+  if (!xl_save(file, NULL, &sh, g_rtJob->n, rt_cell, g_rtJob)) {
     MessageBoxW(g_rtWnd, L"Не удалось записать файл — он не открыт сейчас в Excel?", L"Маршрутная ведомость",
                 MB_ICONWARNING);
     return;
@@ -195,7 +276,8 @@ static void rt_layout(void) {
   place_panel_close(g_rtWnd);
   MoveWindow(g_rtDes, pad, y, RS(300), h, TRUE);
   MoveWindow(g_rtOrder, pad + RS(312), y, RS(170), h, TRUE);
-  MoveWindow(GetDlgItem(g_rtWnd, ID_RT_BUILD), pad + RS(494), y - RS(1), RS(110), h + RS(2), TRUE);
+  MoveWindow(g_rtNum, pad + RS(494), y, RS(150), h, TRUE);
+  MoveWindow(GetDlgItem(g_rtWnd, ID_RT_BUILD), pad + RS(656), y - RS(1), RS(110), h + RS(2), TRUE);
   int by = rc.bottom - pad - RS(30);
   int ly = RS(116);
   MoveWindow(g_rtList, pad, ly, rc.right - pad * 2, by - RS(10) - ly, TRUE);
@@ -213,9 +295,11 @@ static void rt_paint(HWND hwnd, HDC hdc) {
   if (g_fontSmall) SelectObject(hdc, g_fontSmall);
   SetTextColor(hdc, COL_MUTED);
   int pad = RS(14), y = PANEL_TITLE_H + RS(6);
-  RECT a = {pad, y, pad + RS(300), y + RS(18)}, b = {pad + RS(312), y, pad + RS(482), y + RS(18)};
+  RECT a = {pad, y, pad + RS(300), y + RS(18)}, b = {pad + RS(312), y, pad + RS(482), y + RS(18)},
+       c = {pad + RS(494), y, pad + RS(644), y + RS(18)};
   DrawTextW(hdc, L"Обозначение сборки или детали", -1, &a, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
-  DrawTextW(hdc, L"Входит в (заказ), можно пусто", -1, &b, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+  DrawTextW(hdc, L"Входит в (КЗ), можно пусто", -1, &b, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+  DrawTextW(hdc, L"Заказ № — в колонтитулы", -1, &c, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
   if (g_fontUi) SelectObject(hdc, g_fontUi);
   SetTextColor(hdc, g_rtBusy ? COL_SAGE : COL_INK);
   RECT st = {pad, RS(84), rc.right - pad, RS(112)};
@@ -231,7 +315,7 @@ static LRESULT CALLBACK RtEditProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
     return 0;
   }
   if (msg == WM_KEYDOWN && wParam == VK_TAB) { /* между двумя полями */
-    SetFocus(hwnd == g_rtDes ? g_rtOrder : g_rtDes);
+    SetFocus(hwnd == g_rtDes ? g_rtOrder : hwnd == g_rtOrder ? g_rtNum : g_rtDes);
     SendMessageW(GetFocus(), EM_SETSEL, 0, -1);
     return 0;
   }
@@ -311,6 +395,10 @@ static LRESULT CALLBACK RtProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
   }
   case WM_COMMAND: {
     int id = LOWORD(wParam);
+    if (HIWORD(wParam) == EN_KILLFOCUS && ((HWND)lParam == g_rtOrder || (HWND)lParam == g_rtNum)) {
+      rt_prefs_save(); /* ушли из поля — запомнить */
+      return 0;
+    }
     if (id == ID_PANEL_CLOSE) ShowWindow(hwnd, SW_HIDE);
     if (id == ID_RT_BUILD) rt_start();
     if (id == ID_RT_SAVE) rt_save();
@@ -359,8 +447,10 @@ static void route_show(void) {
                               10, 10, g_rtWnd, NULL, g_inst, NULL);
     g_rtOrder = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL, 0,
                                 0, 10, 10, g_rtWnd, NULL, g_inst, NULL);
-    HWND ed[2] = {g_rtDes, g_rtOrder};
-    for (int i = 0; i < 2; i++) {
+    g_rtNum = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL, 0,
+                              0, 10, 10, g_rtWnd, NULL, g_inst, NULL);
+    HWND ed[3] = {g_rtDes, g_rtOrder, g_rtNum};
+    for (int i = 0; i < 3; i++) {
       if (g_fontBody) SendMessageW(ed[i], WM_SETFONT, (WPARAM)g_fontBody, FALSE);
       SetWindowLongPtrW(ed[i], GWLP_USERDATA, (LONG_PTR)SetWindowLongPtrW(ed[i], GWLP_WNDPROC, (LONG_PTR)RtEditProc));
     }
@@ -381,6 +471,7 @@ static void route_show(void) {
       col.iSubItem = c;
       SendMessageW(g_rtList, LVM_INSERTCOLUMNW, (WPARAM)c, (LPARAM)&col);
     }
+    rt_prefs_load();
     rt_layout();
   }
   /* выбрана строка в поиске PLM — её обозначение сразу в поле */

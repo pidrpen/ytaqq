@@ -150,6 +150,8 @@ typedef struct {
   int ncols;
   const wchar_t *const *head;
   const int *width; /* в символах */
+  /* колонтитулы в кодах Excel («&L&18текст&R&24текст»), NULL — нет */
+  const wchar_t *header, *footer;
 } XlSheet;
 
 static BOOL xl_is_num(const wchar_t *s, double *v) {
@@ -176,7 +178,8 @@ static void xl_colname(int c, char *out) {
   }
 }
 
-/* cell(row, col) — текст ячейки строки данных; title — заголовок над шапкой */
+/* cell(row, col) — текст ячейки строки данных; title — заголовок над шапкой,
+   NULL или пусто — без него: шапка в первой строке */
 static BOOL xl_save(const wchar_t *path, const wchar_t *title, const XlSheet *sh, int nrows,
                     const wchar_t *(*cell)(void *, int, int), void *ctx) {
   XlEntry e[6];
@@ -201,6 +204,8 @@ static BOOL xl_save(const wchar_t *path, const wchar_t *title, const XlSheet *sh
           "<Relationship Id=\"rId1\" "
           "Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" "
           "Target=\"xl/workbook.xml\"/></Relationships>");
+  BOOL hasTitle = title && title[0];
+  int hr = hasTitle ? 2 : 1; /* строка шапки */
   e[2].name = "xl/workbook.xml";
   xl_puts(&e[2].data,
           "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n"
@@ -209,7 +214,9 @@ static BOOL xl_save(const wchar_t *path, const wchar_t *title, const XlSheet *sh
           "<sheets><sheet name=\"Лист1\" sheetId=\"1\" r:id=\"rId1\"/></sheets>"
           /* заголовок и шапка печатаются на каждом листе */
           "<definedNames><definedName name=\"_xlnm.Print_Titles\" localSheetId=\"0\">"
-          "'Лист1'!$1:$2</definedName></definedNames></workbook>");
+          "'Лист1'!$1:$");
+  xl_puts(&e[2].data, hasTitle ? "2" : "1");
+  xl_puts(&e[2].data, "</definedName></definedNames></workbook>");
   e[3].name = "xl/_rels/workbook.xml.rels";
   xl_puts(&e[3].data,
           "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n"
@@ -253,30 +260,38 @@ static BOOL xl_save(const wchar_t *path, const wchar_t *title, const XlSheet *sh
   xl_puts(s, "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n"
              "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\">"
              "<sheetPr><pageSetUpPr fitToPage=\"1\"/></sheetPr>"
-             "<sheetViews><sheetView workbookViewId=\"0\"><pane ySplit=\"2\" topLeftCell=\"A3\" "
-             "activePane=\"bottomLeft\" state=\"frozen\"/></sheetView></sheetViews><cols>");
+             "<sheetViews><sheetView workbookViewId=\"0\">");
   char tmp[160];
+  snprintf(tmp, sizeof(tmp),
+           "<pane ySplit=\"%d\" topLeftCell=\"A%d\" activePane=\"bottomLeft\" state=\"frozen\"/>", hr, hr + 1);
+  xl_puts(s, tmp);
+  xl_puts(s, "</sheetView></sheetViews><cols>");
   for (int c = 0; c < sh->ncols; c++) {
     snprintf(tmp, sizeof(tmp), "<col min=\"%d\" max=\"%d\" width=\"%d\" customWidth=\"1\"/>", c + 1, c + 1,
              sh->width[c]);
     xl_puts(s, tmp);
   }
   xl_puts(s, "</cols><sheetData>");
-  /* строка 1 — заголовок, строка 2 — шапка, дальше данные */
-  xl_puts(s, "<row r=\"1\" ht=\"28\" customHeight=\"1\"><c r=\"A1\" s=\"3\" t=\"inlineStr\"><is><t>");
-  xl_text(s, title);
-  xl_puts(s, "</t></is></c></row><row r=\"2\" ht=\"60\" customHeight=\"1\">");
+  /* строка 1 — заголовок (если есть), затем шапка, дальше данные */
+  if (hasTitle) {
+    xl_puts(s, "<row r=\"1\" ht=\"28\" customHeight=\"1\"><c r=\"A1\" s=\"3\" t=\"inlineStr\"><is><t>");
+    xl_text(s, title);
+    xl_puts(s, "</t></is></c></row>");
+  }
+  snprintf(tmp, sizeof(tmp), "<row r=\"%d\" ht=\"60\" customHeight=\"1\">", hr);
+  xl_puts(s, tmp);
   for (int c = 0; c < sh->ncols; c++) {
     char cn[4];
     xl_colname(c, cn);
-    snprintf(tmp, sizeof(tmp), "<c r=\"%s2\" s=\"1\" t=\"inlineStr\"><is><t>", cn);
+    snprintf(tmp, sizeof(tmp), "<c r=\"%s%d\" s=\"1\" t=\"inlineStr\"><is><t>", cn, hr);
     xl_puts(s, tmp);
     xl_text(s, sh->head[c]);
     xl_puts(s, "</t></is></c>");
   }
   xl_puts(s, "</row>");
   for (int r = 0; r < nrows; r++) {
-    snprintf(tmp, sizeof(tmp), "<row r=\"%d\">", r + 3);
+    int rr = r + hr + 1;
+    snprintf(tmp, sizeof(tmp), "<row r=\"%d\">", rr);
     xl_puts(s, tmp);
     for (int c = 0; c < sh->ncols; c++) {
       const wchar_t *v = cell(ctx, r, c);
@@ -284,11 +299,11 @@ static BOOL xl_save(const wchar_t *path, const wchar_t *title, const XlSheet *sh
       xl_colname(c, cn);
       double d;
       if (xl_is_num(v, &d)) {
-        snprintf(tmp, sizeof(tmp), "<c r=\"%s%d\" s=\"2\"><v>%.10g</v></c>", cn, r + 3, d);
+        snprintf(tmp, sizeof(tmp), "<c r=\"%s%d\" s=\"2\"><v>%.10g</v></c>", cn, rr, d);
         xl_puts(s, tmp);
       } else {
         snprintf(tmp, sizeof(tmp), "<c r=\"%s%d\" s=\"2\" t=\"inlineStr\"><is><t xml:space=\"preserve\">", cn,
-                 r + 3);
+                 rr);
         xl_puts(s, tmp);
         xl_text(s, v ? v : L"");
         xl_puts(s, "</t></is></c>");
@@ -299,16 +314,33 @@ static BOOL xl_save(const wchar_t *path, const wchar_t *title, const XlSheet *sh
   /* заголовок — объединён на всю ширину таблицы, по центру */
   char last[4];
   xl_colname(sh->ncols > 0 ? sh->ncols - 1 : 0, last);
-  snprintf(tmp, sizeof(tmp), "</sheetData><mergeCells count=\"1\"><mergeCell ref=\"A1:%s1\"/></mergeCells>", last);
-  xl_puts(s, tmp);
+  xl_puts(s, "</sheetData>");
+  if (hasTitle) {
+    snprintf(tmp, sizeof(tmp), "<mergeCells count=\"1\"><mergeCell ref=\"A1:%s1\"/></mergeCells>", last);
+    xl_puts(s, tmp);
+  }
   /* печать: A3 (paperSize 8) альбомный, все столбцы — в ширину одной
      страницы (fitToWidth 1), в высоту — сколько выйдет (fitToHeight 0),
      поля узкие, таблица по центру листа */
   xl_puts(s, "<printOptions horizontalCentered=\"1\"/>"
              "<pageMargins left=\"0.25\" right=\"0.25\" top=\"0.4\" bottom=\"0.4\" header=\"0.2\" "
              "footer=\"0.2\"/>"
-             "<pageSetup paperSize=\"8\" orientation=\"landscape\" fitToWidth=\"1\" fitToHeight=\"0\"/>"
-             "</worksheet>");
+             "<pageSetup paperSize=\"8\" orientation=\"landscape\" fitToWidth=\"1\" fitToHeight=\"0\"/>");
+  if ((sh->header && sh->header[0]) || (sh->footer && sh->footer[0])) {
+    xl_puts(s, "<headerFooter>");
+    if (sh->header && sh->header[0]) {
+      xl_puts(s, "<oddHeader>");
+      xl_text(s, sh->header);
+      xl_puts(s, "</oddHeader>");
+    }
+    if (sh->footer && sh->footer[0]) {
+      xl_puts(s, "<oddFooter>");
+      xl_text(s, sh->footer);
+      xl_puts(s, "</oddFooter>");
+    }
+    xl_puts(s, "</headerFooter>");
+  }
+  xl_puts(s, "</worksheet>");
   BOOL ok = TRUE;
   for (int i = 0; i < 6; i++)
     if (!e[i].data.p) ok = FALSE;
