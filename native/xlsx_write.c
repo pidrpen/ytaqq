@@ -355,7 +355,20 @@ static BOOL xl_save(const wchar_t *path, const wchar_t *title, const XlSheet *sh
                   "footer=\"0.3\"/>"
                 : "<pageMargins left=\"0.25\" right=\"0.25\" top=\"0.4\" bottom=\"0.4\" header=\"0.2\" "
                   "footer=\"0.2\"/>");
-  xl_puts(s, "<pageSetup paperSize=\"8\" orientation=\"landscape\" fitToWidth=\"1\" fitToHeight=\"0\"/>");
+  /* Масштаб вписывания — сразу в файле, как в шаблоне ведомости (scale="51"):
+     без него Excel до первого предпросмотра печати показывает «Разметку
+     страницы» неверно — пустоты по бокам (так было до 2026.09.23.60). Ширина
+     столбца в пикселях при 100% ≈ символы × 10 + 5 (цифра Arial 14 — 10
+     точек); ширина листа A3 альбомного без полей — (16,54 − 0,5) дюйма × 96. */
+  long px = 0;
+  for (int c = 0; c < sh->ncols; c++) px += sh->width[c] * 10 + 5;
+  int scale = px > 0 ? (int)((16.54 - 0.5) * 96 * 100 / px) : 100;
+  if (scale > 100) scale = 100;
+  if (scale < 10) scale = 10;
+  snprintf(tmp, sizeof(tmp),
+           "<pageSetup paperSize=\"8\" scale=\"%d\" orientation=\"landscape\" fitToWidth=\"1\" fitToHeight=\"0\"/>",
+           scale);
+  xl_puts(s, tmp);
   if (hf) {
     xl_puts(s, "<headerFooter>");
     if (sh->header && sh->header[0]) {
