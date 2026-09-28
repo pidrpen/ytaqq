@@ -510,17 +510,21 @@ static void rt_preform(SQLHDBC dbc, const RtObj *o, CardRow *rows, RtJob *j, RtR
              L"AND nk.Value IN (N'PreformSize',N'ZSizeAdd',N'ZDiametr',N'ZDiameter',N'ZLength',N'MaterialName') "
              L"LEFT JOIN InfoObjects AS lo WITH(NOLOCK) ON a.DataType=6 AND lo.InfoObjectId=a.Link "
              L"WHERE a.OwnerId=%ld AND a.Outdated=0 AND ISNULL(a.CollectionElementId,0)=0 "
-             L"UNION ALL SELECT TOP 60 1, CAST(nkp.Value AS NVARCHAR(100)) + N'|' + CAST(nk.Value AS NVARCHAR(100)), "
+             /* строки составных — как читает PlmApi: элементы с AttributeId
+                составного (или его Link), поля строки без отбора по Outdated —
+                актуальные первыми (ORDER BY 1); с 2026.09.23.63 */
+             L"UNION ALL SELECT TOP 80 CAST(ISNULL(a.Outdated,0) AS INT), "
+             L"CAST(nkp.Value AS NVARCHAR(100)) + N'|' + CAST(nk.Value AS NVARCHAR(100)), "
              PF_VALUE_SQL L", 1, a.DataType "
              L"FROM InfoObjectAttributes AS p WITH(NOLOCK) "
              L"JOIN NameKeys AS nkp WITH(NOLOCK) ON nkp.NameKeyId=p.NameKeyId "
              L"AND nkp.Value IN (N'PreformSize',N'PreformExpense') "
-             L"JOIN InfoObjectCollectionElements AS ce WITH(NOLOCK) ON ce.AttributeId=p.AttributeId AND ce.Outdated=0 "
+             L"JOIN InfoObjectCollectionElements AS ce WITH(NOLOCK) "
+             L"ON ce.AttributeId IN (p.AttributeId, ISNULL(p.Link,0)) AND ce.Outdated=0 "
              L"JOIN InfoObjectAttributes AS a WITH(NOLOCK) ON a.CollectionElementId=ce.CollectionElementId "
-             L"AND a.Outdated=0 "
-             L"JOIN NameKeys AS nk WITH(NOLOCK) ON nk.NameKeyId=a.NameKeyId "
+             L"JOIN NameKeys AS nk WITH(NOLOCK) ON nk.NameKeyId=a.NameKeyId AND nk.Value<>N'LastChanged' "
              L"LEFT JOIN InfoObjects AS lo WITH(NOLOCK) ON a.DataType=6 AND lo.InfoObjectId=a.Link "
-             L"WHERE p.OwnerId=%ld AND p.Outdated=0",
+             L"WHERE p.OwnerId=%ld AND p.Outdated=0 ORDER BY 1",
              pf0, pf0);
   sql[3599] = 0;
   int nd = card_query(dbc, sql, rows, 100, err, 280);
@@ -563,6 +567,7 @@ static void rt_preform(SQLHDBC dbc, const RtObj *o, CardRow *rows, RtJob *j, RtR
       lstrcpynW(szText, v, 200); /* размер одной строкой */
   }
   if (fields[0]) rt_log(j, L"    поля заготовки: %s\r\n", fields);
+  else if (nd >= 0) rt_log(j, L"    поля заготовки #%ld: в строках PreformSize / PreformExpense пусто (строк запроса %d)\r\n", pf0, nd);
   /* вид проката — первое слово материала: «Круг», «Лист», «Проволока» */
   wchar_t kind[40] = L"";
   for (int q = 0; matName[q] && matName[q] != L' ' && q < 39; q++) kind[q] = matName[q], kind[q + 1] = 0;
@@ -888,13 +893,13 @@ static long rt_dump_obj(SQLHDBC dbc, long id, const wchar_t *label, CardRow *row
              L"LEFT(" PF_VALUE_SQL L", 120), ISNULL(a.Link,0), a.DataType "
              L"FROM InfoObjectAttributes AS p WITH(NOLOCK) "
              L"JOIN NameKeys AS nkp WITH(NOLOCK) ON nkp.NameKeyId=p.NameKeyId "
-             L"JOIN InfoObjectCollectionElements AS ce WITH(NOLOCK) ON ce.AttributeId=p.AttributeId AND ce.Outdated=0 "
+             L"JOIN InfoObjectCollectionElements AS ce WITH(NOLOCK) "
+             L"ON ce.AttributeId IN (p.AttributeId, ISNULL(p.Link,0)) AND ce.Outdated=0 "
              L"JOIN InfoObjectAttributes AS a WITH(NOLOCK) ON a.CollectionElementId=ce.CollectionElementId "
-             L"AND a.Outdated=0 "
-             L"JOIN NameKeys AS nk WITH(NOLOCK) ON nk.NameKeyId=a.NameKeyId "
+             L"JOIN NameKeys AS nk WITH(NOLOCK) ON nk.NameKeyId=a.NameKeyId AND nk.Value<>N'LastChanged' "
              L"LEFT JOIN InfoObjects AS lo WITH(NOLOCK) ON a.DataType=6 AND lo.InfoObjectId=a.Link "
              L"WHERE p.OwnerId=%ld AND p.Outdated=0 AND ISNULL(p.CollectionElementId,0)=0 "
-             L"ORDER BY p.AttributeId, a.CollectionElementId, nk.Value",
+             L"ORDER BY p.AttributeId, a.CollectionElementId, a.Outdated, nk.Value",
              id);
   n = card_query(dbc, sql, rows, 80, err, 280);
   long cur = -1;
