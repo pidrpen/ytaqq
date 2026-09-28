@@ -536,6 +536,7 @@ static void rt_preform(SQLHDBC dbc, const RtObj *o, CardRow *rows, RtJob *j, RtR
   static const wchar_t *const kA[] = {L"ZSizeAdd", L"SizeAdd"};
   static const wchar_t *const kV[] = {L"Value", L"TextValue", L"StringValue", L"NumberValue", L"DoubleValue"};
   wchar_t szText[200] = L"", d[40] = L"", len[40] = L"", th[40] = L"", wd[40] = L"", add[40] = L"", expense[80] = L"";
+  wchar_t profile[60] = L""; /* PreformSize.Profile: «Лист», «Круг» */
   wchar_t fields[700] = L"";
   size_t fl = 0;
   for (int i = 0; i < nd; i++) {
@@ -558,7 +559,8 @@ static void rt_preform(SQLHDBC dbc, const RtObj *o, CardRow *rows, RtJob *j, RtR
       if (!expense[0] && (rt_key_is(k, kV, 5) || pf_kind(k) == 2)) lstrcpynW(expense, v, 80);
       continue;
     }
-    if (rt_key_is(k, kA, 2)) { if (!add[0]) pf_num(v, add, 40); }
+    if (!_wcsicmp(k, L"Profile")) { if (!profile[0]) lstrcpynW(profile, v, 60); }
+    else if (rt_key_is(k, kA, 2)) { if (!add[0]) pf_num(v, add, 40); }
     else if (rt_key_is(k, kD, 4)) { if (!d[0]) pf_num(v, d, 40); }
     else if (rt_key_is(k, kL, 2)) { if (!len[0]) pf_num(v, len, 40); }
     else if (rt_key_is(k, kT, 4)) { if (!th[0]) pf_num(v, th, 40); }
@@ -595,6 +597,7 @@ static void rt_preform(SQLHDBC dbc, const RtObj *o, CardRow *rows, RtJob *j, RtR
       }
     }
   }
+  if (profile[0]) lstrcpynW(kind, profile, 40); /* вид проката — из PreformSize, если есть */
   lstrcpynW(r->f[RC_MAT], matName, 200);
   /* сортамент — как в ведомости: «Круг Ø40 L=35», «Лист 4×100 L=200» */
   wchar_t *so = r->f[RC_SORT];
@@ -615,7 +618,31 @@ static void rt_preform(SQLHDBC dbc, const RtObj *o, CardRow *rows, RtJob *j, RtR
     else lstrcpynW(so, q, 200);
     so[199] = 0;
   }
+  /* Размеров в заготовке нет (в PLM у PreformSize бывает только Profile —
+     так у листовых деталей «в разработке»): сортамент — вид и размер из
+     названия материала до стандарта: «Лист 36 ГОСТ 19903-2015 / 45 …» →
+     «Лист 36» (с 2026.09.23.64) */
+  if (!so[0] && matName[0]) {
+    wchar_t head[200];
+    lstrcpynW(head, matName, 200);
+    wchar_t *cut = wcsstr(head, L" / ");
+    if (cut) *cut = 0;
+    static const wchar_t *const std[] = {L" ГОСТ", L" ТУ ", L" ОСТ", L" СТО", L" DIN", L" ISO"};
+    for (size_t i = 0; i < sizeof(std) / sizeof(std[0]); i++) {
+      wchar_t *g = wcsstr(head, std[i]);
+      if (g) *g = 0;
+    }
+    size_t hl = wcslen(head);
+    while (hl && head[hl - 1] == L' ') head[--hl] = 0;
+    BOOL digit = FALSE;
+    for (wchar_t *c = head; *c && !digit; c++) digit = iswdigit(*c);
+    if (digit) { /* только если в нём есть размер — «Лист 36», а не «Сталь» */
+      lstrcpynW(so, head, 200);
+      rt_log(j, L"    размеров в заготовке нет — сортамент из материала: %s\r\n", so);
+    }
+  }
   if (add[0]) lstrcpynW(r->f[RC_ALLOW], add, 200);
+  else if (r->f[RC_ALLOW][0] == 0) rt_log(j, L"    припуска (ZSizeAdd) в заготовке нет\r\n");
   double v;
   if (expense[0] && rt_num(expense, &v)) {
     r->norm1 = v;
