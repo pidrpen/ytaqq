@@ -223,7 +223,8 @@ static void rt_save(void) {
   rt_header_footer(hdr, ftr, 1200);
   /* без строки заголовка над шапкой (с 2026.09.23.52): обозначение и заказ —
      в колонтитулах */
-  XlSheet sh = {RT_NCOL, kRtHead, kRtXlWidth, hdr, ftr};
+  /* «Н. расх. на изделие» — формулой: норма на 1 деталь × количество на изделие */
+  XlSheet sh = {RT_NCOL, kRtHead, kRtXlWidth, hdr, ftr, RC_NORMTOT + 1, RC_NORM1, RC_QTYTOT};
   if (!xl_save(file, NULL, &sh, g_rtJob->n, rt_cell, g_rtJob)) {
     MessageBoxW(g_rtWnd, L"Не удалось записать файл — он не открыт сейчас в Excel?", L"Маршрутная ведомость",
                 MB_ICONWARNING);

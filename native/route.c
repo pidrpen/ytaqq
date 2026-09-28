@@ -790,7 +790,7 @@ static void rt_walk(SQLHDBC dbc, long id, int level, const wchar_t *parentDes, d
   } else {
     rt_preform(dbc, o.pfCard, rows, j, r, notes[1], 60);
     if (!r->f[RC_MAT][0] && o.mat[0]) lstrcpynW(r->f[RC_MAT], o.mat, 200); /* без заготовки — материал изделия */
-    if (r->hasNorm) rt_fmt(r->norm1 * r->qtyTot, 3, r->f[RC_NORMTOT], 200);
+    if (r->hasNorm) rt_fmt(floor(r->norm1 * 1000 + 0.5) / 1000 * r->qtyTot, 3, r->f[RC_NORMTOT], 200); /* как в Excel: показанная норма × кол-во */
   }
   for (int i = 0; i < 3; i++) {
     if (!notes[i][0]) continue;

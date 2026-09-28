@@ -152,6 +152,9 @@ typedef struct {
   const int *width; /* в символах */
   /* колонтитулы в кодах Excel («&L&18текст&R&24текст»), NULL — нет */
   const wchar_t *header, *footer;
+  /* столбец-произведение: prodCol (номер + 1, 0 — нет) = prodA × prodB
+     формулой Excel — поменяли число в файле, пересчиталось само */
+  int prodCol, prodA, prodB;
 } XlSheet;
 
 static BOOL xl_is_num(const wchar_t *s, double *v) {
@@ -216,7 +219,7 @@ static BOOL xl_save(const wchar_t *path, const wchar_t *title, const XlSheet *sh
           "<definedNames><definedName name=\"_xlnm.Print_Titles\" localSheetId=\"0\">"
           "'Лист1'!$1:$");
   xl_puts(&e[2].data, hasTitle ? "2" : "1");
-  xl_puts(&e[2].data, "</definedName></definedNames></workbook>");
+  xl_puts(&e[2].data, "</definedName></definedNames><calcPr fullCalcOnLoad=\"1\"/></workbook>");
   e[3].name = "xl/_rels/workbook.xml.rels";
   xl_puts(&e[3].data,
           "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n"
@@ -297,8 +300,15 @@ static BOOL xl_save(const wchar_t *path, const wchar_t *title, const XlSheet *sh
       const wchar_t *v = cell(ctx, r, c);
       char cn[4];
       xl_colname(c, cn);
-      double d;
-      if (xl_is_num(v, &d)) {
+      double d, a, b;
+      if (sh->prodCol == c + 1 && xl_is_num(cell(ctx, r, sh->prodA), &a) && xl_is_num(cell(ctx, r, sh->prodB), &b)) {
+        char ca[4], cb[4];
+        xl_colname(sh->prodA, ca);
+        xl_colname(sh->prodB, cb);
+        snprintf(tmp, sizeof(tmp), "<c r=\"%s%d\" s=\"2\"><f>%s%d*%s%d</f><v>%.10g</v></c>", cn, rr, ca, rr, cb, rr,
+                 a * b);
+        xl_puts(s, tmp);
+      } else if (xl_is_num(v, &d)) {
         snprintf(tmp, sizeof(tmp), "<c r=\"%s%d\" s=\"2\"><v>%.10g</v></c>", cn, rr, d);
         xl_puts(s, tmp);
       } else {
