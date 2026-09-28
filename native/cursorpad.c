@@ -3908,6 +3908,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
   case WM_UPDATE_DONE:
     on_update_done((int)wParam);
     return 0;
+  case WM_UPD_PEER: /* в общей папке отмечена версия новее — проверить сейчас */
+    upd_on_peer((long)wParam);
+    return 0;
   case WM_OCR_DONE: {
     wchar_t *text = (wchar_t *)lParam;
     if (text && text[0]) {

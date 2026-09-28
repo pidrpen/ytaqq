@@ -348,6 +348,54 @@ static void nd_load_local(void) {
   free(t);
 }
 
+/* ---- «вышла новая версия» — коллегам через общую папку -----------------------
+
+   С 2026.09.23.66. Курсор, у которого стоит версия новее отмеченной, пишет
+   <папка>\CursorPad-Update\latest.txt («ver», «name», «pc»). Остальные
+   раз в минуту читают его и, увидев версию новее своей, сразу проверяют
+   обновление (как по таймеру — та же проверка, та же всплывашка и та же
+   установка, когда человек отойдёт), не дожидаясь трёх часов. Отмечает
+   только проработавший две минуты: новая версия, которая сама откатилась
+   бы, коллег не позовёт. У кого обновления выключены — ничего не делает. */
+#define WM_UPD_PEER (WM_APP + 64) /* wParam — версия, которую отметили коллеги */
+
+static void nd_peer_version(const wchar_t *root, ULONGLONG uptimeMs) {
+  wchar_t dir[SHARE_PATH], path[SHARE_PATH];
+  _snwprintf(dir, SHARE_PATH, L"%s\\CursorPad-Update", root);
+  dir[SHARE_PATH - 1] = 0;
+  CreateDirectoryW(dir, NULL);
+  _snwprintf(path, SHARE_PATH, L"%s\\latest.txt", dir);
+  path[SHARE_PATH - 1] = 0;
+  wchar_t *t = share_read(path);
+  long seen = 0;
+  wchar_t v[40];
+  if (t && nd_field(t, L"ver", v, 40)) seen = wcstol(v, NULL, 10);
+  free(t);
+  if (seen > APP_VERSION) {
+    if (g_hwnd) PostMessageW(g_hwnd, WM_UPD_PEER, (WPARAM)seen, 0);
+  } else if (seen < APP_VERSION && uptimeMs > 120000) {
+    wchar_t user[128], pc[64], txt[400];
+    share_me(user, pc);
+    _snwprintf(txt, 400, L"ver\t%ld\nstr\t%s\nname\t%s\npc\t%s\n", (long)APP_VERSION, APP_VERSION_STR, user, pc);
+    txt[399] = 0;
+    share_write(path, txt);
+  }
+}
+
+/* коллеги уже на версии v — проверить обновление сейчас; одну и ту же
+   версию — не чаще раза в 10 минут (зеркала GitHub могут отдавать новую
+   версию не сразу) */
+static void upd_on_peer(long v) {
+  static long lastVer;
+  static ULONGLONG lastTry;
+  ULONGLONG now = GetTickCount64();
+  if (v <= APP_VERSION || g_updReady || upd_auto_off()) return;
+  if (v == lastVer && now - lastTry < 10 * 60 * 1000) return;
+  lastVer = v;
+  lastTry = now;
+  start_update_auto();
+}
+
 /* ---- фоновый поток: кто в сети, приглашения, файлы партии ----------------- */
 
 /* Опрос папки бережный: при двадцати коллегах каждый раз перечитывать все
@@ -356,7 +404,8 @@ static void nd_load_local(void) {
    файлы партии — раз в секунду и только пока она идёт. */
 static DWORD WINAPI nd_thread(LPVOID param) {
   (void)param;
-  ULONGLONG lastBeat = 0, lastOnline = 0, lastInv = 0, lastPost = 0;
+  ULONGLONG lastBeat = 0, lastOnline = 0, lastInv = 0, lastPost = 0, lastPeer = 0;
+  ULONGLONG started = GetTickCount64();
   static wchar_t *good[2]; /* последнее целое содержимое файлов партии */
   static wchar_t goodGame[96];
   unsigned lastSum = 0;
@@ -372,6 +421,10 @@ static DWORD WINAPI nd_thread(LPVOID param) {
     nd_myid(myId, 96, myName, 128);
     if (!nd_dir(root, L"online", dOn)) continue;
     ULONGLONG now = GetTickCount64();
+    if (now - lastPeer > 60000) { /* вышла ли у коллег версия новее — раз в минуту */
+      lastPeer = now;
+      nd_peer_version(root, now - started);
+    }
     if (!lastBeat || now - lastBeat > 60000) {
       wchar_t path[SHARE_PATH], txt[300], user[128], pc[64];
       share_me(user, pc);
