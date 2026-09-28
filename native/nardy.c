@@ -1406,26 +1406,41 @@ static void nd_mark_btn(void) {
   if (wcscmp(cur, want)) SetWindowTextW(g_btnNd, want);
 }
 
+/* кто сейчас в списке — по строкам списка, а не по свежему «кто в сети»:
+   тот мог смениться, и выбор перескакивал на другого */
+static wchar_t g_ndListId[ND_MAXONLINE][96], g_ndListName[ND_MAXONLINE][128];
+static int g_ndListN;
+
 static void nd_refresh_view(void) {
   nd_mark_btn();
   if (!g_ndWnd) return;
   if (g_ndList && g_nd.mode == ND_LOBBY) {
     NdPoll *pl = g_nd.poll;
-    int sel = (int)SendMessageW(g_ndList, LB_GETCURSEL, 0, 0);
-    wchar_t selId[96] = L"";
-    if (sel >= 0 && pl && sel < pl->nOnline) lstrcpynW(selId, pl->onId[sel], 96);
-    SendMessageW(g_ndList, WM_SETREDRAW, FALSE, 0);
-    SendMessageW(g_ndList, LB_RESETCONTENT, 0, 0);
-    int keep = -1;
-    if (pl)
-      for (int i = 0; i < pl->nOnline; i++) {
+    int n = pl ? pl->nOnline : 0;
+    /* тот же список — не трогаем: пересборка посреди щелчка сбрасывала выбор */
+    BOOL same = n == g_ndListN && (int)SendMessageW(g_ndList, LB_GETCOUNT, 0, 0) == n;
+    for (int i = 0; i < n && same; i++)
+      same = !wcscmp(g_ndListId[i], pl->onId[i]) && !wcscmp(g_ndListName[i], pl->onName[i]);
+    if (!same) {
+      int sel = (int)SendMessageW(g_ndList, LB_GETCURSEL, 0, 0);
+      wchar_t selId[96] = L"";
+      if (sel >= 0 && sel < g_ndListN) lstrcpynW(selId, g_ndListId[sel], 96);
+      SendMessageW(g_ndList, WM_SETREDRAW, FALSE, 0);
+      SendMessageW(g_ndList, LB_RESETCONTENT, 0, 0);
+      int keep = -1;
+      g_ndListN = 0;
+      for (int i = 0; i < n; i++) {
         SendMessageW(g_ndList, LB_ADDSTRING, 0, (LPARAM)pl->onName[i]);
+        lstrcpynW(g_ndListId[g_ndListN], pl->onId[i], 96);
+        lstrcpynW(g_ndListName[g_ndListN], pl->onName[i], 128);
+        g_ndListN++;
         if (selId[0] && !wcscmp(selId, pl->onId[i])) keep = i;
       }
-    if (keep < 0 && pl && pl->nOnline > 0) keep = 0; /* сразу выбран первый — «Позвать» жмётся без поиска */
-    if (keep >= 0) SendMessageW(g_ndList, LB_SETCURSEL, keep, 0);
-    SendMessageW(g_ndList, WM_SETREDRAW, TRUE, 0);
-    InvalidateRect(g_ndList, NULL, TRUE);
+      if (keep < 0 && n > 0) keep = 0; /* сразу выбран первый — «Позвать» жмётся без поиска */
+      if (keep >= 0) SendMessageW(g_ndList, LB_SETCURSEL, keep, 0);
+      SendMessageW(g_ndList, WM_SETREDRAW, TRUE, 0);
+      InvalidateRect(g_ndList, NULL, TRUE);
+    }
   }
   nd_layout();
   InvalidateRect(g_ndWnd, NULL, FALSE);
@@ -1531,16 +1546,18 @@ static LRESULT CALLBACK NardyProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
     int id = LOWORD(wParam);
     /* у кнопок — только щелчок (двойной присылает ещё BN_DOUBLECLICKED) */
     if (id != ID_ND_LIST && HIWORD(wParam) != BN_CLICKED) return 0;
+    /* от списка — только двойной щелчок; фокус у него не отнимаем: иначе
+       Windows не давала выбрать в нём другого игрока */
+    if (id == ID_ND_LIST && HIWORD(wParam) != LBN_DBLCLK) return 0;
     if (id == ID_PANEL_CLOSE) ShowWindow(hwnd, SW_HIDE);
-    if (id == ID_ND_LIST && HIWORD(wParam) == LBN_DBLCLK) id = ID_ND_INVITE;
+    if (id == ID_ND_LIST) id = ID_ND_INVITE;
     if (id == ID_ND_INVITE) {
       int sel = (int)SendMessageW(g_ndList, LB_GETCURSEL, 0, 0);
-      NdPoll *pl = g_nd.poll;
-      if (sel < 0 || !pl || sel >= pl->nOnline) {
+      if (sel < 0 || sel >= g_ndListN) {
         nd_status(L"Выберите, кого позвать");
         nd_refresh_view();
       } else {
-        nd_invite(pl->onId[sel], pl->onName[sel]);
+        nd_invite(g_ndListId[sel], g_ndListName[sel]);
       }
     }
     if (id == ID_ND_ACCEPT) nd_answer(0, TRUE);

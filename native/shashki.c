@@ -15,7 +15,16 @@
    считают одинаково. Каждый ход программа соперника проверяет по правилам
    (shashki_rules.c); партия восстанавливается из файлов целиком — после
    перезапуска доска та же. Ход уходит сразу, как только путь шашки дошёл до
-   конца (со взятием — до последнего поля). */
+   конца (со взятием — до последнего поля).
+
+   С 2026.09.23.73 каждый свой файл партии программа вдобавок кладёт копией в
+   папку соперника mv\<кому>\ — новым файлом, как сообщение чата: соперник
+   забирает его и удаляет. Файл партии, переписываемый на месте, на
+   рабочей сети до соперника не доходил (чат и приглашения — новые файлы —
+   доходили); из двух — файла партии и копии — берётся более длинный: запись
+   только дописывается, длиннее — значит новее. Своя запись хранится ещё и
+   на своём компьютере (shashki_log.txt) — после перезапуска партия
+   восстанавливается, даже если общая папка свой файл не отдаёт. */
 
 #include "shashki_rules.c"
 
@@ -37,6 +46,12 @@ typedef struct {
   ULONGLONG mt[2];
   DWORD rerr[2];
   ULONGLONG readAt;
+  /* копии от соперника (mv\<я>): сколько пришло, когда последняя; взята ли
+     из копии, а не из файла партии; забрал ли соперник мою: −1 — не знаю */
+  int mvIn;
+  ULONGLONG mvInAt;
+  BOOL viaMv[2];
+  int mvTaken;
 } ShPoll;
 
 typedef struct {
@@ -76,12 +91,22 @@ typedef struct {
   int nDoneInv;
   /* своя запись в папку: когда удалась, не сорвалась ли последняя */
   ULONGLONG wroteAt;
-  BOOL writeFail;
+  BOOL writeFail, fileFail;
+  /* копия своей записи в папке соперника */
+  unsigned mvHash;
+  wchar_t mvPath[SHARE_PATH];
+  ULONGLONG mvAt;
+  BOOL mvFail;
 } ShGame;
 
 static ShGame g_sh;
 static HWND g_shWnd, g_shList;
 static wchar_t g_shWatch[96]; /* какую партию читать потоку (под nd_lock) */
+static wchar_t g_shMvPath[SHARE_PATH]; /* моя последняя копия — забрал ли её соперник (под nd_lock) */
+/* кто сейчас в списке игроков — по строкам списка, а не по свежему «кто в
+   сети»: тот мог смениться, и выбор перескакивал на другого */
+static wchar_t g_shListId[ND_MAXONLINE][96], g_shListName[ND_MAXONLINE][128];
+static int g_shListN;
 static float g_shS = 1.0f;
 static HBITMAP g_shPc[2]; /* 0 — белая, 1 — чёрная */
 static int g_shPcD;
@@ -168,17 +193,80 @@ static void sh_game_path(const wchar_t *game, int side, wchar_t *out) {
   out[SHARE_PATH - 1] = 0;
 }
 
+static unsigned sh_hash(const wchar_t *a, const wchar_t *b, int side) {
+  unsigned h = 2166136261u ^ (unsigned)side;
+  for (const wchar_t *p = a; p && *p; p++) h = (h ^ (unsigned)*p) * 16777619u;
+  h = (h ^ 0x7Cu) * 16777619u;
+  for (const wchar_t *p = b; p && *p; p++) h = (h ^ (unsigned)*p) * 16777619u;
+  return h;
+}
+
+/* Копия своей записи — новым файлом в папку соперника mv\<кому>\, как
+   сообщение чата. track — копия текущей партии: одинаковую второй раз не
+   шлём, прежнюю незабранную убираем (в новой всё то же и новее). */
+static BOOL sh_send_copy(const wchar_t *game, int side, const wchar_t *to, const wchar_t *text, BOOL track) {
+  if (!game[0] || !to[0] || !text || !text[0]) return FALSE;
+  unsigned h = sh_hash(game, text, side);
+  if (track && h == g_sh.mvHash) return TRUE;
+  wchar_t root[MAX_PATH], sub[160], dir[SHARE_PATH], path[SHARE_PATH];
+  share_root_copy(root);
+  _snwprintf(sub, 160, L"mv\\%s", to);
+  sub[159] = 0;
+  BOOL ok = FALSE;
+  if (sh_dir(root, sub, dir)) {
+    _snwprintf(path, SHARE_PATH, L"%s\\%s-%d-%llx.txt", dir, game, side, ft_now());
+    path[SHARE_PATH - 1] = 0;
+    size_t n = wcslen(text) + 240;
+    wchar_t *body = (wchar_t *)malloc(n * sizeof(wchar_t));
+    if (body) {
+      _snwprintf(body, n, L"game\t%s\nside\t%d\n%s", game, side, text);
+      body[n - 1] = 0;
+      ok = share_write(path, body);
+      free(body);
+    }
+  }
+  if (track) {
+    g_sh.mvFail = !ok;
+    if (ok) {
+      if (g_sh.mvPath[0]) DeleteFileW(g_sh.mvPath);
+      lstrcpynW(g_sh.mvPath, path, SHARE_PATH);
+      nd_lock();
+      lstrcpynW(g_shMvPath, path, SHARE_PATH);
+      nd_unlock();
+      g_sh.mvHash = h;
+      g_sh.mvAt = ft_now();
+    }
+  }
+  return ok;
+}
+
+/* своя запись — ещё и на своём компьютере: после перезапуска партия
+   восстанавливается, даже если общая папка свой файл не отдаёт */
+static void sh_log_local_path(wchar_t *out) { _snwprintf(out, MAX_PATH, L"%s\\shashki_log.txt", g_dataDir); }
+
+static void sh_save_log_local(void) {
+  if (!g_dataDir[0] || !g_sh.game[0] || !g_sh.log.w) return;
+  wchar_t path[MAX_PATH];
+  sh_log_local_path(path);
+  size_t n = wcslen(g_sh.log.w) + 140;
+  wchar_t *b = (wchar_t *)malloc(n * sizeof(wchar_t));
+  if (!b) return;
+  _snwprintf(b, n, L"game\t%s\n%s", g_sh.game, g_sh.log.w);
+  b[n - 1] = 0;
+  share_write(path, b);
+  free(b);
+}
+
 static BOOL sh_write_mine(void) {
   wchar_t path[SHARE_PATH];
   sh_game_path(g_sh.game, g_sh.me, path);
-  if (!path[0] || !g_sh.log.w) {
-    g_sh.writeFail = TRUE;
-    return FALSE;
-  }
-  BOOL ok = share_write_ex(path, g_sh.log.w, TRUE);
-  g_sh.writeFail = !ok;
+  BOOL ok = path[0] && g_sh.log.w && share_write_ex(path, g_sh.log.w, TRUE);
+  g_sh.fileFail = !ok;
   if (ok) g_sh.wroteAt = ft_now();
-  return ok;
+  BOOL sent = g_sh.log.w && sh_send_copy(g_sh.game, g_sh.me, g_sh.oppId, g_sh.log.w, TRUE);
+  sh_save_log_local();
+  g_sh.writeFail = !ok && !sent; /* дошло хоть одним путём — не пугаем */
+  return ok || sent;
 }
 
 static void sh_log_reset(void) {
@@ -191,6 +279,8 @@ static void sh_save_local(void) {
   wchar_t path[MAX_PATH];
   _snwprintf(path, MAX_PATH, L"%s\\shashki.txt", g_dataDir);
   if (g_sh.mode != SH_WAIT && g_sh.mode != SH_PLAY) {
+    DeleteFileW(path);
+    sh_log_local_path(path);
     DeleteFileW(path);
     return;
   }
@@ -218,6 +308,19 @@ static void sh_load_local(void) {
     sh_start(&g_sh.board);
     g_sh.ply = 1;
     g_sh.logLoaded = FALSE; /* свой файл дочитаем из папки */
+    {
+      /* или со своего компьютера — если там та же партия */
+      wchar_t lp[MAX_PATH], g[96] = L"";
+      sh_log_local_path(lp);
+      wchar_t *lt = share_read(lp);
+      const wchar_t *body = lt ? wcschr(lt, L'\n') : NULL;
+      if (lt && body && nd_field(lt, L"game", g, 96) && !wcscmp(g, g_sh.game) && body[1]) {
+        sh_log_reset();
+        sb_add(&g_sh.log, L"%s", body + 1);
+        g_sh.logLoaded = TRUE;
+      }
+      free(lt);
+    }
     nd_lock();
     lstrcpynW(g_shWatch, g_sh.game, 96);
     nd_unlock();
@@ -227,14 +330,50 @@ static void sh_load_local(void) {
 
 /* ---- фоновый поток: приглашения и файлы партии ----------------------------- */
 
+/* копия записи: «game\t…», «side\t…», дальше сама запись; NULL — не копия
+   (или застали недописанной) */
+static const wchar_t *sh_parse_copy(const wchar_t *t, wchar_t *game, int *side) {
+  size_t l = t ? wcslen(t) : 0;
+  wchar_t sd[8] = L"";
+  game[0] = 0;
+  if (!l || t[l - 1] != L'\n' || !nd_field(t, L"game", game, 96) || !game[0] || !nd_field(t, L"side", sd, 8))
+    return NULL;
+  *side = _wtoi(sd) ? 1 : 0;
+  const wchar_t *q = wcschr(t, L'\n');
+  if (q) q = wcschr(q + 1, L'\n');
+  return q && q[1] ? q + 1 : NULL;
+}
+
+/* последняя принятая копия — и на своём компьютере: из папки её уже убрали,
+   а после перезапуска ходы соперника иначе взять было бы неоткуда */
+static void sh_in_path(wchar_t *out) { _snwprintf(out, MAX_PATH, L"%s\\shashki_in.txt", g_dataDir); }
+
 static DWORD WINAPI sh_thread(LPVOID param) {
   (void)param;
-  ULONGLONG lastInv = 0, lastPost = 0;
+  ULONGLONG lastInv = 0, lastPost = 0, lastMv = 0;
   static wchar_t *good[2];
   static wchar_t goodGame[96];
   static ShPoll cur;
   static ULONGLONG invFt[SH_MAXINV];
+  /* копии записей соперников из своей папки mv\<я>: по партии и стороне */
+  static wchar_t inGame[8][96];
+  static int inSide[8], inNext;
+  static wchar_t *inText[8];
   unsigned lastSum = 0;
+  if (g_dataDir[0]) {
+    wchar_t ip[MAX_PATH], g[96];
+    int sd1 = 0;
+    sh_in_path(ip);
+    wchar_t *t = share_read(ip);
+    const wchar_t *body = sh_parse_copy(t, g, &sd1);
+    if (body) {
+      lstrcpynW(inGame[0], g, 96);
+      inSide[0] = sd1;
+      inText[0] = _wcsdup(body);
+      inNext = 1;
+    }
+    free(t);
+  }
   for (;;) {
     Sleep(1000);
     wchar_t root[MAX_PATH];
@@ -297,13 +436,80 @@ static DWORD WINAPI sh_thread(LPVOID param) {
         }
       }
     }
+    /* копии ходов — новыми файлами в своей папке, как сообщения чата:
+       прочитать, удалить, запомнить самую длинную по партии и стороне */
+    BOOL watching;
+    nd_lock();
+    watching = g_shWatch[0] != 0;
+    nd_unlock();
+    if (watching || !lastMv || now - lastMv > 5000) { /* без партии — реже */
+      lastMv = now;
+      wchar_t dMv[SHARE_PATH];
+      _snwprintf(sub, 160, L"mv\\%s", myId);
+      if (sh_dir(root, sub, dMv)) {
+        wchar_t pat[SHARE_PATH + 8];
+        WIN32_FIND_DATAW fd;
+        _snwprintf(pat, SHARE_PATH + 8, L"%s\\*.txt", dMv);
+        HANDLE f = FindFirstFileW(pat, &fd);
+        if (f != INVALID_HANDLE_VALUE) {
+          do {
+            wchar_t full[SHARE_PATH];
+            _snwprintf(full, SHARE_PATH, L"%s\\%s", dMv, fd.cFileName);
+            full[SHARE_PATH - 1] = 0;
+            if (!ft_within(fd.ftLastWriteTime, 86400)) { /* сутки пролежало — партия давно не та */
+              DeleteFileW(full);
+              continue;
+            }
+            wchar_t *t = share_read(full);
+            if (!t) continue;
+            wchar_t g[96];
+            int sd1 = 0;
+            const wchar_t *body = sh_parse_copy(t, g, &sd1);
+            DeleteFileW(full);
+            if (body) {
+              int slot = -1;
+              for (int k = 0; k < 8 && slot < 0; k++)
+                if (inText[k] && inSide[k] == sd1 && !wcscmp(inGame[k], g)) slot = k;
+              if (slot < 0) {
+                slot = inNext++ % 8;
+                free(inText[slot]);
+                inText[slot] = NULL;
+                lstrcpynW(inGame[slot], g, 96);
+                inSide[slot] = sd1;
+              }
+              if (!inText[slot] || wcslen(body) > wcslen(inText[slot])) {
+                free(inText[slot]);
+                inText[slot] = _wcsdup(body);
+                if (g_dataDir[0]) {
+                  wchar_t ip[MAX_PATH];
+                  sh_in_path(ip);
+                  share_write(ip, t); /* как пришла: с шапкой */
+                }
+              }
+              cur.mvIn++;
+              cur.mvInAt = ft_now();
+            }
+            free(t);
+          } while (FindNextFileW(f, &fd));
+          FindClose(f);
+        }
+      }
+    }
     ShPoll *pl = (ShPoll *)calloc(1, sizeof(ShPoll));
     if (!pl) continue;
     memcpy(pl, &cur, sizeof(ShPoll));
     pl->p0 = pl->p1 = NULL;
+    wchar_t mvp[SHARE_PATH];
     nd_lock();
     lstrcpynW(pl->game, g_shWatch, 96);
+    lstrcpynW(mvp, g_shMvPath, SHARE_PATH);
     nd_unlock();
+    /* моя копия у соперника: файла нет — забрал */
+    pl->mvTaken = -1;
+    if (mvp[0]) {
+      if (GetFileAttributesW(mvp) != INVALID_FILE_ATTRIBUTES) pl->mvTaken = 0;
+      else if (GetLastError() == ERROR_FILE_NOT_FOUND) pl->mvTaken = 1;
+    }
     if (wcscmp(goodGame, pl->game)) {
       free(good[0]);
       free(good[1]);
@@ -329,6 +535,14 @@ static DWORD WINAPI sh_thread(LPVOID param) {
           free(good[s]);
           good[s] = _wcsdup(t);
         }
+        /* копия из своей папки длиннее — значит, новее: берём её */
+        for (int k = 0; k < 8; k++)
+          if (inText[k] && inSide[k] == s && !wcscmp(inGame[k], pl->game) &&
+              wcslen(inText[k]) > (t ? wcslen(t) : 0)) {
+            free(t);
+            t = _wcsdup(inText[k]);
+            pl->viaMv[s] = TRUE;
+          }
         if (s == 0) pl->p0 = t;
         else pl->p1 = t;
       }
@@ -343,6 +557,8 @@ static DWORD WINAPI sh_thread(LPVOID param) {
     SH_MIX(pl->invGame, sizeof(pl->invGame[0]) * pl->nInv);
     SH_MIX(pl->game, sizeof(pl->game));
     SH_MIX(pl->partial, sizeof(pl->partial));
+    SH_MIX(&pl->mvTaken, sizeof(pl->mvTaken));
+    SH_MIX(pl->viaMv, sizeof(pl->viaMv));
     if (pl->p0) SH_MIX(pl->p0, wcslen(pl->p0) * sizeof(wchar_t));
     if (pl->p1) SH_MIX(pl->p1, wcslen(pl->p1) * sizeof(wchar_t));
 #undef SH_MIX
@@ -394,6 +610,8 @@ static void sh_over(int winner, const wchar_t *why) {
   sh_save_local();
 }
 
+static int sh_count_moves(const wchar_t *t);
+
 /* Разыграть партию с начала по обоим файлам (свой — из памяти: только что
    сделанный ход папка могла ещё не вернуть). */
 static void sh_replay(const wchar_t *p0, const wchar_t *p1) {
@@ -424,7 +642,10 @@ static void sh_replay(const wchar_t *p0, const wchar_t *p1) {
   g_sh.white = sh_white_side(g_sh.game);
   if (!nd_field(file[1], L"id", v, 96) || !v[0]) { /* принявший ещё не ответил */
     g_sh.mode = SH_WAIT;
-    sh_status(L"Ждём ответа: %s", g_sh.oppName[0] ? g_sh.oppName : g_sh.oppId);
+    if (sh_count_moves(mine) > 0) /* партия уже шла: после перезапуска его запись ещё не пришла */
+      sh_status(L"Восстанавливаю партию — жду запись %s (до минуты)…", g_sh.oppName[0] ? g_sh.oppName : g_sh.oppId);
+    else
+      sh_status(L"Ждём ответа: %s", g_sh.oppName[0] ? g_sh.oppName : g_sh.oppId);
     return;
   }
   if (g_sh.mode == SH_WAIT) g_sh.mode = SH_PLAY;
@@ -620,9 +841,22 @@ static void sh_on_poll(ShPoll *pl) {
     sb_add(&g_sh.log, L"%s", mineNow);
     g_sh.logLoaded = TRUE;
   }
+  /* в папке своя запись длиннее той, что с компьютера (та не сохранилась) — её */
+  if (thisGame && g_sh.mode != SH_LOBBY && g_sh.logLoaded && g_sh.log.w && mineNow && !pl->partial[g_sh.me] &&
+      wcslen(mineNow) > g_sh.log.len && !wcsncmp(mineNow, g_sh.log.w, g_sh.log.len)) {
+    sh_log_reset();
+    sb_add(&g_sh.log, L"%s", mineNow);
+  }
+  /* ждём соперника дольше минуты — повторить ему свою копию: вдруг он её
+     потерял (забрал и перезапустился) и ждёт нашего хода, а мы — его */
+  if (thisGame && (g_sh.mode == SH_WAIT || (g_sh.mode == SH_PLAY && !sh_my_turn())) && g_sh.mvAt &&
+      ft_now() - g_sh.mvAt > 60ull * 10000000ull)
+    g_sh.mvHash = 0;
   if (thisGame && g_sh.mode != SH_LOBBY && g_sh.logLoaded && g_sh.log.w && g_sh.log.w[0] &&
       (!mineNow || pl->partial[g_sh.me] || wcscmp(mineNow, g_sh.log.w)))
-    sh_write_mine(); /* в папке не то, что у нас — пишем снова */
+    sh_write_mine(); /* в папке не то, что у нас — пишем снова (и копию) */
+  else if (thisGame && g_sh.mode != SH_LOBBY && g_sh.logLoaded && g_sh.log.w && g_sh.log.w[0])
+    sh_send_copy(g_sh.game, g_sh.me, g_sh.oppId, g_sh.log.w, TRUE); /* копия не ушла — ещё раз */
   if ((g_sh.mode == SH_WAIT || g_sh.mode == SH_PLAY) && thisGame) {
     int prevPly = g_sh.ply, prevMode = g_sh.mode;
     sh_replay(pl->p0, pl->p1);
@@ -705,7 +939,9 @@ static void sh_answer_ex(int idx, BOOL accept, BOOL ask) {
     wchar_t path[SHARE_PATH];
     sh_game_path(game, 1, path);
     /* отказ из-за встречного приглашения — с пометкой: тот примет наше сам */
-    if (path[0]) share_write(path, ask ? L"decline\n" : L"decline\nswap\n");
+    const wchar_t *dt = ask ? L"decline\n" : L"decline\nswap\n";
+    if (path[0]) share_write(path, dt);
+    sh_send_copy(game, 1, from, dt, FALSE); /* и копией — как ходы */
     sh_refresh_view();
     return;
   }
@@ -1150,22 +1386,31 @@ static void sh_refresh_view(void) {
   if (!g_shWnd) return;
   if (g_shList && g_sh.mode == SH_LOBBY) {
     NdPoll *pl = g_nd.poll; /* кто в сети — общий список с нардами */
-    int sel = (int)SendMessageW(g_shList, LB_GETCURSEL, 0, 0);
-    wchar_t selId[96] = L"";
-    int cnt = (int)SendMessageW(g_shList, LB_GETCOUNT, 0, 0);
-    if (sel >= 0 && pl && sel < pl->nOnline && sel < cnt) lstrcpynW(selId, pl->onId[sel], 96);
-    SendMessageW(g_shList, WM_SETREDRAW, FALSE, 0);
-    SendMessageW(g_shList, LB_RESETCONTENT, 0, 0);
-    int keep = -1;
-    if (pl)
-      for (int i = 0; i < pl->nOnline; i++) {
+    int n = pl ? pl->nOnline : 0;
+    /* тот же список — не трогаем: пересборка посреди щелчка сбрасывала выбор */
+    BOOL same = n == g_shListN && (int)SendMessageW(g_shList, LB_GETCOUNT, 0, 0) == n;
+    for (int i = 0; i < n && same; i++)
+      same = !wcscmp(g_shListId[i], pl->onId[i]) && !wcscmp(g_shListName[i], pl->onName[i]);
+    if (!same) {
+      int sel = (int)SendMessageW(g_shList, LB_GETCURSEL, 0, 0);
+      wchar_t selId[96] = L"";
+      if (sel >= 0 && sel < g_shListN) lstrcpynW(selId, g_shListId[sel], 96);
+      SendMessageW(g_shList, WM_SETREDRAW, FALSE, 0);
+      SendMessageW(g_shList, LB_RESETCONTENT, 0, 0);
+      int keep = -1;
+      g_shListN = 0;
+      for (int i = 0; i < n; i++) {
         SendMessageW(g_shList, LB_ADDSTRING, 0, (LPARAM)pl->onName[i]);
+        lstrcpynW(g_shListId[g_shListN], pl->onId[i], 96);
+        lstrcpynW(g_shListName[g_shListN], pl->onName[i], 128);
+        g_shListN++;
         if (selId[0] && !wcscmp(selId, pl->onId[i])) keep = i;
       }
-    if (keep < 0 && pl && pl->nOnline > 0) keep = 0;
-    if (keep >= 0) SendMessageW(g_shList, LB_SETCURSEL, keep, 0);
-    SendMessageW(g_shList, WM_SETREDRAW, TRUE, 0);
-    InvalidateRect(g_shList, NULL, TRUE);
+      if (keep < 0 && n > 0) keep = 0;
+      if (keep >= 0) SendMessageW(g_shList, LB_SETCURSEL, keep, 0);
+      SendMessageW(g_shList, WM_SETREDRAW, TRUE, 0);
+      InvalidateRect(g_shList, NULL, TRUE);
+    }
   }
   sh_layout();
   InvalidateRect(g_shWnd, NULL, FALSE);
@@ -1209,17 +1454,27 @@ static void sh_hms(ULONGLONG ft, wchar_t *out, int cap) {
 static void sh_diag_text(wchar_t *out, int cap) {
   ShPoll *pl = g_sh.poll;
   int opp = 1 - g_sh.me;
-  const wchar_t *theirs = pl && !wcscmp(pl->game, g_sh.game) ? (opp == 0 ? pl->p0 : pl->p1) : NULL;
-  wchar_t w1[16], w2[16], w3[16], nm[128], err[60] = L"";
+  BOOL same = pl && !wcscmp(pl->game, g_sh.game);
+  const wchar_t *theirs = same ? (opp == 0 ? pl->p0 : pl->p1) : NULL;
+  wchar_t w1[16], w2[16], w3[16], w4[16], w5[16], nm[128], err[60] = L"", cp[80];
   sh_hms(g_sh.wroteAt, w1, 16);
   sh_hms(pl ? pl->mt[opp] : 0, w2, 16);
   sh_hms(pl ? pl->readAt : 0, w3, 16);
+  sh_hms(g_sh.mvAt, w4, 16);
+  sh_hms(pl ? pl->mvInAt : 0, w5, 16);
   lstrcpynW(nm, g_sh.oppName[0] ? g_sh.oppName : L"соперник", 128);
-  if (pl && !theirs && pl->rerr[opp] == ERROR_FILE_NOT_FOUND) lstrcpynW(err, L" — файла нет", 60);
-  else if (pl && !theirs && pl->rerr[opp]) _snwprintf(err, 60, L" — не читается (ошибка %lu)", pl->rerr[opp]);
-  _snwprintf(out, cap, L"связь: у вас ходов %d, записано %s%s · у %s ходов %d, изменён %s%s · прочитано %s",
-             sh_count_moves(g_sh.log.w), w1, g_sh.writeFail ? L" — НЕ ЗАПИСАЛОСЬ" : L"", nm,
-             sh_count_moves(theirs), w2, err, w3);
+  if (pl && pl->rerr[opp] == ERROR_FILE_NOT_FOUND) lstrcpynW(err, L" (файла нет)", 60);
+  else if (pl && pl->rerr[opp]) _snwprintf(err, 60, L" (не читается, ошибка %lu)", pl->rerr[opp]);
+  /* моя копия в его папке: забрал ли */
+  if (g_sh.mvFail) lstrcpynW(cp, L"копия НЕ ЗАПИСАЛАСЬ", 80);
+  else if (!g_sh.mvAt) lstrcpynW(cp, L"копии нет", 80);
+  else _snwprintf(cp, 80, L"копия %s%s", w4,
+                  !pl || pl->mvTaken < 0 ? L"" : pl->mvTaken ? L" — забрал" : L" — ещё не забрал");
+  _snwprintf(out, cap,
+             L"связь: у вас ходов %d · файл %s · %s  |  у %s ходов %d%s · файл %s%s · копий от него %d "
+             L"(последняя %s) · проверено %s",
+             sh_count_moves(g_sh.log.w), g_sh.fileFail ? L"НЕ ЗАПИСАЛСЯ" : w1, cp, nm, sh_count_moves(theirs),
+             same && pl->viaMv[opp] ? L" (по копии)" : L"", w2, err, pl ? pl->mvIn : 0, w5, w3);
   out[cap - 1] = 0;
 }
 
@@ -1271,7 +1526,7 @@ static void sh_paint(HWND hwnd, HDC hdc) {
     DrawTextW(hdc, g_sh.status, -1, &t, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
     wchar_t dg[400];
     sh_diag_text(dg, 400);
-    RECT dr = {pad, SS_(SH_TOP) + SS_(100), rc.right - pad, SS_(SH_TOP) + SS_(150)};
+    RECT dr = {pad, SS_(SH_TOP) + SS_(100), rc.right - pad, SS_(SH_TOP) + SS_(170)};
     if (g_fontSmall) SelectObject(hdc, g_fontSmall);
     SetTextColor(hdc, COL_MUTED);
     DrawTextW(hdc, dg, -1, &dr, DT_LEFT | DT_WORDBREAK | DT_NOPREFIX);
@@ -1294,7 +1549,7 @@ static void sh_paint(HWND hwnd, HDC hdc) {
   DrawTextW(hdc, info, -1, &ir, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
   wchar_t dg[400];
   sh_diag_text(dg, 400);
-  RECT dr = {pad, yb + SS_(82), rc.right - pad, yb + SS_(112)};
+  RECT dr = {pad, yb + SS_(82), rc.right - pad, yb + SS_(132)};
   SetTextColor(hdc, g_sh.writeFail ? RGB(200, 60, 40) : COL_MUTED);
   DrawTextW(hdc, dg, -1, &dr, DT_LEFT | DT_WORDBREAK | DT_NOPREFIX);
 }
@@ -1347,16 +1602,18 @@ static LRESULT CALLBACK ShashkiProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
     /* у кнопок — только щелчок: двойной щелчок присылает ещё и
        BN_DOUBLECLICKED, и «Позвать играть» уходило дважды */
     if (id != ID_SH_LIST && HIWORD(wParam) != BN_CLICKED) return 0;
+    /* от списка — только двойной щелчок; фокус у него не отнимаем: иначе
+       Windows не давала выбрать в нём другого игрока */
+    if (id == ID_SH_LIST && HIWORD(wParam) != LBN_DBLCLK) return 0;
     if (id == ID_PANEL_CLOSE) ShowWindow(hwnd, SW_HIDE);
-    if (id == ID_SH_LIST && HIWORD(wParam) == LBN_DBLCLK) id = ID_SH_INVITE;
+    if (id == ID_SH_LIST) id = ID_SH_INVITE;
     if (id == ID_SH_INVITE) {
       int sel = (int)SendMessageW(g_shList, LB_GETCURSEL, 0, 0);
-      NdPoll *pl = g_nd.poll;
-      if (sel < 0 || !pl || sel >= pl->nOnline) {
+      if (sel < 0 || sel >= g_shListN) {
         sh_status(L"Выберите, кого позвать");
         sh_refresh_view();
       } else {
-        sh_invite(pl->onId[sel], pl->onName[sel]);
+        sh_invite(g_shListId[sel], g_shListName[sel]);
       }
     }
     if (id == ID_SH_ACCEPT) sh_answer(0, TRUE);
@@ -1399,7 +1656,7 @@ static void shashki_show(void) {
     wc.lpszClassName = L"CursorPadShashki";
     wc.hIcon = LoadIconW(NULL, IDI_APPLICATION);
     RegisterClassExW(&wc);
-    int w = SS_(SH_LEFT * 2 + SH_SQ * 8 + SH_FRAME * 2), h = SS_(SH_TOP + SH_SQ * 8 + SH_FRAME * 2 + 122);
+    int w = SS_(SH_LEFT * 2 + SH_SQ * 8 + SH_FRAME * 2), h = SS_(SH_TOP + SH_SQ * 8 + SH_FRAME * 2 + 140);
     g_shWnd = CreateWindowExW(WS_EX_APPWINDOW, L"CursorPadShashki", L"Шашки",
                               WS_POPUP | WS_CLIPCHILDREN | WS_MINIMIZEBOX | WS_SYSMENU, 0, 0, w, h, NULL, NULL,
                               g_inst, NULL);

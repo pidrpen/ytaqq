@@ -132,24 +132,39 @@ static BOOL share_write_ex(const wchar_t *path, const wchar_t *text, BOOL direct
 static BOOL share_write(const wchar_t *path, const wchar_t *text) { return share_write_ex(path, text, FALSE); }
 
 static wchar_t *share_read(const wchar_t *path) {
-  HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE, NULL,
+  HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
                          OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
   if (h == INVALID_HANDLE_VALUE) return NULL;
+  /* до конца файла, а не по размеру из GetFileSize: сетевой диск может
+     отдать размер из своего запаса, и новое в конце не прочлось бы */
   DWORD sz = GetFileSize(h, NULL);
-  if (sz == INVALID_FILE_SIZE || sz > 8u * 1024u * 1024u) {
-    CloseHandle(h);
-    return NULL;
+  size_t cap = (sz == INVALID_FILE_SIZE ? 0 : sz) + 4096, r = 0;
+  char *buf = (char *)malloc(cap + 1);
+  BOOL ok = buf != NULL;
+  while (ok) {
+    if (cap - r < 1024) {
+      if (cap > 8u * 1024u * 1024u) {
+        ok = FALSE;
+        break;
+      }
+      char *nb = (char *)realloc(buf, cap * 2 + 1);
+      if (!nb) {
+        ok = FALSE;
+        break;
+      }
+      buf = nb;
+      cap *= 2;
+    }
+    DWORD got = 0;
+    if (!ReadFile(h, buf + r, (DWORD)(cap - r), &got, NULL)) ok = FALSE;
+    else if (!got) break;
+    else r += got;
   }
-  char *buf = (char *)malloc((size_t)sz + 1);
-  if (!buf) {
-    CloseHandle(h);
-    return NULL;
-  }
-  DWORD r = 0;
-  BOOL ok = ReadFile(h, buf, sz, &r, NULL);
+  DWORD err = GetLastError();
   CloseHandle(h);
   if (!ok) {
     free(buf);
+    SetLastError(err ? err : ERROR_READ_FAULT);
     return NULL;
   }
   buf[r] = 0;
