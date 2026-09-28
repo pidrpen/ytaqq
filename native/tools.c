@@ -33,7 +33,7 @@ typedef struct {
   int cmd;
   const wchar_t *text, *key;
   COLORREF mark; /* цветная метка; 0 — нет */
-  int kind;      /* 0 — пункт, 1 — заголовок раздела, 2 — опасный (красный) */
+  int kind;      /* 0 — пункт, 1 — заголовок раздела, 2 — опасный (красный), 3 — пока не работает (серый) */
 } MoreItem;
 
 enum { MORE_OCR = 20, MORE_NARDY, MORE_CHANGES, MORE_CLEAR, MORE_LAYOUT, MORE_MSG, MORE_ROUTE, MORE_SHASHKI };
@@ -47,7 +47,7 @@ static const MoreItem kMore[] = {
     {-1, NULL, NULL, 0, 0}, /* черта */
     {MORE_OCR, L"Выделить и прочитать", g_hkName[HK_OCR], 0, 0}, /* клавиши — какие назначены (hotkeys.c) */
     {MORE_LAYOUT, L"Исправить раскладку", g_hkName[HK_LAYOUT], 0, 0}, /* с 2026.09.23.42 */
-    {MORE_MSG, L"Чат с коллегами", NULL, 0, 0}, /* с 2026.09.23.68 — чат вместо исчезающих */
+    {MORE_MSG, L"Чат с коллегами", L"пока не работает", 0, 3}, /* с .68; с .75 выключен */
     {MORE_NARDY, L"Нарды", NULL, 0, 0},
     {MORE_SHASHKI, L"Шашки", NULL, 0, 0}, /* с 2026.09.23.65: по сети, как нарды */
     {MORE_CHANGES, L"Что нового в папке", NULL, 0, 0},
@@ -85,7 +85,7 @@ static void tools_menu_draw(const DRAWITEMSTRUCT *di) {
   if (!it) return;
   HDC dc = di->hDC;
   RECT r = di->rcItem;
-  BOOL sel = (di->itemState & ODS_SELECTED) && it->kind != 1;
+  BOOL sel = (di->itemState & ODS_SELECTED) && it->kind != 1 && it->kind != 3;
   HBRUSH bg = CreateSolidBrush(sel ? blend_rgb(COL_SAGE, COL_PAPER, 215) : COL_PAPER);
   FillRect(dc, &r, bg);
   DeleteObject(bg);
@@ -105,7 +105,7 @@ static void tools_menu_draw(const DRAWITEMSTRUCT *di) {
   }
   x += mk + more_px(10);
   if (g_fontBody) SelectObject(dc, g_fontBody);
-  SetTextColor(dc, it->kind == 2 ? RGB(0xB4, 0x23, 0x18) : COL_INK);
+  SetTextColor(dc, it->kind == 2 ? RGB(0xB4, 0x23, 0x18) : it->kind == 3 ? COL_MUTED : COL_INK);
   RECT t = {x, r.top, r.right - more_px(12), r.bottom};
   DrawTextW(dc, it->text, -1, &t, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
   if (it->key) {
@@ -123,7 +123,8 @@ static void tools_menu(HWND owner, HWND btn) {
     const MoreItem *it = &kMore[k];
     if (it->cmd < 0) AppendMenuW(m, MF_SEPARATOR, 0, NULL);
     else
-      AppendMenuW(m, MF_OWNERDRAW | (it->kind == 1 ? MF_DISABLED : 0), (UINT_PTR)(it->kind == 1 ? 999 : it->cmd),
+      AppendMenuW(m, MF_OWNERDRAW | (it->kind == 1 || it->kind == 3 ? MF_DISABLED : 0),
+                  (UINT_PTR)(it->kind == 1 ? 999 : it->kind == 3 ? 998 : it->cmd),
                   (LPCWSTR)it);
   }
   RECT r;

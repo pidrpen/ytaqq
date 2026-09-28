@@ -2397,9 +2397,10 @@ static void tray_menu(HWND hwnd) {
   AppendMenuW(menu, MF_STRING, 16, L"Настройки");
   AppendMenuW(menu, MF_STRING, 15, mOcr);
   AppendMenuW(menu, MF_STRING, 17, L"Проверить обновления");
-  AppendMenuW(menu, MF_STRING | (upd_auto_off() ? 0 : MF_CHECKED), 22, L"   обновляться самостоятельно");
+  /* с 2026.09.23.75 — выключено: сама программа себя не обновляет (update.c) */
+  AppendMenuW(menu, MF_STRING | MF_GRAYED, 22, L"   обновляться самостоятельно — пока не работает");
   AppendMenuW(menu, MF_STRING, 18, L"Что нового в папке");
-  AppendMenuW(menu, MF_STRING, 23, L"Чат с коллегами");
+  AppendMenuW(menu, MF_STRING | MF_GRAYED, 23, L"Чат с коллегами — пока не работает");
   AppendMenuW(menu, MF_STRING, 21, L"Нарды");
   AppendMenuW(menu, MF_STRING, 24, L"Шашки");
   AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
@@ -2439,8 +2440,8 @@ static void tray_menu(HWND hwnd) {
     else hide_to_tray();
   } else if (cmd == 15) run_ocr_test();
   else if (cmd == 17) start_update();
-  else if (cmd == 23) msg_compose_show();
-  else if (cmd == 22) {
+  else if (cmd == 23 && 0) msg_compose_show(); /* чат выключен с 2026.09.23.75 */
+  else if (cmd == 22 && !UPD_AUTO_DISABLED) {
     BOOL on = upd_auto_off();
     upd_auto_set(on);
     show_status(on ? L"Обновления ставятся сами" : L"Обновления — только по кнопке");
@@ -3551,7 +3552,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     share_start();
     nardy_start(); /* «я в сети» для нард и приглашения — пока задана общая папка */
     shashki_start(); /* приглашения и партии в шашки — там же */
-    msg_start();   /* сообщения коллегам: забирать пришедшие */
+    /* чат с 2026.09.23.75 выключен (пока не работает): его поток каждую
+       секунду-три читал и удалял файлы в общей папке — после .73 сработал
+       «Анализ поведения» Kaspersky */
+    if (0) msg_start();
     load_files_pref();
     if (g_autostart) autostart_set(TRUE);
     create_settings(hwnd);
@@ -3569,7 +3573,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     layout_children();
     SetTimer(hwnd, TIMER_FOLLOW, 10, NULL);
     tools_cleanup_old(); /* страницы и Edge прежних версий */
-    SetTimer(hwnd, TIMER_UPD_AUTO, 90000, NULL);   /* обновление — само, через полторы минуты */
+    if (!UPD_AUTO_DISABLED) SetTimer(hwnd, TIMER_UPD_AUTO, 90000, NULL); /* обновление — само, через полторы минуты */
     SetTimer(hwnd, TIMER_UPD_CONFIRM, 45000, NULL); /* проработали 45 с — версия годная */
     SetTimer(hwnd, TIMER_UPD_NOTE, 8000, NULL);     /* не было ли отката */
     SetTimer(hwnd, TIMER_SAVE, 2000, NULL);

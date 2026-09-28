@@ -1416,7 +1416,14 @@ static void upd_auto_set(BOOL on) {
   else write_all(p, "0", 1);
 }
 
+/* С 2026.09.23.75 обновление само не ставится: на .73 «Анализ поведения»
+   Kaspersky Endpoint счёл программу подозрительной, а подмена своего exe
+   скачанным — первое, что так выглядит. Обновить — кнопкой «Проверить
+   обновления» в Настройках. Вернуть — убрать эту строку. */
+#define UPD_AUTO_DISABLED 1
+
 static void start_update_auto(void) {
+  if (UPD_AUTO_DISABLED) return;
   if (g_updReady || upd_auto_off()) return;
   if (InterlockedCompareExchange(&g_updBusy, 1, 0) != 0) return;
   g_updAuto = TRUE;
