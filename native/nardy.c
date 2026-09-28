@@ -778,6 +778,7 @@ static void nd_on_poll(NdPoll *pl) {
 /* ---- действия игрока -------------------------------------------------------- */
 
 static void nd_invite(const wchar_t *oppId, const wchar_t *oppName) {
+  if (g_nd.mode != ND_LOBBY) return; /* уже позвали — второй раз (двойной щелчок) не зовём */
   wchar_t myId[96], myName[128];
   nd_myid(myId, 96, myName, 128);
   memset(&g_nd.board, 0, sizeof(g_nd.board));
@@ -1528,6 +1529,8 @@ static LRESULT CALLBACK NardyProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
   }
   case WM_COMMAND: {
     int id = LOWORD(wParam);
+    /* у кнопок — только щелчок (двойной присылает ещё BN_DOUBLECLICKED) */
+    if (id != ID_ND_LIST && HIWORD(wParam) != BN_CLICKED) return 0;
     if (id == ID_PANEL_CLOSE) ShowWindow(hwnd, SW_HIDE);
     if (id == ID_ND_LIST && HIWORD(wParam) == LBN_DBLCLK) id = ID_ND_INVITE;
     if (id == ID_ND_INVITE) {

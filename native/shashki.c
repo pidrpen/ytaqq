@@ -70,6 +70,10 @@ typedef struct {
      в свою, — его приглашение принять сразу, как придёт */
   wchar_t swapFrom[96];
   ULONGLONG swapT;
+  /* приглашения, на которые уже ответили: поток помнит список до 5 с —
+     чтобы то же самое не всплывало и не обрабатывалось снова */
+  wchar_t doneInv[8][96];
+  int nDoneInv;
   /* своя запись в папку: когда удалась, не сорвалась ли последняя */
   ULONGLONG wroteAt;
   BOOL writeFail;
@@ -229,6 +233,7 @@ static DWORD WINAPI sh_thread(LPVOID param) {
   static wchar_t *good[2];
   static wchar_t goodGame[96];
   static ShPoll cur;
+  static ULONGLONG invFt[SH_MAXINV];
   unsigned lastSum = 0;
   for (;;) {
     Sleep(1000);
@@ -262,7 +267,31 @@ static DWORD WINAPI sh_thread(LPVOID param) {
             nd_field(t, L"from", cur.invFrom[cur.nInv], 96);
             nd_field(t, L"name", cur.invName[cur.nInv], 128);
             free(t);
-            if (cur.invGame[cur.nInv][0]) cur.nInv++;
+            if (!cur.invGame[cur.nInv][0]) continue;
+            /* От одного человека — только последнее приглашение: он ждёт ответа
+               на одно, старые (двойной щелчок по «Позвать», прошлые попытки)
+               устарели. Раньше «Принять» брало первое в списке — соперник
+               садился в старую партию, а позвавший ждал в новой (2026.09.23.71) */
+            ULONGLONG ft = ((ULONGLONG)fd.ftLastWriteTime.dwHighDateTime << 32) | fd.ftLastWriteTime.dwLowDateTime;
+            int dup = -1;
+            for (int k = 0; k < cur.nInv && dup < 0; k++)
+              if (!wcscmp(cur.invFrom[k], cur.invFrom[cur.nInv])) dup = k;
+            if (dup < 0) {
+              invFt[cur.nInv] = ft;
+              cur.nInv++;
+              continue;
+            }
+            wchar_t old[SHARE_PATH];
+            if (ft > invFt[dup]) { /* новое свежее — оно вместо старого */
+              _snwprintf(old, SHARE_PATH, L"%s\\%s.txt", dInv, cur.invGame[dup]);
+              lstrcpynW(cur.invGame[dup], cur.invGame[cur.nInv], 96);
+              lstrcpynW(cur.invName[dup], cur.invName[cur.nInv], 128);
+              invFt[dup] = ft;
+            } else {
+              _snwprintf(old, SHARE_PATH, L"%s\\%s.txt", dInv, cur.invGame[cur.nInv]);
+            }
+            old[SHARE_PATH - 1] = 0;
+            DeleteFileW(old);
           } while (FindNextFileW(f, &fd));
           FindClose(f);
         }
@@ -532,6 +561,21 @@ static void sh_answer_ex(int idx, BOOL accept, BOOL ask);
 static void sh_on_poll(ShPoll *pl) {
   sh_poll_free(g_sh.poll);
   g_sh.poll = pl;
+  /* уже отвеченные — вон из списка */
+  for (int i = 0; i < pl->nInv;) {
+    BOOL done = FALSE;
+    for (int k = 0; k < 8 && k < g_sh.nDoneInv && !done; k++) done = !wcscmp(g_sh.doneInv[k], pl->invGame[i]);
+    if (!done) {
+      i++;
+      continue;
+    }
+    for (int k = i; k + 1 < pl->nInv; k++) {
+      lstrcpynW(pl->invGame[k], pl->invGame[k + 1], 96);
+      lstrcpynW(pl->invFrom[k], pl->invFrom[k + 1], 96);
+      lstrcpynW(pl->invName[k], pl->invName[k + 1], 128);
+    }
+    pl->nInv--;
+  }
   /* Позвали друг друга одновременно: я жду ответа от X, а от X пришло его
      приглашение. Обе программы решают одинаково — остаётся партия с
      меньшим номером: её приглашённый принимает сам, лишнюю отменяют. */
@@ -591,6 +635,7 @@ static void sh_on_poll(ShPoll *pl) {
 /* ---- действия игрока -------------------------------------------------------- */
 
 static void sh_invite(const wchar_t *oppId, const wchar_t *oppName) {
+  if (g_sh.mode != SH_LOBBY) return; /* уже позвали — второй раз (двойной щелчок) не зовём */
   wchar_t myId[96], myName[128];
   nd_myid(myId, 96, myName, 128);
   _snwprintf(g_sh.game, 96, L"%s-%llx", myId, GetTickCount64());
@@ -650,6 +695,8 @@ static void sh_answer_ex(int idx, BOOL accept, BOOL ask) {
   if (!pl || idx < 0 || idx >= pl->nInv) return;
   wchar_t game[96], from[96], name[128], myId[96], myName[128];
   lstrcpynW(game, pl->invGame[idx], 96);
+  lstrcpynW(g_sh.doneInv[g_sh.nDoneInv % 8], game, 96);
+  g_sh.nDoneInv++;
   lstrcpynW(from, pl->invFrom[idx], 96);
   lstrcpynW(name, pl->invName[idx], 128);
   nd_myid(myId, 96, myName, 128);
@@ -1222,6 +1269,12 @@ static void sh_paint(HWND hwnd, HDC hdc) {
   if (g_sh.mode == SH_WAIT) {
     RECT t = {pad, SS_(SH_TOP), rc.right - pad, SS_(SH_TOP) + SS_(40)};
     DrawTextW(hdc, g_sh.status, -1, &t, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+    wchar_t dg[400];
+    sh_diag_text(dg, 400);
+    RECT dr = {pad, SS_(SH_TOP) + SS_(100), rc.right - pad, SS_(SH_TOP) + SS_(150)};
+    if (g_fontSmall) SelectObject(hdc, g_fontSmall);
+    SetTextColor(hdc, COL_MUTED);
+    DrawTextW(hdc, dg, -1, &dr, DT_LEFT | DT_WORDBREAK | DT_NOPREFIX);
     return;
   }
   sh_paint_board(hdc);
@@ -1291,6 +1344,9 @@ static LRESULT CALLBACK ShashkiProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
   }
   case WM_COMMAND: {
     int id = LOWORD(wParam);
+    /* у кнопок — только щелчок: двойной щелчок присылает ещё и
+       BN_DOUBLECLICKED, и «Позвать играть» уходило дважды */
+    if (id != ID_SH_LIST && HIWORD(wParam) != BN_CLICKED) return 0;
     if (id == ID_PANEL_CLOSE) ShowWindow(hwnd, SW_HIDE);
     if (id == ID_SH_LIST && HIWORD(wParam) == LBN_DBLCLK) id = ID_SH_INVITE;
     if (id == ID_SH_INVITE) {
