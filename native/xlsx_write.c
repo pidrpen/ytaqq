@@ -182,6 +182,40 @@ static void xl_colname(int c, char *out) {
   }
 }
 
+/* Сколько строк займёт текст в столбце шириной w символов при переносе по
+   словам (и по «\n»). Кириллица шире цифры, по которой Excel меряет ширину, —
+   считаем в строке на символ меньше. */
+static int xl_lines(const wchar_t *t, int w) {
+  if (!t || !*t) return 1;
+  int cap = w > 3 ? w - 1 : 2, lines = 1, col = 0;
+  while (*t) {
+    if (*t == L'\n') {
+      lines++;
+      col = 0;
+      t++;
+      continue;
+    }
+    int len = 0;
+    while (t[len] && t[len] != L' ' && t[len] != L'\n') len++;
+    if (len) {
+      if (col && col + 1 + len > cap) { /* слово на новую строку */
+        lines++;
+        col = 0;
+      }
+      if (col) col++;
+      while (len > cap) { /* слово длиннее строки — Excel рвёт его */
+        lines++;
+        len -= cap;
+      }
+      col += len;
+      t += len;
+      while (*t && *t != L' ' && *t != L'\n') t++;
+    }
+    while (*t == L' ') t++;
+  }
+  return lines;
+}
+
 /* cell(row, col) — текст ячейки строки данных; title — заголовок над шапкой,
    NULL или пусто — без него: шапка в первой строке */
 static BOOL xl_save(const wchar_t *path, const wchar_t *title, const XlSheet *sh, int nrows,
@@ -305,9 +339,20 @@ static BOOL xl_save(const wchar_t *path, const wchar_t *title, const XlSheet *sh
     xl_puts(s, "</t></is></c>");
   }
   xl_puts(s, "</row>");
+  /* строки данных — одной высоты: по самой высокой (сколько строк текста в
+     ней при переносе), шрифт 14 — 17 пт на строку и 4 на поля (с
+     2026.09.23.61; раньше высоту подбирал Excel у каждой строки свою) */
+  int maxLines = 1;
+  for (int r = 0; r < nrows; r++)
+    for (int c = 0; c < sh->ncols; c++) {
+      int l = xl_lines(cell(ctx, r, c), sh->width[c]);
+      if (l > maxLines) maxLines = l;
+    }
+  if (maxLines > 12) maxLines = 12;
+  double rowHt = maxLines * 17.0 + 4.0;
   for (int r = 0; r < nrows; r++) {
     int rr = r + hr + 1;
-    snprintf(tmp, sizeof(tmp), "<row r=\"%d\">", rr);
+    snprintf(tmp, sizeof(tmp), "<row r=\"%d\" ht=\"%.1f\" customHeight=\"1\">", rr, rowHt);
     xl_puts(s, tmp);
     for (int c = 0; c < sh->ncols; c++) {
       const wchar_t *v = cell(ctx, r, c);

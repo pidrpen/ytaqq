@@ -170,7 +170,19 @@ static void rt_fill_list(void) {
   }
 }
 
-static const wchar_t *rt_cell(void *ctx, int r, int c) { return ((RtJob *)ctx)->rows[r].f[c]; }
+/* ячейка для Excel: материал — в две строки, сортамент и марка отдельно
+   («Круг 40 ГОСТ 2590-2006» / «38ХС ГОСТ 4543-2016»); в окне и в
+   «Копировать» — как был, через « / » */
+static const wchar_t *rt_cell(void *ctx, int r, int c) {
+  const wchar_t *v = ((RtJob *)ctx)->rows[r].f[c];
+  if (c != RC_MAT) return v;
+  static wchar_t buf[210];
+  const wchar_t *sl = wcsstr(v, L" / ");
+  if (!sl) return v;
+  _snwprintf(buf, 210, L"%.*s\n%s", (int)(sl - v), v, sl + 3);
+  buf[209] = 0;
+  return buf;
+}
 
 static void rt_title(wchar_t *out, int cap) {
   SYSTEMTIME t;
