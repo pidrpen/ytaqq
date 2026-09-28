@@ -334,17 +334,18 @@ static BOOL xl_save(const wchar_t *path, const wchar_t *title, const XlSheet *sh
      поля по бокам узкие, таблица по центру листа. Есть колонтитулы — поля
      сверху и снизу шире (с 2026.09.23.54: было 1 см, и таблица подходила
      вплотную к колонтитулу в две строки 18-м шрифтом): колонтитул с 0,8 см
-     от края, таблица — с 3,3 см; сами колонтитулы не ужимаются вместе с
-     таблицей (scaleWithDoc 0) — 18 и 24 на бумаге такие и есть */
+     от края, таблица — с 2,5 см. Колонтитулы ужимаются вместе с таблицей
+     при вписывании в ширину, как в шаблоне ведомости (в 2026.09.23.54 было
+     scaleWithDoc 0 — на печати выходили огромными рядом с таблицей) */
   BOOL hf = (sh->header && sh->header[0]) || (sh->footer && sh->footer[0]);
   xl_puts(s, "<printOptions horizontalCentered=\"1\"/>");
-  xl_puts(s, hf ? "<pageMargins left=\"0.25\" right=\"0.25\" top=\"1.3\" bottom=\"1.3\" header=\"0.3\" "
+  xl_puts(s, hf ? "<pageMargins left=\"0.25\" right=\"0.25\" top=\"1\" bottom=\"1\" header=\"0.3\" "
                   "footer=\"0.3\"/>"
                 : "<pageMargins left=\"0.25\" right=\"0.25\" top=\"0.4\" bottom=\"0.4\" header=\"0.2\" "
                   "footer=\"0.2\"/>");
   xl_puts(s, "<pageSetup paperSize=\"8\" orientation=\"landscape\" fitToWidth=\"1\" fitToHeight=\"0\"/>");
   if (hf) {
-    xl_puts(s, "<headerFooter scaleWithDoc=\"0\">");
+    xl_puts(s, "<headerFooter>");
     if (sh->header && sh->header[0]) {
       xl_puts(s, "<oddHeader>");
       xl_text(s, sh->header);
