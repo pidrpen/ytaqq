@@ -206,7 +206,10 @@ static BOOL xl_save(const wchar_t *path, const wchar_t *title, const XlSheet *sh
           "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n"
           "<workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" "
           "xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\">"
-          "<sheets><sheet name=\"Лист1\" sheetId=\"1\" r:id=\"rId1\"/></sheets></workbook>");
+          "<sheets><sheet name=\"Лист1\" sheetId=\"1\" r:id=\"rId1\"/></sheets>"
+          /* заголовок и шапка печатаются на каждом листе */
+          "<definedNames><definedName name=\"_xlnm.Print_Titles\" localSheetId=\"0\">"
+          "'Лист1'!$1:$2</definedName></definedNames></workbook>");
   e[3].name = "xl/_rels/workbook.xml.rels";
   xl_puts(&e[3].data,
           "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n"
@@ -218,14 +221,15 @@ static BOOL xl_save(const wchar_t *path, const wchar_t *title, const XlSheet *sh
           "Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles\" "
           "Target=\"styles.xml\"/></Relationships>");
   /* стили: 0 — обычный, 1 — шапка (жирный, серый фон, перенос, рамка),
-     2 — ячейка с рамкой и переносом, 3 — заголовок листа (жирный крупнее) */
+     2 — ячейка с рамкой и переносом, 3 — заголовок листа (жирный крупнее).
+     Шрифт 14, всё по центру (с 2026.09.23.51 — под печать ведомости) */
   e[4].name = "xl/styles.xml";
   xl_puts(&e[4].data,
           "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n"
           "<styleSheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\">"
-          "<fonts count=\"3\"><font><sz val=\"10\"/><name val=\"Arial\"/></font>"
-          "<font><b/><sz val=\"10\"/><name val=\"Arial\"/></font>"
-          "<font><b/><sz val=\"12\"/><name val=\"Arial\"/></font></fonts>"
+          "<fonts count=\"3\"><font><sz val=\"14\"/><name val=\"Arial\"/></font>"
+          "<font><b/><sz val=\"14\"/><name val=\"Arial\"/></font>"
+          "<font><b/><sz val=\"16\"/><name val=\"Arial\"/></font></fonts>"
           "<fills count=\"3\"><fill><patternFill patternType=\"none\"/></fill>"
           "<fill><patternFill patternType=\"gray125\"/></fill>"
           "<fill><patternFill patternType=\"solid\"><fgColor rgb=\"FFE7E6E6\"/><bgColor indexed=\"64\"/>"
@@ -239,14 +243,16 @@ static BOOL xl_save(const wchar_t *path, const wchar_t *title, const XlSheet *sh
           "applyBorder=\"1\" applyAlignment=\"1\"><alignment horizontal=\"center\" vertical=\"center\" "
           "wrapText=\"1\"/></xf>"
           "<xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"1\" xfId=\"0\" applyBorder=\"1\" "
-          "applyAlignment=\"1\"><alignment vertical=\"top\" wrapText=\"1\"/></xf>"
-          "<xf numFmtId=\"0\" fontId=\"2\" fillId=\"0\" borderId=\"0\" xfId=\"0\" applyFont=\"1\"/></cellXfs>"
+          "applyAlignment=\"1\"><alignment horizontal=\"center\" vertical=\"center\" wrapText=\"1\"/></xf>"
+          "<xf numFmtId=\"0\" fontId=\"2\" fillId=\"0\" borderId=\"0\" xfId=\"0\" applyFont=\"1\" "
+          "applyAlignment=\"1\"><alignment horizontal=\"center\" vertical=\"center\"/></xf></cellXfs>"
           "<cellStyles count=\"1\"><cellStyle name=\"Normal\" xfId=\"0\" builtinId=\"0\"/></cellStyles>"
           "</styleSheet>");
   e[5].name = "xl/worksheets/sheet1.xml";
   XlBuf *s = &e[5].data;
   xl_puts(s, "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n"
              "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\">"
+             "<sheetPr><pageSetUpPr fitToPage=\"1\"/></sheetPr>"
              "<sheetViews><sheetView workbookViewId=\"0\"><pane ySplit=\"2\" topLeftCell=\"A3\" "
              "activePane=\"bottomLeft\" state=\"frozen\"/></sheetView></sheetViews><cols>");
   char tmp[160];
@@ -257,9 +263,9 @@ static BOOL xl_save(const wchar_t *path, const wchar_t *title, const XlSheet *sh
   }
   xl_puts(s, "</cols><sheetData>");
   /* строка 1 — заголовок, строка 2 — шапка, дальше данные */
-  xl_puts(s, "<row r=\"1\"><c r=\"A1\" s=\"3\" t=\"inlineStr\"><is><t>");
+  xl_puts(s, "<row r=\"1\" ht=\"28\" customHeight=\"1\"><c r=\"A1\" s=\"3\" t=\"inlineStr\"><is><t>");
   xl_text(s, title);
-  xl_puts(s, "</t></is></c></row><row r=\"2\" ht=\"40\" customHeight=\"1\">");
+  xl_puts(s, "</t></is></c></row><row r=\"2\" ht=\"60\" customHeight=\"1\">");
   for (int c = 0; c < sh->ncols; c++) {
     char cn[4];
     xl_colname(c, cn);
@@ -290,7 +296,19 @@ static BOOL xl_save(const wchar_t *path, const wchar_t *title, const XlSheet *sh
     }
     xl_puts(s, "</row>");
   }
-  xl_puts(s, "</sheetData><pageSetup orientation=\"landscape\"/></worksheet>");
+  /* заголовок — объединён на всю ширину таблицы, по центру */
+  char last[4];
+  xl_colname(sh->ncols > 0 ? sh->ncols - 1 : 0, last);
+  snprintf(tmp, sizeof(tmp), "</sheetData><mergeCells count=\"1\"><mergeCell ref=\"A1:%s1\"/></mergeCells>", last);
+  xl_puts(s, tmp);
+  /* печать: A3 (paperSize 8) альбомный, все столбцы — в ширину одной
+     страницы (fitToWidth 1), в высоту — сколько выйдет (fitToHeight 0),
+     поля узкие, таблица по центру листа */
+  xl_puts(s, "<printOptions horizontalCentered=\"1\"/>"
+             "<pageMargins left=\"0.25\" right=\"0.25\" top=\"0.4\" bottom=\"0.4\" header=\"0.2\" "
+             "footer=\"0.2\"/>"
+             "<pageSetup paperSize=\"8\" orientation=\"landscape\" fitToWidth=\"1\" fitToHeight=\"0\"/>"
+             "</worksheet>");
   BOOL ok = TRUE;
   for (int i = 0; i < 6; i++)
     if (!e[i].data.p) ok = FALSE;

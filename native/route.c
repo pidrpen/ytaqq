@@ -74,6 +74,9 @@ static const wchar_t *const kRtHead[RT_NCOL] = {
     L"Масса, кг",          L"Н. расх. на 1 деталь", L"Н. расх. на изделие",
     L"Единицы измерений нормы", L"Технологический маршрут", L"Примечание"};
 static const int kRtWidth[RT_NCOL] = {26, 30, 24, 16, 10, 12, 40, 20, 10, 10, 12, 12, 10, 26, 30};
+/* ширины в Excel — под шрифт 14 и печать A3 в ширину одной страницы: уже,
+   текст переносится по словам; не уже самого длинного слова шапки */
+static const int kRtXlWidth[RT_NCOL] = {24, 26, 24, 14, 12, 12, 30, 16, 13, 9, 10, 10, 9, 17, 20};
 
 static void rt_log(RtJob *j, const wchar_t *fmt, ...) {
   if (!j->log || j->logLen >= RT_LOG - 2) return;

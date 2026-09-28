@@ -142,7 +142,7 @@ static void rt_save(void) {
   of.lpstrDefExt = L"xlsx";
   of.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
   if (!GetSaveFileNameW(&of)) return;
-  XlSheet sh = {RT_NCOL, kRtHead, kRtWidth};
+  XlSheet sh = {RT_NCOL, kRtHead, kRtXlWidth};
   if (!xl_save(file, title, &sh, g_rtJob->n, rt_cell, g_rtJob)) {
     MessageBoxW(g_rtWnd, L"Не удалось записать файл — он не открыт сейчас в Excel?", L"Маршрутная ведомость",
                 MB_ICONWARNING);
