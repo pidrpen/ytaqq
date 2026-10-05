@@ -165,6 +165,7 @@ static void rt_ws_code(const wchar_t *v, wchar_t *out, int cap) {
 typedef struct {
   wchar_t des[200], name[260], objName[260], section[120], mass[64], massUnit[40], mat[200];
   long tpCard, pfCard, tcCard, prodConf;
+  long prodConfObj; /* исполнение по ссылкам самого изделия — если prodConf взят из строки техсостава */
   BOOL desAttr; /* обозначение — свой атрибут, а не из имени */
   long id, par;
 } RtObj;
@@ -322,13 +323,13 @@ static void rt_route(SQLHDBC dbc, const RtObj *o, CardRow *rows, RtJob *j, wchar
                L"SELECT TOP 10 tp.InfoObjectId, tp.Name, ISNULL(flag.V,N'нет'), ISNULL(av.L,0), 0 "
                L"FROM (SELECT a.OwnerId AS T FROM InfoObjectAttributes AS a WITH(NOLOCK) "
                L"JOIN NameKeys AS nk WITH(NOLOCK) ON nk.NameKeyId=a.NameKeyId AND nk.Value=N'ManufacturedProducts' "
-               L"WHERE a.Link IN (%ld,%ld) AND a.Outdated=0 "
+               L"WHERE a.Link IN (%ld,%ld,%ld) AND a.Outdated=0 "
                L"UNION SELECT la.OwnerId FROM InfoObjectAttributes AS ea WITH(NOLOCK) "
                L"JOIN InfoObjectCollectionElements AS ce WITH(NOLOCK) "
                L"ON ce.CollectionElementId=ea.CollectionElementId AND ce.Outdated=0 "
                L"JOIN InfoObjectAttributes AS la WITH(NOLOCK) ON la.AttributeId=ce.AttributeId "
                L"JOIN NameKeys AS nkl WITH(NOLOCK) ON nkl.NameKeyId=la.NameKeyId AND nkl.Value=N'ManufacturedProducts' "
-               L"WHERE ea.Link IN (%ld,%ld) AND ea.DataType=6 AND ea.Outdated=0) AS m "
+               L"WHERE ea.Link IN (%ld,%ld,%ld) AND ea.DataType=6 AND ea.Outdated=0) AS m "
                L"JOIN InfoObjects AS tp WITH(NOLOCK) ON tp.InfoObjectId=m.T AND tp.Erased=0 "
                L"CROSS APPLY (SELECT TOP 1 ISNULL(iv.Link,0) AS L FROM InfoObjectAttributes AS iv WITH(NOLOCK) "
                L"JOIN NameKeys AS nkv WITH(NOLOCK) ON nkv.NameKeyId=iv.NameKeyId AND nkv.Value=N'ActualVersion' "
@@ -338,7 +339,9 @@ static void rt_route(SQLHDBC dbc, const RtObj *o, CardRow *rows, RtJob *j, wchar
                L"WHERE ia.OwnerId=tp.InfoObjectId AND ia.Outdated=0 "
                L"AND nki.Value IN (N'MainTP',N'IsActual') AND ia.BoolValue=1) AS flag "
                L"WHERE av.L>0 ORDER BY CASE WHEN flag.V=N'да' THEN 0 ELSE 1 END, tp.InfoObjectId",
-               o->id, o->prodConf ? o->prodConf : o->id, o->id, o->prodConf ? o->prodConf : o->id);
+               /* оба исполнения: из строки техсостава и по ссылкам изделия */
+               o->id, o->prodConf ? o->prodConf : o->id, o->prodConfObj ? o->prodConfObj : o->id, o->id,
+               o->prodConf ? o->prodConf : o->id, o->prodConfObj ? o->prodConfObj : o->id);
     int n = card_query(dbc, sql, rows, 10, err, 280);
     if (n > 0) {
       tp = rows[0].n1;
@@ -672,6 +675,15 @@ typedef struct {
   double qty;
   BOOL qtyFound;
   wchar_t section[120];
+  /* с 2026.09.23.76 — по коду модуля «Технологический состав» PLM «Союз»
+     (pidrpen/cursor): строка ссылается на исполнение входящего изделия
+     (ProductConfiguration), порядок строк в редакторе — SortedPosition,
+     единица количества — MeasureUnitOfQuaintity (так, с опечаткой, в PLM) */
+  long pc;
+  double sortPos;
+  BOOL hasSort;
+  wchar_t unit[40];
+  wchar_t kd[160]; /* непринятое изменение КД по этой строке — в примечание */
 } RtEl;
 
 static BOOL rt_is_qty_key(const wchar_t *k) {
@@ -706,7 +718,8 @@ static int rt_tc_rows(SQLHDBC dbc, long ver, long prodConf, CardRow *rows, wchar
   return card_query(dbc, sql, rows, 300, err, 280);
 }
 
-static int rt_children(SQLHDBC dbc, const RtObj *o, CardRow *rows, RtJob *j, RtEl *el, int max) {
+static int rt_children(SQLHDBC dbc, const RtObj *o, CardRow *rows, RtJob *j, RtEl *el, int max, long *variant) {
+  *variant = 0;
   if (!o->tcCard) return 0;
   wchar_t *sql = (wchar_t *)malloc(4000 * sizeof(wchar_t));
   if (!sql) return 0;
@@ -756,6 +769,7 @@ static int rt_children(SQLHDBC dbc, const RtObj *o, CardRow *rows, RtJob *j, RtE
     free(sql);
     return 0;
   }
+  *variant = rows[0].n2; /* исполнение техсостава — у него и список изменений КД */
   int ne = n > max ? max : n;
   long ids[300];
   wchar_t list[3000];
@@ -795,6 +809,7 @@ static int rt_children(SQLHDBC dbc, const RtObj *o, CardRow *rows, RtJob *j, RtE
       if (ar[i].n1 != ids[e]) continue;
       /* ссылок в строке бывает несколько (изделие, документ, версия) — сперва
          Product, как в PlmApi; нет его — та, что похожа на обозначение */
+      if (ar[i].n3 == 6 && ar[i].n2 && !_wcsicmp(ar[i].s1, L"ProductConfiguration")) x.pc = ar[i].n2;
       if (ar[i].n3 == 6 && ar[i].n2 && !_wcsicmp(ar[i].s1, L"Product")) {
         if (!childProd) x.child = ar[i].n2;
         childProd = TRUE;
@@ -805,6 +820,24 @@ static int rt_children(SQLHDBC dbc, const RtObj *o, CardRow *rows, RtJob *j, RtE
         childDes = rt_looks_des(ar[i].s2);
       }
       else if (!_wcsicmp(ar[i].s1, L"Section") && ar[i].s2[0]) lstrcpynW(x.section, ar[i].s2, 120);
+      else if (!_wcsicmp(ar[i].s1, L"SortedPosition")) {
+        double v;
+        if (rt_num(ar[i].s2, &v)) {
+          x.sortPos = v;
+          x.hasSort = TRUE;
+        }
+      }
+      else if (!_wcsicmp(ar[i].s1, L"MeasureUnitOfQuaintity") && ar[i].s2[0])
+        lstrcpynW(x.unit, ar[i].s2, 40); /* поле техсостава PLM — главное */
+      else if (!_wcsicmp(ar[i].s1, L"MeasureUnit") && ar[i].s2[0] && !x.unit[0])
+        lstrcpynW(x.unit, ar[i].s2, 40);
+      else if (!_wcsicmp(ar[i].s1, L"Quantity")) { /* поле PLM — важнее похожих по названию */
+        double v;
+        if (rt_num(ar[i].s2, &v) && v > 0) {
+          x.qty = v;
+          x.qtyFound = TRUE;
+        }
+      }
       else if (rt_is_qty_key(ar[i].s1) && !x.qtyFound) {
         double v;
         if (rt_num(ar[i].s2, &v) && v > 0) {
@@ -825,8 +858,136 @@ static int rt_children(SQLHDBC dbc, const RtObj *o, CardRow *rows, RtJob *j, RtE
     if (x.child) el[out++] = x;
   }
   free(ar);
-  rt_log(j, L"    в техсоставе строк %d, со ссылкой %d\r\n", used, out);
+  /* порядок — как в редакторе техсостава (SortedPosition), а не как строки
+     легли в базу; без номера — в конце, в прежнем порядке */
+  int sorted = 0;
+  for (int a = 1; a < out; a++) {
+    RtEl t = el[a];
+    int b = a;
+    while (b > 0 && t.hasSort && (!el[b - 1].hasSort || el[b - 1].sortPos > t.sortPos)) {
+      el[b] = el[b - 1];
+      b--;
+    }
+    if (b != a) sorted = 1;
+    el[b] = t;
+  }
+  rt_log(j, L"    в техсоставе строк %d, со ссылкой %d%s\r\n", used, out, sorted ? L" (по порядку редактора PLM)" : L"");
   return out;
+}
+
+/* ---- изменения КД, не разобранные технологом ------------------------------
+
+   Модуль «Технологический состав» PLM сам сравнивает конструкторский состав
+   с техсоставом и складывает разницу в исполнение техсостава: коллекция
+   ChangedCollection — строка на позицию (ProductConfiguration), в ней
+   WhatChange — «Изменено количество», «Добавлена в КД», «Удалена из КД»,
+   «Изменена ЕИ»…: было (BeforeString), стало (AfterString) и отметка
+   технолога AcceptChange (да — согласен, нет — отказался, пусто — не
+   разобрано). Не разобранное значит: ведомость собрана по техсоставу, который
+   отстал от КД, — это и пишется в примечание. Только чтение. */
+static void rt_kd_changes(SQLHDBC dbc, long variant, CardRow *rows, RtJob *j, RtEl *el, int ne, wchar_t *asmNote,
+                          int cap) {
+  asmNote[0] = 0;
+  if (!variant) return;
+  wchar_t sql[3600], err[280];
+  /* позиции изменений: какое исполнение */
+  _snwprintf(sql, 3600,
+             L"SELECT TOP 120 r.CollectionElementId, nk.Value, COALESCE(CAST(lo.Name AS NVARCHAR(250)), N''), "
+             L"ISNULL(a.Link,0), 0 FROM InfoObjectAttributes AS cc WITH(NOLOCK) "
+             L"JOIN NameKeys AS nkc WITH(NOLOCK) ON nkc.NameKeyId=cc.NameKeyId AND nkc.Value=N'ChangedCollection' "
+             L"JOIN InfoObjectCollectionElements AS r WITH(NOLOCK) ON r.AttributeId=cc.AttributeId AND r.Outdated=0 "
+             L"JOIN InfoObjectAttributes AS a WITH(NOLOCK) ON a.CollectionElementId=r.CollectionElementId "
+             L"AND a.Outdated=0 "
+             L"JOIN NameKeys AS nk WITH(NOLOCK) ON nk.NameKeyId=a.NameKeyId AND nk.Value=N'ProductConfiguration' "
+             L"LEFT JOIN InfoObjects AS lo WITH(NOLOCK) ON lo.InfoObjectId=a.Link "
+             L"WHERE cc.OwnerId=%ld AND cc.Outdated=0 AND ISNULL(cc.CollectionElementId,0)=0",
+             variant);
+  int np = card_query(dbc, sql, rows, 120, err, 280);
+  if (np < 0) {
+    rt_log(j, L"    изменения КД: запрос не выполнился — %s\r\n", err);
+    return;
+  }
+  if (np == 0) return;
+  typedef struct {
+    long row, pc;
+    wchar_t name[120];
+  } KdPos;
+  KdPos pos[120];
+  int npos = np;
+  for (int i = 0; i < np; i++) {
+    pos[i].row = rows[i].n1;
+    pos[i].pc = rows[i].n2;
+    lstrcpynW(pos[i].name, rows[i].s2, 120);
+  }
+  /* что изменилось: Change, было, стало, отметка (n3: −1 — нет, 0/1) */
+  _snwprintf(sql, 3600,
+             L"SELECT TOP 300 w.CollectionElementId, nk.Value, COALESCE(" CARD_VALUE_SQL L", N''), r.CollectionElementId, "
+             L"CASE WHEN nk.Value=N'AcceptChange' THEN ISNULL(CAST(a.BoolValue AS INT),-1) ELSE 0 END "
+             L"FROM InfoObjectAttributes AS cc WITH(NOLOCK) "
+             L"JOIN NameKeys AS nkc WITH(NOLOCK) ON nkc.NameKeyId=cc.NameKeyId AND nkc.Value=N'ChangedCollection' "
+             L"JOIN InfoObjectCollectionElements AS r WITH(NOLOCK) ON r.AttributeId=cc.AttributeId AND r.Outdated=0 "
+             L"JOIN InfoObjectAttributes AS wa WITH(NOLOCK) ON wa.CollectionElementId=r.CollectionElementId "
+             L"AND wa.Outdated=0 "
+             L"JOIN NameKeys AS nkw WITH(NOLOCK) ON nkw.NameKeyId=wa.NameKeyId AND nkw.Value=N'WhatChange' "
+             L"JOIN InfoObjectCollectionElements AS w WITH(NOLOCK) ON w.AttributeId=wa.AttributeId AND w.Outdated=0 "
+             L"JOIN InfoObjectAttributes AS a WITH(NOLOCK) ON a.CollectionElementId=w.CollectionElementId "
+             L"AND a.Outdated=0 "
+             L"JOIN NameKeys AS nk WITH(NOLOCK) ON nk.NameKeyId=a.NameKeyId "
+             L"AND nk.Value IN (N'Change',N'BeforeString',N'AfterString',N'AcceptChange') "
+             L"WHERE cc.OwnerId=%ld AND cc.Outdated=0 AND ISNULL(cc.CollectionElementId,0)=0 "
+             L"ORDER BY r.CollectionElementId, w.CollectionElementId",
+             variant);
+  int nw = card_query(dbc, sql, rows, 300, err, 280); /* rows — на 300 строк */
+  if (nw < 0) {
+    rt_log(j, L"    изменения КД: запрос не выполнился — %s\r\n", err);
+    return;
+  }
+  int open = 0, total = 0;
+  wchar_t added[200] = L"";
+  rt_log(j, L"    изменения КД в исполнении техсостава #%ld:\r\n", variant);
+  for (int i = 0; i < nw;) {
+    long w = rows[i].n1, r = rows[i].n2;
+    wchar_t chg[120] = L"", before[60] = L"", after[60] = L"";
+    int acc = -1;
+    for (; i < nw && rows[i].n1 == w; i++) {
+      if (!_wcsicmp(rows[i].s1, L"Change")) lstrcpynW(chg, rows[i].s2, 120);
+      else if (!_wcsicmp(rows[i].s1, L"BeforeString")) lstrcpynW(before, rows[i].s2, 60);
+      else if (!_wcsicmp(rows[i].s1, L"AfterString")) lstrcpynW(after, rows[i].s2, 60);
+      else if (!_wcsicmp(rows[i].s1, L"AcceptChange")) acc = (int)rows[i].n3;
+    }
+    if (!chg[0]) continue;
+    total++;
+    const KdPos *ps = NULL;
+    for (int k = 0; k < npos && !ps; k++)
+      if (pos[k].row == r) ps = &pos[k];
+    rt_log(j, L"      %s: %s%s%s%s%s — %s\r\n", ps ? ps->name : L"?", chg, before[0] || after[0] ? L" " : L"", before,
+           after[0] ? L" → " : L"", after, acc == 1 ? L"согласен" : acc == 0 ? L"отказ" : L"НЕ РАЗОБРАНО");
+    if (acc >= 0) continue; /* технолог решил — не предупреждаем */
+    open++;
+    wchar_t one[160];
+    if (before[0] || after[0]) _snwprintf(one, 160, L"КД: %s %s → %s (не разобрано)", chg, before, after);
+    else _snwprintf(one, 160, L"КД: %s (не разобрано)", chg);
+    one[159] = 0;
+    /* к строке ведомости этой позиции; позиции нет (добавлена в КД) — к сборке */
+    BOOL put = FALSE;
+    for (int e = 0; e < ne && ps && ps->pc; e++)
+      if (el[e].pc == ps->pc || el[e].child == ps->pc) {
+        if (!el[e].kd[0]) lstrcpynW(el[e].kd, one, 160);
+        put = TRUE;
+      }
+    if (!put && ps) {
+      wchar_t nd[120];
+      card_des_from_name(ps->name, nd, 120);
+      size_t l = wcslen(added);
+      if (l + wcslen(nd) + 3 < 200) _snwprintf(added + l, 200 - l, L"%s%s", l ? L", " : L"", nd[0] ? nd : ps->name);
+    }
+  }
+  if (!total) rt_log(j, L"      нет\r\n");
+  if (open) {
+    if (added[0]) _snwprintf(asmNote, cap, L"КД изменён, не разобрано: %d (%s)", open, added);
+    else _snwprintf(asmNote, cap, L"КД изменён, не разобрано: %d", open);
+    asmNote[cap - 1] = 0;
+  }
 }
 
 /* документ (сборочный чертёж и т.п.) — код документа после обозначения:
@@ -1007,10 +1168,17 @@ static void rt_dump_product(SQLHDBC dbc, const RtObj *o, CardRow *rows, RtJob *j
 }
 
 static void rt_walk(SQLHDBC dbc, long id, int level, const wchar_t *parentDes, double qty, BOOL qtyFound,
-                    double parentTot, const wchar_t *elSection, CardRow *rows, RtJob *j) {
+                    double parentTot, const wchar_t *elSection, const RtEl *src, CardRow *rows, RtJob *j) {
   if (j->n >= RT_MAX || rt_late(j)) return; /* по кругу не уйдёт: глубина не больше RT_DEPTH */
   RtObj o;
   if (!rt_obj(dbc, id, &o, rows, j)) return;
+  /* исполнение — то, на которое ссылается строка техсостава: у «-01» свой
+     техсостав и ТП, а по ссылкам изделия нашлось бы базовое исполнение */
+  if (src && src->pc && src->pc != o.prodConf) {
+    rt_log(j, L"    исполнение — из строки техсостава #%ld (по изделию было #%ld)\r\n", src->pc, o.prodConf);
+    o.prodConfObj = o.prodConf;
+    o.prodConf = src->pc;
+  }
   /* материалы и покупные в ведомость не идут: у них нет ни своего
      обозначения, ни карточек изделия (ТП, заготовки, техсостава) */
   BOOL product = o.desAttr || o.tpCard || o.pfCard || o.tcCard;
@@ -1044,11 +1212,18 @@ static void rt_walk(SQLHDBC dbc, long id, int level, const wchar_t *parentDes, d
     j->diagShown |= level ? 2 : 1;
     rt_diag(dbc, &o, rows, j);
   }
-  wchar_t notes[3][60] = {L"", L"", L""};
+  wchar_t notes[5][200] = {L"", L"", L"", L"", L""};
   rt_route(dbc, &o, rows, j, r->f[RC_ROUTE], 200, notes[0], 60);
   if (level && !qtyFound) lstrcpynW(notes[2], L"кол-во не найдено", 60);
+  /* количество не в штуках (м, кг…) — столбец «Количество, шт» иначе врёт */
+  if (src && src->unit[0] && _wcsnicmp(src->unit, L"шт", 2) && iswalpha(src->unit[0]))
+    _snwprintf(notes[3], 200, L"кол-во в %s", src->unit);
+  if (src && src->kd[0]) lstrcpynW(notes[4], src->kd, 200);
   RtEl *el = (RtEl *)malloc(sizeof(RtEl) * 150);
-  int ne = el ? rt_children(dbc, &o, rows, j, el, 150) : 0;
+  long variant = 0;
+  int ne = el ? rt_children(dbc, &o, rows, j, el, 150, &variant) : 0;
+  wchar_t kdNote[200] = L"";
+  if (ne > 0 && !rt_late(j)) rt_kd_changes(dbc, variant, rows, j, el, ne, kdNote, 200);
   /* вид изделия */
   const wchar_t *kind = o.section[0] ? o.section : (elSection && elSection[0] ? elSection : NULL);
   lstrcpynW(r->f[RC_KIND], kind ? kind : (ne > 0 ? L"Сборочные единицы" : L"Детали"), 200);
@@ -1070,10 +1245,13 @@ static void rt_walk(SQLHDBC dbc, long id, int level, const wchar_t *parentDes, d
     else if (level) j->dumpDet++;
     rt_dump_product(dbc, &o, rows, j);
   }
-  for (int i = 0; i < 3; i++) {
-    if (!notes[i][0]) continue;
+  for (int i = 0; i < 6; i++) {
+    const wchar_t *nt = i < 5 ? notes[i] : kdNote;
+    if (!nt[0]) continue;
     size_t l = wcslen(r->f[RC_NOTE]);
-    _snwprintf(r->f[RC_NOTE] + l, 200 - l, L"%s%s", l ? L"; " : L"", notes[i]);
+    if (l + 4 >= 200) break;
+    _snwprintf(r->f[RC_NOTE] + l, 200 - l, L"%s%s", l ? L"; " : L"", nt);
+    r->f[RC_NOTE][199] = 0;
   }
   if (level >= RT_DEPTH) {
     free(el);
@@ -1083,7 +1261,7 @@ static void rt_walk(SQLHDBC dbc, long id, int level, const wchar_t *parentDes, d
   wchar_t myDes[200];
   lstrcpynW(myDes, o.des, 200);
   for (int i = 0; i < ne && !rt_late(j); i++)
-    rt_walk(dbc, el[i].child, level + 1, myDes, el[i].qty, el[i].qtyFound, tot, el[i].section, rows, j);
+    rt_walk(dbc, el[i].child, level + 1, myDes, el[i].qty, el[i].qtyFound, tot, el[i].section, &el[i], rows, j);
   free(el);
 }
 
@@ -1183,7 +1361,7 @@ static void rt_build(RtJob *j) {
     long root = j->rootId;
     if (root) rt_log(j, L"Изделие — строка из поиска PLM: %ld\r\n\r\n", root);
     else root = rt_find_root(dbc, j->des, rows, j);
-    if (root) rt_walk(dbc, root, 0, j->order, 1, TRUE, 1, NULL, rows, j);
+    if (root) rt_walk(dbc, root, 0, j->order, 1, TRUE, 1, NULL, NULL, rows, j);
     g_qTimeout = 0;
     if (rt_late(j) && !(j->cancel && *j->cancel))
       rt_log(j, L"\r\nВремя вышло — собрано не всё (%d позиций).\r\n", j->n);
