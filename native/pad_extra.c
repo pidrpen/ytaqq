@@ -1099,8 +1099,8 @@ static void share_card(long id, BOOL verbose, wchar_t *out, int cap);
   L"FROM InfoObjectAttributes AS la WITH(NOLOCK) "                                          \
   L"JOIN NameKeys AS nkl WITH(NOLOCK) ON nkl.NameKeyId=la.NameKeyId "                       \
   L"AND nkl.Value=N'ProductPreforms' "                                                      \
-  L"JOIN InfoObjectCollectionElements AS ce WITH(NOLOCK) ON ce.AttributeId=la.AttributeId " \
-  L"AND ce.Outdated=0 "                                                                     \
+  L"JOIN InfoObjectCollectionElements AS ce WITH(NOLOCK) "                                  \
+  L"ON ce.AttributeId IN (la.AttributeId, ISNULL(la.Link,0)) AND ce.Outdated=0 "            \
   L"JOIN InfoObjectAttributes AS ea WITH(NOLOCK) "                                          \
   L"ON ea.CollectionElementId=ce.CollectionElementId AND ea.DataType=6 "                    \
   L"JOIN InfoObjects AS o2 WITH(NOLOCK) ON o2.InfoObjectId=ea.Link AND o2.Erased=0 "        \
@@ -1483,15 +1483,66 @@ typedef struct {
 static __thread int g_qTimeout; /* у каждого потока свой: карточка и фон не мешают */
 static volatile LONG g_pfGen; /* номер задания столбца «Заготовка»: старые ответы отбрасываем */
 
+/* Остановка сбора (с 2026.09.23.84): у потока сбора g_qCancel — его флаг «Стоп».
+   Поднят — запросы больше не идут (сразу -1), а идущие сейчас прерываются
+   SQLCancel из окна (card_cancel_all): иначе «Стоп» ждал, пока досчитается
+   запрос, — до полутора минут на каждый. */
+static __thread volatile LONG *g_qCancel;
+#define CARD_ACTIVE_MAX 32
+static struct {
+  SQLHSTMT st;
+  volatile LONG *cancel;
+} g_qActive[CARD_ACTIVE_MAX];
+static SRWLOCK g_qActiveLock = SRWLOCK_INIT;
+
+static int card_active_add(SQLHSTMT st) {
+  if (!g_qCancel) return -1;
+  AcquireSRWLockExclusive(&g_qActiveLock);
+  int slot = -1;
+  for (int i = 0; i < CARD_ACTIVE_MAX && slot < 0; i++)
+    if (!g_qActive[i].st) {
+      g_qActive[i].st = st;
+      g_qActive[i].cancel = g_qCancel;
+      slot = i;
+    }
+  ReleaseSRWLockExclusive(&g_qActiveLock);
+  return slot;
+}
+
+static void card_active_del(int slot) {
+  if (slot < 0) return;
+  AcquireSRWLockExclusive(&g_qActiveLock);
+  g_qActive[slot].st = SQL_NULL_HSTMT;
+  g_qActive[slot].cancel = NULL;
+  ReleaseSRWLockExclusive(&g_qActiveLock);
+}
+
+/* «Стоп»: прервать все идущие запросы этого сбора (вызывается из окна) */
+static void card_cancel_all(volatile LONG *cancel) {
+  AcquireSRWLockExclusive(&g_qActiveLock);
+  for (int i = 0; i < CARD_ACTIVE_MAX; i++)
+    if (g_qActive[i].st && g_qActive[i].cancel == cancel) SQLCancel(g_qActive[i].st);
+  ReleaseSRWLockExclusive(&g_qActiveLock);
+}
+
 static int card_query(SQLHDBC dbc, const wchar_t *sql, CardRow *rows, int max, wchar_t *err,
                       int ecap) {
   if (err && ecap) err[0] = 0;
+  if (g_qCancel && *g_qCancel) {
+    if (err && ecap) lstrcpynW(err, L"остановлено", ecap);
+    return -1;
+  }
   SQLHSTMT st = SQL_NULL_HSTMT;
   if (!SQL_SUCCEEDED(SQLAllocHandle(SQL_HANDLE_STMT, dbc, &st))) return -1;
   if (g_qTimeout > 0)
     SQLSetStmtAttr(st, SQL_ATTR_QUERY_TIMEOUT, (SQLPOINTER)(SQLULEN)g_qTimeout, 0);
-  if (!SQL_SUCCEEDED(SQLExecDirectW(st, (SQLWCHAR *)sql, SQL_NTS))) {
-    if (err && ecap) odbc_err(st, SQL_HANDLE_STMT, err, ecap);
+  int slot = card_active_add(st);
+  if ((g_qCancel && *g_qCancel) || !SQL_SUCCEEDED(SQLExecDirectW(st, (SQLWCHAR *)sql, SQL_NTS))) {
+    if (err && ecap) {
+      if (g_qCancel && *g_qCancel) lstrcpynW(err, L"остановлено", ecap);
+      else odbc_err(st, SQL_HANDLE_STMT, err, ecap);
+    }
+    card_active_del(slot);
     SQLFreeHandle(SQL_HANDLE_STMT, st);
     return -1;
   }
@@ -1517,6 +1568,7 @@ static int card_query(SQLHDBC dbc, const wchar_t *sql, CardRow *rows, int max, w
     if (i3 > 0) lstrcpynW(rows[n].s2, (wchar_t *)t2, 600);
     n++;
   }
+  card_active_del(slot);
   SQLFreeHandle(SQL_HANDLE_STMT, st);
   return n;
 }
@@ -1888,13 +1940,16 @@ static int card_norms(SQLHDBC dbc, const wchar_t *ids, CardRow *rows, wchar_t *e
              L"FROM InfoObjectAttributes AS a WITH(NOLOCK) "
              L"JOIN NameKeys AS nk WITH(NOLOCK) ON nk.NameKeyId=a.NameKeyId "
              L"AND nk.Value IN (N'SetupTime',N'TimePerPiece') "
+             /* строки составного — и по ссылке (Link), как техсостав (с .84):
+                иначе норма не находилась, и операция не шла «В 1С» */
              L"JOIN InfoObjectCollectionElements AS ce WITH(NOLOCK) "
-             L"ON ce.AttributeId=a.AttributeId "
+             L"ON ce.AttributeId IN (a.AttributeId, ISNULL(a.Link,0)) AND ce.Outdated=0 "
              L"JOIN InfoObjectAttributes AS ea WITH(NOLOCK) "
              L"ON ea.CollectionElementId=ce.CollectionElementId "
              L"JOIN NameKeys AS nk2 WITH(NOLOCK) ON nk2.NameKeyId=ea.NameKeyId "
              L"AND nk2.Value=N'Value' "
-             L"WHERE a.OwnerId IN (%s) ORDER BY a.OwnerId",
+             L"WHERE a.OwnerId IN (%s) AND a.Outdated=0 AND ea.Outdated=0 "
+             L"ORDER BY a.OwnerId, CASE WHEN ce.AttributeId=a.AttributeId THEN 0 ELSE 1 END",
              ids);
   int n = card_query(dbc, sql, rows, CARD_ROWS, err, 280);
   free(sql);
@@ -1969,7 +2024,7 @@ static void card_probe_time(SQLHDBC dbc, const wchar_t *ids, CardOut *c, CardRow
                  L"JOIN NameKeys AS nk WITH(NOLOCK) ON nk.NameKeyId=a.NameKeyId "
                  L"AND nk.Value IN (N'SetupTime',N'TimePerPiece') "
                  L"JOIN InfoObjectCollectionElements AS ce WITH(NOLOCK) "
-                 L"ON ce.AttributeId=a.AttributeId "
+                 L"ON ce.AttributeId IN (a.AttributeId, ISNULL(a.Link,0)) "
                  L"JOIN InfoObjectAttributes AS ea WITH(NOLOCK) "
                  L"ON ea.CollectionElementId=ce.CollectionElementId "
                  L"JOIN NameKeys AS nk2 WITH(NOLOCK) ON nk2.NameKeyId=ea.NameKeyId "
@@ -2201,6 +2256,9 @@ static void card_operations(SQLHDBC dbc, long tpId, long verId, CardOut *c, Card
     for (int k = 0; k < nn; k++) {
       if (nr[k].n1 != o->n1 && nr[k].n1 != o->n3) continue;
       if (!nr[k].s2[0]) continue;
+      BOOL seen = FALSE; /* то же поле той же операции — второй раз не считать */
+      for (int q = 0; q < k && !seen; q++) seen = nr[q].n1 == nr[k].n1 && !wcscmp(nr[q].s1, nr[k].s1) && nr[q].s2[0];
+      if (seen) continue;
       wchar_t t[64];
       if (!card_time_text(nr[k].s2, t, 64, &opMins)) continue;
       const wchar_t *ru = card_label(nr[k].s1);
@@ -2251,25 +2309,40 @@ static void card_operations(SQLHDBC dbc, long tpId, long verId, CardOut *c, Card
    TechComposition, которые ссылаются на нас, и поднимаемся к их владельцу.
    Удалённые строки (IsRemoved) не в счёт — так же, как в сервисе. */
 static void card_where_used(SQLHDBC dbc, long id, CardOut *c, CardRow *rows, wchar_t *err) {
-  wchar_t *sql = (wchar_t *)malloc(3000 * sizeof(wchar_t));
+  wchar_t *sql = (wchar_t *)malloc(4000 * sizeof(wchar_t));
   if (!sql) return;
   _snwprintf(
-      sql, 3000,
+      sql, 4000,
       L"SELECT TOP 100 own.InfoObjectId, own.Name, ISNULL(pr.NM,N''), ISNULL(pr.PID,0), "
       L"own.TemplateId "
       L"FROM InfoObjectAttributes AS ea WITH(NOLOCK) "
       L"JOIN InfoObjectCollectionElements AS ce WITH(NOLOCK) "
       L"ON ce.CollectionElementId=ea.CollectionElementId AND ce.Outdated=0 "
-      L"JOIN InfoObjectAttributes AS la WITH(NOLOCK) ON la.AttributeId=ce.AttributeId "
-      L"JOIN NameKeys AS nkl WITH(NOLOCK) ON nkl.NameKeyId=la.NameKeyId "
-      L"AND nkl.Value=N'TechComposition' "
-      L"JOIN InfoObjects AS own WITH(NOLOCK) ON own.InfoObjectId=la.OwnerId AND own.Erased=0 "
+      /* чей техсостав: строки свои — или списка по ссылке (Link): техсостав,
+         который ещё не правили, ссылается на строки состава КД (с .84) */
+      L"CROSS APPLY (SELECT la.OwnerId AS O FROM InfoObjectAttributes AS la WITH(NOLOCK) "
+      L"JOIN NameKeys AS nkl WITH(NOLOCK) ON nkl.NameKeyId=la.NameKeyId AND nkl.Value=N'TechComposition' "
+      L"WHERE la.AttributeId=ce.AttributeId AND la.Outdated=0 "
+      L"UNION SELECT lb.OwnerId FROM InfoObjectAttributes AS lb WITH(NOLOCK) "
+      L"JOIN NameKeys AS nkb WITH(NOLOCK) ON nkb.NameKeyId=lb.NameKeyId AND nkb.Value=N'TechComposition' "
+      L"WHERE lb.Link=ce.AttributeId AND lb.Outdated=0) AS tl "
+      L"JOIN InfoObjects AS own WITH(NOLOCK) ON own.InfoObjectId=tl.O AND own.Erased=0 "
+      /* версия варианта: снимки «на дату» (номер меньше нуля) и прежние версии
+         мимо — утверждённая, а нет её — рабочая */
+      L"LEFT JOIN InfoObjects AS ver WITH(NOLOCK) ON ver.InfoObjectId=own.ParentId "
+      L"OUTER APPLY (SELECT TOP 1 vv.IntegerNumber AS N FROM InfoObjectAttributes AS vv WITH(NOLOCK) "
+      L"JOIN NameKeys AS nkv WITH(NOLOCK) ON nkv.NameKeyId=vv.NameKeyId AND nkv.Value=N'VersionNumber' "
+      L"WHERE vv.OwnerId=own.ParentId AND vv.Outdated=0) AS vn "
+      L"OUTER APPLY (SELECT TOP 1 aa.Link AS L FROM InfoObjectAttributes AS aa WITH(NOLOCK) "
+      L"JOIN NameKeys AS nka WITH(NOLOCK) ON nka.NameKeyId=aa.NameKeyId AND nka.Value=N'ActualVersionTechComp' "
+      L"WHERE aa.OwnerId=ver.ParentId AND aa.Outdated=0) AS act "
       L"OUTER APPLY (SELECT TOP 1 o3.Name AS NM, o3.InfoObjectId AS PID "
       L"FROM InfoObjectAttributes AS pa WITH(NOLOCK) "
       L"JOIN NameKeys AS nkp WITH(NOLOCK) ON nkp.NameKeyId=pa.NameKeyId AND nkp.Value=N'Product' "
       L"JOIN InfoObjects AS o3 WITH(NOLOCK) ON o3.InfoObjectId=pa.Link "
       L"WHERE pa.OwnerId=own.InfoObjectId AND pa.Outdated=0) AS pr "
       L"WHERE ea.Link=%ld AND ea.Outdated=0 AND ea.DataType=6 "
+      L"AND ISNULL(vn.N,0)>=0 AND (ISNULL(act.L,0)=0 OR act.L=own.ParentId) "
       L"AND ce.CollectionElementId NOT IN ("
       L"SELECT ioa.CollectionElementId FROM InfoObjectAttributes AS ioa WITH(NOLOCK) "
       L"JOIN NameKeys AS nk WITH(NOLOCK) ON nk.NameKeyId=ioa.NameKeyId "
@@ -3246,6 +3319,8 @@ typedef struct {
   wchar_t text[PF_JOB_MAX][PLM_COL1];
 } PfJob;
 
+static BOOL pf_read_full(SQLHDBC dbc, long pfId, PfSum *sm); /* route.c: как выгрузка — rt_pf_read */
+
 static void pf_compute(SQLHDBC dbc, PfJob *j, ULONGLONG budgetMs) {
   if (j->n <= 0) return;
   ULONGLONG t0 = GetTickCount64();
@@ -3303,7 +3378,8 @@ static void pf_compute(SQLHDBC dbc, PfJob *j, ULONGLONG budgetMs) {
       PfSum *sm = (PfSum *)calloc(1, sizeof(PfSum));
       if (!sm) break;
       sm->deadline = t0 + budgetMs;
-      pf_explore(dbc, pid[p], 3, NULL, L"", sm);
+      /* поля заготовки — как читает выгрузка (с .84); нет их — обходом, как прежде */
+      if (!pf_read_full(dbc, pid[p], sm)) pf_explore(dbc, pid[p], 3, NULL, L"", sm);
       wchar_t one[PLM_COL1];
       pf_summary_text(sm, one, PLM_COL1);
       free(sm);
@@ -3364,8 +3440,10 @@ static void card_preforms(SQLHDBC dbc, long pfCard, CardOut *c, CardRow *rows, w
     card_add(c, L"  %s", names[p]);
     if (g_cardVerbose) card_add(c, L"   ID %ld", ids[p]);
     card_add(c, L"\r\n");
-    /* сначала тихо собрать сводку, потом (в «Атрибутах») показать весь обход */
-    pf_explore(dbc, ids[p], 3, NULL, L"", sm);
+    /* сначала тихо собрать сводку, потом (в «Атрибутах») показать весь обход;
+       поля заготовки — как читает выгрузка: PreformSize → ZDiametr → Value и т. д.
+       (с .84; прежде один уровень — «круг 20» без размеров) */
+    if (!pf_read_full(dbc, ids[p], sm)) pf_explore(dbc, ids[p], 3, NULL, L"", sm);
     wchar_t mt[480], ms[80];
     pf_material_text(sm, mt, 480);
     pf_mass_text(sm->mass, ms, 80);
@@ -3396,16 +3474,39 @@ static void card_preforms(SQLHDBC dbc, long pfCard, CardOut *c, CardRow *rows, w
 /* Техсостав (материалы, покупные) — как его собирает PlmApi: TechCompCard →
    ActualVersionTechComp → среди детей версии та, чей Product — конфигурация
    изделия → её коллекция TechComposition, без строк с IsRemoved. */
-static void card_techcomp(SQLHDBC dbc, long tcCard, long prodConf, CardOut *c, CardRow *rows,
-                          wchar_t *err) {
-  wchar_t *sql = (wchar_t *)malloc(4000 * sizeof(wchar_t));
-  if (!sql) return;
+/* версии техсостава в порядке модуля «Технологический состав» PLM: утверждённая
+   (ActualVersionTechComp), потом рабочие — больший положительный VersionNumber,
+   снимки «на дату» (номер меньше нуля) — последними. n1 — версия, s1 — имя,
+   s2 — откуда (ActualVersionTechComp или пусто), n2 — номер. Тот же порядок —
+   в rt_children (route.c). */
+static int card_tc_versions(SQLHDBC dbc, long tcCard, wchar_t *sql, CardRow *vers, int max, wchar_t *err) {
   _snwprintf(sql, 4000,
-             L"SELECT DISTINCT TOP 300 ce.CollectionElementId, N'', N'', 0, 0 "
-             L"FROM InfoObjectAttributes AS av WITH(NOLOCK) "
-             L"JOIN NameKeys AS nkv WITH(NOLOCK) ON nkv.NameKeyId=av.NameKeyId "
-             L"AND nkv.Value=N'ActualVersionTechComp' "
-             L"JOIN InfoObjects AS ch WITH(NOLOCK) ON ch.ParentId=av.Link AND ch.Erased=0 "
+             L"SELECT TOP 8 c.V, CAST(vo.Name AS NVARCHAR(200)), c.K, ISNULL(vn.N,0), 0 "
+             L"FROM (SELECT a.Link AS V, nk.Value AS K FROM InfoObjectAttributes AS a WITH(NOLOCK) "
+             L"JOIN NameKeys AS nk WITH(NOLOCK) ON nk.NameKeyId=a.NameKeyId "
+             L"WHERE a.OwnerId=%ld AND a.Outdated=0 AND a.DataType=6 AND ISNULL(a.Link,0)<>0 "
+             L"AND ISNULL(a.CollectionElementId,0)=0 "
+             L"UNION SELECT o.InfoObjectId, N'' FROM InfoObjects AS o WITH(NOLOCK) "
+             L"WHERE o.ParentId=%ld AND o.Erased=0) AS c "
+             L"JOIN InfoObjects AS vo WITH(NOLOCK) ON vo.InfoObjectId=c.V AND vo.Erased=0 "
+             L"OUTER APPLY (SELECT TOP 1 vv.IntegerNumber AS N FROM InfoObjectAttributes AS vv WITH(NOLOCK) "
+             L"JOIN NameKeys AS nkv WITH(NOLOCK) ON nkv.NameKeyId=vv.NameKeyId AND nkv.Value=N'VersionNumber' "
+             L"WHERE vv.OwnerId=c.V AND vv.Outdated=0) AS vn "
+             L"WHERE EXISTS (SELECT 1 FROM InfoObjects AS ch WITH(NOLOCK) "
+             L"JOIN InfoObjectAttributes AS t WITH(NOLOCK) ON t.OwnerId=ch.InfoObjectId AND t.Outdated=0 "
+             L"JOIN NameKeys AS nkt WITH(NOLOCK) ON nkt.NameKeyId=t.NameKeyId AND nkt.Value=N'TechComposition' "
+             L"WHERE ch.ParentId=c.V AND ch.Erased=0) "
+             L"ORDER BY CASE WHEN c.K=N'ActualVersionTechComp' THEN 0 WHEN ISNULL(vn.N,0)<0 THEN 2 ELSE 1 END, "
+             L"ISNULL(vn.N,0) DESC, c.V DESC",
+             tcCard, tcCard);
+  return card_query(dbc, sql, vers, max, err, 280);
+}
+
+/* строки техсостава версии: n1 — строка (элемент), n2 — вариант; prodConf=0 — все варианты */
+static int card_tc_rows(SQLHDBC dbc, long ver, long prodConf, wchar_t *sql, CardRow *rows, wchar_t *err) {
+  _snwprintf(sql, 4000,
+             L"SELECT DISTINCT TOP 300 ce.CollectionElementId, N'', N'', ch.InfoObjectId, 0 "
+             L"FROM InfoObjects AS ch WITH(NOLOCK) "
              L"JOIN InfoObjectAttributes AS tc WITH(NOLOCK) ON tc.OwnerId=ch.InfoObjectId "
              L"AND tc.Outdated=0 "
              L"JOIN NameKeys AS nktc WITH(NOLOCK) ON nktc.NameKeyId=tc.NameKeyId "
@@ -3413,7 +3514,7 @@ static void card_techcomp(SQLHDBC dbc, long tcCard, long prodConf, CardOut *c, C
              /* строки — свои или списка по ссылке (Link): см. rt_tc_rows */
              L"JOIN InfoObjectCollectionElements AS ce WITH(NOLOCK) ON ce.AttributeId IN (tc.AttributeId, ISNULL(tc.Link,0)) "
              L"AND ce.Outdated=0 "
-             L"WHERE av.OwnerId=%ld AND av.Outdated=0 "
+             L"WHERE ch.ParentId=%ld AND ch.Erased=0 "
              L"AND (%ld=0 OR EXISTS (SELECT 1 FROM InfoObjectAttributes AS pr WITH(NOLOCK) "
              L"JOIN NameKeys AS nkpr WITH(NOLOCK) ON nkpr.NameKeyId=pr.NameKeyId "
              L"AND nkpr.Value=N'Product' "
@@ -3423,18 +3524,57 @@ static void card_techcomp(SQLHDBC dbc, long tcCard, long prodConf, CardOut *c, C
              L"AND nkr.Value=N'IsRemoved' "
              L"WHERE ir.CollectionElementId=ce.CollectionElementId AND ir.BoolValue=1) "
              L"ORDER BY ce.CollectionElementId",
-             tcCard, prodConf, prodConf);
-  int n = card_query(dbc, sql, rows, CARD_ROWS, err, 280);
+             ver, prodConf, prodConf);
+  return card_query(dbc, sql, rows, CARD_ROWS, err, 280);
+}
+
+static void card_techcomp(SQLHDBC dbc, long tcCard, long prodConf, CardOut *c, CardRow *rows,
+                          wchar_t *err) {
+  wchar_t *sql = (wchar_t *)malloc(4000 * sizeof(wchar_t));
+  if (!sql) return;
+  /* Версия — как в модуле PLM (с 2026.09.23.84; прежде только утверждённая,
+     и неутверждённый техсостав выглядел пустым): утверждённая, иначе рабочая. */
+  CardRow vers[8];
+  int nv = card_tc_versions(dbc, tcCard, sql, vers, 8, err);
+  if (nv < 0) {
+    card_add(c, L"ТЕХСОСТАВ: запрос не выполнился.\r\n%s\r\n\r\n", err);
+    free(sql);
+    return;
+  }
+  int n = 0, vi = -1;
+  BOOL anyVar = FALSE;
+  long tried = 0;
+  for (int v = 0; v < nv && n <= 0; v++) {
+    if (vers[v].n1 == tried) continue; /* утверждённая приходит дважды: ссылкой и вложенным объектом */
+    tried = vers[v].n1;
+    n = card_tc_rows(dbc, vers[v].n1, prodConf, sql, rows, err);
+    if (n == 0 && prodConf) { /* варианта этой конфигурации нет — если вариант один, он и есть */
+      n = card_tc_rows(dbc, vers[v].n1, 0, sql, rows, err);
+      for (int i = 1; i < n; i++)
+        if (rows[i].n2 != rows[0].n2) {
+          n = 0;
+          break;
+        }
+      if (n > 0) anyVar = TRUE;
+    }
+    if (n > 0) vi = v;
+  }
   if (n < 0) {
     card_add(c, L"ТЕХСОСТАВ: запрос не выполнился.\r\n%s\r\n\r\n", err);
     free(sql);
     return;
   }
   if (n == 0) {
-    card_add(c, L"ТЕХСОСТАВ: карточка есть (%ld), но строк в нём нет.\r\n\r\n", tcCard);
+    card_add(c, L"ТЕХСОСТАВ: карточка есть (%ld), но строк для этого исполнения в ней нет (версий %d).\r\n\r\n",
+             tcCard, nv);
     free(sql);
     return;
   }
+  wchar_t verNote[300] = L"";
+  if (vi >= 0 && _wcsicmp(vers[vi].s2, L"ActualVersionTechComp"))
+    _snwprintf(verNote, 300, L" — не утверждён, %s №%ld «%s»", vers[vi].n2 > 0 ? L"рабочая версия" : L"снимок",
+               vers[vi].n2, vers[vi].s1);
+  if (anyVar) wcsncat(verNote, L" (вариант в версии один)", 299 - wcslen(verNote));
   int en = n > 120 ? 120 : n;
   long *els = (long *)malloc(sizeof(long) * (size_t)en);
   wchar_t *ids = (wchar_t *)malloc(sizeof(wchar_t) * 1800);
@@ -3467,7 +3607,7 @@ static void card_techcomp(SQLHDBC dbc, long tcCard, long prodConf, CardOut *c, C
              L"ORDER BY a.CollectionElementId, a.DataType DESC, nk.Value",
              CARD_ROWS, ids);
   n = card_query(dbc, sql, rows, CARD_ROWS, err, 280);
-  card_add(c, L"ТЕХСОСТАВ (%d)\r\n", used);
+  card_add(c, L"ТЕХСОСТАВ (%d)%s\r\n", used, verNote);
   for (int e = 0; e < used; e++) {
     card_add(c, L"  %2d. ", e + 1);
     int shown = 0;
@@ -3656,7 +3796,7 @@ static void plm_card(long id, wchar_t *out, int cap) {
       L"FROM InfoObjectAttributes AS la WITH(NOLOCK) "
       L"JOIN NameKeys AS nkl WITH(NOLOCK) ON nkl.NameKeyId=la.NameKeyId "
       L"AND nkl.Value=N'TechnologicalProcesses' "
-      L"JOIN InfoObjectCollectionElements AS ce WITH(NOLOCK) ON ce.AttributeId=la.AttributeId "
+      L"JOIN InfoObjectCollectionElements AS ce WITH(NOLOCK) ON ce.AttributeId IN (la.AttributeId, ISNULL(la.Link,0)) "
       L"AND ce.Outdated=0 "
       L"JOIN InfoObjectAttributes AS ea WITH(NOLOCK) "
       L"ON ea.CollectionElementId=ce.CollectionElementId AND ea.DataType=6 "

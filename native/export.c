@@ -180,6 +180,14 @@ static BOOL xp_num(const wchar_t *s, double *v) { return s && s[0] && rt_num(s, 
 
 static BOOL xp_late(XpJob *x) { return rt_late(x->rt); }
 
+/* этап и сколько на нём всего — для полосы хода; сделанное — rt->progDone */
+static void xp_prog(XpJob *x, int stage, int total) {
+  InterlockedExchange(&x->rt->progTotal, 0);
+  InterlockedExchange(&x->rt->progDone, 0);
+  x->stage = stage;
+  InterlockedExchange(&x->rt->progTotal, total);
+}
+
 static void xp_stage(XpJob *x, int stage, int done) {
   x->stage = stage;
   if (x->notify) PostMessageW(x->notify, WM_XP_PROGRESS, (WPARAM)done, (LPARAM)stage);
@@ -533,6 +541,7 @@ static void xp_pos_one(SQLHDBC dbc, XpWork *k, int i) {
   xp_pos_ops(dbc, k->x, &k->pos[i], k->out[i], &k->buf);
   xp_pos_pf(dbc, k->x, &k->pos[i], k->out[i], &k->buf);
   k->done[i] = 1;
+  InterlockedIncrement(&k->x->rt->progDone);
   xp_stage(k->x, XP_OPS, (int)InterlockedIncrement(k->count));
 }
 
@@ -543,6 +552,7 @@ static DWORD WINAPI xp_worker(LPVOID param) {
   wchar_t err[280];
   if (!k->ok || !plm_connect(&env, &dbc, err, 280)) return 0; /* позиции возьмут другие */
   g_qTimeout = 60;
+  g_qCancel = k->x->rt->cancel;
   while (!xp_late(k->x)) {
     LONG i = InterlockedIncrement(k->next) - 1;
     if (i >= k->np) break;
@@ -582,6 +592,7 @@ static void xp_pos_sheets(SQLHDBC dbc, XpJob *x, XpPos *pos, int np) {
   }
   for (int i = 0; i < np; i++)
     for (int k = 0; k < XP_NT; k++) out[i][k].ncols = kXpSheets[k].ncols;
+  xp_prog(x, XP_OPS, np);
   volatile LONG next = 0, count = 0;
   int nw = np < XP_WORKERS ? np : XP_WORKERS;
   XpWork work[XP_WORKERS + 1];
@@ -781,6 +792,7 @@ static void xp_ecn_diag(SQLHDBC dbc, RtJob *j, const RtRow *r, const wchar_t *li
 
 static void xp_ecn(SQLHDBC dbc, XpJob *x, XpPos *pos, int np) {
   RtJob *j = x->rt;
+  xp_prog(x, XP_ECN, 0);
   wchar_t *sql = (wchar_t *)malloc(12000 * sizeof(wchar_t));
   CardRow *rows = (CardRow *)malloc(sizeof(CardRow) * 2000);
   XpTarget *tg = (XpTarget *)malloc(sizeof(XpTarget) * XP_TG_MAX);
@@ -828,6 +840,7 @@ static void xp_ecn(SQLHDBC dbc, XpJob *x, XpPos *pos, int np) {
   qsort(tg, (size_t)ntg, sizeof(XpTarget), xp_tg_cmp);
   for (int k = 0; k < ntg; k++) ids[k] = tg[k].id;
   rt_log(j, L"\r\nИзвещения: целей %d (позиции, версии изделия, ТП, техсостав)\r\n", ntg);
+  xp_prog(x, XP_ECN, (ntg + 299) / 300 + (ntg + 149) / 150);
   xp_stage(x, XP_ECN, 0);
   /* 3а. прямые ссылки целей на извещения (ECNDocument, CanceledNotification…) — быстро */
   for (int c = 0; c < ntg && !xp_late(x); c += 300) {
@@ -852,6 +865,7 @@ static void xp_ecn(SQLHDBC dbc, XpJob *x, XpPos *pos, int np) {
       const wchar_t *tk = wcschr(rows[i].s2, L'|');
       ln[nl].tech = tk && (wcsstr(tk, L"Tech") || wcsstr(tk, L"ТП") || wcsstr(tk, L"технол"));
     }
+    InterlockedIncrement(&j->progDone);
   }
   int direct = nl;
   /* 3б. «кто ссылается» — пачками по 150 целей; не уложилась пачка — дальше не ищем */
@@ -888,6 +902,7 @@ static void xp_ecn(SQLHDBC dbc, XpJob *x, XpPos *pos, int np) {
       const wchar_t *tk = wcschr(rows[i].s2, L'|');
       ln[nl].tech = tk && (wcsstr(tk, L"Tech") || wcsstr(tk, L"ТП") || wcsstr(tk, L"технол"));
     }
+    InterlockedIncrement(&j->progDone);
     xp_stage(x, XP_ECN, c + 150);
   }
   g_qTimeout = save;
@@ -1003,6 +1018,7 @@ static void xp_build(XpJob *x) {
   RtJob *j = x->rt;
   ULONGLONG t0 = GetTickCount64();
   /* 1. обход ЭСИ — тот же, что у маршрутной ведомости (параллельный) */
+  xp_prog(x, XP_COMP, 0);
   xp_stage(x, XP_COMP, 0);
   rt_build(j);
   x->secWalk = (double)(GetTickCount64() - t0) / 1000.0;
@@ -1016,6 +1032,7 @@ static void xp_build(XpJob *x) {
   wchar_t err[280];
   if (pos && plm_connect(&env, &dbc, err, 280)) {
     g_qTimeout = 60;
+    g_qCancel = j->cancel;
     int np = xp_positions(x, pos, RT_MAX);
     rt_log(j, L"\r\n===== Выгрузка: позиций %d (разных %d), обход %.0f с =====\r\n", j->n, np, x->secWalk);
     ULONGLONG t1 = GetTickCount64();
@@ -1027,6 +1044,7 @@ static void xp_build(XpJob *x) {
     rt_log(j, L"\r\nВремя: обход %.0f с, операции и заготовки %.0f с, извещения %.0f с\r\n", x->secWalk, x->secSheets,
            x->secEcn);
     g_qTimeout = 0;
+    g_qCancel = NULL;
     SQLDisconnect(dbc);
     SQLFreeHandle(SQL_HANDLE_DBC, dbc);
     SQLFreeHandle(SQL_HANDLE_ENV, env);

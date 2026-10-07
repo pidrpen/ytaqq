@@ -11,6 +11,7 @@
 #define ID_XP_SAVE 288
 #define ID_XP_LOG 289
 #define ID_XP_PKG 290 /* «В пакет для загрузки…» — окно пакета, заполненное этой выгрузкой */
+#define ID_XP_TIMER 291 /* пока идёт сбор: полоса хода, время, свежие «Подробности» */
 
 static HWND g_xpWnd, g_xpDes, g_xpList, g_xpView, g_xpLog, g_xpChk[XP_NT];
 static XpJob *g_xpJob; /* последняя собранная выгрузка */
@@ -20,6 +21,11 @@ static float g_xpS = 1.0f;
 static long g_xpPickId;
 static wchar_t g_xpPickDes[200];
 static int g_xpShown = -1; /* какой лист сейчас в таблице */
+static XpJob *g_xpRun;      /* идущий сбор (до WM_XP_DONE) — для полосы хода и «Подробностей» */
+static int g_xpCount;       /* позиций пройдено — из сообщений сбора */
+static BOOL g_xpStopping;   /* нажат «Стоп» — ждём, пока потоки выйдут */
+static RtJob *g_xpLogSrc;   /* чей журнал в окне «Подробности» и сколько знаков в нём уже есть */
+static int g_xpLogLen;
 
 static int XS(int v) { return (int)(v * g_xpS + 0.5f); }
 
@@ -72,7 +78,7 @@ static void xp_status(const wchar_t *fmt, ...) {
   if (g_xpWnd) {
     RECT rc;
     GetClientRect(g_xpWnd, &rc);
-    RECT st = {0, XS(118), rc.right, XS(146)};
+    RECT st = {0, XS(118), rc.right, XS(153)};
     InvalidateRect(g_xpWnd, &st, FALSE);
   }
 }
@@ -90,7 +96,9 @@ static DWORD WINAPI xp_thread(LPVOID param) {
 static void xp_start(void) {
   if (InterlockedCompareExchange(&g_xpBusy, 1, 0) != 0) {
     InterlockedExchange(&g_xpCancel, 1); /* второй щелчок — остановить */
-    xp_status(L"Останавливаю…");
+    card_cancel_all(&g_xpCancel);        /* идущие запросы — прервать, а не ждать */
+    g_xpStopping = TRUE;
+    xp_status(L"Останавливаю — прерываю запросы к базе…");
     return;
   }
   XpJob *x = xp_job_new();
@@ -122,10 +130,18 @@ static void xp_start(void) {
   j->deadline = GetTickCount64() + 20 * 60 * 1000; /* большая сборка со всеми листами — до 20 минут */
   rt_log(j, L"Выгрузка из PLM: %s\r\n", j->des);
   SetWindowTextW(GetDlgItem(g_xpWnd, ID_XP_BUILD), L"Стоп");
+  g_xpRun = x;
+  g_xpCount = 0;
+  g_xpStopping = FALSE;
+  x->rt->t0 = GetTickCount64();
   xp_status(L"Собираю состав из PLM…");
   HANDLE t = CreateThread(NULL, 0, xp_thread, x, 0, NULL);
-  if (t) CloseHandle(t);
-  else {
+  if (t) {
+    CloseHandle(t);
+    SetTimer(g_xpWnd, ID_XP_TIMER, 300, NULL);
+  } else {
+    g_xpRun = NULL;
+    SetWindowTextW(GetDlgItem(g_xpWnd, ID_XP_BUILD), L"Собрать");
     xp_job_free(x);
     InterlockedExchange(&g_xpBusy, 0);
   }
@@ -250,20 +266,45 @@ static void xp_save(void) {
 
 static void package_show(BOOL fill); /* окно пакета — package_ui.c */
 
+/* «Подробности» — и во время сбора: журнал идущего сбора, дописывается по ходу */
 static void xp_show_log(void) {
-  if (!g_xpJob || !g_xpJob->rt->log[0]) return;
-  if (!g_xpLog) {
-    g_xpLog = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, L"EDIT", L"Выгрузка из PLM — подробности",
-                              WS_OVERLAPPEDWINDOW | ES_MULTILINE | ES_READONLY | WS_VSCROLL | WS_HSCROLL |
-                                  ES_AUTOVSCROLL | ES_AUTOHSCROLL,
-                              CW_USEDEFAULT, CW_USEDEFAULT, XS(820), XS(560), g_xpWnd, NULL, g_inst, NULL);
-    if (!g_xpLog) return;
-    if (g_fontMono) SendMessageW(g_xpLog, WM_SETFONT, (WPARAM)g_fontMono, FALSE);
+  RtJob *src = g_xpRun ? g_xpRun->rt : g_xpJob ? g_xpJob->rt : NULL;
+  if (!src || !src->logLen) {
+    xp_status(L"Подробностей пока нет — сначала «Собрать»");
+    return;
   }
-  SendMessageW(g_xpLog, EM_SETLIMITTEXT, RT_LOG, 0);
-  SetWindowTextW(g_xpLog, g_xpJob->rt->log);
+  if (!log_window(&g_xpLog, g_xpWnd, L"Выгрузка из PLM — подробности", XS(820), XS(560))) return;
+  int len = src->logLen; /* сбор дописывает дальше — берём, сколько есть сейчас */
+  log_put(g_xpLog, src->log, len, FALSE);
+  g_xpLogSrc = src;
+  g_xpLogLen = len;
   ShowWindow(g_xpLog, SW_SHOWNORMAL);
   SetForegroundWindow(g_xpLog);
+}
+
+/* в открытые «Подробности» — то, что журнал успел дописать */
+static void xp_log_follow(void) {
+  if (!g_xpLogSrc || !g_xpLog || !IsWindow(g_xpLog) || !IsWindowVisible(g_xpLog)) return;
+  int len = g_xpLogSrc->logLen;
+  if (len > g_xpLogLen) log_put(g_xpLog, g_xpLogSrc->log + g_xpLogLen, len - g_xpLogLen, TRUE);
+  g_xpLogLen = len;
+}
+
+/* ход сбора, 0…1000: состав — половина, листы по позициям — треть, извещения —
+   остальное (что не отмечено — не считается). На этапе — rt->progDone из progTotal:
+   ветки состава у потоков, позиции, пачки извещений. */
+static int xp_permille(const XpJob *x) {
+  BOOL sheets = (x->what & ((1u << XP_OPS) | (1u << XP_MAT) | (1u << XP_TOOL) | (1u << XP_PF))) != 0;
+  BOOL ecn = ((x->what >> XP_ECN) & 1) != 0;
+  int w0 = 50, w1 = sheets ? 35 : 0, w2 = ecn ? 15 : 0;
+  LONG done = x->rt->progDone, total = x->rt->progTotal;
+  double f = total > 0 ? (double)done / (double)total : 0;
+  if (f > 1) f = 1;
+  double base = 0, cur = w0;
+  if (x->stage == XP_ECN) base = w0 + w1, cur = w2;
+  else if (x->stage != XP_COMP) base = w0, cur = w1;
+  int p = (int)((base + cur * f) * 1000.0 / (w0 + w1 + w2));
+  return p < 0 ? 0 : p > 1000 ? 1000 : p;
 }
 
 static void xp_layout(void) {
@@ -281,7 +322,7 @@ static void xp_layout(void) {
     cx += XS(cw[k] + 8);
   }
   int by = rc.bottom - pad - XS(30);
-  int vy = XS(150);
+  int vy = XS(158);
   MoveWindow(g_xpView, pad, vy, XS(260), XS(300), TRUE);
   int ly = vy + XS(32);
   MoveWindow(g_xpList, pad, ly, rc.right - pad * 2, by - XS(10) - ly, TRUE);
@@ -304,7 +345,18 @@ static void xp_paint(HWND hwnd, HDC hdc) {
             DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
   if (g_fontUi) SelectObject(hdc, g_fontUi);
   SetTextColor(hdc, g_xpBusy ? COL_SAGE : COL_INK);
-  RECT st = {pad, XS(118), rc.right - pad, XS(146)};
+  RECT st = {pad, XS(118), rc.right - pad, XS(140)};
+  if (g_xpBusy && g_xpRun) { /* полоса хода */
+    RECT tr = {pad, XS(143), rc.right - pad, XS(150)};
+    HBRUSH bt = CreateSolidBrush(COL_LINE);
+    FillRect(hdc, &tr, bt);
+    DeleteObject(bt);
+    RECT fr = tr;
+    fr.right = tr.left + (int)((long long)(tr.right - tr.left) * xp_permille(g_xpRun) / 1000);
+    HBRUSH bf = CreateSolidBrush(g_xpStopping ? COL_MUTED : COL_SAGE);
+    if (fr.right > fr.left) FillRect(hdc, &fr, bf);
+    DeleteObject(bf);
+  }
   DrawTextW(hdc,
             g_xpStatus[0] ? g_xpStatus
                           : L"Состав (ЭСИ), операции ТП, материалы, инструмент и извещения — одной книгой Excel. "
@@ -328,6 +380,28 @@ static LRESULT CALLBACK XpEditProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
 
 static const wchar_t *const kXpStage[XP_NT] = {L"состав", L"операции, материалы, инструмент и заготовки", L"",
                                                L"", L"извещения", L""};
+
+/* строка состояния идущего сбора: этап, процент, позиции, время */
+static void xp_run_status(void) {
+  XpJob *x = g_xpRun;
+  if (!x || !g_xpBusy) return;
+  ULONGLONG sec = (GetTickCount64() - x->rt->t0) / 1000;
+  if (g_xpStopping) {
+    xp_status(L"Останавливаю — прерываю запросы к базе… %u:%02u", (unsigned)(sec / 60), (unsigned)(sec % 60));
+    return;
+  }
+  int st = x->stage >= 0 && x->stage < XP_NT ? x->stage : XP_COMP;
+  LONG done = x->rt->progDone, total = x->rt->progTotal;
+  wchar_t part[80] = L"";
+  if (total > 0)
+    _snwprintf(part, 80, st == XP_COMP ? L" · веток %ld из %ld" : st == XP_ECN ? L" · пачек %ld из %ld"
+                                                                               : L" · позиций %ld из %ld",
+               done, total);
+  wchar_t walked[60] = L"";
+  if (st == XP_COMP) _snwprintf(walked, 60, L" · пройдено позиций %d", g_xpCount);
+  xp_status(L"Собираю %s… %d%%%s%s · %u:%02u", kXpStage[st][0] ? kXpStage[st] : L"состав", xp_permille(x) / 10,
+            part, walked, (unsigned)(sec / 60), (unsigned)(sec % 60));
+}
 
 static LRESULT CALLBACK XpProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
   switch (msg) {
@@ -377,17 +451,26 @@ static LRESULT CALLBACK XpProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
     return (LRESULT)bg_brush(FALSE);
   }
   case WM_RT_PROGRESS:
-    xp_status(L"Собираю состав из PLM… позиций: %d", (int)wParam);
+  case WM_XP_PROGRESS:
+    g_xpCount = (int)wParam;
+    xp_run_status();
     return 0;
-  case WM_XP_PROGRESS: {
-    int st = (int)lParam;
-    xp_status(L"Собираю %s… позиций пройдено: %d", st >= 0 && st < XP_NT ? kXpStage[st] : L"", (int)wParam);
+  case WM_TIMER:
+    if (wParam == ID_XP_TIMER) {
+      if (g_xpStopping) card_cancel_all(&g_xpCancel); /* запрос, начатый в миг «Стопа», — тоже */
+      xp_run_status();
+      xp_log_follow();
+    }
     return 0;
-  }
   case WM_XP_DONE: {
     XpJob *x = (XpJob *)lParam;
+    KillTimer(hwnd, ID_XP_TIMER);
+    g_xpRun = NULL;
+    g_xpStopping = FALSE;
+    if (g_xpJob && g_xpLogSrc == g_xpJob->rt) g_xpLogSrc = NULL; /* прежний журнал уходит; текст в окне остаётся */
     xp_job_free(g_xpJob);
     g_xpJob = x;
+    xp_log_follow(); /* «Подробности» этого сбора открыты — дописать конец */
     xp_fill_view();
     xp_fill_list();
     SetWindowTextW(GetDlgItem(hwnd, ID_XP_BUILD), L"Собрать");

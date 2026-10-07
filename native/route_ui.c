@@ -83,6 +83,7 @@ static DWORD WINAPI rt_thread(LPVOID param) {
 static void rt_start_ex(BOOL dump) {
   if (InterlockedCompareExchange(&g_rtBusy, 1, 0) != 0) {
     InterlockedExchange(&g_rtCancel, 1); /* второй щелчок — остановить */
+    card_cancel_all(&g_rtCancel);        /* и прервать идущие запросы */
     rt_status(L"Останавливаю…");
     return;
   }
@@ -304,19 +305,60 @@ static void rt_copy(void) {
   free(b.w);
 }
 
+/* ---- окно «Подробности» — общее для ведомости и выгрузки ---------------------
+   Крестик окно уничтожает: прежде оставалась ссылка на закрытое окно, и
+   «Подробности» больше не открывались (до 2026.09.23.84). Теперь — проверка
+   IsWindow и новое окно. */
+static BOOL log_window(HWND *pw, HWND owner, const wchar_t *title, int w, int h) {
+  if (*pw && IsWindow(*pw)) return TRUE;
+  *pw = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, L"EDIT", title,
+                        WS_OVERLAPPEDWINDOW | ES_MULTILINE | ES_READONLY | WS_VSCROLL | WS_HSCROLL | ES_AUTOVSCROLL |
+                            ES_AUTOHSCROLL,
+                        CW_USEDEFAULT, CW_USEDEFAULT, w, h, owner, NULL, g_inst, NULL);
+  if (!*pw) return FALSE;
+  if (g_fontMono) SendMessageW(*pw, WM_SETFONT, (WPARAM)g_fontMono, FALSE);
+  SendMessageW(*pw, EM_SETLIMITTEXT, RT_LOG, 0); /* проверочная выгрузка длиннее 32 тысяч */
+  return TRUE;
+}
+
+/* n знаков журнала — в окно: заменить всё или дописать в конец. Дописанное
+   прокручивается, только если читали конец; листали выше — место остаётся. */
+static void log_put(HWND w, const wchar_t *s, int n, BOOL append) {
+  if (!w || n < 0) return;
+  wchar_t *t = (wchar_t *)malloc(((size_t)n + 1) * sizeof(wchar_t));
+  if (!t) return;
+  memcpy(t, s, (size_t)n * sizeof(wchar_t));
+  t[n] = 0;
+  if (!append) {
+    SetWindowTextW(w, t);
+  } else if (n) {
+    int len = GetWindowTextLengthW(w);
+    DWORD a = 0, b = 0;
+    SendMessageW(w, EM_GETSEL, (WPARAM)&a, (LPARAM)&b);
+    int top = (int)SendMessageW(w, EM_GETFIRSTVISIBLELINE, 0, 0);
+    BOOL atEnd = (int)b >= len;
+    SendMessageW(w, WM_SETREDRAW, FALSE, 0);
+    SendMessageW(w, EM_SETSEL, (WPARAM)len, (LPARAM)len);
+    SendMessageW(w, EM_REPLACESEL, FALSE, (LPARAM)t);
+    if (!atEnd) {
+      SendMessageW(w, EM_SETSEL, (WPARAM)a, (LPARAM)b);
+      int now = (int)SendMessageW(w, EM_GETFIRSTVISIBLELINE, 0, 0);
+      SendMessageW(w, EM_LINESCROLL, 0, (LPARAM)(top - now));
+    }
+    SendMessageW(w, WM_SETREDRAW, TRUE, 0);
+    InvalidateRect(w, NULL, TRUE);
+  }
+  free(t);
+}
+
 /* «Подробности»: весь проход сбора — чтобы было видно, где пусто и почему */
 static void rt_show_log(void) {
-  if (!g_rtJob || !g_rtJob->log[0]) return;
-  if (!g_rtLog) {
-    g_rtLog = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, L"EDIT", L"Маршрутная ведомость — подробности",
-                              WS_OVERLAPPEDWINDOW | ES_MULTILINE | ES_READONLY | WS_VSCROLL | WS_HSCROLL |
-                                  ES_AUTOVSCROLL | ES_AUTOHSCROLL,
-                              CW_USEDEFAULT, CW_USEDEFAULT, RS(820), RS(560), g_rtWnd, NULL, g_inst, NULL);
-    if (!g_rtLog) return;
-    if (g_fontMono) SendMessageW(g_rtLog, WM_SETFONT, (WPARAM)g_fontMono, FALSE);
+  if (!g_rtJob || !g_rtJob->log[0]) {
+    rt_status(g_rtBusy ? L"Подробности — когда сбор закончится" : L"Подробностей пока нет — сначала «Собрать»");
+    return;
   }
-  SendMessageW(g_rtLog, EM_SETLIMITTEXT, RT_LOG, 0); /* проверочная выгрузка длиннее 32 тысяч */
-  SetWindowTextW(g_rtLog, g_rtJob->log);
+  if (!log_window(&g_rtLog, g_rtWnd, L"Маршрутная ведомость — подробности", RS(820), RS(560))) return;
+  log_put(g_rtLog, g_rtJob->log, g_rtJob->logLen, FALSE);
   ShowWindow(g_rtLog, SW_SHOWNORMAL);
   SetForegroundWindow(g_rtLog);
 }

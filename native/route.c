@@ -85,6 +85,7 @@ typedef struct {
   int *plan;              /* ≥0 — строка rows; <0 — задача −(k+1) */
   int nplan;
   volatile LONG *shared;  /* общий счётчик позиций — для строки состояния */
+  volatile LONG progDone, progTotal; /* полоса хода (с .84): сделано из всего на этапе */
   void *memo;             /* RtMemo[nmemo] — уже собранные позиции (с .83) */
   int nmemo;
   wchar_t lastTpName[200];
@@ -105,7 +106,7 @@ static const int kRtWidth[RT_NCOL] = {26, 30, 24, 16, 10, 12, 40, 20, 10, 10, 12
 static const int kRtXlWidth[RT_NCOL] = {24, 26, 24, 14, 12, 12, 26, 16, 13, 9, 10, 10, 9, 17, 20};
 
 static void rt_log(RtJob *j, const wchar_t *fmt, ...) {
-  if (!j->log || j->logLen >= RT_LOG - 2) return;
+  if (!j || !j->log || j->logLen >= RT_LOG - 2) return; /* без журнала (карточка) — молча */
   va_list ap;
   va_start(ap, fmt);
   int n = _vsnwprintf(j->log + j->logLen, (size_t)(RT_LOG - j->logLen - 1), fmt, ap);
@@ -320,7 +321,7 @@ static void rt_route(SQLHDBC dbc, const RtObj *o, CardRow *rows, RtJob *j, wchar
                L"FROM InfoObjectAttributes AS la WITH(NOLOCK) "
                L"JOIN NameKeys AS nkl WITH(NOLOCK) ON nkl.NameKeyId=la.NameKeyId "
                L"AND nkl.Value=N'TechnologicalProcesses' "
-               L"JOIN InfoObjectCollectionElements AS ce WITH(NOLOCK) ON ce.AttributeId=la.AttributeId "
+               L"JOIN InfoObjectCollectionElements AS ce WITH(NOLOCK) ON ce.AttributeId IN (la.AttributeId, ISNULL(la.Link,0)) "
                L"AND ce.Outdated=0 "
                L"JOIN InfoObjectAttributes AS ea WITH(NOLOCK) "
                L"ON ea.CollectionElementId=ce.CollectionElementId AND ea.DataType=6 "
@@ -675,6 +676,36 @@ static void rt_pf_read(SQLHDBC dbc, long pfId, RtPf *pf, RtJob *j) {
   free(f);
 }
 
+/* Для карточки и столбца «Заготовка» в поиске (с 2026.09.23.84): та же
+   заготовка, что в выгрузке, — в сводку PfSum карточки. FALSE — полей нет,
+   тогда карточка обходит заготовку по-старому (pf_explore). */
+static BOOL pf_read_full(SQLHDBC dbc, long pfId, PfSum *sm) {
+  RtPf pf;
+  rt_pf_read(dbc, pfId, &pf, NULL);
+  if (!pf.mat[0] && !pf.dims[0] && !pf.sort[0] && !pf.hasNorm) return FALSE;
+  if (pf.mat[0]) { /* MaterialName — сортамент с маркой, как в PLM: «Круг 20 ГОСТ… / 45 ГОСТ…» */
+    lstrcpynW(sm->sort, pf.mat, 240);
+    sm->sortScore = 10;
+    sm->mat[0] = 0;
+  }
+  if (pf.dims[0] || pf.sort[0]) {
+    sm->zd[0] = sm->zl[0] = sm->za[0] = 0; /* размеры — уже строкой */
+    int w = _snwprintf(sm->dims, 240, L"Габариты %s", pf.dims[0] ? pf.dims : pf.sort);
+    if (pf.add[0] && wcscmp(pf.add, L"0") && w > 0 && w < 230) _snwprintf(sm->dims + w, 240 - w, L", припуск %s", pf.add);
+    sm->dims[239] = 0;
+    sm->ndims = 1;
+    sm->dimsFixed = TRUE;
+  }
+  if (pf.hasNorm) {
+    wchar_t v[40];
+    rt_fmt(pf.normV, 3, v, 40);
+    if (pf.unit[0] && _wcsnicmp(pf.unit, L"кг", 2)) _snwprintf(sm->mass, 80, L"%s %s", v, pf.unit); /* не кг — как в PLM */
+    else lstrcpynW(sm->mass, v, 80); /* число — pf_mass_text допишет «кг» */
+    sm->mass[79] = 0;
+    sm->massFixed = TRUE;
+  }
+  return TRUE;
+}
 
 static void rt_preform(SQLHDBC dbc, const RtObj *o, CardRow *rows, RtJob *j, RtRow *r, wchar_t *note, int ncap) {
   long pfCard = o->pfCard;
@@ -1330,9 +1361,22 @@ static void rt_dump_product(SQLHDBC dbc, const RtObj *o, CardRow *rows, RtJob *j
   if (o->tcCard) {
     long av = rt_dump_obj(dbc, o->tcCard, L"карточка техсостава", rows, j, L"ActualVersionTechComp");
     int nk = rt_dump_kids(dbc, o->tcCard, L"в карточке техсостава", rows, j, ids, 4);
-    long ver = av ? av : (nk ? ids[nk - 1] : 0);
+    long ver = av;
+    long vn = 0;
+    if (!ver) { /* нет утверждённой — рабочая, как в модуле PLM (с .84; прежде — последняя по id, бывал снимок) */
+      wchar_t *sql = (wchar_t *)malloc(4000 * sizeof(wchar_t)), err[280];
+      CardRow vers[8];
+      int nv = sql ? card_tc_versions(dbc, o->tcCard, sql, vers, 8, err) : -1;
+      free(sql);
+      if (nv > 0) ver = vers[0].n1, vn = vers[0].n2;
+      else if (nk) ver = ids[nk - 1];
+    }
     if (ver) {
-      rt_dump_obj(dbc, ver, av ? L"версия техсостава (утверждённая)" : L"версия техсостава (последняя)", rows, j, NULL);
+      wchar_t lab[80];
+      if (av) lstrcpynW(lab, L"версия техсостава (утверждённая)", 80);
+      else _snwprintf(lab, 80, L"версия техсостава (%s №%ld)", vn > 0 ? L"рабочая" : L"не утверждена,", vn);
+      lab[79] = 0;
+      rt_dump_obj(dbc, ver, lab, rows, j, NULL);
       int nv = rt_dump_kids(dbc, ver, L"варианты версии", rows, j, ids, 2);
       for (int i = 0; i < nv; i++) rt_dump_obj(dbc, ids[i], L"вариант техсостава", rows, j, NULL);
     }
@@ -1715,11 +1759,13 @@ static DWORD WINAPI rt_worker(LPVOID param) {
   if (!plm_connect(&env, &dbc, err, 280)) return 0; /* ветки возьмут другие потоки */
   CardRow *rows = (CardRow *)malloc(sizeof(CardRow) * 300);
   g_qTimeout = 30;
+  g_qCancel = j->cancel;
   while (rows && !rt_late(j)) {
     LONG i = InterlockedIncrement(k->next) - 1;
     if (i >= j->ntask) break;
     k->seg[i].worker = k->idx;
     rt_branch(dbc, j, w, (int)i, &k->seg[i], rows);
+    InterlockedIncrement(&j->progDone);
   }
   free(rows);
   SQLDisconnect(dbc);
@@ -1745,6 +1791,8 @@ static void rt_walk_parallel(SQLHDBC dbc, RtJob *j, CardRow *rows) {
   int started = 0;
   volatile LONG next = 0;
   ULONGLONG t0 = GetTickCount64();
+  InterlockedExchange(&j->progDone, 0);
+  InterlockedExchange(&j->progTotal, nt);
   for (int k = 0; seg && k < nw; k++) {
     RtJob *w = rt_job_new();
     if (!w) break;
@@ -1778,6 +1826,7 @@ static void rt_walk_parallel(SQLHDBC dbc, RtJob *j, CardRow *rows) {
       rest->shared = j->shared;
       seg[i].worker = started;
       rt_branch(dbc, j, rest, i, &seg[i], rows);
+      InterlockedIncrement(&j->progDone);
     }
   /* сшить по плану: строки верхних уровней и ветки — в порядке состава */
   RtRow *out = seg ? (RtRow *)calloc(RT_MAX, sizeof(RtRow)) : NULL;
@@ -1824,6 +1873,7 @@ static void rt_build(RtJob *j) {
   CardRow *rows = (CardRow *)malloc(sizeof(CardRow) * 300);
   if (rows) {
     g_qTimeout = 30; /* на один запрос; не уложился — позиция с пометкой, сбор идёт дальше */
+    g_qCancel = j->cancel;
     long root = j->rootId;
     if (root) rt_log(j, L"Изделие — строка из поиска PLM: %ld\r\n\r\n", root);
     else root = rt_find_root(dbc, j->des, rows, j);
@@ -1840,8 +1890,11 @@ static void rt_build(RtJob *j) {
     j->shared = NULL;
     j->split = FALSE;
     g_qTimeout = 0;
+    g_qCancel = NULL;
     if (rt_late(j) && !(j->cancel && *j->cancel))
       rt_log(j, L"\r\nВремя вышло — собрано не всё (%d позиций).\r\n", j->n);
+    else if (j->cancel && *j->cancel)
+      rt_log(j, L"\r\nОстановлено — собрано %d позиций.\r\n", j->n);
     free(rows);
   }
   SQLDisconnect(dbc);
