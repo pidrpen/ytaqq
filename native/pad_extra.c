@@ -3762,6 +3762,7 @@ done:
 #include "share.c"
 #include "route_ui.c"
 #include "export_ui.c"
+#include "package_ui.c" /* пакет для загрузки ЭСИ, состава и ТП в PLM */
 
 /* ---- столбец «Заготовка» в фоне ------------------------------------------- */
 #define WM_PF_DONE (WM_APP + 16) /* lParam — PfJob*, освобождает получатель */

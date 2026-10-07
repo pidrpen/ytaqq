@@ -36,7 +36,7 @@ typedef struct {
   int kind;      /* 0 — пункт, 1 — заголовок раздела, 2 — опасный (красный), 3 — пока не работает (серый) */
 } MoreItem;
 
-enum { MORE_OCR = 20, MORE_NARDY, MORE_CHANGES, MORE_CLEAR, MORE_LAYOUT, MORE_MSG, MORE_ROUTE, MORE_SHASHKI, MORE_EXPORT };
+enum { MORE_OCR = 20, MORE_NARDY, MORE_CHANGES, MORE_CLEAR, MORE_LAYOUT, MORE_MSG, MORE_ROUTE, MORE_SHASHKI, MORE_EXPORT, MORE_PACKAGE };
 static const MoreItem kMore[] = {
     {0, L"ИНСТРУМЕНТЫ", NULL, 0, 1},
     {1, L"Расчёт резки и газов", NULL, RGB(0x1F, 0x6B, 0x5A), 0},
@@ -45,6 +45,7 @@ static const MoreItem kMore[] = {
     {4, L"Расчёт краски", NULL, RGB(0xB4, 0x4B, 0x2A), 0},
     {MORE_ROUTE, L"Маршрутная ведомость", NULL, RGB(0x5B, 0x4B, 0x8A), 0}, /* с 2026.09.23.45: из PLM в Excel */
     {MORE_EXPORT, L"Выгрузка из PLM", NULL, RGB(0x2F, 0x6F, 0x8F), 0}, /* с 2026.09.23.78: ЭСИ, ТП, извещения */
+    {MORE_PACKAGE, L"Пакет для загрузки в PLM", NULL, RGB(0x3F, 0x7F, 0x4F), 0}, /* с .80: ЭСИ, состав, ТП */
     {-1, NULL, NULL, 0, 0}, /* черта */
     {MORE_OCR, L"Выделить и прочитать", g_hkName[HK_OCR], 0, 0}, /* клавиши — какие назначены (hotkeys.c) */
     {MORE_LAYOUT, L"Исправить раскладку", g_hkName[HK_LAYOUT], 0, 0}, /* с 2026.09.23.42 */
@@ -138,6 +139,7 @@ static void tools_menu(HWND owner, HWND btn) {
   else if (cmd == MORE_OCR) run_ocr_test();
   else if (cmd == MORE_ROUTE) route_show();
   else if (cmd == MORE_EXPORT) export_show();
+  else if (cmd == MORE_PACKAGE) package_show(FALSE);
   else if (cmd == MORE_LAYOUT) layout_fix_hint();
   else if (cmd == MORE_MSG) msg_compose_show();
   else if (cmd == MORE_NARDY) nardy_show();

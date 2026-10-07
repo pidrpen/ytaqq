@@ -552,6 +552,32 @@ static const wchar_t *xp_ecn_role(const wchar_t *key) {
   return key;
 }
 
+/* извещений не нашлось — какие объекты ссылаются на цели (их шаблоны), раз */
+static void xp_ecn_diag(SQLHDBC dbc, RtJob *j, const RtRow *r, const wchar_t *list, CardRow *rows, wchar_t *sql) {
+  wchar_t err[280];
+  _snwprintf(sql, 12000,
+             L"SELECT TOP 30 COUNT(*), CAST(t.NameKey AS NVARCHAR(200)) + N' · ' + CAST(ISNULL(t.NameUI,N'') AS NVARCHAR(200)), "
+             L"CAST(nk.Value AS NVARCHAR(200)), 0, 0 "
+             L"FROM (SELECT a.NameKeyId AS K, a.OwnerId AS O FROM InfoObjectAttributes AS a WITH(NOLOCK) "
+             L"WHERE a.Link IN (%s) AND a.DataType=6 AND a.Outdated=0 AND ISNULL(a.CollectionElementId,0)=0 "
+             L"UNION ALL SELECT a.NameKeyId, la.OwnerId FROM InfoObjectAttributes AS a WITH(NOLOCK) "
+             L"JOIN InfoObjectCollectionElements AS ce WITH(NOLOCK) "
+             L"ON ce.CollectionElementId=a.CollectionElementId AND ce.Outdated=0 "
+             L"JOIN InfoObjectAttributes AS la WITH(NOLOCK) ON la.AttributeId=ce.AttributeId "
+             L"WHERE a.Link IN (%s) AND a.DataType=6 AND a.Outdated=0) AS x "
+             L"JOIN InfoObjects AS n WITH(NOLOCK) ON n.InfoObjectId=x.O AND n.Erased=0 "
+             L"JOIN Templates AS t WITH(NOLOCK) ON t.TemplateId=n.TemplateId "
+             L"JOIN NameKeys AS nk WITH(NOLOCK) ON nk.NameKeyId=x.K "
+             L"GROUP BY t.NameKey, t.NameUI, nk.Value ORDER BY COUNT(*) DESC",
+             list, list);
+  sql[11999] = 0;
+  int n = card_query(dbc, sql, rows, 30, err, 280);
+  rt_log(j, L"  извещений у %s не нашлось; на него, его версии, ТП и техсостав ссылаются (для проверки):\r\n",
+         r->f[RC_DES]);
+  if (n < 0) rt_log(j, L"    запрос не выполнился — %s\r\n", err);
+  for (int i = 0; i < n; i++) rt_log(j, L"    %ld × %s — поле %s\r\n", rows[i].n1, rows[i].s1, rows[i].s2);
+}
+
 static void xp_ecn(SQLHDBC dbc, XpJob *x, XpPos *pos, int np, CardRow *rows) {
   RtJob *j = x->rt;
   wchar_t *sql = (wchar_t *)malloc(12000 * sizeof(wchar_t));
@@ -565,9 +591,10 @@ static void xp_ecn(SQLHDBC dbc, XpJob *x, XpPos *pos, int np, CardRow *rows) {
   }
   wchar_t err[280];
   int total = 0;
+  BOOL diag = FALSE;
   for (int p = 0; p < np && !xp_late(x); p++) {
     const RtRow *r = pos[p].r;
-    long tp = r->tp, id = r->id, par = r->par;
+    long tp = r->tp, id = r->id, par = r->par, tc = r->tcCard;
     /* цели: n1 — объект, s1 — его имя, n2 — 2 у ТП и его версий, 1 — изделие */
     _snwprintf(sql, 12000,
                L"SELECT TOP 200 o.InfoObjectId, CAST(o.Name AS NVARCHAR(250)), N'', "
@@ -575,8 +602,10 @@ static void xp_ecn(SQLHDBC dbc, XpJob *x, XpPos *pos, int np, CardRow *rows) {
                L"FROM InfoObjects AS o WITH(NOLOCK) WHERE o.Erased=0 AND (o.InfoObjectId IN (%ld,%ld,%ld) "
                L"OR (%ld<>0 AND o.ParentId=%ld) "
                L"OR (%ld<>0 AND o.ParentId=(SELECT ParentId FROM InfoObjects WITH(NOLOCK) WHERE InfoObjectId=%ld) "
-               L"AND o.TemplateId=(SELECT TemplateId FROM InfoObjects WITH(NOLOCK) WHERE InfoObjectId=%ld)))",
-               tp, tp, tp, id, par ? par : id, tp ? tp : id, tp, tp, par, par, par);
+               L"AND o.TemplateId=(SELECT TemplateId FROM InfoObjects WITH(NOLOCK) WHERE InfoObjectId=%ld)) "
+               /* карточка техсостава и её версии — их утверждают извещения (с 2026.09.23.80) */
+               L"OR (%ld<>0 AND (o.InfoObjectId=%ld OR o.ParentId=%ld)))",
+               tp, tp, tp, id, par ? par : id, tp ? tp : id, tp, tp, par, par, par, tc, tc, tc);
     int nt = card_query(dbc, sql, tg, 200, err, 280);
     if (nt <= 0) {
       if (nt < 0) rt_log(j, L"  извещения %s: цели не прочитались — %s\r\n", r->f[RC_DES], err);
@@ -588,7 +617,8 @@ static void xp_ecn(SQLHDBC dbc, XpJob *x, XpPos *pos, int np, CardRow *rows) {
     list[q] = 0;
     _snwprintf(sql, 12000,
                L"SELECT TOP 300 n.InfoObjectId, CAST(n.Name AS NVARCHAR(250)), "
-               L"CAST(nk.Value AS NVARCHAR(100)) + N'|' + CAST(t.NameKey AS NVARCHAR(100)), x.T, 0 "
+               L"CAST(nk.Value AS NVARCHAR(100)) + N'|' + CAST(t.NameKey AS NVARCHAR(100)) + N'|' + "
+               L"CAST(ISNULL(t.NameUI,N'') AS NVARCHAR(200)), x.T, 0 "
                L"FROM (SELECT a.Link AS T, a.NameKeyId AS K, a.OwnerId AS O FROM InfoObjectAttributes AS a WITH(NOLOCK) "
                L"WHERE a.Link IN (%s) AND a.DataType=6 AND a.Outdated=0 AND ISNULL(a.CollectionElementId,0)=0 "
                L"UNION ALL SELECT a.Link, a.NameKeyId, la.OwnerId FROM InfoObjectAttributes AS a WITH(NOLOCK) "
@@ -601,8 +631,12 @@ static void xp_ecn(SQLHDBC dbc, XpJob *x, XpPos *pos, int np, CardRow *rows) {
                L"AND k.Value IN (N'ECNDocument',N'CanceledNotification') "
                L"WHERE a.OwnerId IN (%s) AND a.Outdated=0 AND ISNULL(a.Link,0)<>0) AS x "
                L"JOIN InfoObjects AS n WITH(NOLOCK) ON n.InfoObjectId=x.O AND n.Erased=0 "
+               /* шаблон извещения: штатные ChangeNotification / TechChangeNotification, а
+                  на случай заводских модификаторов — любой «…Notification» или «извещени…» */
                L"JOIN Templates AS t WITH(NOLOCK) ON t.TemplateId=n.TemplateId "
-               L"AND t.NameKey IN (N'ChangeNotification',N'TechChangeNotification') "
+               L"AND (t.NameKey IN (N'ChangeNotification',N'TechChangeNotification') "
+               L"OR CAST(t.NameKey AS NVARCHAR(200)) LIKE N'%%Notification%%' "
+               L"OR CAST(ISNULL(t.NameUI,N'') AS NVARCHAR(200)) LIKE N'%%звещени%%') "
                L"JOIN NameKeys AS nk WITH(NOLOCK) ON nk.NameKeyId=x.K "
                L"ORDER BY n.InfoObjectId",
                list, list, list);
@@ -612,7 +646,13 @@ static void xp_ecn(SQLHDBC dbc, XpJob *x, XpPos *pos, int np, CardRow *rows) {
       rt_log(j, L"  извещения %s: запрос не выполнился — %s\r\n", r->f[RC_DES], err);
       continue;
     }
-    if (!nn) continue;
+    if (!nn) {
+      if (!diag) { /* раз — кто вообще ссылается на эти объекты: по этому видно, где извещения */
+        diag = TRUE;
+        xp_ecn_diag(dbc, j, r, list, rows, sql);
+      }
+      continue;
+    }
     /* номер и состояние извещений */
     wchar_t nl[300 * 12];
     q = 0;
@@ -641,9 +681,11 @@ static void xp_ecn(SQLHDBC dbc, XpJob *x, XpPos *pos, int np, CardRow *rows) {
         wchar_t key[200];
         lstrcpynW(key, rows[i].s2, 200);
         wchar_t *bar = wcschr(key, L'|');
-        if (bar) {
+        if (bar) { /* «ключ|шаблон|название шаблона» */
           *bar = 0;
-          lstrcpynW(kind, !_wcsicmp(bar + 1, L"TechChangeNotification") ? L"ТП" : L"КД", 8);
+          const wchar_t *tk = bar + 1, *tn = wcschr(tk, L'|');
+          BOOL tech = wcsstr(tk, L"Tech") != NULL || (tn && (wcsstr(tn, L"ТП") || wcsstr(tn, L"технол")));
+          lstrcpynW(kind, tech ? L"ТП" : L"КД", 8);
         }
         const wchar_t *role = xp_ecn_role(key);
         if (!wcsstr(roles, role)) {

@@ -51,6 +51,7 @@ typedef struct {
   long tp, tpVer, tpVar; /* основной ТП, его версия и вариант с операциями */
   long par, prodConf;    /* версия изделия (родитель) и исполнение */
   long tcVariant;        /* вариант техсостава этого исполнения */
+  long tcCard;           /* карточка техсостава — её версии бывают в извещениях */
   wchar_t tpName[200];
 } RtRow;
 
@@ -71,6 +72,7 @@ typedef struct {
   BOOL dump;       /* «Выгрузка для проверки»: всё найденное — в подробности */
   int dumpDet, dumpAsm;
   long lastTp, lastTpVer, lastTpVar; /* техпроцесс последней позиции: для выгрузки */
+  int kdUsed; /* у скольких сборок состав взят по КД — техсостава нет */
   wchar_t lastTpName[200];
   ULONGLONG t0;
 } RtJob;
@@ -725,57 +727,99 @@ static int rt_tc_rows(SQLHDBC dbc, long ver, long prodConf, CardRow *rows, wchar
   return card_query(dbc, sql, rows, 300, err, 280);
 }
 
+/* строки конструкторского состава (Items) ИИВ — когда техсостава нет */
+static int rt_kd_rows(SQLHDBC dbc, long pvc, CardRow *rows, wchar_t *sql, wchar_t *err) {
+  _snwprintf(sql, 4000,
+             L"SELECT DISTINCT TOP 300 ce.CollectionElementId, N'', N'', 0, 0 "
+             L"FROM InfoObjectAttributes AS it WITH(NOLOCK) "
+             L"JOIN NameKeys AS nki WITH(NOLOCK) ON nki.NameKeyId=it.NameKeyId AND nki.Value=N'Items' "
+             L"JOIN InfoObjectCollectionElements AS ce WITH(NOLOCK) ON ce.AttributeId=it.AttributeId AND ce.Outdated=0 "
+             L"WHERE it.OwnerId=%ld AND it.Outdated=0 AND ISNULL(it.CollectionElementId,0)=0 "
+             L"ORDER BY ce.CollectionElementId",
+             pvc);
+  return card_query(dbc, sql, rows, 300, err, 280);
+}
+
 static int rt_children(SQLHDBC dbc, const RtObj *o, CardRow *rows, RtJob *j, RtEl *el, int max, long *variant) {
   *variant = 0;
-  if (!o->tcCard) return 0;
   wchar_t *sql = (wchar_t *)malloc(4000 * sizeof(wchar_t));
   if (!sql) return 0;
   wchar_t err[280];
-  /* Версия техсостава: утверждённая (ActualVersionTechComp); её нет —
-     техсостав не утверждён: последняя версия — из ссылок карточки или её
-     вложенных объектов, у которой есть варианты с TechComposition (с
-     2026.09.23.59; раньше состав тогда не выгружался) */
-  _snwprintf(sql, 4000,
-             L"SELECT TOP 5 c.V, CAST(vo.Name AS NVARCHAR(200)), c.K, 0, 0 "
-             L"FROM (SELECT a.Link AS V, nk.Value AS K FROM InfoObjectAttributes AS a WITH(NOLOCK) "
-             L"JOIN NameKeys AS nk WITH(NOLOCK) ON nk.NameKeyId=a.NameKeyId "
-             L"WHERE a.OwnerId=%ld AND a.Outdated=0 AND a.DataType=6 AND ISNULL(a.Link,0)<>0 "
-             L"AND ISNULL(a.CollectionElementId,0)=0 "
-             L"UNION SELECT o.InfoObjectId, N'' FROM InfoObjects AS o WITH(NOLOCK) "
-             L"WHERE o.ParentId=%ld AND o.Erased=0) AS c "
-             L"JOIN InfoObjects AS vo WITH(NOLOCK) ON vo.InfoObjectId=c.V AND vo.Erased=0 "
-             L"WHERE EXISTS (SELECT 1 FROM InfoObjects AS ch WITH(NOLOCK) "
-             L"JOIN InfoObjectAttributes AS t WITH(NOLOCK) ON t.OwnerId=ch.InfoObjectId AND t.Outdated=0 "
-             L"JOIN NameKeys AS nkt WITH(NOLOCK) ON nkt.NameKeyId=t.NameKeyId AND nkt.Value=N'TechComposition' "
-             L"WHERE ch.ParentId=c.V AND ch.Erased=0) "
-             L"ORDER BY CASE WHEN c.K=N'ActualVersionTechComp' THEN 0 ELSE 1 END, c.V DESC",
-             o->tcCard, o->tcCard);
-  int nv = card_query(dbc, sql, rows, 5, err, 280);
-  if (nv <= 0) {
+  int n = 0;
+  if (o->tcCard) {
+    /* Версия техсостава — как её выбирает модуль «Технологический состав» PLM
+       (с 2026.09.23.80): утверждённая (ActualVersionTechComp); её нет — рабочая:
+       «В работе» / «На корректировке» с номером больше нуля, то есть самый
+       большой положительный VersionNumber; версии с номером меньше нуля — снимки
+       «на дату», они последними. Прежде без утверждённой бралась версия с самым
+       большим id — бывал снимок или версия без варианта этого исполнения, и
+       состав выходил пустым. Пробуем по порядку, пока не найдётся вариант. */
+    _snwprintf(sql, 4000,
+               L"SELECT TOP 8 c.V, CAST(vo.Name AS NVARCHAR(200)), c.K, ISNULL(vn.N,0), 0 "
+               L"FROM (SELECT a.Link AS V, nk.Value AS K FROM InfoObjectAttributes AS a WITH(NOLOCK) "
+               L"JOIN NameKeys AS nk WITH(NOLOCK) ON nk.NameKeyId=a.NameKeyId "
+               L"WHERE a.OwnerId=%ld AND a.Outdated=0 AND a.DataType=6 AND ISNULL(a.Link,0)<>0 "
+               L"AND ISNULL(a.CollectionElementId,0)=0 "
+               L"UNION SELECT o.InfoObjectId, N'' FROM InfoObjects AS o WITH(NOLOCK) "
+               L"WHERE o.ParentId=%ld AND o.Erased=0) AS c "
+               L"JOIN InfoObjects AS vo WITH(NOLOCK) ON vo.InfoObjectId=c.V AND vo.Erased=0 "
+               L"OUTER APPLY (SELECT TOP 1 vv.IntegerNumber AS N FROM InfoObjectAttributes AS vv WITH(NOLOCK) "
+               L"JOIN NameKeys AS nkv WITH(NOLOCK) ON nkv.NameKeyId=vv.NameKeyId AND nkv.Value=N'VersionNumber' "
+               L"WHERE vv.OwnerId=c.V AND vv.Outdated=0) AS vn "
+               L"WHERE EXISTS (SELECT 1 FROM InfoObjects AS ch WITH(NOLOCK) "
+               L"JOIN InfoObjectAttributes AS t WITH(NOLOCK) ON t.OwnerId=ch.InfoObjectId AND t.Outdated=0 "
+               L"JOIN NameKeys AS nkt WITH(NOLOCK) ON nkt.NameKeyId=t.NameKeyId AND nkt.Value=N'TechComposition' "
+               L"WHERE ch.ParentId=c.V AND ch.Erased=0) "
+               L"ORDER BY CASE WHEN c.K=N'ActualVersionTechComp' THEN 0 WHEN ISNULL(vn.N,0)<0 THEN 2 ELSE 1 END, "
+               L"ISNULL(vn.N,0) DESC, c.V DESC",
+               o->tcCard, o->tcCard);
+    CardRow vers[8];
+    int nv = card_query(dbc, sql, vers, 8, err, 280);
     if (nv < 0) rt_log(j, L"    техсостав: версия не прочиталась — %s\r\n", err);
-    else rt_log(j, L"    техсостав: в карточке %ld нет версии с составом\r\n", o->tcCard);
-    free(sql);
-    return 0;
-  }
-  long ver = rows[0].n1;
-  if (_wcsicmp(rows[0].s2, L"ActualVersionTechComp"))
-    rt_log(j, L"    техсостав не утверждён — беру последнюю версию «%s» (#%ld)\r\n", rows[0].s1, ver);
-  int n = rt_tc_rows(dbc, ver, o->prodConf, rows, sql, err);
-  if (n == 0 && o->prodConf) { /* варианта этой конфигурации нет — если вариант один, он и есть */
-    n = rt_tc_rows(dbc, ver, 0, rows, sql, err);
-    for (int i = 1; i < n; i++)
-      if (rows[i].n2 != rows[0].n2) {
-        rt_log(j, L"    техсостав: вариантов несколько, своего (конфигурация %ld) нет\r\n", o->prodConf);
-        n = 0;
-        break;
+    else if (nv == 0) rt_log(j, L"    техсостав: в карточке %ld нет версии с составом\r\n", o->tcCard);
+    long tried = 0;
+    for (int v = 0; v < nv && n <= 0; v++) {
+      long ver = vers[v].n1;
+      if (ver == tried) continue; /* утверждённая приходит дважды: ссылкой и вложенным объектом */
+      tried = ver;
+      BOOL actual = !_wcsicmp(vers[v].s2, L"ActualVersionTechComp");
+      n = rt_tc_rows(dbc, ver, o->prodConf, rows, sql, err);
+      if (n == 0 && o->prodConf) { /* варианта этой конфигурации нет — если вариант один, он и есть */
+        n = rt_tc_rows(dbc, ver, 0, rows, sql, err);
+        for (int i = 1; i < n; i++)
+          if (rows[i].n2 != rows[0].n2) {
+            rt_log(j, L"    техсостав «%s»: вариантов несколько, своего (конфигурация %ld) нет\r\n", vers[v].s1,
+                   o->prodConf);
+            n = 0;
+            break;
+          }
+        if (n > 0) rt_log(j, L"    техсостав: вариант не по конфигурации, но он в версии один — беру\r\n");
       }
-    if (n > 0) rt_log(j, L"    техсостав: вариант не по конфигурации, но он в версии один — беру\r\n");
+      if (n < 0) rt_log(j, L"    техсостав: запрос не выполнился — %s\r\n", err);
+      else if (n > 0 && !actual)
+        rt_log(j, L"    техсостав не утверждён — беру %s версию №%ld «%s» (#%ld)\r\n",
+               vers[v].n2 > 0 ? L"рабочую" : L"снимок, ", vers[v].n2, vers[v].s1, ver);
+    }
+  }
+  /* Техсостава нет (не заведён или пуст) — состав по КД: Items самого ИИВ, с
+     пометкой (с 2026.09.23.80; прежде позиция выходила без состава) */
+  BOOL kd = FALSE;
+  if (n <= 0) {
+    n = rt_kd_rows(dbc, o->id, rows, sql, err);
+    if (n > 0) {
+      kd = TRUE;
+      j->kdUsed++;
+      rt_log(j, L"    техсостава нет — состав по КД (Items): строк %d\r\n", n);
+    } else if (n < 0) {
+      rt_log(j, L"    состав по КД: запрос не выполнился — %s\r\n", err);
+    }
   }
   if (n <= 0) {
-    if (n < 0) rt_log(j, L"    техсостав: запрос не выполнился — %s\r\n", err);
     free(sql);
     return 0;
   }
+  if (kd)
+    for (int i = 0; i < n; i++) rows[i].n2 = 0; /* у состава КД нет исполнения техсостава */
   *variant = rows[0].n2; /* исполнение техсостава — у него и список изменений КД */
   int ne = n > max ? max : n;
   long ids[300];
@@ -1234,10 +1278,13 @@ static void rt_walk(SQLHDBC dbc, long id, int level, const wchar_t *parentDes, d
   if (src && src->kd[0]) lstrcpynW(notes[4], src->kd, 200);
   RtEl *el = (RtEl *)malloc(sizeof(RtEl) * 150);
   long variant = 0;
+  int kdBefore = j->kdUsed;
   int ne = el ? rt_children(dbc, &o, rows, j, el, 150, &variant) : 0;
   r->tcVariant = variant;
+  r->tcCard = o.tcCard;
   wchar_t kdNote[200] = L"";
   if (ne > 0 && !rt_late(j)) rt_kd_changes(dbc, variant, rows, j, el, ne, kdNote, 200);
+  if (j->kdUsed > kdBefore && !kdNote[0]) lstrcpynW(kdNote, L"состав по КД — техсостава нет", 200);
   /* вид изделия */
   const wchar_t *kind = o.section[0] ? o.section : (elSection && elSection[0] ? elSection : NULL);
   lstrcpynW(r->f[RC_KIND], kind ? kind : (ne > 0 ? L"Сборочные единицы" : L"Детали"), 200);
