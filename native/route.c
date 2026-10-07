@@ -75,6 +75,7 @@ typedef struct {
   int dumpDet, dumpAsm;
   long lastTp, lastTpVer, lastTpVar; /* техпроцесс последней позиции: для выгрузки */
   int kdUsed; /* у скольких сборок состав взят по КД — техсостава нет */
+  BOOL tcDiag; /* почему техсостав не нашёлся — выписано один раз */
   /* параллельный обход (с 2026.09.23.81): корень — здесь, его ветки — потоки */
   BOOL split;             /* у корня не спускаться, а оставить состав в root… */
   void *rootEl;           /* RtEl[rootNe] — строки состава корня */
@@ -774,7 +775,11 @@ static int rt_tc_rows(SQLHDBC dbc, long ver, long prodConf, CardRow *rows, wchar
              L"FROM InfoObjects AS ch WITH(NOLOCK) "
              L"JOIN InfoObjectAttributes AS tc WITH(NOLOCK) ON tc.OwnerId=ch.InfoObjectId AND tc.Outdated=0 "
              L"JOIN NameKeys AS nktc WITH(NOLOCK) ON nktc.NameKeyId=tc.NameKeyId AND nktc.Value=N'TechComposition' "
-             L"JOIN InfoObjectCollectionElements AS ce WITH(NOLOCK) ON ce.AttributeId=tc.AttributeId "
+             /* строки списка — свои или того списка, на который он ссылается (Link):
+                техсостав модуль заводит копией состава КД (SetValue(Items)), и пока его
+                не правили, своих строк у него нет — они у Items (с 2026.09.23.82; так же
+                PLM читает и составные — PreformSize) */
+             L"JOIN InfoObjectCollectionElements AS ce WITH(NOLOCK) ON ce.AttributeId IN (tc.AttributeId, ISNULL(tc.Link,0)) "
              L"AND ce.Outdated=0 "
              L"WHERE ch.ParentId=%ld AND ch.Erased=0 "
              L"AND (%ld=0 OR EXISTS (SELECT 1 FROM InfoObjectAttributes AS pr WITH(NOLOCK) "
@@ -794,7 +799,8 @@ static int rt_kd_rows(SQLHDBC dbc, long pvc, CardRow *rows, wchar_t *sql, wchar_
              L"SELECT DISTINCT TOP 300 ce.CollectionElementId, N'', N'', 0, 0 "
              L"FROM InfoObjectAttributes AS it WITH(NOLOCK) "
              L"JOIN NameKeys AS nki WITH(NOLOCK) ON nki.NameKeyId=it.NameKeyId AND nki.Value=N'Items' "
-             L"JOIN InfoObjectCollectionElements AS ce WITH(NOLOCK) ON ce.AttributeId=it.AttributeId AND ce.Outdated=0 "
+             L"JOIN InfoObjectCollectionElements AS ce WITH(NOLOCK) ON ce.AttributeId IN (it.AttributeId, ISNULL(it.Link,0)) "
+             L"AND ce.Outdated=0 "
              L"WHERE it.OwnerId=%ld AND it.Outdated=0 AND ISNULL(it.CollectionElementId,0)=0 "
              L"ORDER BY ce.CollectionElementId",
              pvc);
@@ -860,6 +866,74 @@ static int rt_children(SQLHDBC dbc, const RtObj *o, CardRow *rows, RtJob *j, RtE
       else if (n > 0 && !actual)
         rt_log(j, L"    техсостав не утверждён — беру %s версию №%ld «%s» (#%ld)\r\n",
                vers[v].n2 > 0 ? L"рабочую" : L"снимок, ", vers[v].n2, vers[v].s1, ver);
+    }
+  }
+  /* Через карточку не вышло — прямо: вариант техсостава, у которого Product —
+     это исполнение (или исполнение по ссылкам изделия), и у которого есть
+     TechComposition; версия — утверждённая, иначе с большим положительным
+     номером (с 2026.09.23.82). Так находится техсостав, даже если карточка
+     взаимосвязей указывает не туда или карточки нет вовсе. */
+  if (n <= 0 && (o->prodConf || o->prodConfObj)) {
+    long pc1 = o->prodConf ? o->prodConf : o->prodConfObj, pc2 = o->prodConfObj ? o->prodConfObj : pc1;
+    _snwprintf(sql, 4000,
+               L"SELECT TOP 10 ch.InfoObjectId, CAST(v.Name AS NVARCHAR(200)), N'', ISNULL(vn.N,0), ch.ParentId "
+               L"FROM InfoObjectAttributes AS pr WITH(NOLOCK) "
+               L"JOIN NameKeys AS nkp WITH(NOLOCK) ON nkp.NameKeyId=pr.NameKeyId AND nkp.Value=N'Product' "
+               L"JOIN InfoObjects AS ch WITH(NOLOCK) ON ch.InfoObjectId=pr.OwnerId AND ch.Erased=0 "
+               L"JOIN InfoObjects AS v WITH(NOLOCK) ON v.InfoObjectId=ch.ParentId AND v.Erased=0 "
+               L"OUTER APPLY (SELECT TOP 1 vv.IntegerNumber AS N FROM InfoObjectAttributes AS vv WITH(NOLOCK) "
+               L"JOIN NameKeys AS nkv WITH(NOLOCK) ON nkv.NameKeyId=vv.NameKeyId AND nkv.Value=N'VersionNumber' "
+               L"WHERE vv.OwnerId=v.InfoObjectId AND vv.Outdated=0) AS vn "
+               L"OUTER APPLY (SELECT TOP 1 1 AS A FROM InfoObjectAttributes AS av WITH(NOLOCK) "
+               L"JOIN NameKeys AS nka WITH(NOLOCK) ON nka.NameKeyId=av.NameKeyId AND nka.Value=N'ActualVersionTechComp' "
+               L"WHERE av.OwnerId=v.ParentId AND av.Link=v.InfoObjectId AND av.Outdated=0) AS act "
+               L"WHERE pr.Link IN (%ld,%ld) AND pr.Outdated=0 AND ISNULL(pr.CollectionElementId,0)=0 "
+               L"AND EXISTS (SELECT 1 FROM InfoObjectAttributes AS t WITH(NOLOCK) "
+               L"JOIN NameKeys AS nkt WITH(NOLOCK) ON nkt.NameKeyId=t.NameKeyId AND nkt.Value=N'TechComposition' "
+               L"WHERE t.OwnerId=ch.InfoObjectId AND t.Outdated=0) "
+               L"ORDER BY CASE WHEN act.A=1 THEN 0 WHEN ISNULL(vn.N,0)<0 THEN 2 ELSE 1 END, ISNULL(vn.N,0) DESC, ch.InfoObjectId DESC",
+               pc1, pc2);
+    CardRow cand[10];
+    int nc = card_query(dbc, sql, cand, 10, err, 280);
+    if (nc < 0) rt_log(j, L"    техсостав напрямую: запрос не выполнился — %s\r\n", err);
+    for (int c = 0; c < nc && n <= 0; c++) {
+      n = rt_tc_rows(dbc, cand[c].n3, 0, rows, sql, err);
+      if (n > 0) {
+        for (int i = 0; i < n; i++) /* в версии и чужие варианты — только этот */
+          if (rows[i].n2 != cand[c].n1) rows[i--] = rows[--n];
+        if (n > 0)
+          rt_log(j, L"    техсостав найден напрямую (вариант #%ld исполнения, версия №%ld «%s»)%s\r\n", cand[c].n1,
+                 cand[c].n2, cand[c].s1, o->tcCard ? L" — через карточку не нашёлся" : L" — карточки техсостава нет");
+      }
+    }
+    if (n <= 0 && !j->tcDiag) { /* раз — почему: что есть в карточке и на какие исполнения ссылаются варианты */
+      j->tcDiag = TRUE;
+      rt_log(j, L"    техсостав не найден: карточка #%ld, исполнение #%ld (по изделию #%ld), вариантов с ним напрямую %d\r\n",
+             o->tcCard, o->prodConf, o->prodConfObj, nc < 0 ? 0 : nc);
+      if (o->tcCard) {
+        _snwprintf(sql, 4000,
+                   L"SELECT TOP 40 ch.InfoObjectId, CAST(v.Name AS NVARCHAR(200)), "
+                   L"ISNULL(CAST(po.Name AS NVARCHAR(250)),N'—'), ISNULL(vn.N,0), ISNULL(pr.Link,0) "
+                   L"FROM InfoObjects AS v WITH(NOLOCK) "
+                   L"JOIN InfoObjects AS ch WITH(NOLOCK) ON ch.ParentId=v.InfoObjectId AND ch.Erased=0 "
+                   L"OUTER APPLY (SELECT TOP 1 vv.IntegerNumber AS N FROM InfoObjectAttributes AS vv WITH(NOLOCK) "
+                   L"JOIN NameKeys AS nkv WITH(NOLOCK) ON nkv.NameKeyId=vv.NameKeyId AND nkv.Value=N'VersionNumber' "
+                   L"WHERE vv.OwnerId=v.InfoObjectId AND vv.Outdated=0) AS vn "
+                   L"OUTER APPLY (SELECT TOP 1 a.Link FROM InfoObjectAttributes AS a WITH(NOLOCK) "
+                   L"JOIN NameKeys AS nk WITH(NOLOCK) ON nk.NameKeyId=a.NameKeyId AND nk.Value=N'Product' "
+                   L"WHERE a.OwnerId=ch.InfoObjectId AND a.Outdated=0) AS pr "
+                   L"LEFT JOIN InfoObjects AS po WITH(NOLOCK) ON po.InfoObjectId=pr.Link "
+                   L"WHERE v.ParentId=%ld AND v.Erased=0 ORDER BY v.InfoObjectId, ch.InfoObjectId",
+                   o->tcCard);
+        CardRow *dg = (CardRow *)malloc(sizeof(CardRow) * 40);
+        int nd = dg ? card_query(dbc, sql, dg, 40, err, 280) : -1;
+        if (nd < 0) rt_log(j, L"      карточка: запрос не выполнился — %s\r\n", err);
+        else if (nd == 0) rt_log(j, L"      в карточке техсостава нет версий с вариантами\r\n");
+        for (int i = 0; i < nd; i++)
+          rt_log(j, L"      версия «%s» №%ld · вариант #%ld → исполнение %s (#%ld)\r\n", dg[i].s1, dg[i].n2, dg[i].n1,
+                 dg[i].s2, dg[i].n3);
+        free(dg);
+      }
     }
   }
   /* Техсостава нет (не заведён или пуст) — состав по КД: Items самого ИИВ, с

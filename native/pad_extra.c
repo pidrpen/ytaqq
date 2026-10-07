@@ -3410,7 +3410,8 @@ static void card_techcomp(SQLHDBC dbc, long tcCard, long prodConf, CardOut *c, C
              L"AND tc.Outdated=0 "
              L"JOIN NameKeys AS nktc WITH(NOLOCK) ON nktc.NameKeyId=tc.NameKeyId "
              L"AND nktc.Value=N'TechComposition' "
-             L"JOIN InfoObjectCollectionElements AS ce WITH(NOLOCK) ON ce.AttributeId=tc.AttributeId "
+             /* строки — свои или списка по ссылке (Link): см. rt_tc_rows */
+             L"JOIN InfoObjectCollectionElements AS ce WITH(NOLOCK) ON ce.AttributeId IN (tc.AttributeId, ISNULL(tc.Link,0)) "
              L"AND ce.Outdated=0 "
              L"WHERE av.OwnerId=%ld AND av.Outdated=0 "
              L"AND (%ld=0 OR EXISTS (SELECT 1 FROM InfoObjectAttributes AS pr WITH(NOLOCK) "
