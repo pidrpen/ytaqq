@@ -1026,14 +1026,14 @@ static void xp_build(XpJob *x) {
   if ((x->what >> XP_COMP) & 1) xp_comp(x);
   if (xp_late(x)) return;
   /* 2. листы по уникальным позициям */
-  XpPos *pos = (XpPos *)malloc(sizeof(XpPos) * RT_MAX);
+  XpPos *pos = (XpPos *)malloc(sizeof(XpPos) * (size_t)(j->n > 0 ? j->n : 1));
   SQLHENV env = SQL_NULL_HENV;
   SQLHDBC dbc = SQL_NULL_HDBC;
   wchar_t err[280];
   if (pos && plm_connect(&env, &dbc, err, 280)) {
     g_qTimeout = 60;
     g_qCancel = j->cancel;
-    int np = xp_positions(x, pos, RT_MAX);
+    int np = xp_positions(x, pos, j->n);
     rt_log(j, L"\r\n===== Выгрузка: позиций %d (разных %d), обход %.0f с =====\r\n", j->n, np, x->secWalk);
     ULONGLONG t1 = GetTickCount64();
     xp_pos_sheets(dbc, x, pos, np);

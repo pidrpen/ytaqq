@@ -851,9 +851,9 @@ static void share_route(RtJob *j) {
     int k = share_split(line, f, RT_NCOL + 2);
     if (!wcscmp(f[0], L"via") && k >= 2) lstrcpynW(via, f[1], 200);
     else if (!wcscmp(f[0], L"rterr") && k >= 2) lstrcpynW(j->err, f[1], 400);
-    else if (!wcscmp(f[0], L"rt") && k >= RT_NCOL + 2 && j->n < RT_MAX) {
-      RtRow *r = &j->rows[j->n++];
-      memset(r, 0, sizeof(*r));
+    else if (!wcscmp(f[0], L"rt") && k >= RT_NCOL + 2) {
+      RtRow *r = rt_row_add(j);
+      if (!r) continue;
       r->level = (int)wcstol(f[1], NULL, 10);
       for (int c = 0; c < RT_NCOL; c++) lstrcpynW(r->f[c], f[c + 2], 200);
     }
