@@ -76,13 +76,17 @@ typedef struct {
   long lastTp, lastTpVer, lastTpVar; /* техпроцесс последней позиции: для выгрузки */
   int kdUsed; /* у скольких сборок состав взят по КД — техсостава нет */
   BOOL tcDiag; /* почему техсостав не нашёлся — выписано один раз */
-  /* параллельный обход (с 2026.09.23.81): корень — здесь, его ветки — потоки */
-  BOOL split;             /* у корня не спускаться, а оставить состав в root… */
-  void *rootEl;           /* RtEl[rootNe] — строки состава корня */
-  int rootNe;
-  double rootTot;
-  wchar_t rootDes[200];
+  /* параллельный обход (с 2026.09.23.81, глубже — с .83): верхние уровни —
+     здесь, ветки ниже — задачи потокам; plan — порядок строк для сшивки */
+  BOOL split;             /* раздавать ветки, а не спускаться самому */
+  int splitDepth;         /* с какого уровня ветки — задачи: 1 или 2 */
+  void *tasks;            /* RtTask[ntask] */
+  int ntask;
+  int *plan;              /* ≥0 — строка rows; <0 — задача −(k+1) */
+  int nplan;
   volatile LONG *shared;  /* общий счётчик позиций — для строки состояния */
+  void *memo;             /* RtMemo[nmemo] — уже собранные позиции (с .83) */
+  int nmemo;
   wchar_t lastTpName[200];
   ULONGLONG t0;
 } RtJob;
@@ -1353,9 +1357,117 @@ static void rt_dump_product(SQLHDBC dbc, const RtObj *o, CardRow *rows, RtJob *j
   rt_log(j, L"===== конец проверки #%ld =====\r\n\r\n", o->id);
 }
 
+/* ---- уже собранное: повтор позиции — копией, без запросов ---------------------
+   Одна и та же подсборка или деталь входит во многие узлы (болт — в десяток), и
+   каждый раз это десяток-другой запросов. Позиция с тем же исполнением уже
+   собрана — её строки (сама и всё под ней) копируются: уровень сдвигается,
+   «входит в», количество и норма на изделие пересчитываются по новому месту
+   (с 2026.09.23.83). Свои пометки позиции (маршрут, заготовка, КД) — из
+   собранного, пометки строки состава (кол-во, единица) — новые. */
+typedef struct {
+  long id, pc;
+  int row0, row1; /* строки в rows; row0 < 0 — позиция пропущена (материал, документ) */
+  wchar_t note[200];
+} RtMemo;
+
+static RtMemo *rt_memo_find(RtJob *j, long id, long pc) {
+  RtMemo *m = (RtMemo *)j->memo;
+  for (int i = 0; m && i < j->nmemo; i++)
+    if (m[i].id == id && m[i].pc == pc) return &m[i];
+  return NULL;
+}
+
+static RtMemo *rt_memo_add(RtJob *j, long id, long pc) {
+  if (j->dump || j->split) return NULL; /* в раздаче строки ещё не на месте; проверочная — подробно */
+  if (!j->memo) j->memo = calloc(RT_MAX, sizeof(RtMemo));
+  if (!j->memo || j->nmemo >= RT_MAX) return NULL;
+  RtMemo *m = &((RtMemo *)j->memo)[j->nmemo++];
+  memset(m, 0, sizeof(*m));
+  m->id = id;
+  m->pc = pc;
+  m->row0 = m->row1 = -1;
+  return m;
+}
+
+static void rt_note_add(wchar_t *note, const wchar_t *nt) {
+  if (!nt || !nt[0]) return;
+  size_t l = wcslen(note);
+  if (l + 4 >= 200) return;
+  _snwprintf(note + l, 200 - l, L"%s%s", l ? L"; " : L"", nt);
+  note[199] = 0;
+}
+
+/* пометки строки состава (а не позиции): кол-во не найдено, не в штуках, КД */
+static void rt_src_notes(int level, BOOL qtyFound, const RtEl *src, wchar_t *note) {
+  if (level && !qtyFound) rt_note_add(note, L"кол-во не найдено");
+  if (src && src->unit[0] && _wcsnicmp(src->unit, L"шт", 2) && iswalpha(src->unit[0])) {
+    wchar_t u[60];
+    _snwprintf(u, 60, L"кол-во в %s", src->unit);
+    u[59] = 0;
+    rt_note_add(note, u);
+  }
+  if (src && src->kd[0]) rt_note_add(note, src->kd);
+}
+
+static void rt_memo_copy(RtJob *j, const RtMemo *m, int level, const wchar_t *parentDes, double qty, BOOL qtyFound,
+                         double parentTot, const RtEl *src) {
+  int cnt = m->row1 - m->row0;
+  if (cnt <= 0) return;
+  if (j->n + cnt > RT_MAX) cnt = RT_MAX - j->n;
+  const RtRow *f0 = &j->rows[m->row0];
+  double newTot = qty * parentTot;
+  double factor = f0->qtyTot != 0 ? newTot / f0->qtyTot : 0;
+  int dl = level - f0->level;
+  rt_log(j, L"%*s%s %s — повтор: из уже собранного (строк %d), кол-во ", level * 2, L"", f0->f[RC_DES],
+         f0->f[RC_NAME], cnt);
+  for (int k = 0; k < cnt; k++) {
+    RtRow *d = &j->rows[j->n++];
+    *d = j->rows[m->row0 + k];
+    d->level += dl;
+    if (k == 0) {
+      d->qty = qty;
+      d->qtyTot = newTot;
+      lstrcpynW(d->f[RC_PARENT], parentDes, 200);
+      rt_fmt(d->qty, 3, d->f[RC_QTY], 200);
+      lstrcpynW(d->f[RC_NOTE], m->note, 200);
+      rt_src_notes(level, qtyFound, src, d->f[RC_NOTE]);
+      rt_log(j, L"%s\r\n", d->f[RC_QTY]);
+    } else {
+      d->qtyTot *= factor;
+    }
+    rt_fmt(d->qtyTot, 3, d->f[RC_QTYTOT], 200);
+    if (d->hasNorm) rt_fmt(floor(d->norm1 * 1000 + 0.5) / 1000 * d->qtyTot, 3, d->f[RC_NORMTOT], 200);
+    if (j->notify)
+      PostMessageW(j->notify, WM_RT_PROGRESS, (WPARAM)(j->shared ? InterlockedIncrement(j->shared) : j->n), 0);
+  }
+}
+
+/* задача для потока: ветка состава с её местом в дереве */
+typedef struct {
+  RtEl el;
+  int level;
+  double tot;
+  wchar_t des[200];
+} RtTask;
+
+static void rt_plan_add(RtJob *j, int v) {
+  if (!j->plan) j->plan = (int *)malloc(sizeof(int) * RT_MAX * 2);
+  if (j->plan && j->nplan < RT_MAX * 2) j->plan[j->nplan++] = v;
+}
+
 static void rt_walk(SQLHDBC dbc, long id, int level, const wchar_t *parentDes, double qty, BOOL qtyFound,
                     double parentTot, const wchar_t *elSection, const RtEl *src, CardRow *rows, RtJob *j) {
   if (j->n >= RT_MAX || rt_late(j)) return; /* по кругу не уйдёт: глубина не больше RT_DEPTH */
+  long keyPc = src ? src->pc : 0;
+  if (!j->dump && !j->split) {
+    const RtMemo *hit = rt_memo_find(j, id, keyPc);
+    /* кол-во на изделие было 0 — пересчитать нечем, собрать заново */
+    if (hit && !(hit->row0 >= 0 && j->rows[hit->row0].qtyTot == 0)) {
+      if (hit->row0 >= 0) rt_memo_copy(j, hit, level, parentDes, qty, qtyFound, parentTot, src);
+      return;
+    }
+  }
+  RtMemo *memo = rt_memo_add(j, id, keyPc);
   RtObj o;
   if (!rt_obj(dbc, id, &o, rows, j)) return;
   /* исполнение — то, на которое ссылается строка техсостава: у «-01» свой
@@ -1370,13 +1482,15 @@ static void rt_walk(SQLHDBC dbc, long id, int level, const wchar_t *parentDes, d
   BOOL product = o.desAttr || o.tpCard || o.pfCard || o.tcCard;
   if (level > 0 && (!product || !rt_looks_des(o.des) || (elSection && wcsstr(elSection, L"атериал")))) {
     rt_log(j, L"  %*s· пропуск «%s» — нет обозначения (материал?)\r\n", level * 2, L"", o.objName);
-    return;
+    return; /* memo->row0 < 0: повтор — тоже пропуск */
   }
   if (level > 0 && (rt_is_doc(o.des, o.objName) || (elSection && wcsstr(elSection, L"окумент")))) {
     rt_log(j, L"  %*s· пропуск «%s» — документ\r\n", level * 2, L"", o.objName);
     return;
   }
+  int myRow = j->n;
   RtRow *r = &j->rows[j->n++];
+  if (j->split) rt_plan_add(j, myRow);
   memset(r, 0, sizeof(*r));
   r->id = id;
   r->level = level;
@@ -1398,7 +1512,7 @@ static void rt_walk(SQLHDBC dbc, long id, int level, const wchar_t *parentDes, d
     j->diagShown |= level ? 2 : 1;
     rt_diag(dbc, &o, rows, j);
   }
-  wchar_t notes[5][200] = {L"", L"", L"", L"", L""};
+  wchar_t notes[2][200] = {L"", L""}; /* своё у позиции: маршрут, заготовка */
   rt_route(dbc, &o, rows, j, r->f[RC_ROUTE], 200, notes[0], 60);
   r->tp = j->lastTp;
   r->tpVer = j->lastTpVer;
@@ -1406,11 +1520,6 @@ static void rt_walk(SQLHDBC dbc, long id, int level, const wchar_t *parentDes, d
   lstrcpynW(r->tpName, j->lastTpName, 200);
   r->par = o.par;
   r->prodConf = o.prodConf;
-  if (level && !qtyFound) lstrcpynW(notes[2], L"кол-во не найдено", 60);
-  /* количество не в штуках (м, кг…) — столбец «Количество, шт» иначе врёт */
-  if (src && src->unit[0] && _wcsnicmp(src->unit, L"шт", 2) && iswalpha(src->unit[0]))
-    _snwprintf(notes[3], 200, L"кол-во в %s", src->unit);
-  if (src && src->kd[0]) lstrcpynW(notes[4], src->kd, 200);
   RtEl *el = (RtEl *)malloc(sizeof(RtEl) * 150);
   long variant = 0;
   int kdBefore = j->kdUsed;
@@ -1442,31 +1551,45 @@ static void rt_walk(SQLHDBC dbc, long id, int level, const wchar_t *parentDes, d
     else if (level) j->dumpDet++;
     rt_dump_product(dbc, &o, rows, j);
   }
-  for (int i = 0; i < 6; i++) {
-    const wchar_t *nt = i < 5 ? notes[i] : kdNote;
-    if (!nt[0]) continue;
-    size_t l = wcslen(r->f[RC_NOTE]);
-    if (l + 4 >= 200) break;
-    _snwprintf(r->f[RC_NOTE] + l, 200 - l, L"%s%s", l ? L"; " : L"", nt);
-    r->f[RC_NOTE][199] = 0;
-  }
+  /* пометки: свои у позиции (маршрут, заготовка, КД) — их помнит memo; строки состава — свои у места */
+  wchar_t own[200] = L"";
+  rt_note_add(own, notes[0]);
+  rt_note_add(own, notes[1]);
+  rt_note_add(own, kdNote);
+  lstrcpynW(r->f[RC_NOTE], own, 200);
+  rt_src_notes(level, qtyFound, src, r->f[RC_NOTE]);
+  if (memo) lstrcpynW(memo->note, own, 200);
   if (level >= RT_DEPTH) {
     free(el);
+    if (memo) memo->row0 = myRow, memo->row1 = j->n;
     return;
   }
   double tot = r->qtyTot;
   wchar_t myDes[200];
   lstrcpynW(myDes, o.des, 200);
-  if (level == 0 && j->split && ne > 1) { /* ветки корня обойдут потоки — rt_walk_parallel */
-    j->rootEl = el;
-    j->rootNe = ne;
-    j->rootTot = tot;
-    lstrcpynW(j->rootDes, myDes, 200);
-    return;
+  if (j->split) {
+    /* Раздача: веток у корня много (8 и больше) — задачи они; мало — их
+       состав (уровень 2), иначе потоки простаивают на одной большой ветке */
+    if (level == 0) j->splitDepth = ne >= 8 ? 1 : 2;
+    if (level + 1 >= j->splitDepth) {
+      if (!j->tasks) j->tasks = calloc(RT_MAX, sizeof(RtTask));
+      for (int i = 0; i < ne && j->tasks && j->ntask < RT_MAX; i++) {
+        RtTask *t = &((RtTask *)j->tasks)[j->ntask];
+        t->el = el[i];
+        t->level = level + 1;
+        t->tot = tot;
+        lstrcpynW(t->des, myDes, 200);
+        rt_plan_add(j, -(j->ntask + 1));
+        j->ntask++;
+      }
+      free(el);
+      return;
+    }
   }
   for (int i = 0; i < ne && !rt_late(j); i++)
     rt_walk(dbc, el[i].child, level + 1, myDes, el[i].qty, el[i].qtyFound, tot, el[i].section, &el[i], rows, j);
   free(el);
+  if (memo) memo->row0 = myRow, memo->row1 = j->n;
 }
 
 /* найти изделие по обозначению: у кого есть карточки (техсостав, ТП, заготовка) */
@@ -1574,10 +1697,10 @@ static RtJob *rt_job_new(void);
 static void rt_job_free(RtJob *j);
 
 static void rt_branch(SQLHDBC dbc, RtJob *j, RtJob *w, int i, RtSeg *seg, CardRow *rows) {
-  RtEl *el = (RtEl *)j->rootEl;
+  RtTask *t = &((RtTask *)j->tasks)[i];
   seg->row0 = w->n;
   seg->log0 = w->logLen;
-  rt_walk(dbc, el[i].child, 1, j->rootDes, el[i].qty, el[i].qtyFound, j->rootTot, el[i].section, &el[i], rows, w);
+  rt_walk(dbc, t->el.child, t->level, t->des, t->el.qty, t->el.qtyFound, t->tot, t->el.section, &t->el, rows, w);
   seg->row1 = w->n;
   seg->log1 = w->logLen;
   seg->done = TRUE;
@@ -1594,7 +1717,7 @@ static DWORD WINAPI rt_worker(LPVOID param) {
   g_qTimeout = 30;
   while (rows && !rt_late(j)) {
     LONG i = InterlockedIncrement(k->next) - 1;
-    if (i >= j->rootNe) break;
+    if (i >= j->ntask) break;
     k->seg[i].worker = k->idx;
     rt_branch(dbc, j, w, (int)i, &k->seg[i], rows);
   }
@@ -1615,8 +1738,8 @@ static void rt_log_raw(RtJob *j, const wchar_t *s, int n) {
 }
 
 static void rt_walk_parallel(SQLHDBC dbc, RtJob *j, CardRow *rows) {
-  int ne = j->rootNe, nw = ne < RT_WORKERS ? ne : RT_WORKERS;
-  RtSeg *seg = (RtSeg *)calloc((size_t)ne, sizeof(RtSeg));
+  int nt = j->ntask, nw = nt < RT_WORKERS ? nt : RT_WORKERS;
+  RtSeg *seg = (RtSeg *)calloc((size_t)nt, sizeof(RtSeg));
   RtWork work[RT_WORKERS];
   HANDLE th[RT_WORKERS];
   int started = 0;
@@ -1645,7 +1768,7 @@ static void rt_walk_parallel(SQLHDBC dbc, RtJob *j, CardRow *rows) {
   for (int k = 0; k < started; k++) CloseHandle(th[k]);
   /* что потоки не взяли (не подключились) — здесь же, по очереди */
   RtJob *rest = NULL;
-  for (int i = 0; seg && i < ne && !rt_late(j); i++)
+  for (int i = 0; seg && i < nt && !rt_late(j); i++)
     if (!seg[i].done) {
       if (!rest) rest = rt_job_new();
       if (!rest) break;
@@ -1656,12 +1779,25 @@ static void rt_walk_parallel(SQLHDBC dbc, RtJob *j, CardRow *rows) {
       seg[i].worker = started;
       rt_branch(dbc, j, rest, i, &seg[i], rows);
     }
-  /* сшить в порядке состава */
-  for (int i = 0; seg && i < ne; i++) {
-    if (!seg[i].done) continue;
+  /* сшить по плану: строки верхних уровней и ветки — в порядке состава */
+  RtRow *out = seg ? (RtRow *)calloc(RT_MAX, sizeof(RtRow)) : NULL;
+  int n = 0;
+  for (int p = 0; out && p < j->nplan; p++) {
+    int v = j->plan[p];
+    if (v >= 0) {
+      if (n < RT_MAX) out[n++] = j->rows[v];
+      continue;
+    }
+    int i = -v - 1;
+    if (i >= nt || !seg[i].done) continue;
     RtJob *w = seg[i].worker < started ? work[seg[i].worker].w : rest;
-    for (int r = seg[i].row0; r < seg[i].row1 && j->n < RT_MAX; r++) j->rows[j->n++] = w->rows[r];
+    for (int r = seg[i].row0; r < seg[i].row1 && n < RT_MAX; r++) out[n++] = w->rows[r];
     rt_log_raw(j, w->log + seg[i].log0, seg[i].log1 - seg[i].log0);
+  }
+  if (out) {
+    memcpy(j->rows, out, sizeof(RtRow) * (size_t)n);
+    j->n = n;
+    free(out);
   }
   for (int k = 0; k < started; k++) {
     j->kdUsed += work[k].w->kdUsed;
@@ -1671,8 +1807,8 @@ static void rt_walk_parallel(SQLHDBC dbc, RtJob *j, CardRow *rows) {
     j->kdUsed += rest->kdUsed;
     rt_job_free(rest);
   }
-  rt_log(j, L"\r\nВетвей состава %d, обход в %d потока — %.0f с\r\n", ne, started ? started : 1,
-         (double)(GetTickCount64() - t0) / 1000.0);
+  rt_log(j, L"\r\nВетвей — задач потокам %d (с уровня %d), потоков %d — %.0f с\r\n", nt, j->splitDepth,
+         started ? started : 1, (double)(GetTickCount64() - t0) / 1000.0);
   free(seg);
 }
 
@@ -1695,11 +1831,12 @@ static void rt_build(RtJob *j) {
     j->shared = &prog;
     j->split = !j->dump; /* проверочная выгрузка — по-старому, подряд */
     if (root) rt_walk(dbc, root, 0, j->order, 1, TRUE, 1, NULL, NULL, rows, j);
-    if (j->rootEl) {
-      rt_walk_parallel(dbc, j, rows);
-      free(j->rootEl);
-      j->rootEl = NULL;
-    }
+    if (j->ntask) rt_walk_parallel(dbc, j, rows);
+    free(j->tasks);
+    free(j->plan);
+    j->tasks = NULL;
+    j->plan = NULL;
+    j->ntask = j->nplan = 0;
     j->shared = NULL;
     j->split = FALSE;
     g_qTimeout = 0;
@@ -1728,6 +1865,9 @@ static RtJob *rt_job_new(void) {
 
 static void rt_job_free(RtJob *j) {
   if (!j) return;
+  free(j->memo);
+  free(j->tasks);
+  free(j->plan);
   free(j->rows);
   free(j->log);
   free(j);
