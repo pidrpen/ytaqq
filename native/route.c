@@ -35,7 +35,7 @@
 
 #define WM_RT_PROGRESS (WM_APP + 61)
 #define WM_RT_DONE (WM_APP + 62) /* lParam — RtJob*, освобождает получатель */
-#define RT_MAX 400
+#define RT_MAX 1000 /* с 2026.09.23.78 — и для выгрузки из PLM (export.c): большие сборки */
 #define RT_DEPTH 8
 #define RT_NCOL 15
 #define RT_LOG 500000 /* с проверочной выгрузкой (2026.09.23.59) — до полумиллиона знаков */
@@ -46,6 +46,12 @@ typedef struct {
   wchar_t f[RT_NCOL][200]; /* столбцы ведомости, как в файле */
   double qty, qtyTot, norm1;
   BOOL hasNorm;
+  /* связи позиции в PLM — для выгрузки (export.c): листы операций, материалов,
+     извещений берут их отсюда, а не ищут заново. 0 — не нашлось */
+  long tp, tpVer, tpVar; /* основной ТП, его версия и вариант с операциями */
+  long par, prodConf;    /* версия изделия (родитель) и исполнение */
+  long tcVariant;        /* вариант техсостава этого исполнения */
+  wchar_t tpName[200];
 } RtRow;
 
 typedef struct {
@@ -65,6 +71,7 @@ typedef struct {
   BOOL dump;       /* «Выгрузка для проверки»: всё найденное — в подробности */
   int dumpDet, dumpAsm;
   long lastTp, lastTpVer, lastTpVar; /* техпроцесс последней позиции: для выгрузки */
+  wchar_t lastTpName[200];
   ULONGLONG t0;
 } RtJob;
 
@@ -290,6 +297,7 @@ static void rt_route(SQLHDBC dbc, const RtObj *o, CardRow *rows, RtJob *j, wchar
   wchar_t sql[4600], err[280]; /* запрос операций с участком и номером — около 3600 знаков */
   long tp = 0, ver = 0;
   j->lastTp = j->lastTpVer = j->lastTpVar = 0;
+  j->lastTpName[0] = 0;
   if (o->tpCard) {
     _snwprintf(sql, 3600,
                L"SELECT TOP 20 tp.InfoObjectId, tp.Name, ISNULL(flag.V,N'нет'), ISNULL(av.L,0), 0 "
@@ -315,6 +323,7 @@ static void rt_route(SQLHDBC dbc, const RtObj *o, CardRow *rows, RtJob *j, wchar
     if (n > 0 && rows[0].n2) {
       tp = rows[0].n1;
       ver = rows[0].n2;
+      lstrcpynW(j->lastTpName, rows[0].s1, 200);
       rt_log(j, L"    ТП: %s (%ld)%s\r\n", rows[0].s1, tp, _wcsicmp(rows[0].s2, L"да") ? L", не помечен основным" : L"");
     }
   }
@@ -346,6 +355,7 @@ static void rt_route(SQLHDBC dbc, const RtObj *o, CardRow *rows, RtJob *j, wchar
     if (n > 0) {
       tp = rows[0].n1;
       ver = rows[0].n2;
+      lstrcpynW(j->lastTpName, rows[0].s1, 200);
       rt_log(j, L"    ТП по ссылке из техпроцесса: %s (%ld)\r\n", rows[0].s1, tp);
     } else if (n < 0) {
       rt_log(j, L"    ТП по ссылке: запрос не выполнился — %s\r\n", err);
@@ -1211,6 +1221,12 @@ static void rt_walk(SQLHDBC dbc, long id, int level, const wchar_t *parentDes, d
   }
   wchar_t notes[5][200] = {L"", L"", L"", L"", L""};
   rt_route(dbc, &o, rows, j, r->f[RC_ROUTE], 200, notes[0], 60);
+  r->tp = j->lastTp;
+  r->tpVer = j->lastTpVer;
+  r->tpVar = j->lastTpVar;
+  lstrcpynW(r->tpName, j->lastTpName, 200);
+  r->par = o.par;
+  r->prodConf = o.prodConf;
   if (level && !qtyFound) lstrcpynW(notes[2], L"кол-во не найдено", 60);
   /* количество не в штуках (м, кг…) — столбец «Количество, шт» иначе врёт */
   if (src && src->unit[0] && _wcsnicmp(src->unit, L"шт", 2) && iswalpha(src->unit[0]))
@@ -1219,6 +1235,7 @@ static void rt_walk(SQLHDBC dbc, long id, int level, const wchar_t *parentDes, d
   RtEl *el = (RtEl *)malloc(sizeof(RtEl) * 150);
   long variant = 0;
   int ne = el ? rt_children(dbc, &o, rows, j, el, 150, &variant) : 0;
+  r->tcVariant = variant;
   wchar_t kdNote[200] = L"";
   if (ne > 0 && !rt_late(j)) rt_kd_changes(dbc, variant, rows, j, el, ne, kdNote, 200);
   /* вид изделия */

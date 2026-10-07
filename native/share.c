@@ -281,6 +281,7 @@ static int share_serve_child(const wchar_t *reqPath, const wchar_t *ansPath) {
   wchar_t kind[16] = L"", q[400] = L"", from[200] = L"", idl[1400] = L"", rdes[200] = L"", rorder[120] = L"";
   long id = 0, rid = 0;
   BOOL rdump = FALSE;
+  unsigned rwhat = 0; /* выгрузка: какие листы */
   BOOL verbose = FALSE;
   wchar_t *p = req, *line;
   while ((line = share_next_line(&p)) != NULL) {
@@ -297,6 +298,7 @@ static int share_serve_child(const wchar_t *reqPath, const wchar_t *ansPath) {
     else if (!wcscmp(f[0], L"order")) lstrcpynW(rorder, f[1], 120);
     else if (!wcscmp(f[0], L"rid")) rid = wcstol(f[1], NULL, 10);
     else if (!wcscmp(f[0], L"dump")) rdump = f[1][0] == L'1';
+    else if (!wcscmp(f[0], L"what")) rwhat = (unsigned)wcstoul(f[1], NULL, 10);
   }
   free(req);
   wchar_t user[128], pc[64];
@@ -393,6 +395,30 @@ static int share_serve_child(const wchar_t *reqPath, const wchar_t *ansPath) {
       }
       lstrcpynW(out, j->log, SHARE_OUT);
       rt_job_free(j);
+    }
+  } else if (!wcscmp(kind, L"export") && rdes[0]) {
+    /* выгрузка коллеги: сбор здесь, ответ — строками таблиц «xt номер ячейки…» */
+    XpJob *x = xp_job_new();
+    if (x) {
+      lstrcpynW(x->rt->des, rdes, 200);
+      x->rt->rootId = rid;
+      x->what = rwhat;
+      x->rt->deadline = GetTickCount64() + 80000; /* исполнителя снимают через 90 с */
+      rt_log(x->rt, L"Выгрузка из PLM: %s (сбор у коллеги)\r\n", rdes);
+      xp_build(x);
+      if (x->rt->err[0]) {
+        sb_add(&b, L"rterr");
+        sb_field(&b, x->rt->err);
+        sb_add(&b, L"\n");
+      }
+      for (int k = 0; k < XP_NT; k++)
+        for (int r = 0; r < x->t[k].n; r++) {
+          sb_add(&b, L"xt\t%d", k);
+          for (int c = 0; c < x->t[k].ncols; c++) sb_field(&b, xp_cell(&x->t[k], r, c));
+          sb_add(&b, L"\n");
+        }
+      lstrcpynW(out, x->rt->log, SHARE_OUT);
+      xp_job_free(x);
     }
   } else {
     lstrcpynW(out, L"PLM\r\n\r\nНепонятный запрос.", SHARE_OUT);
@@ -832,6 +858,49 @@ static void share_route(RtJob *j) {
       for (int c = 0; c < RT_NCOL; c++) lstrcpynW(r->f[c], f[c + 2], 200);
     }
   }
+  if (p) rt_log(j, L"%s", p);
+  rt_log(j, L"\r\nPLM через компьютер: %s\r\n", via[0] ? via : L"коллеги");
+  free(a);
+}
+
+/* Выгрузка из PLM через раздающего: весь сбор у него, таблицы — строками.
+   У коллеги должна быть версия с выгрузкой (2026.09.23.78 и новее). */
+static void share_export(XpJob *x) {
+  RtJob *j = x->rt;
+  wchar_t body[400], d[200];
+  lstrcpynW(d, j->des, 200);
+  for (wchar_t *c = d; *c; c++)
+    if (*c == L'\t' || *c == L'\r' || *c == L'\n') *c = L' ';
+  _snwprintf(body, 400, L"kind\texport\ndes\t%s\nrid\t%ld\nwhat\t%u", d, j->rootId, x->what);
+  body[399] = 0;
+  wchar_t out[600];
+  wchar_t *a = share_ask(body, L"-xp", 100, out, 600);
+  if (!a) {
+    wchar_t *t = out;
+    if (!wcsncmp(t, L"PLM\r\n\r\n", 7)) t += 7;
+    lstrcpynW(j->err, t, 400);
+    return;
+  }
+  wchar_t via[200] = L"";
+  wchar_t *p = a, *line;
+  BOOL any = FALSE;
+  while ((line = share_next_line(&p)) != NULL) {
+    if (!wcscmp(line, L"text")) break;
+    wchar_t *f[24];
+    int k = share_split(line, f, 24);
+    if (!wcscmp(f[0], L"via") && k >= 2) lstrcpynW(via, f[1], 200);
+    else if (!wcscmp(f[0], L"rterr") && k >= 2) lstrcpynW(j->err, f[1], 400);
+    else if (!wcscmp(f[0], L"xt") && k >= 2) {
+      int t = (int)wcstol(f[1], NULL, 10);
+      if (t < 0 || t >= XP_NT) continue;
+      wchar_t **row = xp_row(&x->t[t]);
+      if (!row) break;
+      any = TRUE;
+      for (int c = 0; c < x->t[t].ncols && c + 2 < k; c++) xp_set(row, c, f[c + 2]);
+    }
+  }
+  if (!any && !j->err[0] && p && wcsstr(p, L"Непонятный запрос"))
+    lstrcpynW(j->err, L"У коллеги, который раздаёт PLM, старая версия CursorPad — выгрузки в ней нет.", 400);
   if (p) rt_log(j, L"%s", p);
   rt_log(j, L"\r\nPLM через компьютер: %s\r\n", via[0] ? via : L"коллеги");
   free(a);

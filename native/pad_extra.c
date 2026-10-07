@@ -1810,13 +1810,15 @@ static const Op1c *op1c_by_name(const wchar_t *name) {
   return hit;
 }
 
-/* Операция для 1С — уже так, как она записана в 1С. Ищем: по коду из
+/* Операция для 1С — так, как она записана в 1С. Ищем: по коду из
    справочника операций PLM, по номеру в начале названия («4110 Токарная»),
    по названию справочника, по имени объекта операции, по имени строки ТП.
    Не нашлось — «{код} {название}», как пишет PLM, или название без номера
-   строки («010 »); такая строка помечается в карточке (возвращается FALSE). */
-static BOOL ops_1c_add(const wchar_t *dirCode, const wchar_t *dirName, const wchar_t *tsName, const wchar_t *rowName) {
-  if (g_opsPendN >= OPS_1C) return TRUE;
+   строки («010 »), и возвращается FALSE. out пусто — названия нет вовсе.
+   Общая для кнопки «В 1С» и выгрузки (export.c). */
+static BOOL op1c_text(const wchar_t *dirCode, const wchar_t *dirName, const wchar_t *tsName, const wchar_t *rowName,
+                      wchar_t *out, int cap) {
+  out[0] = 0;
   const wchar_t *names[3] = {dirName, tsName, rowName};
   const Op1c *hit = op1c_by_num(dirCode);
   for (int i = 0; i < 3 && !hit; i++) {
@@ -1831,10 +1833,8 @@ static BOOL ops_1c_add(const wchar_t *dirCode, const wchar_t *dirName, const wch
     }
     if (!hit) hit = op1c_by_name(s);
   }
-  wchar_t *dst = g_opsPend[g_opsPendN];
   if (hit) {
-    lstrcpynW(dst, hit->name, PLM_COL1);
-    g_opsPendN++;
+    lstrcpynW(out, hit->name, cap);
     return TRUE;
   }
   const wchar_t *src = NULL;
@@ -1843,14 +1843,21 @@ static BOOL ops_1c_add(const wchar_t *dirCode, const wchar_t *dirName, const wch
   if (!src) return TRUE;
   while (*src == L' ') src++;
   src += op_num_prefix(src);
-  if (dirCode && dirCode[0]) _snwprintf(dst, PLM_COL1, L"%s %s", dirCode, src);
-  else lstrcpynW(dst, src, PLM_COL1);
-  dst[PLM_COL1 - 1] = 0;
-  int n = (int)wcslen(dst);
-  while (n > 0 && dst[n - 1] == L' ') dst[--n] = 0;
-  if (!n) return TRUE;
-  g_opsPendN++;
-  return FALSE;
+  if (dirCode && dirCode[0]) _snwprintf(out, cap, L"%s %s", dirCode, src);
+  else lstrcpynW(out, src, cap);
+  out[cap - 1] = 0;
+  int n = (int)wcslen(out);
+  while (n > 0 && out[n - 1] == L' ') out[--n] = 0;
+  return n == 0;
+}
+
+/* в очередь «В 1С»; FALSE — операции нет в справочнике 1С (карточка помечает) */
+static BOOL ops_1c_add(const wchar_t *dirCode, const wchar_t *dirName, const wchar_t *tsName, const wchar_t *rowName) {
+  if (g_opsPendN >= OPS_1C) return TRUE;
+  wchar_t *dst = g_opsPend[g_opsPendN];
+  BOOL found = op1c_text(dirCode, dirName, tsName, rowName, dst, PLM_COL1);
+  if (dst[0]) g_opsPendN++;
+  return found;
 }
 
 /* Состав техпроцесса: ТП → ActualVersion → MainVariantInVersion → дети
@@ -3751,8 +3758,10 @@ done:
 }
 
 #include "route.c" /* маршрутная ведомость: тем же путём по PLM, что карточка */
+#include "export.c" /* выгрузка из PLM: каркас на обходе ведомости */
 #include "share.c"
 #include "route_ui.c"
+#include "export_ui.c"
 
 /* ---- столбец «Заготовка» в фоне ------------------------------------------- */
 #define WM_PF_DONE (WM_APP + 16) /* lParam — PfJob*, освобождает получатель */

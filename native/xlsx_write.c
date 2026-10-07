@@ -1,7 +1,8 @@
 /* ---- Запись простого .xlsx ---------------------------------------------------
 
-   Один лист, строки текстом или числом, жирная шапка с переносом, рамки,
-   ширины столбцов. Файл .xlsx — это zip с несколькими xml внутри; пишем его
+   Листы со строками текстом или числом, жирная шапка с переносом, рамки,
+   ширины столбцов. xl_save — один лист (маршрутная ведомость), xl_save_book —
+   несколько (выгрузка из PLM, export.c). Файл .xlsx — это zip с несколькими xml внутри; пишем его
    сами, без сжатия (метод «store»): Excel такие открывает, а библиотек не
    нужно. Строки — «inlineStr», без таблицы общих строк. */
 
@@ -156,7 +157,21 @@ typedef struct {
      формулой Excel — поменяли число в файле, пересчиталось само */
   int prodCol, prodA, prodB;
   int zoom; /* масштаб «Разметки страницы», %; 0 — 70 */
+  /* простой лист данных (выгрузка): шрифт 11, текст слева, высота строки —
+     своя у каждой, фильтр на шапке, печать A4 в ширину листа. 0 — как у
+     маршрутной ведомости: шрифт 14 под печать A3 */
+  int plain;
 } XlSheet;
+
+/* лист книги для xl_save_book */
+typedef struct {
+  const wchar_t *name; /* имя ярлыка: до 31 знака, без []:*?/\ */
+  const wchar_t *title;
+  const XlSheet *sh;
+  int nrows;
+  const wchar_t *(*cell)(void *, int, int);
+  void *ctx;
+} XlBookSheet;
 
 static BOOL xl_is_num(const wchar_t *s, double *v) {
   if (!s || !*s) return FALSE;
@@ -216,90 +231,20 @@ static int xl_lines(const wchar_t *t, int w) {
   return lines;
 }
 
-/* cell(row, col) — текст ячейки строки данных; title — заголовок над шапкой,
-   NULL или пусто — без него: шапка в первой строке */
-static BOOL xl_save(const wchar_t *path, const wchar_t *title, const XlSheet *sh, int nrows,
-                    const wchar_t *(*cell)(void *, int, int), void *ctx) {
-  XlEntry e[6];
-  memset(e, 0, sizeof(e));
-  e[0].name = "[Content_Types].xml";
-  xl_puts(&e[0].data,
-          "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n"
-          "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">"
-          "<Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/>"
-          "<Default Extension=\"xml\" ContentType=\"application/xml\"/>"
-          "<Override PartName=\"/xl/workbook.xml\" "
-          "ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml\"/>"
-          "<Override PartName=\"/xl/worksheets/sheet1.xml\" "
-          "ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\"/>"
-          "<Override PartName=\"/xl/styles.xml\" "
-          "ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml\"/>"
-          "</Types>");
-  e[1].name = "_rels/.rels";
-  xl_puts(&e[1].data,
-          "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n"
-          "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">"
-          "<Relationship Id=\"rId1\" "
-          "Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" "
-          "Target=\"xl/workbook.xml\"/></Relationships>");
+/* xml одного листа. cell(row, col) — текст ячейки строки данных; title —
+   заголовок над шапкой, NULL или пусто — без него: шапка в первой строке.
+   Стили — из xl_styles: 1/2 — шапка и ячейка ведомости (шрифт 14), 3 —
+   заголовок, 4/5 — шапка и ячейка простого листа (шрифт 11, слева). */
+static void xl_sheet_xml(XlBuf *s, const wchar_t *title, const XlSheet *sh, int nrows,
+                         const wchar_t *(*cell)(void *, int, int), void *ctx) {
   BOOL hasTitle = title && title[0];
   int hr = hasTitle ? 2 : 1; /* строка шапки */
-  e[2].name = "xl/workbook.xml";
-  xl_puts(&e[2].data,
-          "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n"
-          "<workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" "
-          "xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\">"
-          "<sheets><sheet name=\"Лист1\" sheetId=\"1\" r:id=\"rId1\"/></sheets>"
-          /* заголовок и шапка печатаются на каждом листе */
-          "<definedNames><definedName name=\"_xlnm.Print_Titles\" localSheetId=\"0\">"
-          "'Лист1'!$1:$");
-  xl_puts(&e[2].data, hasTitle ? "2" : "1");
-  xl_puts(&e[2].data, "</definedName></definedNames><calcPr fullCalcOnLoad=\"1\"/></workbook>");
-  e[3].name = "xl/_rels/workbook.xml.rels";
-  xl_puts(&e[3].data,
-          "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n"
-          "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">"
-          "<Relationship Id=\"rId1\" "
-          "Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" "
-          "Target=\"worksheets/sheet1.xml\"/>"
-          "<Relationship Id=\"rId2\" "
-          "Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles\" "
-          "Target=\"styles.xml\"/></Relationships>");
-  /* стили: 0 — обычный, 1 — шапка (жирный, серый фон, перенос, рамка),
-     2 — ячейка с рамкой и переносом, 3 — заголовок листа (жирный крупнее).
-     Шрифт 14, всё по центру (с 2026.09.23.51 — под печать ведомости) */
-  e[4].name = "xl/styles.xml";
-  xl_puts(&e[4].data,
-          "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n"
-          "<styleSheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\">"
-          "<fonts count=\"3\"><font><sz val=\"14\"/><name val=\"Arial\"/></font>"
-          "<font><b/><sz val=\"14\"/><name val=\"Arial\"/></font>"
-          "<font><b/><sz val=\"16\"/><name val=\"Arial\"/></font></fonts>"
-          "<fills count=\"3\"><fill><patternFill patternType=\"none\"/></fill>"
-          "<fill><patternFill patternType=\"gray125\"/></fill>"
-          "<fill><patternFill patternType=\"solid\"><fgColor rgb=\"FFE7E6E6\"/><bgColor indexed=\"64\"/>"
-          "</patternFill></fill></fills>"
-          "<borders count=\"2\"><border><left/><right/><top/><bottom/><diagonal/></border>"
-          "<border><left style=\"thin\"/><right style=\"thin\"/><top style=\"thin\"/><bottom style=\"thin\"/>"
-          "<diagonal/></border></borders>"
-          "<cellStyleXfs count=\"1\"><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\"/></cellStyleXfs>"
-          "<cellXfs count=\"4\"><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\"/>"
-          "<xf numFmtId=\"0\" fontId=\"1\" fillId=\"2\" borderId=\"1\" xfId=\"0\" applyFont=\"1\" applyFill=\"1\" "
-          "applyBorder=\"1\" applyAlignment=\"1\"><alignment horizontal=\"center\" vertical=\"center\" "
-          "wrapText=\"1\"/></xf>"
-          "<xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"1\" xfId=\"0\" applyBorder=\"1\" "
-          "applyAlignment=\"1\"><alignment horizontal=\"center\" vertical=\"center\" wrapText=\"1\"/></xf>"
-          "<xf numFmtId=\"0\" fontId=\"2\" fillId=\"0\" borderId=\"0\" xfId=\"0\" applyFont=\"1\" "
-          "applyAlignment=\"1\"><alignment horizontal=\"center\" vertical=\"center\"/></xf></cellXfs>"
-          "<cellStyles count=\"1\"><cellStyle name=\"Normal\" xfId=\"0\" builtinId=\"0\"/></cellStyles>"
-          "</styleSheet>");
-  e[5].name = "xl/worksheets/sheet1.xml";
-  XlBuf *s = &e[5].data;
+  const char *sHead = sh->plain ? "4" : "1", *sCell = sh->plain ? "5" : "2";
   xl_puts(s, "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n"
              "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\">"
              "<sheetPr><pageSetUpPr fitToPage=\"1\"/></sheetPr>"
              "<sheetViews>");
-  char tmp[160];
+  char tmp[200];
   BOOL hf = (sh->header && sh->header[0]) || (sh->footer && sh->footer[0]);
   if (hf) {
     /* есть колонтитулы — открывается сразу «Разметкой страницы»: листы как
@@ -328,30 +273,43 @@ static BOOL xl_save(const wchar_t *path, const wchar_t *title, const XlSheet *sh
     xl_text(s, title);
     xl_puts(s, "</t></is></c></row>");
   }
-  snprintf(tmp, sizeof(tmp), "<row r=\"%d\" ht=\"60\" customHeight=\"1\">", hr);
+  snprintf(tmp, sizeof(tmp), "<row r=\"%d\" ht=\"%d\" customHeight=\"1\">", hr, sh->plain ? 32 : 60);
   xl_puts(s, tmp);
   for (int c = 0; c < sh->ncols; c++) {
     char cn[4];
     xl_colname(c, cn);
-    snprintf(tmp, sizeof(tmp), "<c r=\"%s%d\" s=\"1\" t=\"inlineStr\"><is><t>", cn, hr);
+    snprintf(tmp, sizeof(tmp), "<c r=\"%s%d\" s=\"%s\" t=\"inlineStr\"><is><t>", cn, hr, sHead);
     xl_puts(s, tmp);
     xl_text(s, sh->head[c]);
     xl_puts(s, "</t></is></c>");
   }
   xl_puts(s, "</row>");
-  /* строки данных — одной высоты: по самой высокой (сколько строк текста в
-     ней при переносе), шрифт 14 — 17 пт на строку и 4 на поля (с
-     2026.09.23.61; раньше высоту подбирал Excel у каждой строки свою) */
+  /* Ведомость: строки одной высоты — по самой высокой (сколько строк текста
+     в ней при переносе), шрифт 14 — 17 пт на строку и 4 на поля (с
+     2026.09.23.61; раньше высоту подбирал Excel у каждой строки свою).
+     Простой лист: у каждой строки своя высота, шрифт 11 — 15 пт на строку;
+     ширина столбца мерится цифрой шрифта 14, а 11-го в неё входит больше */
   int maxLines = 1;
-  for (int r = 0; r < nrows; r++)
-    for (int c = 0; c < sh->ncols; c++) {
-      int l = xl_lines(cell(ctx, r, c), sh->width[c]);
-      if (l > maxLines) maxLines = l;
-    }
-  if (maxLines > 12) maxLines = 12;
-  double rowHt = maxLines * 17.0 + 4.0;
+  if (!sh->plain) {
+    for (int r = 0; r < nrows; r++)
+      for (int c = 0; c < sh->ncols; c++) {
+        int l = xl_lines(cell(ctx, r, c), sh->width[c]);
+        if (l > maxLines) maxLines = l;
+      }
+    if (maxLines > 12) maxLines = 12;
+  }
   for (int r = 0; r < nrows; r++) {
     int rr = r + hr + 1;
+    double rowHt = maxLines * 17.0 + 4.0;
+    if (sh->plain) {
+      int lines = 1;
+      for (int c = 0; c < sh->ncols; c++) {
+        int l = xl_lines(cell(ctx, r, c), sh->width[c] * 5 / 4);
+        if (l > lines) lines = l;
+      }
+      if (lines > 8) lines = 8;
+      rowHt = lines * 15.0 + 3.0;
+    }
     snprintf(tmp, sizeof(tmp), "<row r=\"%d\" ht=\"%.1f\" customHeight=\"1\">", rr, rowHt);
     xl_puts(s, tmp);
     for (int c = 0; c < sh->ncols; c++) {
@@ -363,15 +321,15 @@ static BOOL xl_save(const wchar_t *path, const wchar_t *title, const XlSheet *sh
         char ca[4], cb[4];
         xl_colname(sh->prodA, ca);
         xl_colname(sh->prodB, cb);
-        snprintf(tmp, sizeof(tmp), "<c r=\"%s%d\" s=\"2\"><f>%s%d*%s%d</f><v>%.10g</v></c>", cn, rr, ca, rr, cb, rr,
-                 a * b);
+        snprintf(tmp, sizeof(tmp), "<c r=\"%s%d\" s=\"%s\"><f>%s%d*%s%d</f><v>%.10g</v></c>", cn, rr, sCell, ca, rr,
+                 cb, rr, a * b);
         xl_puts(s, tmp);
       } else if (xl_is_num(v, &d)) {
-        snprintf(tmp, sizeof(tmp), "<c r=\"%s%d\" s=\"2\"><v>%.10g</v></c>", cn, rr, d);
+        snprintf(tmp, sizeof(tmp), "<c r=\"%s%d\" s=\"%s\"><v>%.10g</v></c>", cn, rr, sCell, d);
         xl_puts(s, tmp);
       } else {
-        snprintf(tmp, sizeof(tmp), "<c r=\"%s%d\" s=\"2\" t=\"inlineStr\"><is><t xml:space=\"preserve\">", cn,
-                 rr);
+        snprintf(tmp, sizeof(tmp), "<c r=\"%s%d\" s=\"%s\" t=\"inlineStr\"><is><t xml:space=\"preserve\">", cn,
+                 rr, sCell);
         xl_puts(s, tmp);
         xl_text(s, v ? v : L"");
         xl_puts(s, "</t></is></c>");
@@ -383,9 +341,20 @@ static BOOL xl_save(const wchar_t *path, const wchar_t *title, const XlSheet *sh
   char last[4];
   xl_colname(sh->ncols > 0 ? sh->ncols - 1 : 0, last);
   xl_puts(s, "</sheetData>");
+  if (sh->plain && nrows > 0) { /* фильтр на шапке: отобрать по детали, участку… */
+    snprintf(tmp, sizeof(tmp), "<autoFilter ref=\"A%d:%s%d\"/>", hr, last, hr + nrows);
+    xl_puts(s, tmp);
+  }
   if (hasTitle) {
     snprintf(tmp, sizeof(tmp), "<mergeCells count=\"1\"><mergeCell ref=\"A1:%s1\"/></mergeCells>", last);
     xl_puts(s, tmp);
+  }
+  if (sh->plain) {
+    /* простой лист: A4 (paperSize 9) альбомный, в ширину одной страницы */
+    xl_puts(s, "<pageMargins left=\"0.25\" right=\"0.25\" top=\"0.4\" bottom=\"0.4\" header=\"0.2\" footer=\"0.2\"/>"
+               "<pageSetup paperSize=\"9\" orientation=\"landscape\" fitToWidth=\"1\" fitToHeight=\"0\"/>"
+               "</worksheet>");
+    return;
   }
   /* печать: A3 (paperSize 8) альбомный, все столбцы — в ширину одной
      страницы (fitToWidth 1), в высоту — сколько выйдет (fitToHeight 0),
@@ -429,10 +398,144 @@ static BOOL xl_save(const wchar_t *path, const wchar_t *title, const XlSheet *sh
     xl_puts(s, "</headerFooter>");
   }
   xl_puts(s, "</worksheet>");
+}
+
+#define XL_MAX_SHEETS 12
+
+/* Книга из нескольких листов. Ярлыки — как названы, печатаемая шапка
+   (заголовок и строка столбцов) повторяется на каждой странице каждого листа. */
+static BOOL xl_save_book(const wchar_t *path, const XlBookSheet *bs, int n) {
+  if (n < 1 || n > XL_MAX_SHEETS) return FALSE;
+  XlEntry e[5 + XL_MAX_SHEETS];
+  memset(e, 0, sizeof(e));
+  char tmp[400];
+  e[0].name = "[Content_Types].xml";
+  xl_puts(&e[0].data,
+          "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n"
+          "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">"
+          "<Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/>"
+          "<Default Extension=\"xml\" ContentType=\"application/xml\"/>"
+          "<Override PartName=\"/xl/workbook.xml\" "
+          "ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml\"/>");
+  for (int i = 0; i < n; i++) {
+    snprintf(tmp, sizeof(tmp),
+             "<Override PartName=\"/xl/worksheets/sheet%d.xml\" "
+             "ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\"/>",
+             i + 1);
+    xl_puts(&e[0].data, tmp);
+  }
+  xl_puts(&e[0].data, "<Override PartName=\"/xl/styles.xml\" "
+                      "ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml\"/>"
+                      "</Types>");
+  e[1].name = "_rels/.rels";
+  xl_puts(&e[1].data,
+          "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n"
+          "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">"
+          "<Relationship Id=\"rId1\" "
+          "Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" "
+          "Target=\"xl/workbook.xml\"/></Relationships>");
+  e[2].name = "xl/workbook.xml";
+  XlBuf *w = &e[2].data;
+  xl_puts(w, "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n"
+             "<workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" "
+             "xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><sheets>");
+  for (int i = 0; i < n; i++) {
+    /* имя ярлыка: без запрещённых знаков, до 31 символа */
+    wchar_t nm[32];
+    lstrcpynW(nm, bs[i].name && bs[i].name[0] ? bs[i].name : L"Лист", 32);
+    for (wchar_t *c = nm; *c; c++)
+      if (wcschr(L"[]:*?/\\'", *c)) *c = L' ';
+    xl_puts(w, "<sheet name=\"");
+    xl_text(w, nm);
+    snprintf(tmp, sizeof(tmp), "\" sheetId=\"%d\" r:id=\"rId%d\"/>", i + 1, i + 1);
+    xl_puts(w, tmp);
+  }
+  xl_puts(w, "</sheets><definedNames>");
+  for (int i = 0; i < n; i++) {
+    snprintf(tmp, sizeof(tmp), "<definedName name=\"_xlnm.Print_Titles\" localSheetId=\"%d\">'", i);
+    xl_puts(w, tmp);
+    wchar_t nm[32];
+    lstrcpynW(nm, bs[i].name && bs[i].name[0] ? bs[i].name : L"Лист", 32);
+    for (wchar_t *c = nm; *c; c++)
+      if (wcschr(L"[]:*?/\\'", *c)) *c = L' ';
+    xl_text(w, nm);
+    snprintf(tmp, sizeof(tmp), "'!$1:$%d</definedName>", bs[i].title && bs[i].title[0] ? 2 : 1);
+    xl_puts(w, tmp);
+  }
+  xl_puts(w, "</definedNames><calcPr fullCalcOnLoad=\"1\"/></workbook>");
+  e[3].name = "xl/_rels/workbook.xml.rels";
+  XlBuf *rl = &e[3].data;
+  xl_puts(rl, "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n"
+              "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">");
+  for (int i = 0; i < n; i++) {
+    snprintf(tmp, sizeof(tmp),
+             "<Relationship Id=\"rId%d\" "
+             "Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" "
+             "Target=\"worksheets/sheet%d.xml\"/>",
+             i + 1, i + 1);
+    xl_puts(rl, tmp);
+  }
+  snprintf(tmp, sizeof(tmp),
+           "<Relationship Id=\"rId%d\" "
+           "Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles\" "
+           "Target=\"styles.xml\"/></Relationships>",
+           n + 1);
+  xl_puts(rl, tmp);
+  /* стили: 0 — обычный, 1 — шапка (жирный, серый фон, перенос, рамка),
+     2 — ячейка с рамкой и переносом, 3 — заголовок листа (жирный крупнее).
+     Шрифт 14, всё по центру (с 2026.09.23.51 — под печать ведомости).
+     4, 5 — шапка и ячейка простого листа выгрузки: шрифт 11, ячейка слева
+     и сверху (с 2026.09.23.78) */
+  e[4].name = "xl/styles.xml";
+  xl_puts(&e[4].data,
+          "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n"
+          "<styleSheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\">"
+          "<fonts count=\"5\"><font><sz val=\"14\"/><name val=\"Arial\"/></font>"
+          "<font><b/><sz val=\"14\"/><name val=\"Arial\"/></font>"
+          "<font><b/><sz val=\"16\"/><name val=\"Arial\"/></font>"
+          "<font><sz val=\"11\"/><name val=\"Arial\"/></font>"
+          "<font><b/><sz val=\"11\"/><name val=\"Arial\"/></font></fonts>"
+          "<fills count=\"3\"><fill><patternFill patternType=\"none\"/></fill>"
+          "<fill><patternFill patternType=\"gray125\"/></fill>"
+          "<fill><patternFill patternType=\"solid\"><fgColor rgb=\"FFE7E6E6\"/><bgColor indexed=\"64\"/>"
+          "</patternFill></fill></fills>"
+          "<borders count=\"2\"><border><left/><right/><top/><bottom/><diagonal/></border>"
+          "<border><left style=\"thin\"/><right style=\"thin\"/><top style=\"thin\"/><bottom style=\"thin\"/>"
+          "<diagonal/></border></borders>"
+          "<cellStyleXfs count=\"1\"><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\"/></cellStyleXfs>"
+          "<cellXfs count=\"6\"><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\"/>"
+          "<xf numFmtId=\"0\" fontId=\"1\" fillId=\"2\" borderId=\"1\" xfId=\"0\" applyFont=\"1\" applyFill=\"1\" "
+          "applyBorder=\"1\" applyAlignment=\"1\"><alignment horizontal=\"center\" vertical=\"center\" "
+          "wrapText=\"1\"/></xf>"
+          "<xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"1\" xfId=\"0\" applyBorder=\"1\" "
+          "applyAlignment=\"1\"><alignment horizontal=\"center\" vertical=\"center\" wrapText=\"1\"/></xf>"
+          "<xf numFmtId=\"0\" fontId=\"2\" fillId=\"0\" borderId=\"0\" xfId=\"0\" applyFont=\"1\" "
+          "applyAlignment=\"1\"><alignment horizontal=\"center\" vertical=\"center\"/></xf>"
+          "<xf numFmtId=\"0\" fontId=\"4\" fillId=\"2\" borderId=\"1\" xfId=\"0\" applyFont=\"1\" applyFill=\"1\" "
+          "applyBorder=\"1\" applyAlignment=\"1\"><alignment horizontal=\"center\" vertical=\"center\" "
+          "wrapText=\"1\"/></xf>"
+          "<xf numFmtId=\"0\" fontId=\"3\" fillId=\"0\" borderId=\"1\" xfId=\"0\" applyFont=\"1\" applyBorder=\"1\" "
+          "applyAlignment=\"1\"><alignment horizontal=\"left\" vertical=\"top\" wrapText=\"1\"/></xf></cellXfs>"
+          "<cellStyles count=\"1\"><cellStyle name=\"Normal\" xfId=\"0\" builtinId=\"0\"/></cellStyles>"
+          "</styleSheet>");
+  static char sheetNames[XL_MAX_SHEETS][32];
+  for (int i = 0; i < n; i++) {
+    snprintf(sheetNames[i], sizeof(sheetNames[i]), "xl/worksheets/sheet%d.xml", i + 1);
+    e[5 + i].name = sheetNames[i];
+    xl_sheet_xml(&e[5 + i].data, bs[i].title, bs[i].sh, bs[i].nrows, bs[i].cell, bs[i].ctx);
+  }
+  int ne = 5 + n;
   BOOL ok = TRUE;
-  for (int i = 0; i < 6; i++)
+  for (int i = 0; i < ne; i++)
     if (!e[i].data.p) ok = FALSE;
-  if (ok) ok = xl_zip_write(path, e, 6);
-  for (int i = 0; i < 6; i++) free(e[i].data.p);
+  if (ok) ok = xl_zip_write(path, e, ne);
+  for (int i = 0; i < ne; i++) free(e[i].data.p);
   return ok;
+}
+
+/* один лист «Лист1» — маршрутная ведомость */
+static BOOL xl_save(const wchar_t *path, const wchar_t *title, const XlSheet *sh, int nrows,
+                    const wchar_t *(*cell)(void *, int, int), void *ctx) {
+  XlBookSheet one = {L"Лист1", title, sh, nrows, cell, ctx};
+  return xl_save_book(path, &one, 1);
 }
