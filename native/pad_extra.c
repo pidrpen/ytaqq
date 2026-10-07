@@ -1488,7 +1488,12 @@ static volatile LONG g_pfGen; /* номер задания столбца «За
    SQLCancel из окна (card_cancel_all): иначе «Стоп» ждал, пока досчитается
    запрос, — до полутора минут на каждый. */
 static __thread volatile LONG *g_qCancel;
-#define CARD_ACTIVE_MAX 96 /* до 32 потоков сбора, у каждого по запросу, — с запасом */
+/* Потоки сбора (с .89, их бывает до 128): каждый мелкий запрос — на одном ядре
+   сервера (OPTION(MAXDOP 1)). Иначе сервер делит запрос ещё на свои потоки, и
+   при сотне подключений они кончаются у всего PLM; одноядерные мелкие
+   запросы при большом их числе ещё и быстрее в сумме. */
+static __thread BOOL g_qSerial;
+#define CARD_ACTIVE_MAX 300 /* до 128 потоков сбора, у каждого по запросу, — с запасом */
 static struct {
   SQLHSTMT st;
   volatile LONG *cancel;
@@ -1537,7 +1542,19 @@ static int card_query(SQLHDBC dbc, const wchar_t *sql, CardRow *rows, int max, w
   if (g_qTimeout > 0)
     SQLSetStmtAttr(st, SQL_ATTR_QUERY_TIMEOUT, (SQLPOINTER)(SQLULEN)g_qTimeout, 0);
   int slot = card_active_add(st);
-  if ((g_qCancel && *g_qCancel) || !SQL_SUCCEEDED(SQLExecDirectW(st, (SQLWCHAR *)sql, SQL_NTS))) {
+  wchar_t *ser = NULL;
+  if (g_qSerial && !wcsstr(sql, L"OPTION(")) {
+    size_t l = wcslen(sql);
+    ser = (wchar_t *)malloc((l + 24) * sizeof(wchar_t));
+    if (ser) {
+      memcpy(ser, sql, l * sizeof(wchar_t));
+      wcscpy(ser + l, L" OPTION(MAXDOP 1)");
+      sql = ser;
+    }
+  }
+  BOOL ok = !(g_qCancel && *g_qCancel) && SQL_SUCCEEDED(SQLExecDirectW(st, (SQLWCHAR *)sql, SQL_NTS));
+  free(ser);
+  if (!ok) {
     if (err && ecap) {
       if (g_qCancel && *g_qCancel) lstrcpynW(err, L"остановлено", ecap);
       else odbc_err(st, SQL_HANDLE_STMT, err, ecap);

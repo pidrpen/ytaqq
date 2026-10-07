@@ -85,6 +85,7 @@ typedef struct {
   BOOL split;             /* до .86 — раздача веток верхних уровней; теперь всегда FALSE */
   volatile LONG *shared;  /* общий счётчик позиций — для строки состояния */
   volatile LONG progDone, progTotal; /* полоса хода (с .84): сделано из всего на этапе */
+  volatile LONG prog2Done, prog2Total; /* обход (с .89): задачи «ТП и заготовка» — отдельно от позиций */
   void *memo;             /* RtMemo[nmemo] — уже собранные позиции (с .83) */
   int nmemo, memoCap;
   BOOL fullShown;         /* «строк больше RT_MAX» — в подробности один раз */
@@ -1747,8 +1748,8 @@ static long rt_find_root(SQLHDBC dbc, const wchar_t *des, CardRow *rows, RtJob *
    берут готовое, а пришедшие, пока её собирает другой поток, ждут в её списке,
    не повторяя запросов. В конце дерево обходится в порядке состава — строки и
    журнал такие же, как при обходе подряд. */
-#define RT_WORKERS_MAX 32
-static int g_plmThreads = 12; /* потоков сбора: окно «Выгрузка из PLM», 4…32 (с .88) */
+#define RT_WORKERS_MAX 128
+static int g_plmThreads = 24; /* потоков сбора: окно «Выгрузка из PLM», 4…128 (с .88; до .89 — до 32) */
 #define RT_BLOCK 4096
 #define RT_HASH (1 << 17)
 
@@ -1793,6 +1794,7 @@ typedef struct {
   int *hash;          /* RT_HASH: номер позиции + 1 */
   int *queue, nq, capQ; /* ≥0 — вхождение: изделие и состав; <0 — позиция −(k+1): ТП и заготовка */
   int nb;               /* задач «ТП и заготовка» — для полосы хода */
+  int nskip;            /* вхождений-материалов и документов (под замком): в ведомость не идут — из счёта вон */
   int busy;           /* потоков с задачей на руках */
   ULONGLONG ms[5];    /* время по видам запросов (сумма по потокам): изделие, ТП, состав, КД, заготовка */
 } RtPool;
@@ -2024,9 +2026,16 @@ static void rt_node_expand(RtPool *p, int ni) {
   RtJob *j = p->j;
   RtNode *nd = rt_node(p, ni);
   RtItem *it = nd->item;
+  if (it->skip) { /* материал, документ: не позиция — из «найденных» вон */
+    AcquireSRWLockExclusive(&p->lock);
+    p->nskip++;
+    InterlockedExchange(&j->progTotal, p->nn - p->nskip);
+    ReleaseSRWLockExclusive(&p->lock);
+    return;
+  }
   LONG done = InterlockedIncrement(&j->progDone);
-  if (j->notify && !it->skip) PostMessageW(j->notify, WM_RT_PROGRESS, (WPARAM)done, 0);
-  if (it->skip || !it->nk) return;
+  if (j->notify) PostMessageW(j->notify, WM_RT_PROGRESS, (WPARAM)done, 0);
+  if (!it->nk) return;
   if (nd->level >= RT_DEPTH) {
     nd->deep = TRUE;
     return;
@@ -2054,7 +2063,7 @@ static void rt_node_expand(RtPool *p, int ni) {
   }
   nd->kids = kids;
   nd->nk = nk;
-  InterlockedExchange(&j->progTotal, p->nn + p->nb);
+  InterlockedExchange(&j->progTotal, p->nn - p->nskip);
   WakeAllConditionVariable(&p->cv);
   ReleaseSRWLockExclusive(&p->lock);
 }
@@ -2086,6 +2095,7 @@ static void rt_pool_node(RtPool *p, SQLHDBC dbc, RtJob *w, CardRow *rows, int ni
     if (more) { /* ТП и заготовка — отдельной задачей, раньше состава: состав (он позже) возьмут первым */
       rt_queue_push(p, -(it->idx + 1));
       p->nb++;
+      InterlockedExchange(&p->j->prog2Total, p->nb);
       WakeAllConditionVariable(&p->cv);
     }
     int nw = it->nwait, *wl = it->wait;
@@ -2112,7 +2122,7 @@ static void rt_pool_run(RtPool *p, SQLHDBC dbc, RtJob *w, CardRow *rows) {
     ReleaseSRWLockExclusive(&p->lock);
     if (it) {
       rt_item_eval_b(p, dbc, w, rows, it);
-      InterlockedIncrement(&p->j->progDone);
+      InterlockedIncrement(&p->j->prog2Done);
     } else {
       rt_pool_node(p, dbc, w, rows, ni);
     }
@@ -2137,6 +2147,7 @@ static DWORD WINAPI rt_pool_worker(LPVOID param) {
   CardRow *rows = (CardRow *)malloc(sizeof(CardRow) * 300);
   g_qTimeout = 30;
   g_qCancel = k->p->j->cancel;
+  g_qSerial = TRUE; /* мелкие запросы при десятках потоков — на одном ядре сервера (card_query) */
   if (rows) rt_pool_run(k->p, dbc, k->w, rows);
   free(rows);
   SQLDisconnect(dbc);
@@ -2203,6 +2214,8 @@ static void rt_walk_pool(SQLHDBC dbc, RtJob *j, CardRow *rows, long root) {
   InitializeConditionVariable(&p->cv);
   InterlockedExchange(&j->progDone, 0);
   InterlockedExchange(&j->progTotal, 1);
+  InterlockedExchange(&j->prog2Done, 0);
+  InterlockedExchange(&j->prog2Total, 0);
   int r0 = rt_node_new(p, root, -1, 0, 1, 1, TRUE, NULL);
   rt_queue_push(p, r0);
   RtPoolWork work[RT_WORKERS_MAX];
@@ -2226,7 +2239,9 @@ static void rt_walk_pool(SQLHDBC dbc, RtJob *j, CardRow *rows, long root) {
   if (me) {
     me->deadline = j->deadline;
     me->cancel = j->cancel;
+    g_qSerial = TRUE;
     rt_pool_run(p, dbc, me, rows);
+    g_qSerial = FALSE;
   }
   if (started) WaitForMultipleObjects((DWORD)started, th, TRUE, INFINITE);
   for (int k = 0; k < started; k++) {

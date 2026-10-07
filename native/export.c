@@ -184,6 +184,8 @@ static BOOL xp_late(XpJob *x) { return rt_late(x->rt); }
 static void xp_prog(XpJob *x, int stage, int total) {
   InterlockedExchange(&x->rt->progTotal, 0);
   InterlockedExchange(&x->rt->progDone, 0);
+  InterlockedExchange(&x->rt->prog2Total, 0);
+  InterlockedExchange(&x->rt->prog2Done, 0);
   x->stage = stage;
   InterlockedExchange(&x->rt->progTotal, total);
 }
@@ -553,6 +555,7 @@ static DWORD WINAPI xp_worker(LPVOID param) {
   if (!k->ok || !plm_connect(&env, &dbc, err, 280)) return 0; /* позиции возьмут другие */
   g_qTimeout = 60;
   g_qCancel = k->x->rt->cancel;
+  g_qSerial = TRUE;
   while (!xp_late(k->x)) {
     LONG i = InterlockedIncrement(k->next) - 1;
     if (i >= k->np) break;

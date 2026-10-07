@@ -18,7 +18,7 @@ static HWND g_xpWnd, g_xpDes, g_xpList, g_xpView, g_xpLog, g_xpChk[XP_NT], g_xpT
 /* Потоков больше — быстрее, пока успевает сервер PLM: каждый поток — своё
    подключение и свои запросы. За 16–24 обычно упирается в сервер, и
    прибавка мала, а другим пользователям PLM в это время медленнее. */
-static const int kXpThreads[] = {4, 8, 12, 16, 24, 32};
+static const int kXpThreads[] = {4, 8, 12, 16, 24, 32, 48, 64, 96, 128};
 static XpJob *g_xpJob; /* последняя собранная выгрузка */
 static volatile LONG g_xpBusy, g_xpCancel;
 static wchar_t g_xpStatus[300];
@@ -76,7 +76,7 @@ static void xp_prefs_load(void) {
   }
   for (int k = 0; k < XP_NT; k++)
     SendMessageW(g_xpChk[k], BM_SETCHECK, (what >> k) & 1 ? BST_CHECKED : BST_UNCHECKED, 0);
-  int sel = 2;
+  int sel = 4; /* 24 */
   for (int i = 0; i < (int)(sizeof(kXpThreads) / sizeof(kXpThreads[0])); i++)
     if (kXpThreads[i] == g_plmThreads) sel = i;
   SendMessageW(g_xpThr, CB_SETCURSEL, (WPARAM)sel, 0);
@@ -311,6 +311,7 @@ static int xp_permille(const XpJob *x) {
   BOOL ecn = ((x->what >> XP_ECN) & 1) != 0;
   int w0 = 50, w1 = sheets ? 35 : 0, w2 = ecn ? 15 : 0;
   LONG done = x->rt->progDone, total = x->rt->progTotal;
+  if (x->stage == XP_COMP) done += x->rt->prog2Done, total += x->rt->prog2Total; /* позиции и их ТП с заготовкой */
   double f = total > 0 ? (double)done / (double)total : 0;
   if (f > 1) f = 1;
   double base = 0, cur = w0;
@@ -411,8 +412,10 @@ static void xp_run_status(void) {
     _snwprintf(part, 80, st == XP_COMP ? L" · позиций %ld из %ld найденных" : st == XP_ECN ? L" · пачек %ld из %ld"
                                                                                : L" · позиций %ld из %ld",
                done, total);
-  wchar_t walked[60] = L"";
-  if (st == XP_COMP && total <= 0) _snwprintf(walked, 60, L" · пройдено позиций %d", g_xpCount);
+  wchar_t walked[80] = L"";
+  LONG d2 = x->rt->prog2Done, t2 = x->rt->prog2Total;
+  if (st == XP_COMP && total <= 0) _snwprintf(walked, 80, L" · пройдено позиций %d", g_xpCount);
+  else if (st == XP_COMP && t2 > 0) _snwprintf(walked, 80, L" · ТП и заготовки %ld из %ld", d2, t2);
   xp_status(L"Собираю %s… %d%%%s%s · %u:%02u", kXpStage[st][0] ? kXpStage[st] : L"состав", xp_permille(x) / 10,
             part, walked, (unsigned)(sec / 60), (unsigned)(sec % 60));
 }
@@ -515,7 +518,9 @@ static LRESULT CALLBACK XpProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
       if (i >= 0 && i < (int)(sizeof(kXpThreads) / sizeof(kXpThreads[0]))) g_plmThreads = kXpThreads[i];
       xp_prefs_save();
       xp_status(L"Потоков: %d — со следующего «Собрать»%s", g_plmThreads,
-                g_plmThreads > 16 ? L" (больше 16 — нагрузка на сервер PLM, прибавка обычно мала)" : L"");
+                g_plmThreads > 32 ? L" (больше 32 — сравните время с 24–32: упёрлось в сервер — прибавки нет, "
+                                    L"а PLM у всех медленнее)"
+                                  : L"");
     }
     return 0;
   }
