@@ -348,6 +348,7 @@ static BOOL g_statusOn = FALSE;
 static HINSTANCE g_inst;
 static int g_skin = 1; /* 0 system, 1 sword, 2 gauntlet, 3 fairy, 4 dragon */
 static BOOL g_sparkle = TRUE; /* у «Феи» — звёздочки при нажатии */
+static BOOL g_flame = TRUE;   /* у «Дракона» — пламя при нажатии */
 static int g_balloonKind; /* куда ведёт щелчок по всплывашке: 0 — изменения в папке, 1 — нарды */
 static HCURSOR g_staticCur[4];
 static HCURSOR g_ibeamCur[4];
@@ -398,7 +399,7 @@ static void show_status(const wchar_t *text);
 static void toggle_settings(void);
 static void save_cursor_pref(void);
 static void set_skin(int skin);
-static void fx_sync(void); /* fairy_fx.c: звёздочки при нажатии у «Феи» */
+static void fx_sync(void); /* fairy_fx.c: звёздочки у «Феи», пламя у «Дракона» */
 static void nardy_show(void); /* nardy.c: короткие нарды через общую папку */
 static void shashki_show(void); /* shashki.c: русские шашки — так же */
 static void start_lookup(const wchar_t *q);
@@ -1026,10 +1027,12 @@ static void load_cursor_pref(void) {
   int ox = 0, oy = 0, ow = 0, oh = 0, opt = 0;
   int sparkle = -1; /* нет в файле — искорки включены */
   int padMode = 0;
-  sscanf(buf, "%15s %d %d %15s %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d", skin, &bg,
-         &fg, eng, &autoOn, &theme, &aw, &ah, &cw, &ch, &pt, &keep, &ax, &ay, &cx, &cy, &cpt, &ox,
-         &oy, &ow, &oh, &opt, &sparkle, &padMode);
+  int flame = -1; /* нет в файле — пламя включено */
+  sscanf(buf, "%15s %d %d %15s %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d", skin,
+         &bg, &fg, eng, &autoOn, &theme, &aw, &ah, &cw, &ch, &pt, &keep, &ax, &ay, &cx, &cy, &cpt,
+         &ox, &oy, &ow, &oh, &opt, &sparkle, &padMode, &flame);
   g_sparkle = sparkle != 0;
+  g_flame = flame != 0;
   g_padMode = padMode == 1 ? 1 : 0;
   g_cardX = cx;
   g_cardY = cy;
@@ -1067,10 +1070,11 @@ static void save_cursor_pref(void) {
                   : g_skin == 3 ? "k4" : (g_skin == 2 ? "k3" : (g_skin == 0 ? "system" : "k2"));
   const char *e = g_engine == 4 ? "plm" : (g_engine == 5 ? "files" : "ai");
   char buf[280];
-  snprintf(buf, sizeof(buf), "%s %d %d %s %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d\n",
+  snprintf(buf, sizeof(buf), "%s %d %d %s %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d\n",
            v, g_alphaFollow, g_alphaPinned, e, g_autostart ? 1 : 0, g_theme, g_ansW, g_ansH,
            g_cardW, g_cardH, g_ansPt, g_ansKeepPos ? 1 : 0, g_ansX, g_ansY, g_cardX, g_cardY,
-           g_cardPt, g_ocrX, g_ocrY, g_ocrW, g_ocrH, g_ocrPt, g_sparkle ? 1 : 0, g_padMode);
+           g_cardPt, g_ocrX, g_ocrY, g_ocrW, g_ocrH, g_ocrPt, g_sparkle ? 1 : 0, g_padMode,
+           g_flame ? 1 : 0);
   HANDLE h = CreateFileW(g_prefPath, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
                          FILE_ATTRIBUTE_NORMAL, NULL);
   if (h == INVALID_HANDLE_VALUE) return;
@@ -2437,6 +2441,8 @@ static void tray_menu(HWND hwnd) {
   AppendMenuW(menu, MF_STRING | (g_sparkle ? MF_CHECKED : 0) | (g_skin == 3 ? 0 : MF_GRAYED), 20,
               L"   звёздочки при нажатии");
   AppendMenuW(menu, MF_STRING | (g_skin == 4 ? MF_CHECKED : 0), 25, L"Курсор: Дракон");
+  AppendMenuW(menu, MF_STRING | (g_flame ? MF_CHECKED : 0) | (g_skin == 4 ? 0 : MF_GRAYED), 26,
+              L"   пламя при нажатии");
   AppendMenuW(menu, MF_STRING | (g_skin == 0 ? MF_CHECKED : 0), 12, L"Курсор: обычный Windows");
   AppendMenuW(menu, MF_STRING, 13, mCur);
   AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
@@ -2461,6 +2467,12 @@ static void tray_menu(HWND hwnd) {
     save_cursor_pref();
     fx_sync();
     show_status(g_sparkle ? L"Звёздочки при нажатии включены" : L"Звёздочки при нажатии выключены");
+  }
+  else if (cmd == 26) {
+    g_flame = !g_flame;
+    save_cursor_pref();
+    fx_sync();
+    show_status(g_flame ? L"Пламя при нажатии включено" : L"Пламя при нажатии выключено");
   }
   else if (cmd == 12) set_skin(0);
   else if (cmd == 13) cycle_skin();
