@@ -1931,10 +1931,12 @@ static void rt_walk_parallel(SQLHDBC dbc, RtJob *j, CardRow *rows) {
   }
   for (int k = 0; k < started; k++) {
     j->kdUsed += work[k].w->kdUsed;
+    if (work[k].w->fullShown) rt_full(j); /* поток упёрся в предел строк */
     rt_job_free(work[k].w);
   }
   if (rest) {
     j->kdUsed += rest->kdUsed;
+    if (rest->fullShown) rt_full(j);
     rt_job_free(rest);
   }
   rt_log(j, L"\r\nВетвей — задач потокам %d (с уровня %d), потоков %d — %.0f с\r\n", nt, j->splitDepth,

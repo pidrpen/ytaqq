@@ -477,6 +477,7 @@ static LRESULT CALLBACK RtProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
     if (j->err[0] && !j->n) rt_status(L"%s", j->err);
     else if (g_rtCancel) rt_status(L"Остановлено: собрано %d позиций", j->n);
     else if (j->dump) rt_dump_save(j);
+    else if (j->fullShown) rt_status(L"%s · позиций %d за %.0f с", j->err, j->n, sec);
     else {
       int blanks = 0;
       for (int i = 0; i < j->n; i++)

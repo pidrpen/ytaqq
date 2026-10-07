@@ -479,6 +479,7 @@ static LRESULT CALLBACK XpProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
     for (int k = 0; k < XP_NT; k++) rows += x->t[k].n;
     if (x->rt->err[0] && !rows) xp_status(L"%s", x->rt->err);
     else if (g_xpCancel) xp_status(L"Остановлено: что успели — в таблице, можно сохранить");
+    else if (x->rt->fullShown) xp_status(L"%s · позиций %d за %.0f с", x->rt->err, x->t[XP_COMP].n, sec);
     else
       xp_status(L"Готово за %.0f с (обход %.0f, операции %.0f, извещения %.0f): позиций %d · заготовок %d · "
                 L"операций %d · материалов %d · инструмента %d · извещений %d",
