@@ -287,7 +287,7 @@ static BOOL rt_obj(SQLHDBC dbc, long id, RtObj *o, CardRow *rows, RtJob *j) {
 static void rt_route(SQLHDBC dbc, const RtObj *o, CardRow *rows, RtJob *j, wchar_t *out, int cap,
                      wchar_t *note, int ncap) {
   out[0] = 0;
-  wchar_t sql[3600], err[280];
+  wchar_t sql[4600], err[280]; /* запрос операций с участком и номером — около 3600 знаков */
   long tp = 0, ver = 0;
   j->lastTp = j->lastTpVer = j->lastTpVar = 0;
   if (o->tpCard) {
@@ -371,9 +371,9 @@ static void rt_route(SQLHDBC dbc, const RtObj *o, CardRow *rows, RtJob *j, wchar
   j->lastTp = tp;
   j->lastTpVer = ver;
   j->lastTpVar = parent;
-  /* операции по порядку и участок каждой: Area (с 2026.09.23.49 — прежде
+  /* операции по порядку ТП и участок каждой: Area (с 2026.09.23.49 — прежде
      цеха: в ведомости маршрут по участкам), нет — WorkShop; своё или у TSOperation */
-  _snwprintf(sql, 3600,
+  _snwprintf(sql, 4600,
              L"SELECT TOP 200 ch.InfoObjectId, ISNULL(ws.V,N''), ch.Name, ISNULL(num.N,0), 0 "
              L"FROM InfoObjects AS ch WITH(NOLOCK) "
              L"OUTER APPLY (SELECT TOP 1 ts.Link AS L FROM InfoObjectAttributes AS ts WITH(NOLOCK) "
@@ -387,14 +387,11 @@ static void rt_route(SQLHDBC dbc, const RtObj *o, CardRow *rows, RtJob *j, wchar
              L"AND NULLIF(COALESCE(lo.Name, " CARD_VALUE_SQL L", N''), N'') IS NOT NULL "
              L"ORDER BY CASE WHEN nkw.Value=N'Area' THEN 0 ELSE 1 END, "
              L"CASE WHEN a.OwnerId=ch.InfoObjectId THEN 0 ELSE 1 END) AS ws "
-             L"OUTER APPLY (SELECT TOP 1 ISNULL(nn.IntegerNumber,0) AS N "
-             L"FROM InfoObjectAttributes AS nn WITH(NOLOCK) "
-             L"JOIN NameKeys AS nkn WITH(NOLOCK) ON nkn.NameKeyId=nn.NameKeyId "
-             L"WHERE nn.OwnerId=ch.InfoObjectId AND nn.Outdated=0 "
-             L"AND nkn.Value IN (N'Number',N'OperationNumber',N'LocalId')) AS num "
-             L"WHERE ch.ParentId=%ld AND ch.Erased=0 ORDER BY num.N, ch.InfoObjectId",
+             /* порядок — по номеру операции (строка «005»), как в ТП: OP_NUM_APPLY */
+             OP_NUM_APPLY(L"ch.InfoObjectId")
+             L"WHERE ch.ParentId=%ld AND ch.Erased=0 ORDER BY " OP_NUM_ORDER L", ch.InfoObjectId",
              parent);
-  sql[3599] = 0;
+  sql[4599] = 0;
   int n = card_query(dbc, sql, rows, 200, err, 280);
   if (n < 0) {
     lstrcpynW(note, L"маршрут не прочитался", ncap);

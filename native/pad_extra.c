@@ -1741,29 +1741,116 @@ static int g_opsPendN;
 static wchar_t g_ops1c[OPS_1C][PLM_COL1];
 static int g_ops1cN;
 
-/* Для 1С нужно название из справочника операций (TSOperation), а не имя строки в
-   ТП: имя строки бывает с номером или своим текстом. Нет ссылки на справочник —
-   берём имя строки и срезаем с него ведущий номер вроде «005 ». */
-static void ops_1c_add(const wchar_t *dirName, BOOL hasDir, const wchar_t *rowName) {
-  if (g_opsPendN >= OPS_1C) return;
-  const wchar_t *src = (hasDir && dirName && dirName[0]) ? dirName : rowName;
-  if (!src || !src[0]) return;
-  while (*src == L' ') src++;
-  const wchar_t *p = src;
+/* Справочник операций 1С (make_ops_1c.py из «1с опер.xlsx»): в 1С операция
+   записана с номером впереди — «4110 Токарная», и в буфер кладётся ровно так.
+   Номер — тот же код, что у операции в справочнике операций PLM (Code): так
+   и выгрузка трудоёмкости в самом PLM пишет «{Code} {Name}». */
+#include "ops_1c.h"
+
+/* ведущий номер вроде «005 », «010.», «4110 »: длина вместе с разделителем */
+static int op_num_prefix(const wchar_t *s) {
+  const wchar_t *p = s;
   int digits = 0;
-  while (*p >= L'0' && *p <= L'9') {
-    p++;
-    digits++;
+  while (*p >= L'0' && *p <= L'9') p++, digits++;
+  if (digits < 2 || digits > 4 || !(*p == L' ' || *p == L'.' || *p == L'-')) return 0;
+  while (*p == L' ' || *p == L'.' || *p == L'-') p++;
+  return *p ? (int)(p - s) : 0;
+}
+
+/* для сравнения названий, как key в ops_1c.h: строчные, ё→е, один пробел,
+   без ведущего номера и точки в конце */
+static void op1c_norm(const wchar_t *s, wchar_t *out, int cap) {
+  while (*s == L' ') s++;
+  s += op_num_prefix(s);
+  int k = 0;
+  for (; *s && k < cap - 1; s++) {
+    wchar_t c = *s;
+    if (c == L' ' || c == L'\t' || c == 0xA0) {
+      if (k && out[k - 1] != L' ') out[k++] = L' ';
+      continue;
+    }
+    out[k++] = c;
   }
-  if (digits >= 2 && digits <= 4 && (*p == L' ' || *p == L'.' || *p == L'-')) {
-    while (*p == L' ' || *p == L'.' || *p == L'-') p++;
-    if (*p) src = p;
+  while (k && (out[k - 1] == L' ' || out[k - 1] == L'.')) k--;
+  out[k] = 0;
+  CharLowerBuffW(out, (DWORD)k);
+  for (wchar_t *c = out; *c; c++)
+    if (*c == L'ё') *c = L'е';
+}
+
+/* строка 1С по коду операции PLM («4110», «101» → «0101») */
+static const Op1c *op1c_by_num(const wchar_t *code) {
+  wchar_t d[8];
+  int k = 0;
+  for (const wchar_t *p = code ? code : L""; *p; p++) {
+    if (*p == L' ') continue;
+    if (*p < L'0' || *p > L'9' || k >= 4) return NULL; /* не номер классификатора */
+    d[k++] = *p;
+  }
+  if (!k) return NULL;
+  wchar_t num[5] = L"0000";
+  for (int i = 0; i < k; i++) num[4 - k + i] = d[i];
+  for (int i = 0; i < OPS_1C_N; i++)
+    if (!wcscmp(kOps1c[i].num, num)) return &kOps1c[i];
+  return NULL;
+}
+
+/* по названию — только если в 1С оно одно («Контроль» там дважды: 0200 и 0201) */
+static const Op1c *op1c_by_name(const wchar_t *name) {
+  if (!name || !name[0]) return NULL;
+  wchar_t key[PLM_COL1];
+  op1c_norm(name, key, PLM_COL1);
+  if (!key[0]) return NULL;
+  const Op1c *hit = NULL;
+  for (int i = 0; i < OPS_1C_N; i++)
+    if (!wcscmp(kOps1c[i].key, key)) {
+      if (hit) return NULL;
+      hit = &kOps1c[i];
+    }
+  return hit;
+}
+
+/* Операция для 1С — уже так, как она записана в 1С. Ищем: по коду из
+   справочника операций PLM, по номеру в начале названия («4110 Токарная»),
+   по названию справочника, по имени объекта операции, по имени строки ТП.
+   Не нашлось — «{код} {название}», как пишет PLM, или название без номера
+   строки («010 »); такая строка помечается в карточке (возвращается FALSE). */
+static BOOL ops_1c_add(const wchar_t *dirCode, const wchar_t *dirName, const wchar_t *tsName, const wchar_t *rowName) {
+  if (g_opsPendN >= OPS_1C) return TRUE;
+  const wchar_t *names[3] = {dirName, tsName, rowName};
+  const Op1c *hit = op1c_by_num(dirCode);
+  for (int i = 0; i < 3 && !hit; i++) {
+    if (!names[i] || !names[i][0]) continue;
+    const wchar_t *s = names[i];
+    while (*s == L' ') s++;
+    int pre = op_num_prefix(s);
+    if (pre >= 5) { /* «4110 Токарная»: четыре цифры — номер классификатора, а не строки ТП */
+      wchar_t num[8];
+      lstrcpynW(num, s, 5);
+      hit = op1c_by_num(num);
+    }
+    if (!hit) hit = op1c_by_name(s);
   }
   wchar_t *dst = g_opsPend[g_opsPendN];
-  lstrcpynW(dst, src, PLM_COL1);
+  if (hit) {
+    lstrcpynW(dst, hit->name, PLM_COL1);
+    g_opsPendN++;
+    return TRUE;
+  }
+  const wchar_t *src = NULL;
+  for (int i = 0; i < 3 && !src; i++)
+    if (names[i] && names[i][0]) src = names[i];
+  if (!src) return TRUE;
+  while (*src == L' ') src++;
+  src += op_num_prefix(src);
+  if (dirCode && dirCode[0]) _snwprintf(dst, PLM_COL1, L"%s %s", dirCode, src);
+  else lstrcpynW(dst, src, PLM_COL1);
+  dst[PLM_COL1 - 1] = 0;
   int n = (int)wcslen(dst);
   while (n > 0 && dst[n - 1] == L' ') dst[--n] = 0;
-  if (n) g_opsPendN++;
+  if (!n) return TRUE;
+  g_opsPendN++;
+  return FALSE;
 }
 
 /* Состав техпроцесса: ТП → ActualVersion → MainVariantInVersion → дети
@@ -1778,13 +1865,15 @@ static void ops_1c_add(const wchar_t *dirName, BOOL hasDir, const wchar_t *rowNa
    операцию возвращаем «имя нормы» и «поле=значение» из её строк. */
 static int card_norms(SQLHDBC dbc, const wchar_t *ids, CardRow *rows, wchar_t *err) {
   if (!ids || !ids[0]) return 0;
-  wchar_t *sql = (wchar_t *)malloc(3000 * sizeof(wchar_t));
+  /* операций для 1С бывает до OPS_1C — список номеров длиннее прежних сорока */
+  size_t cap = 1200 + wcslen(ids);
+  wchar_t *sql = (wchar_t *)malloc(cap * sizeof(wchar_t));
   if (!sql) return 0;
   /* Слепок с того запроса, который заведомо работает: отдельные колонки,
      без склейки имени со значением, и отбор поля Value прямо в запросе —
      остальные поля строки (единица измерения и прочее) не нужны. */
-  _snwprintf(sql, 3000,
-             L"SELECT TOP 200 a.OwnerId, nk.Value, "
+  _snwprintf(sql, cap,
+             L"SELECT TOP 900 a.OwnerId, nk.Value, "
              L"COALESCE(CONVERT(NVARCHAR(64), ea.FloatNumber), "
              L"CONVERT(NVARCHAR(64), ea.IntegerNumber), "
              L"CONVERT(NVARCHAR(64), ea.LongNumber), ea.ShortText, N''), "
@@ -1895,6 +1984,72 @@ static void card_probe_time(SQLHDBC dbc, const wchar_t *ids, CardOut *c, CardRow
              rows[i].n1, rows[i].s1, rows[i].s2, rows[i].n2, rows[i].n3);
 }
 
+/* Номер операции в ТП (Number) — строка: «005», «010». Прежде порядок брался
+   из IntegerNumber, а у строки его нет — операции шли в порядке создания, а не
+   как в ТП. PLM сам ставит операции по Number (OrderBy GetString("Number")) —
+   так и здесь: целое, если номер целый, иначе текст, дополненный нулями слева,
+   чтобы «5» не встало после «10». num.N — номер для показа, num.K — ключ
+   порядка (нет номера — в конец). После макроса — WHERE. */
+#define OP_NUM_APPLY(own)                                                                   \
+  L"OUTER APPLY (SELECT TOP 1 CASE WHEN nn.DataType=13 THEN nn.IntegerNumber END AS I, "     \
+  L"CASE WHEN nn.DataType=2 THEN LTRIM(RTRIM(CAST(nn.ShortText AS NVARCHAR(40)))) END AS S " \
+  L"FROM InfoObjectAttributes AS nn WITH(NOLOCK) "                                           \
+  L"JOIN NameKeys AS nkn WITH(NOLOCK) ON nkn.NameKeyId=nn.NameKeyId "                        \
+  L"WHERE nn.OwnerId=" own L" AND nn.Outdated=0 "                                           \
+  L"AND nkn.Value IN (N'Number',N'OperationNumber',N'LocalId') "                             \
+  L"AND ((nn.DataType=13 AND nn.IntegerNumber IS NOT NULL) OR (nn.DataType=2 "              \
+  L"AND NULLIF(LTRIM(RTRIM(CAST(nn.ShortText AS NVARCHAR(40)))),N'') IS NOT NULL)) "         \
+  L"ORDER BY CASE nkn.Value WHEN N'Number' THEN 0 WHEN N'OperationNumber' THEN 1 ELSE 2 END) AS nr0 " \
+  L"CROSS APPLY (SELECT CASE WHEN nr0.I IS NOT NULL THEN nr0.I "                              \
+  L"WHEN LEN(nr0.S) BETWEEN 1 AND 9 AND nr0.S NOT LIKE N'%%[^0-9]%%' THEN CAST(nr0.S AS INT) " \
+  L"ELSE 0 END AS N, "                                                                       \
+  L"CASE WHEN nr0.I IS NOT NULL THEN RIGHT(N'0000000000' + CONVERT(NVARCHAR(12), nr0.I), 10) " \
+  L"WHEN nr0.S IS NOT NULL THEN RIGHT(N'0000000000' + nr0.S, 10) END AS K) AS num "
+#define OP_NUM_ORDER L"CASE WHEN num.K IS NULL THEN 1 ELSE 0 END, num.K"
+
+/* Справочник операций у каждой операции ТП: ссылка Operation — на самой
+   строке ТП или на объекте TSOperation; у справочной операции — Code (номер
+   классификатора, он же номер в 1С) и имя. n1 — операция, s1 — код, s2 — имя. */
+static int card_op_dirs(SQLHDBC dbc, const wchar_t *ids, CardRow *rows, wchar_t *err) {
+  if (!ids || !ids[0]) return 0;
+  size_t cap = 1800 + wcslen(ids);
+  wchar_t *sql = (wchar_t *)malloc(cap * sizeof(wchar_t));
+  if (!sql) return 0;
+  _snwprintf(sql, cap,
+             L"SELECT TOP 300 ch.InfoObjectId, ISNULL(cd.V,N''), CAST(d.Name AS NVARCHAR(250)), d.InfoObjectId, 0 "
+             L"FROM InfoObjects AS ch WITH(NOLOCK) "
+             L"OUTER APPLY (SELECT TOP 1 ts.Link AS L FROM InfoObjectAttributes AS ts WITH(NOLOCK) "
+             L"JOIN NameKeys AS nkt WITH(NOLOCK) ON nkt.NameKeyId=ts.NameKeyId AND nkt.Value=N'TSOperation' "
+             L"WHERE ts.OwnerId=ch.InfoObjectId AND ts.Outdated=0) AS op "
+             L"CROSS APPLY (SELECT TOP 1 l.Link AS D FROM InfoObjectAttributes AS l WITH(NOLOCK) "
+             L"JOIN NameKeys AS nkl WITH(NOLOCK) ON nkl.NameKeyId=l.NameKeyId AND nkl.Value=N'Operation' "
+             L"WHERE l.OwnerId IN (ch.InfoObjectId, ISNULL(op.L,0)) AND l.Outdated=0 AND ISNULL(l.Link,0)<>0 "
+             L"AND ISNULL(l.CollectionElementId,0)=0 "
+             L"ORDER BY CASE WHEN l.OwnerId=ch.InfoObjectId THEN 0 ELSE 1 END) AS dl "
+             L"JOIN InfoObjects AS d WITH(NOLOCK) ON d.InfoObjectId=dl.D "
+             L"OUTER APPLY (SELECT TOP 1 COALESCE(NULLIF(LTRIM(RTRIM(CAST(c.ShortText AS NVARCHAR(40)))),N''), "
+             L"CONVERT(NVARCHAR(40), c.IntegerNumber), CONVERT(NVARCHAR(40), c.LongNumber)) AS V "
+             L"FROM InfoObjectAttributes AS c WITH(NOLOCK) "
+             L"JOIN NameKeys AS nkc WITH(NOLOCK) ON nkc.NameKeyId=c.NameKeyId AND nkc.Value=N'Code' "
+             L"WHERE c.OwnerId=d.InfoObjectId AND c.Outdated=0 AND ISNULL(c.CollectionElementId,0)=0) AS cd "
+             L"WHERE ch.InfoObjectId IN (%s)",
+             ids);
+  int n = card_query(dbc, sql, rows, CARD_ROWS, err, 280);
+  free(sql);
+  return n < 0 ? 0 : n;
+}
+
+/* есть ли у операции время — Тпз или Тшт больше нуля (свои или у TSOperation) */
+static BOOL card_op_timed(const CardRow *nr, int nn, long a, long b) {
+  for (int k = 0; k < nn; k++) {
+    if (nr[k].n1 != a && (!b || nr[k].n1 != b)) continue;
+    double m = 0.0;
+    wchar_t t[64];
+    if (card_time_text(nr[k].s2, t, 64, &m) && m > 0.0) return TRUE;
+  }
+  return FALSE;
+}
+
 static void card_operations(SQLHDBC dbc, long tpId, long verId, CardOut *c, CardRow *rows,
                             wchar_t *err) {
   wchar_t sql[3000];
@@ -1926,13 +2081,9 @@ static void card_operations(SQLHDBC dbc, long tpId, long verId, CardOut *c, Card
              L"AND nkt.Value=N'TSOperation' "
              L"JOIN InfoObjects AS o2 WITH(NOLOCK) ON o2.InfoObjectId=ts.Link "
              L"WHERE ts.OwnerId=ch.InfoObjectId AND ts.Outdated=0) AS op "
-             L"OUTER APPLY (SELECT TOP 1 ISNULL(nn.IntegerNumber,0) AS N "
-             L"FROM InfoObjectAttributes AS nn WITH(NOLOCK) "
-             L"JOIN NameKeys AS nkn WITH(NOLOCK) ON nkn.NameKeyId=nn.NameKeyId "
-             L"WHERE nn.OwnerId=ch.InfoObjectId AND nn.Outdated=0 "
-             L"AND nkn.Value IN (N'Number',N'OperationNumber',N'LocalId')) AS num "
+             OP_NUM_APPLY(L"ch.InfoObjectId")
              L"WHERE ch.ParentId=%ld AND ch.Erased=0 "
-             L"ORDER BY num.N, ch.InfoObjectId",
+             L"ORDER BY " OP_NUM_ORDER L", ch.InfoObjectId",
              parent);
   int n = card_query(dbc, sql, rows, CARD_ROWS, err, 280);
   if (n < 0) {
@@ -1969,7 +2120,27 @@ static void card_operations(SQLHDBC dbc, long tpId, long verId, CardOut *c, Card
       q += _snwprintf(list + q, 13, i ? L",%ld" : L"%ld", ids[i]);
     list[q] = 0;
   }
-  if (nr && nid) nn = card_norms(dbc, list, nr, err);
+  /* Для 1С нужны все операции, а не первые сорок: нормы (есть ли время) и
+     справочник операций (код 1С) — по всем, до OPS_1C */
+  int all1c = n < OPS_1C ? n : OPS_1C;
+  wchar_t *allList = (wchar_t *)malloc((size_t)OPS_1C * 2 * 12 * sizeof(wchar_t));
+  wchar_t *opList = (wchar_t *)malloc((size_t)OPS_1C * 12 * sizeof(wchar_t));
+  if (allList && opList) {
+    int q = 0, w = 0;
+    for (int i = 0; i < all1c; i++) {
+      q += _snwprintf(allList + q, 13, q ? L",%ld" : L"%ld", rows[i].n1);
+      if (rows[i].n3) q += _snwprintf(allList + q, 13, L",%ld", rows[i].n3);
+      w += _snwprintf(opList + w, 13, w ? L",%ld" : L"%ld", rows[i].n1);
+    }
+    allList[q] = 0;
+    opList[w] = 0;
+  }
+  if (nr && allList) nn = card_norms(dbc, allList, nr, err);
+  CardRow *dr = (CardRow *)malloc(sizeof(CardRow) * CARD_ROWS);
+  int nd = (dr && opList) ? card_op_dirs(dbc, opList, dr, err) : 0;
+  free(allList);
+  free(opList);
+  unsigned char miss1c[OPS_1C] = {0};
 
   int na = 0;
   if (ops && nid) {
@@ -1994,7 +2165,15 @@ static void card_operations(SQLHDBC dbc, long tpId, long verId, CardOut *c, Card
     if (o->n2) _snwprintf(num, 16, L"%ld", o->n2);
     else lstrcpynW(num, L"—", 16);
     const wchar_t *nm = o->s1[0] ? o->s1 : (o->s2[0] ? o->s2 : L"(без имени)");
-    ops_1c_add(o->s2, o->n3 != 0, o->s1);
+    /* в 1С — только операции со временем (Тпз или Тшт), в порядке ТП */
+    if (i < all1c && card_op_timed(nr, nn, o->n1, o->n3)) {
+      const CardRow *d = NULL;
+      for (int k = 0; k < nd && !d; k++)
+        if (dr[k].n1 == o->n1) d = &dr[k];
+      int at = g_opsPendN;
+      if (!ops_1c_add(d ? d->s1 : NULL, d ? d->s2 : NULL, o->n3 ? o->s2 : NULL, o->s1) && at < OPS_1C)
+        miss1c[at] = 1;
+    }
     card_add(c, L"  %-4s %-40s %ld\r\n", num, nm, o->n1);
     if (o->s2[0] && o->s1[0] && _wcsicmp(o->s2, o->s1) != 0)
       card_add(c, L"       %s\r\n", o->s2);
@@ -2043,8 +2222,20 @@ static void card_operations(SQLHDBC dbc, long tpId, long verId, CardOut *c, Card
   }
   if (n > shown)
     card_add(c, L"  показано подробно первых %d операций из %d\r\n", shown, n);
+  /* что уйдёт по кнопке «В 1С» — ровно так, как ляжет в буфер */
+  card_add(c, L"\r\n  ── В 1С: операций со временем %d из %d ──\r\n", g_opsPendN, n);
+  int miss = 0;
+  for (int i = 0; i < g_opsPendN; i++) {
+    card_add(c, L"  %2d. %s%s\r\n", i + 1, g_opsPend[i], miss1c[i] ? L"   ← нет в справочнике 1С" : L"");
+    miss += miss1c[i];
+  }
+  if (miss)
+    card_add(c, L"  Не нашлось в справочнике 1С: %d — вставятся как есть, проверьте в 1С.\r\n", miss);
+  else if (!g_opsPendN)
+    card_add(c, L"  Ни у одной операции нет Тпз или Тшт — переносить в 1С нечего.\r\n");
   free(ops);
   free(nr);
+  free(dr);
 }
 
 /* Куда этот объект входит по техсоставу. Прямой путь — изделие → TechCompCard
@@ -4368,7 +4559,7 @@ static LRESULT CALLBACK onec_kbd(int code, WPARAM wp, LPARAM lp) {
 
 static void onec_start(void) {
   if (g_ops1cN <= 0) {
-    show_status(L"В карточке нет операций — переносить нечего");
+    show_status(L"В карточке нет операций со временем — переносить в 1С нечего");
     return;
   }
   onec_stop(NULL);
