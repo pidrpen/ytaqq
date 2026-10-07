@@ -12,8 +12,13 @@
 #define ID_XP_LOG 289
 #define ID_XP_PKG 290 /* «В пакет для загрузки…» — окно пакета, заполненное этой выгрузкой */
 #define ID_XP_TIMER 291 /* пока идёт сбор: полоса хода, время, свежие «Подробности» */
+#define ID_XP_THREADS 292 /* сколько потоков (подключений к PLM) — g_plmThreads */
 
-static HWND g_xpWnd, g_xpDes, g_xpList, g_xpView, g_xpLog, g_xpChk[XP_NT];
+static HWND g_xpWnd, g_xpDes, g_xpList, g_xpView, g_xpLog, g_xpChk[XP_NT], g_xpThr;
+/* Потоков больше — быстрее, пока успевает сервер PLM: каждый поток — своё
+   подключение и свои запросы. За 16–24 обычно упирается в сервер, и
+   прибавка мала, а другим пользователям PLM в это время медленнее. */
+static const int kXpThreads[] = {4, 8, 12, 16, 24, 32};
 static XpJob *g_xpJob; /* последняя собранная выгрузка */
 static volatile LONG g_xpBusy, g_xpCancel;
 static wchar_t g_xpStatus[300];
@@ -45,7 +50,7 @@ static unsigned xp_checked(void) {
 static void xp_prefs_save(void) {
   if (!g_dataDir[0]) return;
   wchar_t buf[60], p[MAX_PATH];
-  _snwprintf(buf, 60, L"what6\t%u\n", xp_checked()); /* «what6» — с листом «Заготовки» */
+  _snwprintf(buf, 60, L"what6\t%u\nthreads\t%d\n", xp_checked(), g_plmThreads); /* «what6» — с листом «Заготовки» */
   xp_prefs_path(p);
   share_write_ex(p, buf, TRUE);
 }
@@ -62,11 +67,19 @@ static void xp_prefs_load(void) {
       if (share_split(line, f, 3) < 2) continue;
       if (!wcscmp(f[0], L"what6")) what = (unsigned)wcstoul(f[1], NULL, 10);
       else if (!wcscmp(f[0], L"what")) what = (unsigned)wcstoul(f[1], NULL, 10) | (1u << XP_PF); /* до .81 листа не было */
+      else if (!wcscmp(f[0], L"threads")) {
+        int n = (int)wcstol(f[1], NULL, 10);
+        if (n >= 1 && n <= RT_WORKERS_MAX) g_plmThreads = n;
+      }
     }
     free(t);
   }
   for (int k = 0; k < XP_NT; k++)
     SendMessageW(g_xpChk[k], BM_SETCHECK, (what >> k) & 1 ? BST_CHECKED : BST_UNCHECKED, 0);
+  int sel = 2;
+  for (int i = 0; i < (int)(sizeof(kXpThreads) / sizeof(kXpThreads[0])); i++)
+    if (kXpThreads[i] == g_plmThreads) sel = i;
+  SendMessageW(g_xpThr, CB_SETCURSEL, (WPARAM)sel, 0);
 }
 
 static void xp_status(const wchar_t *fmt, ...) {
@@ -314,6 +327,7 @@ static void xp_layout(void) {
   place_panel_close(g_xpWnd);
   MoveWindow(g_xpDes, pad, y, XS(320), h, TRUE);
   MoveWindow(GetDlgItem(g_xpWnd, ID_XP_BUILD), pad + XS(332), y - XS(1), XS(110), h + XS(2), TRUE);
+  MoveWindow(g_xpThr, pad + XS(452), y, XS(130), XS(300), TRUE);
   int cx = pad, cy = y + XS(34);
   static const int cw[XP_NT] = {130, 100, 105, 110, 100, 110}; /* по номеру листа */
   for (int o = 0; o < XP_NT; o++) {
@@ -496,6 +510,13 @@ static LRESULT CALLBACK XpProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
     if (id == ID_XP_PKG) package_show(TRUE);
     if (id >= ID_XP_CHK && id < ID_XP_CHK + XP_NT && HIWORD(wParam) == BN_CLICKED) xp_prefs_save();
     if (id == ID_XP_VIEW && HIWORD(wParam) == CBN_SELCHANGE) xp_fill_list();
+    if (id == ID_XP_THREADS && HIWORD(wParam) == CBN_SELCHANGE) {
+      int i = (int)SendMessageW(g_xpThr, CB_GETCURSEL, 0, 0);
+      if (i >= 0 && i < (int)(sizeof(kXpThreads) / sizeof(kXpThreads[0]))) g_plmThreads = kXpThreads[i];
+      xp_prefs_save();
+      xp_status(L"Потоков: %d — со следующего «Собрать»%s", g_plmThreads,
+                g_plmThreads > 16 ? L" (больше 16 — нагрузка на сервер PLM, прибавка обычно мала)" : L"");
+    }
     return 0;
   }
   case WM_KEYDOWN:
@@ -549,6 +570,15 @@ static void export_show(void) {
     g_xpView = CreateWindowExW(0, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL,
                                0, 0, 10, 300, g_xpWnd, (HMENU)(INT_PTR)ID_XP_VIEW, g_inst, NULL);
     if (g_fontUi) SendMessageW(g_xpView, WM_SETFONT, (WPARAM)g_fontUi, FALSE);
+    g_xpThr = CreateWindowExW(0, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL,
+                              0, 0, 10, 300, g_xpWnd, (HMENU)(INT_PTR)ID_XP_THREADS, g_inst, NULL);
+    if (g_fontUi) SendMessageW(g_xpThr, WM_SETFONT, (WPARAM)g_fontUi, FALSE);
+    for (int i = 0; i < (int)(sizeof(kXpThreads) / sizeof(kXpThreads[0])); i++) {
+      wchar_t t[40];
+      int n = kXpThreads[i];
+      _snwprintf(t, 40, L"%d %s", n, n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 12 || n % 100 > 14) ? L"потока" : L"потоков");
+      SendMessageW(g_xpThr, CB_ADDSTRING, 0, (LPARAM)t);
+    }
     mk_btn(g_xpWnd, L"Сохранить в Excel…", ID_XP_SAVE);
     mk_btn(g_xpWnd, L"Подробности", ID_XP_LOG);
     mk_btn(g_xpWnd, L"В пакет для загрузки…", ID_XP_PKG);

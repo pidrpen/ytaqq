@@ -249,7 +249,7 @@ static void xp_comp(XpJob *x) {
 
 #define XP_OPS_MAX 200
 #define XP_FIELDS 3000
-#define XP_WORKERS 12 /* с .86 — 12: запросы ждут сервер, а не процессор */
+#define XP_WORKERS RT_WORKERS_MAX /* сколько на деле — g_plmThreads (окно выгрузки, с .88) */
 
 typedef struct {
   long id, ts; /* операция и её TSOperation */
@@ -594,7 +594,8 @@ static void xp_pos_sheets(SQLHDBC dbc, XpJob *x, XpPos *pos, int np) {
     for (int k = 0; k < XP_NT; k++) out[i][k].ncols = kXpSheets[k].ncols;
   xp_prog(x, XP_OPS, np);
   volatile LONG next = 0, count = 0;
-  int nw = np < XP_WORKERS ? np : XP_WORKERS;
+  int nt = g_plmThreads < 1 ? 1 : g_plmThreads > XP_WORKERS ? XP_WORKERS : g_plmThreads;
+  int nw = np < nt ? np : nt;
   XpWork work[XP_WORKERS + 1];
   HANDLE th[XP_WORKERS];
   int started = 0;

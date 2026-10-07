@@ -1742,19 +1742,24 @@ static long rt_find_root(SQLHDBC dbc, const wchar_t *des, CardRow *rows, RtJob *
    (сборка в сборке в сборке…) почти всё лежит в одной ветке, и её шёл один
    поток — остальные простаивали. Теперь задача — каждое вхождение дерева:
    поток берёт его из общей очереди, собирает позицию и кладёт в очередь её
-   состав, так что RT_WORKERS потоков заняты до конца. Позиция (изделие +
+   состав, так что g_plmThreads потоков заняты до конца. Позиция (изделие +
    исполнение) собирается один раз на все потоки: повторы (болт в сотне узлов)
    берут готовое, а пришедшие, пока её собирает другой поток, ждут в её списке,
    не повторяя запросов. В конце дерево обходится в порядке состава — строки и
    журнал такие же, как при обходе подряд. */
-#define RT_WORKERS 12
+#define RT_WORKERS_MAX 32
+static int g_plmThreads = 12; /* потоков сбора: окно «Выгрузка из PLM», 4…32 (с .88) */
 #define RT_BLOCK 4096
 #define RT_HASH (1 << 17)
 
 typedef struct {
   long id, pc;
-  int state;          /* 1 — собирается, 2 — готово */
+  int state;          /* 1 — собирается, 2 — изделие и состав готовы (ТП и заготовка — второй задачей) */
   BOOL skip;          /* материал, документ — не позиция ведомости */
+  BOOL assy;          /* сборка: заготовку не берём */
+  int level;          /* уровень первого вхождения — отступ в журнале */
+  RtObj o;            /* изделие — для второй задачи */
+  wchar_t kdNote[200];
   RtRow row;          /* поля позиции; место в дереве (уровень, кол-во, «входит в») — у вхождения */
   wchar_t own[200];   /* свои пометки: маршрут, заготовка, КД */
   RtEl *kids;         /* строки её состава */
@@ -1762,6 +1767,7 @@ typedef struct {
   wchar_t *log;       /* что выписал её сбор — в «Подробности» у первого вхождения */
   int logLen;
   int first;          /* вхождение, которое её собирало */
+  int idx;            /* номер в p->items — для задачи «ТП и заготовка» */
   int *wait, nwait, capWait; /* вхождения, пришедшие, пока она собиралась */
 } RtItem;
 
@@ -1785,7 +1791,8 @@ typedef struct {
   RtItem **items;
   int ni, capItems;
   int *hash;          /* RT_HASH: номер позиции + 1 */
-  int *queue, nq, capQ;
+  int *queue, nq, capQ; /* ≥0 — вхождение: изделие и состав; <0 — позиция −(k+1): ТП и заготовка */
+  int nb;               /* задач «ТП и заготовка» — для полосы хода */
   int busy;           /* потоков с задачей на руках */
   ULONGLONG ms[5];    /* время по видам запросов (сумма по потокам): изделие, ТП, состав, КД, заготовка */
 } RtPool;
@@ -1852,6 +1859,8 @@ static RtItem *rt_item_get(RtPool *p, long id, long pc, BOOL *made) {
     it->id = id;
     it->pc = pc;
     it->state = 1;
+    it->first = -1;
+    it->idx = p->ni;
     p->items[p->ni++] = it;
     *slot = p->ni;
     *made = TRUE;
@@ -1860,113 +1869,32 @@ static RtItem *rt_item_get(RtPool *p, long id, long pc, BOOL *made) {
   return NULL;
 }
 
-/* собрать позицию — то же, что rt_walk у первого вхождения, без места в дереве */
-static void rt_item_eval(RtPool *p, SQLHDBC dbc, RtJob *w, CardRow *rows, const RtNode *nd, RtItem *it) {
+/* журнал задачи — к журналу позиции (часть «изделие и состав», потом «ТП, заготовка») */
+static void rt_item_log_add(RtItem *it, const RtJob *w) {
+  if (w->logLen <= 0) return;
+  wchar_t *n = (wchar_t *)realloc(it->log, sizeof(wchar_t) * ((size_t)it->logLen + (size_t)w->logLen + 1));
+  if (!n) return;
+  memcpy(n + it->logLen, w->log, sizeof(wchar_t) * ((size_t)w->logLen + 1));
+  it->log = n;
+  it->logLen += w->logLen;
+}
+
+/* «показать один раз» — один раз на весь сбор, а не на поток: флаги главной ⇄ потока */
+static void rt_flags_in(RtPool *p, RtJob *w) {
   RtJob *j = p->j;
-  ULONGLONG ms[5] = {0, 0, 0, 0, 0}, t;
   w->logLen = 0;
   w->log[0] = 0;
-  AcquireSRWLockExclusive(&p->lock); /* «показать один раз» — один раз на весь сбор, а не на поток */
+  AcquireSRWLockExclusive(&p->lock);
   w->keysShown = j->keysShown;
   w->opsShown = j->opsShown;
   w->pfShown = j->pfShown;
   w->diagShown = j->diagShown;
   w->tcDiag = j->tcDiag;
   ReleaseSRWLockExclusive(&p->lock);
-  int level = nd->level;
-  const RtEl *src = nd->hasSrc ? &nd->src : NULL;
-  const wchar_t *elSection = src ? src->section : NULL;
-  RtObj o;
-  t = GetTickCount64();
-  BOOL got = rt_obj(dbc, nd->id, &o, rows, w);
-  ms[0] += GetTickCount64() - t;
-  if (!got) {
-    it->skip = TRUE;
-    goto done;
-  }
-  if (src && src->pc && src->pc != o.prodConf) {
-    rt_log(w, L"    исполнение — из строки техсостава #%ld (по изделию было #%ld)\r\n", src->pc, o.prodConf);
-    o.prodConfObj = o.prodConf;
-    o.prodConf = src->pc;
-  }
-  BOOL product = o.desAttr || o.tpCard || o.pfCard || o.tcCard;
-  if (level > 0 && (!product || !rt_looks_des(o.des) || (elSection && wcsstr(elSection, L"атериал")))) {
-    rt_log(w, L"  %*s· пропуск «%s» — нет обозначения (материал?)\r\n", level * 2, L"", o.objName);
-    it->skip = TRUE;
-    goto done;
-  }
-  if (level > 0 && (rt_is_doc(o.des, o.objName) || (elSection && wcsstr(elSection, L"окумент")))) {
-    rt_log(w, L"  %*s· пропуск «%s» — документ\r\n", level * 2, L"", o.objName);
-    it->skip = TRUE;
-    goto done;
-  }
-  RtRow *r = &it->row;
-  memset(r, 0, sizeof(*r));
-  r->id = nd->id;
-  lstrcpynW(r->f[RC_DES], o.des, 200);
-  lstrcpynW(r->f[RC_NAME], o.name, 200);
-  double v;
-  if (o.mass[0] && rt_num(o.mass, &v)) rt_fmt(v, 3, r->f[RC_MASS], 200);
-  wchar_t q[40];
-  rt_fmt(nd->qty, 3, q, 40);
-  rt_log(w, L"%*s%s %s (%ld), кол-во %s%s\r\n", level * 2, L"", o.des, o.name, nd->id, q,
-         level && !nd->qtyFound ? L" (поле количества не найдено — 1)" : L"");
-  rt_log(w, L"    карточки: ТП %ld, заготовок %ld, техсостава %ld, конфигурация %ld\r\n", o.tpCard, o.pfCard,
-         o.tcCard, o.prodConf);
-  if (!o.tpCard && !o.pfCard && !(w->diagShown & (level ? 2 : 1))) {
-    w->diagShown |= level ? 2 : 1;
-    rt_diag(dbc, &o, rows, w);
-  }
-  wchar_t notes[2][200] = {L"", L""};
-  t = GetTickCount64();
-  rt_route(dbc, &o, rows, w, r->f[RC_ROUTE], 200, notes[0], 60);
-  ms[1] += GetTickCount64() - t;
-  r->tp = w->lastTp;
-  r->tpVer = w->lastTpVer;
-  r->tpVar = w->lastTpVar;
-  lstrcpynW(r->tpName, w->lastTpName, 200);
-  r->par = o.par;
-  r->prodConf = o.prodConf;
-  RtEl *el = (RtEl *)malloc(sizeof(RtEl) * RT_KIDS);
-  long variant = 0;
-  int kdBefore = w->kdUsed;
-  t = GetTickCount64();
-  int ne = el ? rt_children(dbc, &o, rows, w, el, RT_KIDS, &variant) : 0;
-  ms[2] += GetTickCount64() - t;
-  r->tcVariant = variant;
-  r->tcCard = o.tcCard;
-  r->pfCard = o.pfCard;
-  wchar_t kdNote[200] = L"";
-  t = GetTickCount64();
-  if (ne > 0 && !rt_late(w)) rt_kd_changes(dbc, variant, rows, w, el, ne, kdNote, 200);
-  ms[3] += GetTickCount64() - t;
-  if (w->kdUsed > kdBefore && !kdNote[0]) lstrcpynW(kdNote, L"состав по КД — техсостава нет", 200);
-  const wchar_t *kind = o.section[0] ? o.section : (elSection && elSection[0] ? elSection : NULL);
-  lstrcpynW(r->f[RC_KIND], kind ? kind : (ne > 0 ? L"Сборочные единицы" : L"Детали"), 200);
-  BOOL assy = ne > 0 || wcsstr(r->f[RC_KIND], L"борочн") || wcsstr(r->f[RC_KIND], L"омплекс");
-  if (assy) {
-    if (o.pfCard) rt_log(w, L"    сборка — заготовку (карточка %ld) не берём\r\n", o.pfCard);
-  } else {
-    t = GetTickCount64();
-    rt_preform(dbc, &o, rows, w, r, notes[1], 60);
-    ms[4] += GetTickCount64() - t;
-    if (!r->f[RC_MAT][0] && o.mat[0]) lstrcpynW(r->f[RC_MAT], o.mat, 200);
-  }
-  rt_note_add(it->own, notes[0]);
-  rt_note_add(it->own, notes[1]);
-  rt_note_add(it->own, kdNote);
-  if (ne > 0 && el) {
-    RtEl *k = (RtEl *)realloc(el, sizeof(RtEl) * (size_t)ne);
-    it->kids = k ? k : el;
-    it->nk = ne;
-  } else {
-    free(el);
-  }
-done:
-  if (w->logLen > 0 && (it->log = (wchar_t *)malloc(sizeof(wchar_t) * ((size_t)w->logLen + 1))) != NULL) {
-    memcpy(it->log, w->log, sizeof(wchar_t) * ((size_t)w->logLen + 1));
-    it->logLen = w->logLen;
-  }
+}
+
+static void rt_flags_out(RtPool *p, RtJob *w, const ULONGLONG *ms) {
+  RtJob *j = p->j;
   AcquireSRWLockExclusive(&p->lock);
   if (w->keysShown) j->keysShown = TRUE;
   if (w->opsShown) j->opsShown = TRUE;
@@ -1975,6 +1903,120 @@ done:
   j->diagShown |= w->diagShown;
   for (int k = 0; k < 5; k++) p->ms[k] += ms[k];
   ReleaseSRWLockExclusive(&p->lock);
+}
+
+/* Позиция собирается в две задачи (с 2026.09.23.88). Первая — изделие и его
+   состав: сразу после неё строки состава уходят в очередь, и дерево
+   раскрывается вглубь, не дожидаясь ТП и заготовки (прежде каждый уровень
+   ждал, пока у позиции над ним соберутся ещё и маршрут, и заготовка). Вторая —
+   ТП (маршрут) и заготовка — отдельной задачей, её берёт любой свободный поток. */
+static BOOL rt_item_eval_a(RtPool *p, SQLHDBC dbc, RtJob *w, CardRow *rows, const RtNode *nd, RtItem *it) {
+  ULONGLONG ms[5] = {0, 0, 0, 0, 0}, t;
+  rt_flags_in(p, w);
+  int level = nd->level;
+  const RtEl *src = nd->hasSrc ? &nd->src : NULL;
+  const wchar_t *elSection = src ? src->section : NULL;
+  RtObj *o = &it->o;
+  it->level = level;
+  t = GetTickCount64();
+  BOOL got = rt_obj(dbc, nd->id, o, rows, w);
+  ms[0] += GetTickCount64() - t;
+  if (!got) {
+    it->skip = TRUE;
+    goto done;
+  }
+  if (src && src->pc && src->pc != o->prodConf) {
+    rt_log(w, L"    исполнение — из строки техсостава #%ld (по изделию было #%ld)\r\n", src->pc, o->prodConf);
+    o->prodConfObj = o->prodConf;
+    o->prodConf = src->pc;
+  }
+  BOOL product = o->desAttr || o->tpCard || o->pfCard || o->tcCard;
+  if (level > 0 && (!product || !rt_looks_des(o->des) || (elSection && wcsstr(elSection, L"атериал")))) {
+    rt_log(w, L"  %*s· пропуск «%s» — нет обозначения (материал?)\r\n", level * 2, L"", o->objName);
+    it->skip = TRUE;
+    goto done;
+  }
+  if (level > 0 && (rt_is_doc(o->des, o->objName) || (elSection && wcsstr(elSection, L"окумент")))) {
+    rt_log(w, L"  %*s· пропуск «%s» — документ\r\n", level * 2, L"", o->objName);
+    it->skip = TRUE;
+    goto done;
+  }
+  RtRow *r = &it->row;
+  memset(r, 0, sizeof(*r));
+  r->id = nd->id;
+  lstrcpynW(r->f[RC_DES], o->des, 200);
+  lstrcpynW(r->f[RC_NAME], o->name, 200);
+  double v;
+  if (o->mass[0] && rt_num(o->mass, &v)) rt_fmt(v, 3, r->f[RC_MASS], 200);
+  wchar_t q[40];
+  rt_fmt(nd->qty, 3, q, 40);
+  rt_log(w, L"%*s%s %s (%ld), кол-во %s%s\r\n", level * 2, L"", o->des, o->name, nd->id, q,
+         level && !nd->qtyFound ? L" (поле количества не найдено — 1)" : L"");
+  rt_log(w, L"    карточки: ТП %ld, заготовок %ld, техсостава %ld, конфигурация %ld\r\n", o->tpCard, o->pfCard,
+         o->tcCard, o->prodConf);
+  r->par = o->par;
+  r->prodConf = o->prodConf;
+  RtEl *el = (RtEl *)malloc(sizeof(RtEl) * RT_KIDS);
+  long variant = 0;
+  int kdBefore = w->kdUsed;
+  t = GetTickCount64();
+  int ne = el ? rt_children(dbc, o, rows, w, el, RT_KIDS, &variant) : 0;
+  ms[2] += GetTickCount64() - t;
+  r->tcVariant = variant;
+  r->tcCard = o->tcCard;
+  r->pfCard = o->pfCard;
+  /* изменения КД — здесь: они пишут пометки в строки состава, а те сейчас уйдут в очередь */
+  t = GetTickCount64();
+  if (ne > 0 && !rt_late(w)) rt_kd_changes(dbc, variant, rows, w, el, ne, it->kdNote, 200);
+  ms[3] += GetTickCount64() - t;
+  if (w->kdUsed > kdBefore && !it->kdNote[0]) lstrcpynW(it->kdNote, L"состав по КД — техсостава нет", 200);
+  const wchar_t *kind = o->section[0] ? o->section : (elSection && elSection[0] ? elSection : NULL);
+  lstrcpynW(r->f[RC_KIND], kind ? kind : (ne > 0 ? L"Сборочные единицы" : L"Детали"), 200);
+  it->assy = ne > 0 || wcsstr(r->f[RC_KIND], L"борочн") || wcsstr(r->f[RC_KIND], L"омплекс");
+  if (ne > 0 && el) {
+    RtEl *k = (RtEl *)realloc(el, sizeof(RtEl) * (size_t)ne);
+    it->kids = k ? k : el;
+    it->nk = ne;
+  } else {
+    free(el);
+  }
+done:
+  rt_item_log_add(it, w);
+  rt_flags_out(p, w, ms);
+  return !it->skip;
+}
+
+static void rt_item_eval_b(RtPool *p, SQLHDBC dbc, RtJob *w, CardRow *rows, RtItem *it) {
+  ULONGLONG ms[5] = {0, 0, 0, 0, 0}, t;
+  rt_flags_in(p, w);
+  RtObj *o = &it->o;
+  RtRow *r = &it->row;
+  rt_log(w, L"%*s  · %s: ТП и заготовка\r\n", it->level * 2, L"", o->des);
+  if (!o->tpCard && !o->pfCard && !(w->diagShown & (it->level ? 2 : 1))) {
+    w->diagShown |= it->level ? 2 : 1;
+    rt_diag(dbc, o, rows, w);
+  }
+  wchar_t notes[2][200] = {L"", L""};
+  t = GetTickCount64();
+  rt_route(dbc, o, rows, w, r->f[RC_ROUTE], 200, notes[0], 60);
+  ms[1] += GetTickCount64() - t;
+  r->tp = w->lastTp;
+  r->tpVer = w->lastTpVer;
+  r->tpVar = w->lastTpVar;
+  lstrcpynW(r->tpName, w->lastTpName, 200);
+  if (it->assy) {
+    if (o->pfCard) rt_log(w, L"    сборка — заготовку (карточка %ld) не берём\r\n", o->pfCard);
+  } else {
+    t = GetTickCount64();
+    rt_preform(dbc, o, rows, w, r, notes[1], 60);
+    ms[4] += GetTickCount64() - t;
+    if (!r->f[RC_MAT][0] && o->mat[0]) lstrcpynW(r->f[RC_MAT], o->mat, 200);
+  }
+  rt_note_add(it->own, notes[0]);
+  rt_note_add(it->own, notes[1]);
+  rt_note_add(it->own, it->kdNote);
+  rt_item_log_add(it, w);
+  rt_flags_out(p, w, ms);
 }
 
 /* позиция вхождения готова — его состав в очередь */
@@ -2012,7 +2054,7 @@ static void rt_node_expand(RtPool *p, int ni) {
   }
   nd->kids = kids;
   nd->nk = nk;
-  InterlockedExchange(&j->progTotal, p->nn);
+  InterlockedExchange(&j->progTotal, p->nn + p->nb);
   WakeAllConditionVariable(&p->cv);
   ReleaseSRWLockExclusive(&p->lock);
 }
@@ -2038,9 +2080,14 @@ static void rt_pool_node(RtPool *p, SQLHDBC dbc, RtJob *w, CardRow *rows, int ni
   if (made) it->first = ni;
   ReleaseSRWLockExclusive(&p->lock);
   if (made) {
-    rt_item_eval(p, dbc, w, rows, nd, it);
+    BOOL more = rt_item_eval_a(p, dbc, w, rows, nd, it);
     AcquireSRWLockExclusive(&p->lock);
     it->state = 2;
+    if (more) { /* ТП и заготовка — отдельной задачей, раньше состава: состав (он позже) возьмут первым */
+      rt_queue_push(p, -(it->idx + 1));
+      p->nb++;
+      WakeAllConditionVariable(&p->cv);
+    }
     int nw = it->nwait, *wl = it->wait;
     it->wait = NULL;
     it->nwait = it->capWait = 0;
@@ -2061,8 +2108,14 @@ static void rt_pool_run(RtPool *p, SQLHDBC dbc, RtJob *w, CardRow *rows) {
     if (p->nq == 0 || rt_late(p->j)) break;
     int ni = p->queue[--p->nq]; /* с конца: в глубину — повторы чаще находят готовое */
     p->busy++;
+    RtItem *it = ni < 0 ? p->items[-ni - 1] : NULL;
     ReleaseSRWLockExclusive(&p->lock);
-    rt_pool_node(p, dbc, w, rows, ni);
+    if (it) {
+      rt_item_eval_b(p, dbc, w, rows, it);
+      InterlockedIncrement(&p->j->progDone);
+    } else {
+      rt_pool_node(p, dbc, w, rows, ni);
+    }
     AcquireSRWLockExclusive(&p->lock);
     p->busy--;
   }
@@ -2152,10 +2205,11 @@ static void rt_walk_pool(SQLHDBC dbc, RtJob *j, CardRow *rows, long root) {
   InterlockedExchange(&j->progTotal, 1);
   int r0 = rt_node_new(p, root, -1, 0, 1, 1, TRUE, NULL);
   rt_queue_push(p, r0);
-  RtPoolWork work[RT_WORKERS];
-  HANDLE th[RT_WORKERS];
+  RtPoolWork work[RT_WORKERS_MAX];
+  HANDLE th[RT_WORKERS_MAX];
   int started = 0;
-  for (int k = 0; k < RT_WORKERS - 1; k++) { /* и этот поток — тоже рабочий */
+  int want = g_plmThreads < 1 ? 1 : g_plmThreads > RT_WORKERS_MAX ? RT_WORKERS_MAX : g_plmThreads;
+  for (int k = 0; k < want - 1; k++) { /* и этот поток — тоже рабочий */
     work[started].p = p;
     work[started].w = rt_job_new();
     if (!work[started].w) break;

@@ -1488,7 +1488,7 @@ static volatile LONG g_pfGen; /* номер задания столбца «За
    SQLCancel из окна (card_cancel_all): иначе «Стоп» ждал, пока досчитается
    запрос, — до полутора минут на каждый. */
 static __thread volatile LONG *g_qCancel;
-#define CARD_ACTIVE_MAX 32
+#define CARD_ACTIVE_MAX 96 /* до 32 потоков сбора, у каждого по запросу, — с запасом */
 static struct {
   SQLHSTMT st;
   volatile LONG *cancel;
