@@ -44,6 +44,7 @@
 #define ID_CUR_K2 104
 #define ID_CUR_K3 105
 #define ID_CUR_K4 115 /* «Фея» */
+#define ID_CUR_K5 120 /* «Дракон» */
 #define ID_MIN 106
 #define ID_OCR 107
 #define ID_ALPHA_BG 108
@@ -240,6 +241,7 @@ static HWND g_close;
 static HWND g_btnK2;
 static HWND g_btnK3;
 static HWND g_btnK4;
+static HWND g_btnK5;
 static HWND g_min;
 static HWND g_ocr;
 static HWND g_btnUp;
@@ -344,23 +346,23 @@ static int g_ocrPt = 11;
 static HFONT g_ocrFontZoom;
 static BOOL g_statusOn = FALSE;
 static HINSTANCE g_inst;
-static int g_skin = 1; /* 0 system, 1 sword, 2 gauntlet, 3 fairy */
+static int g_skin = 1; /* 0 system, 1 sword, 2 gauntlet, 3 fairy, 4 dragon */
 static BOOL g_sparkle = TRUE; /* у «Феи» — звёздочки при нажатии */
 static int g_balloonKind; /* куда ведёт щелчок по всплывашке: 0 — изменения в папке, 1 — нарды */
-static HCURSOR g_staticCur[3];
-static HCURSOR g_ibeamCur[3];
-static HCURSOR g_handCur[3];
-static HCURSOR g_helpCur[3];
-static HCURSOR g_noCur[3];
-static HCURSOR g_crossCur[3];
-static HCURSOR g_sizeweCur[3];
-static HCURSOR g_sizensCur[3];
-static HCURSOR g_nwseCur[3];
-static HCURSOR g_neswCur[3];
-static HCURSOR g_allCur[3];
-static HCURSOR g_upCur[3];
-static HCURSOR g_pinCur[3];
-static HCURSOR g_personCur[3];
+static HCURSOR g_staticCur[4];
+static HCURSOR g_ibeamCur[4];
+static HCURSOR g_handCur[4];
+static HCURSOR g_helpCur[4];
+static HCURSOR g_noCur[4];
+static HCURSOR g_crossCur[4];
+static HCURSOR g_sizeweCur[4];
+static HCURSOR g_sizensCur[4];
+static HCURSOR g_nwseCur[4];
+static HCURSOR g_neswCur[4];
+static HCURSOR g_allCur[4];
+static HCURSOR g_upCur[4];
+static HCURSOR g_pinCur[4];
+static HCURSOR g_personCur[4];
 static int g_alphaFollow = 180;
 static int g_alphaPinned = 250;
 static BOOL g_cursorOn = FALSE;
@@ -550,6 +552,10 @@ static void extract_payloads(void) {
   extract_rcdata(306, path);
   _snwprintf(path, MAX_PATH, L"%s\\k4_app.ani", g_dataDir);
   extract_rcdata(307, path);
+  _snwprintf(path, MAX_PATH, L"%s\\k5_wait.ani", g_dataDir);
+  extract_rcdata(308, path);
+  _snwprintf(path, MAX_PATH, L"%s\\k5_app.ani", g_dataDir);
+  extract_rcdata(309, path);
 }
 
 static void set_slot(HCURSOR src, int ocr) {
@@ -566,7 +572,7 @@ static HCURSOR load_res_or_file(HINSTANCE inst, int id, const wchar_t *rel) {
 }
 
 static void apply_scheme_slots(void) {
-  if (g_skin <= 0 || g_skin > 3) return;
+  if (g_skin <= 0 || g_skin > 4) return;
   int s = g_skin - 1;
   set_slot(g_staticCur[s], OCR_NORMAL_ID);
   set_slot(g_ibeamCur[s], OCR_IBEAM_ID);
@@ -582,8 +588,8 @@ static void apply_scheme_slots(void) {
   set_slot(g_upCur[s], OCR_UP_ID);
   set_slot(g_pinCur[s], OCR_PIN_ID);
   set_slot(g_personCur[s], OCR_PERSON_ID);
-  static const wchar_t *kWait[3] = {L"k2_wait.ani", L"k3_wait.ani", L"k4_wait.ani"};
-  static const wchar_t *kApp[3] = {L"k2_app.ani", L"k3_app.ani", L"k4_app.ani"};
+  static const wchar_t *kWait[4] = {L"k2_wait.ani", L"k3_wait.ani", L"k4_wait.ani", L"k5_wait.ani"};
+  static const wchar_t *kApp[4] = {L"k2_app.ani", L"k3_app.ani", L"k4_app.ani", L"k5_app.ani"};
   const wchar_t *wait = kWait[s];
   const wchar_t *app = kApp[s];
   wchar_t alt[64];
@@ -1041,7 +1047,8 @@ static void load_cursor_pref(void) {
   if (cw >= 320 && cw <= 4000) g_cardW = cw;
   if (ch >= 200 && ch <= 3000) g_cardH = ch;
   if (pt >= 7 && pt <= 22) g_ansPt = pt;
-  if (skin[0] == 'k' && skin[1] == '4') g_skin = 3;
+  if (skin[0] == 'k' && skin[1] == '5') g_skin = 4;
+  else if (skin[0] == 'k' && skin[1] == '4') g_skin = 3;
   else if (skin[0] == 'k' && skin[1] == '3') g_skin = 2;
   else if (skin[0] == 's') g_skin = 0;
   else g_skin = 1;
@@ -1056,7 +1063,8 @@ static void load_cursor_pref(void) {
 }
 
 static void save_cursor_pref(void) {
-  const char *v = g_skin == 3 ? "k4" : (g_skin == 2 ? "k3" : (g_skin == 0 ? "system" : "k2"));
+  const char *v = g_skin == 4 ? "k5"
+                  : g_skin == 3 ? "k4" : (g_skin == 2 ? "k3" : (g_skin == 0 ? "system" : "k2"));
   const char *e = g_engine == 4 ? "plm" : (g_engine == 5 ? "files" : "ai");
   char buf[280];
   snprintf(buf, sizeof(buf), "%s %d %d %s %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d\n",
@@ -1078,6 +1086,8 @@ static void update_cursor_buttons(void) {
     SetWindowTextW(g_btnK3, g_skin == 2 ? L"● Рукавица" : L"Рукавица");
   if (g_btnK4)
     SetWindowTextW(g_btnK4, g_skin == 3 ? L"● Фея" : L"Фея");
+  if (g_btnK5)
+    SetWindowTextW(g_btnK5, g_skin == 4 ? L"● Дракон" : L"Дракон");
 }
 
 static void set_skin(int skin) {
@@ -1088,7 +1098,8 @@ static void set_skin(int skin) {
   else install_scheme_cursors();
   fx_sync();
   _snwprintf(g_status, 160, L"Курсор: %s",
-             skin == 3 ? L"Фея" : (skin == 2 ? L"Рукавица" : (skin == 0 ? L"Windows" : L"Мечник")));
+             skin == 4 ? L"Дракон"
+             : skin == 3 ? L"Фея" : (skin == 2 ? L"Рукавица" : (skin == 0 ? L"Windows" : L"Мечник")));
   g_statusOn = TRUE;
   if (g_hwnd) {
     SetTimer(g_hwnd, TIMER_STATUS, 1600, NULL);
@@ -1098,7 +1109,7 @@ static void set_skin(int skin) {
 
 static void cycle_skin(void) {
   int next = g_skin + 1;
-  if (next > 3) next = 0;
+  if (next > 4) next = 0;
   set_skin(next);
 }
 
@@ -1163,6 +1174,21 @@ static void load_cursor_frames(HINSTANCE inst) {
   g_upCur[2] = load_big_cursor(inst, 271, L"cursors\\k4_up.cur");
   g_pinCur[2] = load_big_cursor(inst, 272, L"cursors\\k4_pin.cur");
   g_personCur[2] = load_big_cursor(inst, 273, L"cursors\\k4_person.cur");
+  /* «Дракон» — обычного размера, как Мечник и Рукавица */
+  g_staticCur[3] = load_res_or_file(inst, 280, L"cursors\\k5_static.cur");
+  g_ibeamCur[3] = load_res_or_file(inst, 281, L"cursors\\k5_ibeam.cur");
+  g_handCur[3] = load_res_or_file(inst, 282, L"cursors\\k5_hand.cur");
+  g_helpCur[3] = load_res_or_file(inst, 283, L"cursors\\k5_help.cur");
+  g_noCur[3] = load_res_or_file(inst, 284, L"cursors\\k5_no.cur");
+  g_crossCur[3] = load_res_or_file(inst, 285, L"cursors\\k5_cross.cur");
+  g_sizeweCur[3] = load_res_or_file(inst, 286, L"cursors\\k5_sizewe.cur");
+  g_sizensCur[3] = load_res_or_file(inst, 287, L"cursors\\k5_sizens.cur");
+  g_nwseCur[3] = load_res_or_file(inst, 288, L"cursors\\k5_sizenwse.cur");
+  g_neswCur[3] = load_res_or_file(inst, 289, L"cursors\\k5_sizenesw.cur");
+  g_allCur[3] = load_res_or_file(inst, 290, L"cursors\\k5_sizeall.cur");
+  g_upCur[3] = load_res_or_file(inst, 291, L"cursors\\k5_up.cur");
+  g_pinCur[3] = load_res_or_file(inst, 292, L"cursors\\k5_pin.cur");
+  g_personCur[3] = load_res_or_file(inst, 293, L"cursors\\k5_person.cur");
 }
 
 static void free_one(HCURSOR *c) {
@@ -1174,7 +1200,7 @@ static void free_one(HCURSOR *c) {
 
 static void free_cursor_frames(void) {
   restore_system_cursor();
-  for (int s = 0; s < 3; s++) {
+  for (int s = 0; s < 4; s++) {
     free_one(&g_staticCur[s]);
     free_one(&g_ibeamCur[s]);
     free_one(&g_handCur[s]);
@@ -1386,6 +1412,7 @@ static void apply_follow_state(void) {
   if (g_btnK2) EnableWindow(g_btnK2, !g_follow);
   if (g_btnK3) EnableWindow(g_btnK3, !g_follow);
   if (g_btnK4) EnableWindow(g_btnK4, !g_follow);
+  if (g_btnK5) EnableWindow(g_btnK5, !g_follow);
   if (g_tbBg) EnableWindow(g_tbBg, !g_follow);
   if (g_tbFg) EnableWindow(g_tbFg, !g_follow);
   if (g_btnSys) EnableWindow(g_btnSys, !g_follow);
@@ -2409,6 +2436,7 @@ static void tray_menu(HWND hwnd) {
   AppendMenuW(menu, MF_STRING | (g_skin == 3 ? MF_CHECKED : 0), 19, L"Курсор: Фея");
   AppendMenuW(menu, MF_STRING | (g_sparkle ? MF_CHECKED : 0) | (g_skin == 3 ? 0 : MF_GRAYED), 20,
               L"   звёздочки при нажатии");
+  AppendMenuW(menu, MF_STRING | (g_skin == 4 ? MF_CHECKED : 0), 25, L"Курсор: Дракон");
   AppendMenuW(menu, MF_STRING | (g_skin == 0 ? MF_CHECKED : 0), 12, L"Курсор: обычный Windows");
   AppendMenuW(menu, MF_STRING, 13, mCur);
   AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
@@ -2427,6 +2455,7 @@ static void tray_menu(HWND hwnd) {
   } else if (cmd == 10) set_skin(1);
   else if (cmd == 11) set_skin(2);
   else if (cmd == 19) set_skin(3);
+  else if (cmd == 25) set_skin(4);
   else if (cmd == 20) {
     g_sparkle = !g_sparkle;
     save_cursor_pref();
@@ -2874,7 +2903,10 @@ static void layout_settings(void) {
     if (g_btnK4) MoveWindow(g_btnK4, pad + (third + gap) * 2, y, cw - pad - (third + gap) * 2, btnH, TRUE);
   }
   y += btnH + gap;
-  if (g_btnSys) MoveWindow(g_btnSys, pad, y, cw - pad, btnH, TRUE);
+  /* под ними Дракон и «Курсор Windows» — в одном ряду, чтобы окно не росло:
+     оно и так почти во всю высоту экрана и не прокручивается */
+  if (g_btnK5) MoveWindow(g_btnK5, pad, y, half, btnH, TRUE);
+  if (g_btnSys) MoveWindow(g_btnSys, pad + half + gap, y, cw - pad - half - gap, btnH, TRUE);
   y += btnH + gap;
   if (g_chkAuto) MoveWindow(g_chkAuto, pad, y, cw - pad, btnH, TRUE);
   y += btnH + gap;
@@ -3009,6 +3041,7 @@ static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
     if (LOWORD(wParam) == ID_CUR_K2) set_skin(1);
     if (LOWORD(wParam) == ID_CUR_K3) set_skin(2);
     if (LOWORD(wParam) == ID_CUR_K4) set_skin(3);
+    if (LOWORD(wParam) == ID_CUR_K5) set_skin(4);
     if (LOWORD(wParam) == ID_SYS_CUR) set_skin(0);
     if (LOWORD(wParam) == ID_OCR) run_ocr_test();
     if (LOWORD(wParam) == ID_UPDATE) start_update();
@@ -3406,6 +3439,7 @@ static void create_settings(HWND owner) {
   g_btnK2 = mk_btn(g_setHwnd, L"Мечник", ID_CUR_K2);
   g_btnK3 = mk_btn(g_setHwnd, L"Рукавица", ID_CUR_K3);
   g_btnK4 = mk_btn(g_setHwnd, L"Фея", ID_CUR_K4);
+  g_btnK5 = mk_btn(g_setHwnd, L"Дракон", ID_CUR_K5);
   g_btnSys = mk_btn(g_setHwnd, L"Курсор Windows", ID_SYS_CUR);
   g_chkAuto = CreateWindowExW(0, L"BUTTON", L"Автозапуск с Windows",
                               WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 0, 0, 200, 26,
@@ -3431,6 +3465,7 @@ static void create_settings(HWND owner) {
   SendMessageW(g_btnK2, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
   SendMessageW(g_btnK3, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
   SendMessageW(g_btnK4, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
+  SendMessageW(g_btnK5, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
   SendMessageW(g_btnSys, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
   SendMessageW(g_ocr, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
   if (g_btnUp) SendMessageW(g_btnUp, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
