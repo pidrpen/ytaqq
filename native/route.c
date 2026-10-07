@@ -40,7 +40,8 @@
    надобности (rt_row_add), а не сразу на все. Глубина — до RT_DEPTH уровней
    (было 8), строк в составе одного узла — до RT_KIDS (было 150). */
 #define RT_MAX 50000
-#define RT_DEPTH 16
+#define RT_DEPTH 64 /* с .87: цикл (изделие входит само в себя) ловится по цепочке «входит в»;
+                       глубина — только последняя страховка */
 #define RT_KIDS 300
 #define RT_NCOL 15
 #define RT_LOG 3000000 /* с .86 — до 3 млн знаков: у изделия из тысяч позиций журнал длинный */
@@ -1770,6 +1771,7 @@ typedef struct {
   int parent, level;
   double qty, tot;    /* tot — на изделие: произведение количеств по цепочке */
   BOOL qtyFound, hasSrc, deep;
+  int cycles;         /* строк состава, которые вели бы в цикл, — пропущены */
   RtEl src;           /* строка состава, которой вошла */
   int *kids, nk;
 } RtNode;
@@ -1993,6 +1995,13 @@ static void rt_node_expand(RtPool *p, int ni) {
   int nk = 0;
   for (int i = 0; i < it->nk; i++) {
     const RtEl *e = &it->kids[i];
+    /* цикл: входящее уже есть в цепочке над этим вхождением — дальше не идём */
+    BOOL loop = FALSE;
+    for (int a = ni; a >= 0 && !loop; a = rt_node(p, a)->parent) loop = rt_node(p, a)->id == e->child;
+    if (loop) {
+      nd->cycles++;
+      continue;
+    }
     int c = rt_node_new(p, e->child, ni, nd->level + 1, e->qty, e->qty * nd->tot, e->qtyFound, e);
     if (c < 0) {
       rt_full(j);
@@ -2117,6 +2126,9 @@ static void rt_pool_out(RtPool *p, RtJob *j, int ni, const wchar_t *parentDes) {
   if (it->first != ni)
     rt_log(j, L"%*s%s %s — повтор: из уже собранного, кол-во %s\r\n", nd->level * 2, L"", r->f[RC_DES],
            r->f[RC_NAME], r->f[RC_QTY]);
+  if (nd->cycles)
+    rt_log(j, L"%*s    !!! в составе «%s» %d строк ведут в цикл (входящее уже есть выше по цепочке) — пропущены\r\n",
+           nd->level * 2, L"", r->f[RC_DES], nd->cycles);
   if (nd->deep)
     rt_log(j, L"%*s    !!! глубже %d уровней не спускаюсь — состав «%s» не собран\r\n", nd->level * 2, L"", RT_DEPTH,
            r->f[RC_DES]);
