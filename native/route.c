@@ -52,6 +52,7 @@ typedef struct {
   long par, prodConf;    /* версия изделия (родитель) и исполнение */
   long tcVariant;        /* вариант техсостава этого исполнения */
   long tcCard;           /* карточка техсостава — её версии бывают в извещениях */
+  long pfCard;           /* карточка заготовок — лист «Заготовки» */
   wchar_t tpName[200];
 } RtRow;
 
@@ -68,11 +69,19 @@ typedef struct {
   volatile LONG *cancel;
   BOOL keysShown; /* поля строки техсостава — в подробности один раз */
   BOOL opsShown;  /* поля операции без цеха — тоже один раз */
+  BOOL pfShown;   /* поля заготовки — один раз */
   int diagShown;  /* связи изделия без ТП и заготовки: 1 — сборки, 2 — детали */
   BOOL dump;       /* «Выгрузка для проверки»: всё найденное — в подробности */
   int dumpDet, dumpAsm;
   long lastTp, lastTpVer, lastTpVar; /* техпроцесс последней позиции: для выгрузки */
   int kdUsed; /* у скольких сборок состав взят по КД — техсостава нет */
+  /* параллельный обход (с 2026.09.23.81): корень — здесь, его ветки — потоки */
+  BOOL split;             /* у корня не спускаться, а оставить состав в root… */
+  void *rootEl;           /* RtEl[rootNe] — строки состава корня */
+  int rootNe;
+  double rootTot;
+  wchar_t rootDes[200];
+  volatile LONG *shared;  /* общий счётчик позиций — для строки состояния */
   wchar_t lastTpName[200];
   ULONGLONG t0;
 } RtJob;
@@ -383,6 +392,13 @@ static void rt_route(SQLHDBC dbc, const RtObj *o, CardRow *rows, RtJob *j, wchar
   j->lastTp = tp;
   j->lastTpVer = ver;
   j->lastTpVar = parent;
+  /* ТП найден по обозначению — имени из поиска нет: берём по id (с 2026.09.23.81;
+     прежде столбец «Техпроцесс» был пуст, а маршрут из этого ТП — был) */
+  if (!j->lastTpName[0]) {
+    _snwprintf(sql, 3600, L"SELECT TOP 1 o.InfoObjectId, CAST(o.Name AS NVARCHAR(250)), N'', 0, 0 "
+                          L"FROM InfoObjects AS o WITH(NOLOCK) WHERE o.InfoObjectId=%ld", tp);
+    if (card_query(dbc, sql, rows, 1, err, 280) > 0) lstrcpynW(j->lastTpName, rows[0].s1, 200);
+  }
   /* операции по порядку ТП и участок каждой: Area (с 2026.09.23.49 — прежде
      цеха: в ведомости маршрут по участкам), нет — WorkShop; своё или у TSOperation */
   _snwprintf(sql, 4600,
@@ -455,6 +471,105 @@ static void rt_route(SQLHDBC dbc, const RtObj *o, CardRow *rows, RtJob *j, wchar
   (void)blank;
 }
 
+/* ---- общее чтение полей объектов PLM (и для выгрузки, export.c) ---- */
+
+/* значение поля по псевдониму таблицы атрибутов (как PF_VALUE_SQL, но для любого
+   псевдонима): у ссылки — имя объекта (lo), у перечисления — его название */
+#define XP_VALUE(al)                                                                          \
+  L"COALESCE(lo.Name, NULLIF(CASE " al L".DataType "                                           \
+  L"WHEN 3 THEN CASE WHEN " al L".BoolValue=1 THEN N'да' ELSE N'нет' END "                     \
+  L"WHEN 2 THEN CAST(" al L".ShortText AS NVARCHAR(400)) "                                     \
+  L"WHEN 24 THEN CAST(" al L".LargeText AS NVARCHAR(400)) "                                    \
+  L"WHEN 11 THEN (SELECT TOP 1 CAST(cvn.NameUI AS NVARCHAR(400)) FROM NamedValues AS cvn WITH(NOLOCK) " \
+  L"WHERE cvn.NamedValueId=" al L".Link) "                                                     \
+  L"WHEN 22 THEN (SELECT TOP 1 CAST(cvt.NameUI AS NVARCHAR(400)) FROM Templates AS cvt WITH(NOLOCK) " \
+  L"WHERE cvt.TemplateId=" al L".Link) "                                                       \
+  L"WHEN 25 THEN (SELECT TOP 1 CAST(cvt.NameUI AS NVARCHAR(400)) FROM Templates AS cvt WITH(NOLOCK) " \
+  L"WHERE cvt.TemplateId=" al L".Link) END, N''), "                                            \
+  L"CONVERT(NVARCHAR(64), " al L".FloatNumber), CONVERT(NVARCHAR(64), " al L".IntegerNumber), " \
+  L"CASE WHEN " al L".DataType<>6 THEN CONVERT(NVARCHAR(64), " al L".LongNumber) END, N'')"
+
+/* Поля объектов ids одним запросом:
+     свои поля из списка own                       — путь «Поле»;
+     строки списков и составных из списка coll     — «Список|Поле»;
+     составные внутри этих строк                   — «Список|Поле|Подполе».
+   own и coll — списки для IN: N'Area',N'WorkShop'. n1 — владелец, n2 — строка
+   списка (0 — своё поле), n3 — DataType + 1000, если значение устаревшее
+   (поля составных PLM читает без отбора по Outdated — актуальные первыми,
+   так и здесь: порядок владелец · строка · путь · устаревшее), s1 — путь,
+   s2 — значение. */
+static int xp_fields(SQLHDBC dbc, const wchar_t *ids, const wchar_t *own, const wchar_t *coll, CardRow *rows, int max,
+                     wchar_t *err) {
+  size_t cap = 9000 + wcslen(ids) * 3;
+  wchar_t *sql = (wchar_t *)malloc(cap * sizeof(wchar_t));
+  if (!sql) return -1;
+  _snwprintf(sql, cap,
+             L"SELECT TOP %d a.OwnerId, CAST(nk.Value AS NVARCHAR(200)), CAST(" XP_VALUE(L"a") L" AS NVARCHAR(600)), "
+             L"0, a.DataType "
+             L"FROM InfoObjectAttributes AS a WITH(NOLOCK) "
+             L"JOIN NameKeys AS nk WITH(NOLOCK) ON nk.NameKeyId=a.NameKeyId AND nk.Value IN (%s) "
+             L"LEFT JOIN InfoObjects AS lo WITH(NOLOCK) ON a.DataType=6 AND lo.InfoObjectId=a.Link "
+             L"WHERE a.OwnerId IN (%s) AND a.Outdated=0 AND ISNULL(a.CollectionElementId,0)=0 "
+             L"UNION ALL "
+             L"SELECT p.OwnerId, CAST(nkp.Value AS NVARCHAR(90)) + N'|' + CAST(nk.Value AS NVARCHAR(100)), "
+             L"CAST(" XP_VALUE(L"a") L" AS NVARCHAR(600)), ce.CollectionElementId, "
+             L"a.DataType + 1000 * ISNULL(CAST(a.Outdated AS INT),0) "
+             L"FROM InfoObjectAttributes AS p WITH(NOLOCK) "
+             L"JOIN NameKeys AS nkp WITH(NOLOCK) ON nkp.NameKeyId=p.NameKeyId AND nkp.Value IN (%s) "
+             L"JOIN InfoObjectCollectionElements AS ce WITH(NOLOCK) "
+             L"ON ce.AttributeId IN (p.AttributeId, ISNULL(p.Link,0)) AND ce.Outdated=0 "
+             L"JOIN InfoObjectAttributes AS a WITH(NOLOCK) ON a.CollectionElementId=ce.CollectionElementId "
+             L"JOIN NameKeys AS nk WITH(NOLOCK) ON nk.NameKeyId=a.NameKeyId AND nk.Value<>N'LastChanged' "
+             L"LEFT JOIN InfoObjects AS lo WITH(NOLOCK) ON a.DataType=6 AND lo.InfoObjectId=a.Link "
+             L"WHERE p.OwnerId IN (%s) AND p.Outdated=0 AND ISNULL(p.CollectionElementId,0)=0 "
+             L"UNION ALL "
+             L"SELECT p.OwnerId, CAST(nkp.Value AS NVARCHAR(60)) + N'|' + CAST(nka.Value AS NVARCHAR(60)) + N'|' + "
+             L"CAST(nk.Value AS NVARCHAR(70)), CAST(" XP_VALUE(L"b") L" AS NVARCHAR(600)), ce.CollectionElementId, "
+             L"b.DataType + 1000 * ISNULL(CAST(b.Outdated AS INT),0) "
+             L"FROM InfoObjectAttributes AS p WITH(NOLOCK) "
+             L"JOIN NameKeys AS nkp WITH(NOLOCK) ON nkp.NameKeyId=p.NameKeyId AND nkp.Value IN (%s) "
+             L"JOIN InfoObjectCollectionElements AS ce WITH(NOLOCK) "
+             L"ON ce.AttributeId IN (p.AttributeId, ISNULL(p.Link,0)) AND ce.Outdated=0 "
+             L"JOIN InfoObjectAttributes AS a WITH(NOLOCK) ON a.CollectionElementId=ce.CollectionElementId "
+             L"AND a.DataType=23 AND ISNULL(a.Outdated,0)=0 "
+             L"JOIN NameKeys AS nka WITH(NOLOCK) ON nka.NameKeyId=a.NameKeyId "
+             L"JOIN InfoObjectCollectionElements AS ce2 WITH(NOLOCK) "
+             L"ON ce2.AttributeId IN (a.AttributeId, ISNULL(a.Link,0)) AND ce2.Outdated=0 "
+             L"JOIN InfoObjectAttributes AS b WITH(NOLOCK) ON b.CollectionElementId=ce2.CollectionElementId "
+             L"JOIN NameKeys AS nk WITH(NOLOCK) ON nk.NameKeyId=b.NameKeyId AND nk.Value<>N'LastChanged' "
+             L"LEFT JOIN InfoObjects AS lo WITH(NOLOCK) ON b.DataType=6 AND lo.InfoObjectId=b.Link "
+             L"WHERE p.OwnerId IN (%s) AND p.Outdated=0 AND ISNULL(p.CollectionElementId,0)=0 "
+             L"ORDER BY 1, 4, 2, 5",
+             max, own, ids, coll, ids, coll, ids);
+  sql[cap - 1] = 0;
+  int n = card_query(dbc, sql, rows, max, err, 280);
+  free(sql);
+  return n;
+}
+
+/* Первое значение по пути у владельца a (нет — у b, это его TSOperation);
+   row — только эта строка списка (0 — любая). Пути — через «;», по порядку
+   важности: «TimePerPiece|Value;TimePerPiece». Устаревшее — только если
+   актуального нет (оно в выборке после актуального). */
+static const wchar_t *xp_get(const CardRow *f, int nf, long a, long b, long row, const wchar_t *paths) {
+  wchar_t buf[400];
+  lstrcpynW(buf, paths, 400);
+  for (wchar_t *p = buf, *next; p && *p; p = next) {
+    next = wcschr(p, L';');
+    if (next) *next++ = 0;
+    for (int pass = 0; pass < 2; pass++) {
+      long own = pass ? b : a;
+      if (!own) continue;
+      for (int i = 0; i < nf; i++) {
+        if (f[i].n1 != own || (row && f[i].n2 != row) || !f[i].s2[0]) continue;
+        if (f[i].n3 % 1000 == 23) continue; /* составное поле само значения не держит — только его строки */
+        if (!_wcsicmp(f[i].s1, p)) return f[i].s2;
+      }
+    }
+  }
+  return NULL;
+}
+
 /* заготовка: материал, сортамент, припуск, норма (масса заготовки) */
 /* Заготовка (как в выгрузке PlmApi: ProductPreformsCard → вложенные
    ProductPreform). С 2026.09.23.62 — по связям самой заготовки:
@@ -468,11 +583,93 @@ static void rt_route(SQLHDBC dbc, const RtObj *o, CardRow *rows, RtJob *j, wchar
        а не только Value; в «Подробностях» они выписаны как есть;
      • норма — PreformExpense (его строка, поле Value или масса);
    чего так не нашлось — как раньше, обходом заготовки (pf_explore). */
-static BOOL rt_key_is(const wchar_t *k, const wchar_t *const *names, int n) {
-  for (int i = 0; i < n; i++)
-    if (!_wcsicmp(k, names[i])) return TRUE;
-  return FALSE;
+/* Одна заготовка (ProductPreform) — как её читают заводские выгрузки PLM:
+     материал — MaterialName (заготовка из изделия — PreformConfigurationName);
+     сортамент — PreformSize.DisplayedName (так PLM пишет «Сортамент заготовки»),
+       нет — собирается: профиль (PreformSize.Profile) Ø / толщина×ширина, L=длина;
+     размеры — ZDiametr, ZThickness, ZWidth, ZLength: каждый — составной (Value и
+       единица), то есть на два уровня вглубь: PreformSize → ZDiametr → Value
+       (до 2026.09.23.81 читался один уровень — размеров не было, и сортамент
+       выходил из названия материала: «Круг 20» без длины);
+     припуск — ZSizeAdd тем же путём; норма — PreformExpense: Value и
+       ComputingUnit (единица — из PLM, не всегда кг). */
+typedef struct {
+  wchar_t mat[400], from[260], sort[200], dims[160], profile[80], add[40], unit[40];
+  double normV;
+  BOOL hasNorm;
+} RtPf;
+
+#define RT_PF_OWN L"N'MaterialName',N'PreformConfigurationName',N'ZSizeAdd',N'ZDiametr',N'ZLength'"
+#define RT_PF_COLL L"N'PreformSize',N'PreformExpense'"
+
+static void rt_pf_read(SQLHDBC dbc, long pfId, RtPf *pf, RtJob *j) {
+  memset(pf, 0, sizeof(*pf));
+  CardRow *f = (CardRow *)malloc(sizeof(CardRow) * 200);
+  if (!f) return;
+  wchar_t ids[24], err[280];
+  _snwprintf(ids, 24, L"%ld", pfId);
+  int nf = xp_fields(dbc, ids, RT_PF_OWN, RT_PF_COLL, f, 200, err);
+  if (nf < 0) {
+    rt_log(j, L"    поля заготовки #%ld: запрос не выполнился — %s\r\n", pfId, err);
+    nf = 0;
+  }
+  const wchar_t *v;
+  if ((v = xp_get(f, nf, pfId, 0, 0, L"MaterialName"))) lstrcpynW(pf->mat, v, 400);
+  if ((v = xp_get(f, nf, pfId, 0, 0, L"PreformConfigurationName"))) lstrcpynW(pf->from, v, 260);
+  if (!pf->mat[0] && pf->from[0]) lstrcpynW(pf->mat, pf->from, 400);
+  if ((v = xp_get(f, nf, pfId, 0, 0, L"PreformSize|Profile"))) lstrcpynW(pf->profile, v, 80);
+  wchar_t d[40] = L"", th[40] = L"", wd[40] = L"", len[40] = L"";
+  if ((v = xp_get(f, nf, pfId, 0, 0, L"PreformSize|ZDiametr|Value;PreformSize|ZDiameter|Value;PreformSize|ZDiametr;ZDiametr")))
+    pf_num(v, d, 40);
+  if ((v = xp_get(f, nf, pfId, 0, 0, L"PreformSize|ZThickness|Value;PreformSize|ZThickness"))) pf_num(v, th, 40);
+  if ((v = xp_get(f, nf, pfId, 0, 0, L"PreformSize|ZWidth|Value;PreformSize|ZWidth"))) pf_num(v, wd, 40);
+  if ((v = xp_get(f, nf, pfId, 0, 0, L"PreformSize|ZLength|Value;PreformSize|ZLength;ZLength"))) pf_num(v, len, 40);
+  if ((v = xp_get(f, nf, pfId, 0, 0, L"PreformSize|ZSizeAdd|Value;PreformSize|ZSizeAdd;ZSizeAdd"))) pf_num(v, pf->add, 40);
+  if ((v = xp_get(f, nf, pfId, 0, 0, L"PreformExpense|Value")) && rt_num(v, &pf->normV)) pf->hasNorm = TRUE;
+  if ((v = xp_get(f, nf, pfId, 0, 0, L"PreformExpense|ComputingUnit"))) lstrcpynW(pf->unit, v, 40);
+  /* размеры одной строкой: «Ø20 L=150», «4×100 L=200» */
+  int w = 0;
+  if (d[0]) w += _snwprintf(pf->dims + w, 160 - w, L"Ø%s", d);
+  if (th[0] && w >= 0 && w < 150) w += _snwprintf(pf->dims + w, 160 - w, L"%s%s", w ? L" " : L"", th);
+  if (wd[0] && w >= 0 && w < 150) w += _snwprintf(pf->dims + w, 160 - w, L"%s%s", th[0] ? L"×" : (w ? L" " : L""), wd);
+  if (len[0] && w >= 0 && w < 150) _snwprintf(pf->dims + w, 160 - w, L"%sL=%s", w ? L" " : L"", len);
+  pf->dims[159] = 0;
+  /* сортамент — как в PLM; нет — профиль и размеры; нет и их — вид и размер из материала */
+  if ((v = xp_get(f, nf, pfId, 0, 0, L"PreformSize|DisplayedName"))) lstrcpynW(pf->sort, v, 200);
+  if (!pf->sort[0] && pf->dims[0]) {
+    wchar_t kind[80] = L"";
+    if (pf->profile[0]) lstrcpynW(kind, pf->profile, 80);
+    else
+      for (int q = 0; pf->mat[q] && pf->mat[q] != L' ' && q < 79; q++) kind[q] = pf->mat[q], kind[q + 1] = 0;
+    _snwprintf(pf->sort, 200, L"%s%s%s", kind, kind[0] ? L" " : L"", pf->dims);
+    pf->sort[199] = 0;
+  }
+  if (!pf->sort[0] && pf->mat[0]) { /* «Лист 36 ГОСТ 19903-2015 / 45 …» → «Лист 36» */
+    wchar_t head[200];
+    lstrcpynW(head, pf->mat, 200);
+    wchar_t *cut = wcsstr(head, L" / ");
+    if (cut) *cut = 0;
+    static const wchar_t *const std[] = {L" ГОСТ", L" ТУ ", L" ОСТ", L" СТО", L" DIN", L" ISO"};
+    for (size_t i = 0; i < sizeof(std) / sizeof(std[0]); i++) {
+      wchar_t *g = wcsstr(head, std[i]);
+      if (g) *g = 0;
+    }
+    size_t hl = wcslen(head);
+    while (hl && head[hl - 1] == L' ') head[--hl] = 0;
+    BOOL digit = FALSE;
+    for (wchar_t *c = head; *c && !digit; c++) digit = iswdigit(*c);
+    if (digit) lstrcpynW(pf->sort, head, 200);
+  }
+  if (j && !j->pfShown && nf > 0) { /* поля первой заготовки — как пришли: для проверки */
+    j->pfShown = TRUE;
+    rt_log(j, L"    поля заготовки #%ld (для проверки):", pfId);
+    for (int i = 0; i < nf && i < 60; i++)
+      if (f[i].n3 % 1000 != 23) rt_log(j, L" %s=%s%s", f[i].s1, f[i].s2, f[i].n3 >= 1000 ? L"(устар.)" : L"");
+    rt_log(j, L"\r\n");
+  }
+  free(f);
 }
+
 
 static void rt_preform(SQLHDBC dbc, const RtObj *o, CardRow *rows, RtJob *j, RtRow *r, wchar_t *note, int ncap) {
   long pfCard = o->pfCard;
@@ -514,158 +711,22 @@ static void rt_preform(SQLHDBC dbc, const RtObj *o, CardRow *rows, RtJob *j, RtR
            rows[0].n2 == o->id ? L"этой версии изделия"
            : (rows[0].n3 == o->id || rows[0].n3 == conf) ? L"этого изделия"
                                                          : L"самая новая");
-  /* поля заготовки: свои и все поля строк составных (PreformSize, PreformExpense) */
-  _snwprintf(sql, 3600,
-             L"SELECT TOP 40 0, CAST(nk.Value AS NVARCHAR(100)), " PF_VALUE_SQL L", 0, a.DataType "
-             L"FROM InfoObjectAttributes AS a WITH(NOLOCK) "
-             L"JOIN NameKeys AS nk WITH(NOLOCK) ON nk.NameKeyId=a.NameKeyId "
-             L"AND nk.Value IN (N'PreformSize',N'ZSizeAdd',N'ZDiametr',N'ZDiameter',N'ZLength',N'MaterialName') "
-             L"LEFT JOIN InfoObjects AS lo WITH(NOLOCK) ON a.DataType=6 AND lo.InfoObjectId=a.Link "
-             L"WHERE a.OwnerId=%ld AND a.Outdated=0 AND ISNULL(a.CollectionElementId,0)=0 "
-             /* строки составных — как читает PlmApi: элементы с AttributeId
-                составного (или его Link), поля строки без отбора по Outdated —
-                актуальные первыми (ORDER BY 1); с 2026.09.23.63 */
-             L"UNION ALL SELECT TOP 80 CAST(ISNULL(a.Outdated,0) AS INT), "
-             L"CAST(nkp.Value AS NVARCHAR(100)) + N'|' + CAST(nk.Value AS NVARCHAR(100)), "
-             PF_VALUE_SQL L", 1, a.DataType "
-             L"FROM InfoObjectAttributes AS p WITH(NOLOCK) "
-             L"JOIN NameKeys AS nkp WITH(NOLOCK) ON nkp.NameKeyId=p.NameKeyId "
-             L"AND nkp.Value IN (N'PreformSize',N'PreformExpense') "
-             L"JOIN InfoObjectCollectionElements AS ce WITH(NOLOCK) "
-             L"ON ce.AttributeId IN (p.AttributeId, ISNULL(p.Link,0)) AND ce.Outdated=0 "
-             L"JOIN InfoObjectAttributes AS a WITH(NOLOCK) ON a.CollectionElementId=ce.CollectionElementId "
-             L"JOIN NameKeys AS nk WITH(NOLOCK) ON nk.NameKeyId=a.NameKeyId AND nk.Value<>N'LastChanged' "
-             L"LEFT JOIN InfoObjects AS lo WITH(NOLOCK) ON a.DataType=6 AND lo.InfoObjectId=a.Link "
-             L"WHERE p.OwnerId=%ld AND p.Outdated=0 ORDER BY 1",
-             pf0, pf0);
-  sql[3599] = 0;
-  int nd = card_query(dbc, sql, rows, 100, err, 280);
-  if (nd < 0) rt_log(j, L"    поля заготовки: запрос не выполнился — %s\r\n", err);
-  static const wchar_t *const kD[] = {L"ZDiametr", L"ZDiameter", L"Diameter", L"Diametr"};
-  static const wchar_t *const kL[] = {L"ZLength", L"Length"};
-  static const wchar_t *const kT[] = {L"ZThickness", L"Thickness", L"ZHeight", L"Height"};
-  static const wchar_t *const kW[] = {L"ZWidth", L"Width"};
-  static const wchar_t *const kA[] = {L"ZSizeAdd", L"SizeAdd"};
-  static const wchar_t *const kV[] = {L"Value", L"TextValue", L"StringValue", L"NumberValue", L"DoubleValue"};
-  wchar_t szText[200] = L"", d[40] = L"", len[40] = L"", th[40] = L"", wd[40] = L"", add[40] = L"", expense[80] = L"";
-  wchar_t profile[60] = L""; /* PreformSize.Profile: «Лист», «Круг» */
-  wchar_t fields[700] = L"";
-  size_t fl = 0;
-  for (int i = 0; i < nd; i++) {
-    const wchar_t *v = rows[i].s2;
-    if (!v[0] || !wcscmp(v, L"0")) continue;
-    wchar_t *bar = wcschr(rows[i].s1, L'|');
-    const wchar_t *par = rows[i].s1, *k = bar ? bar + 1 : rows[i].s1;
-    if (bar) *bar = 0;
-    if (!_wcsicmp(k, L"MaterialName")) {
-      if (!matName[0]) lstrcpynW(matName, v, 400);
-      continue;
-    }
-    if (bar && fl < 650) {
-      int w = _snwprintf(fields + fl, 700 - fl, L"%s%s.%s=%s", fl ? L" · " : L"", par, k, v);
-      if (w > 0) fl += (size_t)w;
-      fields[699] = 0;
-    }
-    BOOL expen = bar && !_wcsicmp(par, L"PreformExpense");
-    if (expen) {
-      if (!expense[0] && (rt_key_is(k, kV, 5) || pf_kind(k) == 2)) lstrcpynW(expense, v, 80);
-      continue;
-    }
-    if (!_wcsicmp(k, L"Profile")) { if (!profile[0]) lstrcpynW(profile, v, 60); }
-    else if (rt_key_is(k, kA, 2)) { if (!add[0]) pf_num(v, add, 40); }
-    else if (rt_key_is(k, kD, 4)) { if (!d[0]) pf_num(v, d, 40); }
-    else if (rt_key_is(k, kL, 2)) { if (!len[0]) pf_num(v, len, 40); }
-    else if (rt_key_is(k, kT, 4)) { if (!th[0]) pf_num(v, th, 40); }
-    else if (rt_key_is(k, kW, 2)) { if (!wd[0]) pf_num(v, wd, 40); }
-    else if (!szText[0] && (!_wcsicmp(k, L"PreformSize") || (bar && rt_key_is(k, kV, 5))))
-      lstrcpynW(szText, v, 200); /* размер одной строкой */
-  }
-  if (fields[0]) rt_log(j, L"    поля заготовки: %s\r\n", fields);
-  else if (nd >= 0) rt_log(j, L"    поля заготовки #%ld: в строках PreformSize / PreformExpense пусто (строк запроса %d)\r\n", pf0, nd);
-  /* вид проката — первое слово материала: «Круг», «Лист», «Проволока» */
-  wchar_t kind[40] = L"";
-  for (int q = 0; matName[q] && matName[q] != L' ' && q < 39; q++) kind[q] = matName[q], kind[q + 1] = 0;
-  /* нужно ли ещё обходить заготовку: чего-то из главного не нашлось */
-  PfSum *sm = NULL;
-  if (!matName[0] || !expense[0] || (!szText[0] && !d[0] && !len[0] && !th[0])) {
-    sm = (PfSum *)calloc(1, sizeof(PfSum));
-    if (sm) {
-      ULONGLONG one = GetTickCount64() + 6000;
-      sm->deadline = j->deadline && j->deadline < one ? j->deadline : one;
-      pf_explore(dbc, pf0, 3, NULL, L"", sm);
-      if (!matName[0]) pf_material_text(sm, matName, 400);
-      if (!d[0] && sm->zd[0]) pf_num(sm->zd, d, 40);
-      if (!len[0] && sm->zl[0]) pf_num(sm->zl, len, 40);
-      if (!add[0] && sm->za[0]) pf_num(sm->za, add, 40);
-      if (!expense[0] && sm->mass[0]) lstrcpynW(expense, sm->mass, 80);
-      if (!kind[0]) {
-        const wchar_t *src = sm->sort[0] ? sm->sort : sm->mat;
-        for (int q = 0; src[q] && src[q] != L' ' && q < 39; q++) kind[q] = src[q], kind[q + 1] = 0;
-      }
-      if (!szText[0] && !d[0] && !len[0] && !th[0] && sm->dims[0]) {
-        const wchar_t *dv = sm->dims;
-        if (!wcsncmp(dv, L"Габариты ", 9)) dv += 9;
-        lstrcpynW(szText, dv, 200);
-      }
-    }
-  }
-  if (profile[0]) lstrcpynW(kind, profile, 40); /* вид проката — из PreformSize, если есть */
-  lstrcpynW(r->f[RC_MAT], matName, 200);
-  /* сортамент — как в ведомости: «Круг Ø40 L=35», «Лист 4×100 L=200» */
-  wchar_t *so = r->f[RC_SORT];
-  so[0] = 0;
-  if (d[0] || len[0] || th[0] || wd[0]) {
-    int w = 0;
-    if (kind[0]) w += _snwprintf(so + w, 200 - w, L"%s", kind);
-    if (d[0] && w >= 0 && w < 190) w += _snwprintf(so + w, 200 - w, L"%sØ%s", w ? L" " : L"", d);
-    if (th[0] && w >= 0 && w < 190) w += _snwprintf(so + w, 200 - w, L"%s%s", w ? L" " : L"", th);
-    if (wd[0] && w >= 0 && w < 190) w += _snwprintf(so + w, 200 - w, L"%s%s", th[0] ? L"×" : (w ? L" " : L""), wd);
-    if (len[0] && w >= 0 && w < 190) _snwprintf(so + w, 200 - w, L"%sL=%s", w ? L" " : L"", len);
-    so[199] = 0;
-  } else if (szText[0]) {
-    const wchar_t *q = szText;
-    while (*q == L' ') q++;
-    BOOL word = (*q >= L'А' && *q <= L'я') || *q == L'Ё' || *q == L'ё';
-    if (!word && kind[0]) _snwprintf(so, 200, L"%s %s", kind, q);
-    else lstrcpynW(so, q, 200);
-    so[199] = 0;
-  }
-  /* Размеров в заготовке нет (в PLM у PreformSize бывает только Profile —
-     так у листовых деталей «в разработке»): сортамент — вид и размер из
-     названия материала до стандарта: «Лист 36 ГОСТ 19903-2015 / 45 …» →
-     «Лист 36» (с 2026.09.23.64) */
-  if (!so[0] && matName[0]) {
-    wchar_t head[200];
-    lstrcpynW(head, matName, 200);
-    wchar_t *cut = wcsstr(head, L" / ");
-    if (cut) *cut = 0;
-    static const wchar_t *const std[] = {L" ГОСТ", L" ТУ ", L" ОСТ", L" СТО", L" DIN", L" ISO"};
-    for (size_t i = 0; i < sizeof(std) / sizeof(std[0]); i++) {
-      wchar_t *g = wcsstr(head, std[i]);
-      if (g) *g = 0;
-    }
-    size_t hl = wcslen(head);
-    while (hl && head[hl - 1] == L' ') head[--hl] = 0;
-    BOOL digit = FALSE;
-    for (wchar_t *c = head; *c && !digit; c++) digit = iswdigit(*c);
-    if (digit) { /* только если в нём есть размер — «Лист 36», а не «Сталь» */
-      lstrcpynW(so, head, 200);
-      rt_log(j, L"    размеров в заготовке нет — сортамент из материала: %s\r\n", so);
-    }
-  }
-  if (add[0]) lstrcpynW(r->f[RC_ALLOW], add, 200);
-  else if (r->f[RC_ALLOW][0] == 0) rt_log(j, L"    припуска (ZSizeAdd) в заготовке нет\r\n");
-  double v;
-  if (expense[0] && rt_num(expense, &v)) {
-    r->norm1 = v;
+  RtPf pf;
+  rt_pf_read(dbc, pf0, &pf, j);
+  if (!pf.mat[0]) lstrcpynW(pf.mat, matName, 400);
+  lstrcpynW(r->f[RC_MAT], pf.mat, 200);
+  lstrcpynW(r->f[RC_SORT], pf.sort, 200);
+  if (pf.add[0]) lstrcpynW(r->f[RC_ALLOW], pf.add, 200);
+  if (pf.hasNorm) {
+    r->norm1 = pf.normV;
     r->hasNorm = TRUE;
-    rt_fmt(v, 3, r->f[RC_NORM1], 200);
-    lstrcpynW(r->f[RC_UNIT], L"кг", 200);
+    rt_fmt(pf.normV, 3, r->f[RC_NORM1], 200);
+    lstrcpynW(r->f[RC_UNIT], pf.unit[0] ? pf.unit : L"кг", 200);
   }
-  rt_log(j, L"    заготовка %s: %s · %s · припуск %s · норма %s\r\n", pfName, matName[0] ? matName : L"—",
-         so[0] ? so : L"—", add[0] ? add : L"—", r->f[RC_NORM1][0] ? r->f[RC_NORM1] : L"—");
-  if (!matName[0] && !r->hasNorm) lstrcpynW(note, L"в заготовке нет материала и массы", ncap);
-  free(sm);
+  rt_log(j, L"    заготовка %s: %s · %s · припуск %s · норма %s %s\r\n", pfName, pf.mat[0] ? pf.mat : L"—",
+         pf.sort[0] ? pf.sort : L"—", pf.add[0] ? pf.add : L"—", r->f[RC_NORM1][0] ? r->f[RC_NORM1] : L"—",
+         r->f[RC_UNIT]);
+  if (!pf.mat[0] && !r->hasNorm) lstrcpynW(note, L"в заготовке нет материала и нормы", ncap);
 }
 
 static BOOL rt_looks_des(const wchar_t *s) {
@@ -1256,7 +1317,7 @@ static void rt_walk(SQLHDBC dbc, long id, int level, const wchar_t *parentDes, d
   if (o.mass[0] && rt_num(o.mass, &v)) rt_fmt(v, 3, r->f[RC_MASS], 200);
   rt_log(j, L"%*s%s %s (%ld), кол-во %s%s\r\n", level * 2, L"", o.des, o.name, id, r->f[RC_QTY],
          level && !qtyFound ? L" (поле количества не найдено — 1)" : L"");
-  if (j->notify) PostMessageW(j->notify, WM_RT_PROGRESS, (WPARAM)j->n, 0);
+  if (j->notify) PostMessageW(j->notify, WM_RT_PROGRESS, (WPARAM)(j->shared ? InterlockedIncrement(j->shared) : j->n), 0);
   rt_log(j, L"    карточки: ТП %ld, заготовок %ld, техсостава %ld, конфигурация %ld\r\n", o.tpCard, o.pfCard,
          o.tcCard, o.prodConf);
   if (!o.tpCard && !o.pfCard && !(j->diagShown & (level ? 2 : 1))) {
@@ -1282,6 +1343,7 @@ static void rt_walk(SQLHDBC dbc, long id, int level, const wchar_t *parentDes, d
   int ne = el ? rt_children(dbc, &o, rows, j, el, 150, &variant) : 0;
   r->tcVariant = variant;
   r->tcCard = o.tcCard;
+  r->pfCard = o.pfCard;
   wchar_t kdNote[200] = L"";
   if (ne > 0 && !rt_late(j)) rt_kd_changes(dbc, variant, rows, j, el, ne, kdNote, 200);
   if (j->kdUsed > kdBefore && !kdNote[0]) lstrcpynW(kdNote, L"состав по КД — техсостава нет", 200);
@@ -1321,6 +1383,13 @@ static void rt_walk(SQLHDBC dbc, long id, int level, const wchar_t *parentDes, d
   double tot = r->qtyTot;
   wchar_t myDes[200];
   lstrcpynW(myDes, o.des, 200);
+  if (level == 0 && j->split && ne > 1) { /* ветки корня обойдут потоки — rt_walk_parallel */
+    j->rootEl = el;
+    j->rootNe = ne;
+    j->rootTot = tot;
+    lstrcpynW(j->rootDes, myDes, 200);
+    return;
+  }
   for (int i = 0; i < ne && !rt_late(j); i++)
     rt_walk(dbc, el[i].child, level + 1, myDes, el[i].qty, el[i].qtyFound, tot, el[i].section, &el[i], rows, j);
   free(el);
@@ -1407,6 +1476,132 @@ static long rt_find_root(SQLHDBC dbc, const wchar_t *des, CardRow *rows, RtJob *
   return best;
 }
 
+/* ---- параллельный обход ----------------------------------------------------
+   Каждая позиция — десяток-другой запросов, и они идут по очереди: на большой
+   сборке это минуты. Ветки состава корня друг от друга не зависят — их берут
+   RT_WORKERS потоков, у каждого своё подключение к PLM и своя «ведомость»
+   (строки, журнал); ветки разбираются по очереди номеров, а потом строки и
+   журнал сшиваются в порядке состава — как при обходе подряд. */
+#define RT_WORKERS 4
+
+typedef struct {
+  int worker, row0, row1, log0, log1;
+  BOOL done;
+} RtSeg;
+
+typedef struct {
+  RtJob *main, *w;
+  volatile LONG *next;
+  RtSeg *seg;
+  int idx;
+} RtWork;
+
+static RtJob *rt_job_new(void);
+static void rt_job_free(RtJob *j);
+
+static void rt_branch(SQLHDBC dbc, RtJob *j, RtJob *w, int i, RtSeg *seg, CardRow *rows) {
+  RtEl *el = (RtEl *)j->rootEl;
+  seg->row0 = w->n;
+  seg->log0 = w->logLen;
+  rt_walk(dbc, el[i].child, 1, j->rootDes, el[i].qty, el[i].qtyFound, j->rootTot, el[i].section, &el[i], rows, w);
+  seg->row1 = w->n;
+  seg->log1 = w->logLen;
+  seg->done = TRUE;
+}
+
+static DWORD WINAPI rt_worker(LPVOID param) {
+  RtWork *k = (RtWork *)param;
+  RtJob *j = k->main, *w = k->w;
+  SQLHENV env = SQL_NULL_HENV;
+  SQLHDBC dbc = SQL_NULL_HDBC;
+  wchar_t err[280];
+  if (!plm_connect(&env, &dbc, err, 280)) return 0; /* ветки возьмут другие потоки */
+  CardRow *rows = (CardRow *)malloc(sizeof(CardRow) * 300);
+  g_qTimeout = 30;
+  while (rows && !rt_late(j)) {
+    LONG i = InterlockedIncrement(k->next) - 1;
+    if (i >= j->rootNe) break;
+    k->seg[i].worker = k->idx;
+    rt_branch(dbc, j, w, (int)i, &k->seg[i], rows);
+  }
+  free(rows);
+  SQLDisconnect(dbc);
+  SQLFreeHandle(SQL_HANDLE_DBC, dbc);
+  SQLFreeHandle(SQL_HANDLE_ENV, env);
+  return 0;
+}
+
+static void rt_log_raw(RtJob *j, const wchar_t *s, int n) {
+  if (!j->log || n <= 0) return;
+  if (n > RT_LOG - 1 - j->logLen) n = RT_LOG - 1 - j->logLen;
+  if (n <= 0) return;
+  memcpy(j->log + j->logLen, s, (size_t)n * sizeof(wchar_t));
+  j->logLen += n;
+  j->log[j->logLen] = 0;
+}
+
+static void rt_walk_parallel(SQLHDBC dbc, RtJob *j, CardRow *rows) {
+  int ne = j->rootNe, nw = ne < RT_WORKERS ? ne : RT_WORKERS;
+  RtSeg *seg = (RtSeg *)calloc((size_t)ne, sizeof(RtSeg));
+  RtWork work[RT_WORKERS];
+  HANDLE th[RT_WORKERS];
+  int started = 0;
+  volatile LONG next = 0;
+  ULONGLONG t0 = GetTickCount64();
+  for (int k = 0; seg && k < nw; k++) {
+    RtJob *w = rt_job_new();
+    if (!w) break;
+    w->deadline = j->deadline;
+    w->cancel = j->cancel;
+    w->notify = j->notify;
+    w->shared = j->shared;
+    work[started].main = j;
+    work[started].w = w;
+    work[started].next = &next;
+    work[started].seg = seg;
+    work[started].idx = started;
+    th[started] = CreateThread(NULL, 0, rt_worker, &work[started], 0, NULL);
+    if (!th[started]) {
+      rt_job_free(w);
+      break;
+    }
+    started++;
+  }
+  if (started) WaitForMultipleObjects((DWORD)started, th, TRUE, INFINITE);
+  for (int k = 0; k < started; k++) CloseHandle(th[k]);
+  /* что потоки не взяли (не подключились) — здесь же, по очереди */
+  RtJob *rest = NULL;
+  for (int i = 0; seg && i < ne && !rt_late(j); i++)
+    if (!seg[i].done) {
+      if (!rest) rest = rt_job_new();
+      if (!rest) break;
+      rest->deadline = j->deadline;
+      rest->cancel = j->cancel;
+      rest->notify = j->notify;
+      rest->shared = j->shared;
+      seg[i].worker = started;
+      rt_branch(dbc, j, rest, i, &seg[i], rows);
+    }
+  /* сшить в порядке состава */
+  for (int i = 0; seg && i < ne; i++) {
+    if (!seg[i].done) continue;
+    RtJob *w = seg[i].worker < started ? work[seg[i].worker].w : rest;
+    for (int r = seg[i].row0; r < seg[i].row1 && j->n < RT_MAX; r++) j->rows[j->n++] = w->rows[r];
+    rt_log_raw(j, w->log + seg[i].log0, seg[i].log1 - seg[i].log0);
+  }
+  for (int k = 0; k < started; k++) {
+    j->kdUsed += work[k].w->kdUsed;
+    rt_job_free(work[k].w);
+  }
+  if (rest) {
+    j->kdUsed += rest->kdUsed;
+    rt_job_free(rest);
+  }
+  rt_log(j, L"\r\nВетвей состава %d, обход в %d потока — %.0f с\r\n", ne, started ? started : 1,
+         (double)(GetTickCount64() - t0) / 1000.0);
+  free(seg);
+}
+
 /* весь сбор — в своём потоке; у раздающего — в его исполнителе */
 static void rt_build(RtJob *j) {
   SQLHENV env = SQL_NULL_HENV;
@@ -1422,7 +1617,17 @@ static void rt_build(RtJob *j) {
     long root = j->rootId;
     if (root) rt_log(j, L"Изделие — строка из поиска PLM: %ld\r\n\r\n", root);
     else root = rt_find_root(dbc, j->des, rows, j);
+    volatile LONG prog = 0;
+    j->shared = &prog;
+    j->split = !j->dump; /* проверочная выгрузка — по-старому, подряд */
     if (root) rt_walk(dbc, root, 0, j->order, 1, TRUE, 1, NULL, NULL, rows, j);
+    if (j->rootEl) {
+      rt_walk_parallel(dbc, j, rows);
+      free(j->rootEl);
+      j->rootEl = NULL;
+    }
+    j->shared = NULL;
+    j->split = FALSE;
     g_qTimeout = 0;
     if (rt_late(j) && !(j->cancel && *j->cancel))
       rt_log(j, L"\r\nВремя вышло — собрано не всё (%d позиций).\r\n", j->n);

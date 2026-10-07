@@ -39,7 +39,7 @@ static unsigned xp_checked(void) {
 static void xp_prefs_save(void) {
   if (!g_dataDir[0]) return;
   wchar_t buf[60], p[MAX_PATH];
-  _snwprintf(buf, 60, L"what\t%u\n", xp_checked());
+  _snwprintf(buf, 60, L"what6\t%u\n", xp_checked()); /* «what6» — с листом «Заготовки» */
   xp_prefs_path(p);
   share_write_ex(p, buf, TRUE);
 }
@@ -53,7 +53,9 @@ static void xp_prefs_load(void) {
     wchar_t *pp = t, *line;
     while ((line = share_next_line(&pp)) != NULL) {
       wchar_t *f[3];
-      if (share_split(line, f, 3) >= 2 && !wcscmp(f[0], L"what")) what = (unsigned)wcstoul(f[1], NULL, 10);
+      if (share_split(line, f, 3) < 2) continue;
+      if (!wcscmp(f[0], L"what6")) what = (unsigned)wcstoul(f[1], NULL, 10);
+      else if (!wcscmp(f[0], L"what")) what = (unsigned)wcstoul(f[1], NULL, 10) | (1u << XP_PF); /* до .81 листа не было */
     }
     free(t);
   }
@@ -132,8 +134,9 @@ static void xp_start(void) {
 /* таблица окна — выбранный лист; больше 3000 строк не показываем (в Excel — все) */
 #define XP_VIEW_MAX 3000
 static void xp_fill_list(void) {
-  int k = (int)SendMessageW(g_xpView, CB_GETCURSEL, 0, 0);
-  if (k < 0 || k >= XP_NT) k = 0;
+  int sel = (int)SendMessageW(g_xpView, CB_GETCURSEL, 0, 0);
+  if (sel < 0 || sel >= XP_NT) sel = 0;
+  int k = kXpOrder[sel]; /* в списке листы — в порядке книги */
   SendMessageW(g_xpList, WM_SETREDRAW, FALSE, 0);
   ListView_DeleteAllItems(g_xpList);
   if (k != g_xpShown) {
@@ -177,7 +180,8 @@ static void xp_fill_list(void) {
 static void xp_fill_view(void) {
   int cur = (int)SendMessageW(g_xpView, CB_GETCURSEL, 0, 0);
   SendMessageW(g_xpView, CB_RESETCONTENT, 0, 0);
-  for (int k = 0; k < XP_NT; k++) {
+  for (int o = 0; o < XP_NT; o++) {
+    int k = kXpOrder[o];
     wchar_t s[80];
     if (g_xpJob && ((g_xpJob->what >> k) & 1)) _snwprintf(s, 80, L"%s — %d", kXpSheets[k].name, g_xpJob->t[k].n);
     else lstrcpynW(s, kXpSheets[k].name, 80);
@@ -216,7 +220,8 @@ static void xp_save(void) {
   XlBookSheet bs[XP_NT];
   wchar_t titles[XP_NT][300];
   int n = 0;
-  for (int k = 0; k < XP_NT; k++) {
+  for (int o = 0; o < XP_NT; o++) {
+    int k = kXpOrder[o];
     if (!((g_xpJob->what >> k) & 1)) continue;
     memset(&sh[n], 0, sizeof(sh[n]));
     sh[n].ncols = kXpSheets[k].ncols;
@@ -269,8 +274,9 @@ static void xp_layout(void) {
   MoveWindow(g_xpDes, pad, y, XS(320), h, TRUE);
   MoveWindow(GetDlgItem(g_xpWnd, ID_XP_BUILD), pad + XS(332), y - XS(1), XS(110), h + XS(2), TRUE);
   int cx = pad, cy = y + XS(34);
-  static const int cw[XP_NT] = {130, 100, 105, 110, 100};
-  for (int k = 0; k < XP_NT; k++) {
+  static const int cw[XP_NT] = {130, 100, 105, 110, 100, 110}; /* по номеру листа */
+  for (int o = 0; o < XP_NT; o++) {
+    int k = kXpOrder[o];
     MoveWindow(g_xpChk[k], cx, cy, XS(cw[k]), XS(22), TRUE);
     cx += XS(cw[k] + 8);
   }
@@ -320,8 +326,8 @@ static LRESULT CALLBACK XpEditProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
   return CallWindowProcW(old, hwnd, msg, wParam, lParam);
 }
 
-static const wchar_t *const kXpStage[XP_NT] = {L"состав", L"операции, материалы, инструмент", L"", L"",
-                                               L"извещения"};
+static const wchar_t *const kXpStage[XP_NT] = {L"состав", L"операции, материалы, инструмент и заготовки", L"",
+                                               L"", L"извещения", L""};
 
 static LRESULT CALLBACK XpProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
   switch (msg) {
@@ -391,8 +397,10 @@ static LRESULT CALLBACK XpProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
     if (x->rt->err[0] && !rows) xp_status(L"%s", x->rt->err);
     else if (g_xpCancel) xp_status(L"Остановлено: что успели — в таблице, можно сохранить");
     else
-      xp_status(L"Готово за %.0f с: позиций %d · операций %d · материалов %d · инструмента %d · извещений %d", sec,
-                x->t[XP_COMP].n, x->t[XP_OPS].n, x->t[XP_MAT].n, x->t[XP_TOOL].n, x->t[XP_ECN].n);
+      xp_status(L"Готово за %.0f с (обход %.0f, операции %.0f, извещения %.0f): позиций %d · заготовок %d · "
+                L"операций %d · материалов %d · инструмента %d · извещений %d",
+                sec, x->secWalk, x->secSheets, x->secEcn, x->t[XP_COMP].n, x->t[XP_PF].n, x->t[XP_OPS].n,
+                x->t[XP_MAT].n, x->t[XP_TOOL].n, x->t[XP_ECN].n);
     return 0;
   }
   case WM_COMMAND: {

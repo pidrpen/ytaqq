@@ -27,7 +27,8 @@
 #define WM_XP_PROGRESS (WM_APP + 64)
 #define WM_XP_DONE (WM_APP + 65) /* lParam — XpJob*, освобождает получатель */
 
-enum { XP_COMP, XP_OPS, XP_MAT, XP_TOOL, XP_ECN, XP_NT };
+/* XP_PF — в конце: номера листов ходят и через раздающего коллегу */
+enum { XP_COMP, XP_OPS, XP_MAT, XP_TOOL, XP_ECN, XP_PF, XP_NT };
 
 typedef struct {
   int ncols, n, cap;
@@ -40,6 +41,7 @@ typedef struct {
   XpTable t[XP_NT];
   HWND notify;
   int stage; /* что сейчас собирается — для строки состояния */
+  double secWalk, secSheets, secEcn; /* сколько шли этапы — в строку состояния */
 } XpJob;
 
 /* ---- листы: столбцы ---------------------------------------------------------- */
@@ -66,6 +68,13 @@ static const wchar_t *const kXpToolHead[] = {L"Обозначение", L"Наи
                                              L"Инструмент, оснастка", L"Кол-во", L"Коэф. применения"};
 static const int kXpToolW[] = {24, 28, 7, 26, 50, 9, 11};
 
+static const wchar_t *const kXpPfHead[] = {L"Обозначение", L"Наименование", L"Кол-во на изд. (всего)",
+                                           L"Заготовка",   L"Материал",     L"Сортамент",
+                                           L"Размеры",     L"Припуск",      L"Норма на 1",
+                                           L"Ед. нормы",   L"Норма на изд.", L"Из изделия",
+                                           L"Для версии"};
+static const int kXpPfW[] = {24, 28, 10, 28, 40, 24, 18, 8, 9, 7, 10, 26, 26};
+
 static const wchar_t *const kXpEcnHead[] = {L"Обозначение", L"Наименование", L"Вид", L"Номер извещения",
                                             L"Извещение",   L"Состояние",    L"Что делает", L"С чем связано"};
 static const int kXpEcnW[] = {24, 28, 6, 20, 40, 16, 26, 40};
@@ -84,7 +93,10 @@ static const XpSheetDef kXpSheets[XP_NT] = {
     {L"Материалы", XP_N(kXpMatHead), kXpMatHead, kXpMatW},
     {L"Инструмент", XP_N(kXpToolHead), kXpToolHead, kXpToolW},
     {L"Извещения", XP_N(kXpEcnHead), kXpEcnHead, kXpEcnW},
+    {L"Заготовки", XP_N(kXpPfHead), kXpPfHead, kXpPfW},
 };
+/* порядок листов в книге и в окне: заготовки — сразу за составом */
+static const int kXpOrder[XP_NT] = {XP_COMP, XP_PF, XP_OPS, XP_MAT, XP_TOOL, XP_ECN};
 
 /* ---- таблица ------------------------------------------------------------------ */
 
@@ -148,102 +160,6 @@ static XpJob *xp_job_new(void) {
 }
 
 /* ---- общее чтение полей -------------------------------------------------------- */
-
-/* значение поля по псевдониму таблицы атрибутов (как PF_VALUE_SQL, но для любого
-   псевдонима): у ссылки — имя объекта (lo), у перечисления — его название */
-#define XP_VALUE(al)                                                                          \
-  L"COALESCE(lo.Name, NULLIF(CASE " al L".DataType "                                           \
-  L"WHEN 3 THEN CASE WHEN " al L".BoolValue=1 THEN N'да' ELSE N'нет' END "                     \
-  L"WHEN 2 THEN CAST(" al L".ShortText AS NVARCHAR(400)) "                                     \
-  L"WHEN 24 THEN CAST(" al L".LargeText AS NVARCHAR(400)) "                                    \
-  L"WHEN 11 THEN (SELECT TOP 1 CAST(cvn.NameUI AS NVARCHAR(400)) FROM NamedValues AS cvn WITH(NOLOCK) " \
-  L"WHERE cvn.NamedValueId=" al L".Link) "                                                     \
-  L"WHEN 22 THEN (SELECT TOP 1 CAST(cvt.NameUI AS NVARCHAR(400)) FROM Templates AS cvt WITH(NOLOCK) " \
-  L"WHERE cvt.TemplateId=" al L".Link) "                                                       \
-  L"WHEN 25 THEN (SELECT TOP 1 CAST(cvt.NameUI AS NVARCHAR(400)) FROM Templates AS cvt WITH(NOLOCK) " \
-  L"WHERE cvt.TemplateId=" al L".Link) END, N''), "                                            \
-  L"CONVERT(NVARCHAR(64), " al L".FloatNumber), CONVERT(NVARCHAR(64), " al L".IntegerNumber), " \
-  L"CASE WHEN " al L".DataType<>6 THEN CONVERT(NVARCHAR(64), " al L".LongNumber) END, N'')"
-
-/* Поля объектов ids одним запросом:
-     свои поля из списка own                       — путь «Поле»;
-     строки списков и составных из списка coll     — «Список|Поле»;
-     составные внутри этих строк                   — «Список|Поле|Подполе».
-   own и coll — списки для IN: N'Area',N'WorkShop'. n1 — владелец, n2 — строка
-   списка (0 — своё поле), n3 — DataType + 1000, если значение устаревшее
-   (поля составных PLM читает без отбора по Outdated — актуальные первыми,
-   так и здесь: порядок владелец · строка · путь · устаревшее), s1 — путь,
-   s2 — значение. */
-static int xp_fields(SQLHDBC dbc, const wchar_t *ids, const wchar_t *own, const wchar_t *coll, CardRow *rows, int max,
-                     wchar_t *err) {
-  size_t cap = 9000 + wcslen(ids) * 3;
-  wchar_t *sql = (wchar_t *)malloc(cap * sizeof(wchar_t));
-  if (!sql) return -1;
-  _snwprintf(sql, cap,
-             L"SELECT TOP %d a.OwnerId, CAST(nk.Value AS NVARCHAR(200)), CAST(" XP_VALUE(L"a") L" AS NVARCHAR(600)), "
-             L"0, a.DataType "
-             L"FROM InfoObjectAttributes AS a WITH(NOLOCK) "
-             L"JOIN NameKeys AS nk WITH(NOLOCK) ON nk.NameKeyId=a.NameKeyId AND nk.Value IN (%s) "
-             L"LEFT JOIN InfoObjects AS lo WITH(NOLOCK) ON a.DataType=6 AND lo.InfoObjectId=a.Link "
-             L"WHERE a.OwnerId IN (%s) AND a.Outdated=0 AND ISNULL(a.CollectionElementId,0)=0 "
-             L"UNION ALL "
-             L"SELECT p.OwnerId, CAST(nkp.Value AS NVARCHAR(90)) + N'|' + CAST(nk.Value AS NVARCHAR(100)), "
-             L"CAST(" XP_VALUE(L"a") L" AS NVARCHAR(600)), ce.CollectionElementId, "
-             L"a.DataType + 1000 * ISNULL(CAST(a.Outdated AS INT),0) "
-             L"FROM InfoObjectAttributes AS p WITH(NOLOCK) "
-             L"JOIN NameKeys AS nkp WITH(NOLOCK) ON nkp.NameKeyId=p.NameKeyId AND nkp.Value IN (%s) "
-             L"JOIN InfoObjectCollectionElements AS ce WITH(NOLOCK) "
-             L"ON ce.AttributeId IN (p.AttributeId, ISNULL(p.Link,0)) AND ce.Outdated=0 "
-             L"JOIN InfoObjectAttributes AS a WITH(NOLOCK) ON a.CollectionElementId=ce.CollectionElementId "
-             L"JOIN NameKeys AS nk WITH(NOLOCK) ON nk.NameKeyId=a.NameKeyId AND nk.Value<>N'LastChanged' "
-             L"LEFT JOIN InfoObjects AS lo WITH(NOLOCK) ON a.DataType=6 AND lo.InfoObjectId=a.Link "
-             L"WHERE p.OwnerId IN (%s) AND p.Outdated=0 AND ISNULL(p.CollectionElementId,0)=0 "
-             L"UNION ALL "
-             L"SELECT p.OwnerId, CAST(nkp.Value AS NVARCHAR(60)) + N'|' + CAST(nka.Value AS NVARCHAR(60)) + N'|' + "
-             L"CAST(nk.Value AS NVARCHAR(70)), CAST(" XP_VALUE(L"b") L" AS NVARCHAR(600)), ce.CollectionElementId, "
-             L"b.DataType + 1000 * ISNULL(CAST(b.Outdated AS INT),0) "
-             L"FROM InfoObjectAttributes AS p WITH(NOLOCK) "
-             L"JOIN NameKeys AS nkp WITH(NOLOCK) ON nkp.NameKeyId=p.NameKeyId AND nkp.Value IN (%s) "
-             L"JOIN InfoObjectCollectionElements AS ce WITH(NOLOCK) "
-             L"ON ce.AttributeId IN (p.AttributeId, ISNULL(p.Link,0)) AND ce.Outdated=0 "
-             L"JOIN InfoObjectAttributes AS a WITH(NOLOCK) ON a.CollectionElementId=ce.CollectionElementId "
-             L"AND a.DataType=23 AND ISNULL(a.Outdated,0)=0 "
-             L"JOIN NameKeys AS nka WITH(NOLOCK) ON nka.NameKeyId=a.NameKeyId "
-             L"JOIN InfoObjectCollectionElements AS ce2 WITH(NOLOCK) "
-             L"ON ce2.AttributeId IN (a.AttributeId, ISNULL(a.Link,0)) AND ce2.Outdated=0 "
-             L"JOIN InfoObjectAttributes AS b WITH(NOLOCK) ON b.CollectionElementId=ce2.CollectionElementId "
-             L"JOIN NameKeys AS nk WITH(NOLOCK) ON nk.NameKeyId=b.NameKeyId AND nk.Value<>N'LastChanged' "
-             L"LEFT JOIN InfoObjects AS lo WITH(NOLOCK) ON b.DataType=6 AND lo.InfoObjectId=b.Link "
-             L"WHERE p.OwnerId IN (%s) AND p.Outdated=0 AND ISNULL(p.CollectionElementId,0)=0 "
-             L"ORDER BY 1, 4, 2, 5",
-             max, own, ids, coll, ids, coll, ids);
-  sql[cap - 1] = 0;
-  int n = card_query(dbc, sql, rows, max, err, 280);
-  free(sql);
-  return n;
-}
-
-/* Первое значение по пути у владельца a (нет — у b, это его TSOperation);
-   row — только эта строка списка (0 — любая). Пути — через «;», по порядку
-   важности: «TimePerPiece|Value;TimePerPiece». Устаревшее — только если
-   актуального нет (оно в выборке после актуального). */
-static const wchar_t *xp_get(const CardRow *f, int nf, long a, long b, long row, const wchar_t *paths) {
-  wchar_t buf[400];
-  lstrcpynW(buf, paths, 400);
-  for (wchar_t *p = buf, *next; p && *p; p = next) {
-    next = wcschr(p, L';');
-    if (next) *next++ = 0;
-    for (int pass = 0; pass < 2; pass++) {
-      long own = pass ? b : a;
-      if (!own) continue;
-      for (int i = 0; i < nf; i++) {
-        if (f[i].n1 != own || (row && f[i].n2 != row) || !f[i].s2[0]) continue;
-        if (!_wcsicmp(f[i].s1, p)) return f[i].s2;
-      }
-    }
-  }
-  return NULL;
-}
 
 /* все разные значения пути у владельца — через «; » (оборудование, профессии) */
 static void xp_join(const CardRow *f, int nf, long a, const wchar_t *path, wchar_t *out, int cap) {
@@ -317,10 +233,15 @@ static void xp_comp(XpJob *x) {
   }
 }
 
-/* ---- операции ТП позиции: общее для листов операций, материалов, инструмента -- */
+/* ---- листы по позициям: операции, материалы, инструмент, заготовки ------------
+
+   Каждая позиция — свои запросы, а позиций сотни: потому (с 2026.09.23.81) их
+   разбирают XP_WORKERS потоков, у каждого своё подключение к PLM; строки каждой
+   позиции — в её таблицах, потом сшиваются в порядке состава. */
 
 #define XP_OPS_MAX 200
 #define XP_FIELDS 3000
+#define XP_WORKERS 4
 
 typedef struct {
   long id, ts; /* операция и её TSOperation */
@@ -385,148 +306,320 @@ static int xp_coll_rows(const CardRow *f, int nf, long own, const wchar_t *coll,
 
 static void xp_fmt3(double v, wchar_t *out, int cap) { rt_fmt(floor(v * 1000 + 0.5) / 1000, 3, out, cap); }
 
-static void xp_ops_sheets(SQLHDBC dbc, XpJob *x, XpPos *pos, int np, CardRow *rows) {
-  RtJob *j = x->rt;
+/* буферы одного потока */
+typedef struct {
+  CardRow *f, *dr, *rows;
+  XpOp *ops;
+  RtJob *lg; /* его журнал — в «Подробности» после сбора */
+  BOOL keysShown;
+} XpBuf;
+
+static BOOL xp_buf_new(XpBuf *b) {
+  memset(b, 0, sizeof(*b));
+  b->f = (CardRow *)malloc(sizeof(CardRow) * XP_FIELDS);
+  b->dr = (CardRow *)malloc(sizeof(CardRow) * 300);
+  b->rows = (CardRow *)malloc(sizeof(CardRow) * 400);
+  b->ops = (XpOp *)malloc(sizeof(XpOp) * XP_OPS_MAX);
+  b->lg = (RtJob *)calloc(1, sizeof(RtJob));
+  if (b->lg) b->lg->log = (wchar_t *)calloc(RT_LOG, sizeof(wchar_t));
+  return b->f && b->dr && b->rows && b->ops && b->lg && b->lg->log;
+}
+
+static void xp_buf_free(XpBuf *b) {
+  free(b->f);
+  free(b->dr);
+  free(b->rows);
+  free(b->ops);
+  if (b->lg) free(b->lg->log);
+  free(b->lg);
+}
+
+/* операции, материалы и инструмент одной позиции — в out[XP_OPS…XP_TOOL] */
+static void xp_pos_ops(SQLHDBC dbc, XpJob *x, const XpPos *pp, XpTable *out, XpBuf *b) {
+  const RtRow *r = pp->r;
   BOOL wantOps = (x->what >> XP_OPS) & 1, wantMat = (x->what >> XP_MAT) & 1, wantTool = (x->what >> XP_TOOL) & 1;
-  if (!wantOps && !wantMat && !wantTool) return;
-  CardRow *f = (CardRow *)malloc(sizeof(CardRow) * XP_FIELDS);
-  CardRow *dr = (CardRow *)malloc(sizeof(CardRow) * 300);
-  XpOp *ops = (XpOp *)malloc(sizeof(XpOp) * XP_OPS_MAX);
-  if (!f || !dr || !ops) {
-    free(f);
-    free(dr);
-    free(ops);
-    return;
-  }
-  BOOL keysShown = FALSE;
-  int totalOps = 0;
-  for (int p = 0; p < np && !xp_late(x); p++) {
-    const RtRow *r = pos[p].r;
-    if (!r->tpVar) continue;
-    int no = xp_ops_of(dbc, r->tpVar, rows, ops, XP_OPS_MAX, j);
-    if (!no) continue;
-    wchar_t qty[40];
-    xp_fmt3(pos[p].qtyAll, qty, 40);
-    /* по 8 операций за запрос: у каждой десятки полей и строк */
-    for (int b0 = 0; b0 < no && !xp_late(x); b0 += 8) {
-      int b1 = b0 + 8 < no ? b0 + 8 : no;
-      wchar_t ids[400], opIds[200];
-      int q = 0, w = 0;
-      for (int i = b0; i < b1; i++) {
-        q += _snwprintf(ids + q, 400 - q, q ? L",%ld" : L"%ld", ops[i].id);
-        if (ops[i].ts) q += _snwprintf(ids + q, 400 - q, L",%ld", ops[i].ts);
-        w += _snwprintf(opIds + w, 200 - w, w ? L",%ld" : L"%ld", ops[i].id);
+  if ((!wantOps && !wantMat && !wantTool) || !r->tpVar) return;
+  RtJob *j = b->lg;
+  CardRow *f = b->f, *dr = b->dr;
+  XpOp *ops = b->ops;
+  int no = xp_ops_of(dbc, r->tpVar, b->rows, ops, XP_OPS_MAX, j);
+  if (!no) return;
+  wchar_t qty[40];
+  xp_fmt3(pp->qtyAll, qty, 40);
+  /* по 25 операций за запрос: меньше запросов — быстрее */
+  for (int b0 = 0; b0 < no && !xp_late(x); b0 += 25) {
+    int b1 = b0 + 25 < no ? b0 + 25 : no;
+    wchar_t ids[1300], opIds[700];
+    int q = 0, w = 0;
+    for (int i = b0; i < b1; i++) {
+      q += _snwprintf(ids + q, 1300 - q, q ? L",%ld" : L"%ld", ops[i].id);
+      if (ops[i].ts) q += _snwprintf(ids + q, 1300 - q, L",%ld", ops[i].ts);
+      w += _snwprintf(opIds + w, 700 - w, w ? L",%ld" : L"%ld", ops[i].id);
+    }
+    wchar_t err[280];
+    int nf = xp_fields(dbc, ids, XP_OP_OWN, XP_OP_COLL, f, XP_FIELDS, err);
+    if (nf < 0) {
+      rt_log(j, L"  поля операций %s: запрос не выполнился — %s\r\n", r->f[RC_DES], err);
+      nf = 0;
+    }
+    if (nf >= XP_FIELDS)
+      rt_log(j, L"  поля операций %s: строк больше %d — часть не прочитана\r\n", r->f[RC_DES], XP_FIELDS);
+    if (!b->keysShown && nf > 0) { /* какие поля пришли — раз, для проверки */
+      b->keysShown = TRUE;
+      rt_log(j, L"  поля операции %s (для проверки):\r\n", ops[b0].name);
+      for (int i = 0; i < nf && i < 80; i++)
+        if (f[i].n1 == ops[b0].id || f[i].n1 == ops[b0].ts)
+          rt_log(j, L"    %s = %s%s\r\n", f[i].s1, f[i].s2, f[i].n3 >= 1000 ? L" (устар.)" : L"");
+    }
+    int nd = wantOps ? card_op_dirs(dbc, opIds, dr, err) : 0;
+    for (int i = b0; i < b1; i++) {
+      const XpOp *o = &ops[i];
+      const wchar_t *num = xp_get(f, nf, o->id, 0, 0, L"Number");
+      const wchar_t *opNum = num && num[0] ? num : o->num;
+      if (wantOps) {
+        wchar_t **row = xp_row(&out[XP_OPS]);
+        if (!row) break;
+        xp_set(row, 0, r->f[RC_DES]);
+        xp_set(row, 1, r->f[RC_NAME]);
+        xp_set(row, 2, qty);
+        xp_set(row, 3, r->tpName);
+        xp_set(row, 4, opNum);
+        xp_set(row, 5, o->name);
+        const CardRow *d = NULL;
+        for (int k = 0; k < nd && !d; k++)
+          if (dr[k].n1 == o->id) d = &dr[k];
+        wchar_t t1c[PLM_COL1];
+        op1c_text(d ? d->s1 : NULL, d ? d->s2 : NULL, o->ts ? o->tsName : NULL, o->name, t1c, PLM_COL1);
+        xp_set(row, 6, t1c);
+        xp_set(row, 7, xp_get(f, nf, o->id, o->ts, 0, L"Area"));
+        xp_set(row, 8, xp_get(f, nf, o->id, o->ts, 0, L"WorkShop"));
+        wchar_t eq[600], cr[600];
+        xp_join(f, nf, o->id, L"EquipmentList|Equipment|Equipment", eq, 600);
+        if (!eq[0]) xp_join(f, nf, o->id, L"EquipmentList|Equipment", eq, 600);
+        xp_join(f, nf, o->id, L"CraftList|Craft|Craft", cr, 600);
+        if (!cr[0]) xp_join(f, nf, o->id, L"CraftList|Craft", cr, 600);
+        xp_set(row, 9, eq);
+        xp_set(row, 10, cr);
+        const wchar_t *tpz = xp_get(f, nf, o->id, o->ts, 0, L"SetupTime|Value");
+        const wchar_t *tsh = xp_get(f, nf, o->id, o->ts, 0, L"TimePerPiece|Value");
+        const wchar_t *unit = xp_get(f, nf, o->id, o->ts, 0, L"TimePerPiece|ComputingUnit;SetupTime|ComputingUnit");
+        double v;
+        wchar_t nb[40];
+        if (xp_num(tpz, &v) && v != 0) xp_fmt3(v, nb, 40), xp_set(row, 11, nb);
+        if (xp_num(tsh, &v) && v != 0) {
+          xp_fmt3(v, nb, 40);
+          xp_set(row, 12, nb);
+          xp_fmt3(v * pp->qtyAll, nb, 40);
+          xp_set(row, 14, nb);
+        }
+        xp_set(row, 13, unit);
       }
-      wchar_t err[280];
-      int nf = xp_fields(dbc, ids, XP_OP_OWN, XP_OP_COLL, f, XP_FIELDS, err);
-      if (nf < 0) {
-        rt_log(j, L"  поля операций %s: запрос не выполнился — %s\r\n", r->f[RC_DES], err);
-        nf = 0;
-      }
-      if (nf >= XP_FIELDS) rt_log(j, L"  поля операций %s: строк больше %d — часть не прочитана\r\n", r->f[RC_DES],
-                                  XP_FIELDS);
-      if (!keysShown && nf > 0) { /* какие поля пришли — раз, для проверки */
-        keysShown = TRUE;
-        rt_log(j, L"  поля операции %s (для проверки):\r\n", ops[b0].name);
-        for (int i = 0; i < nf && i < 80; i++)
-          if (f[i].n1 == ops[b0].id || f[i].n1 == ops[b0].ts)
-            rt_log(j, L"    %s = %s%s\r\n", f[i].s1, f[i].s2, f[i].n3 >= 1000 ? L" (устар.)" : L"");
-      }
-      int nd = wantOps ? card_op_dirs(dbc, opIds, dr, err) : 0;
-      for (int i = b0; i < b1; i++) {
-        const XpOp *o = &ops[i];
-        const wchar_t *num = xp_get(f, nf, o->id, 0, 0, L"Number");
-        const wchar_t *opNum = num && num[0] ? num : o->num;
-        if (wantOps) {
-          wchar_t **row = xp_row(&x->t[XP_OPS]);
+      if (wantMat) {
+        long rr[60];
+        int nr = xp_coll_rows(f, nf, o->id, L"SummaryList", rr, 60);
+        for (int k = 0; k < nr; k++) {
+          const wchar_t *mat = xp_get(f, nf, o->id, 0, rr[k], L"SummaryList|Material");
+          if (!mat) continue;
+          wchar_t **row = xp_row(&out[XP_MAT]);
           if (!row) break;
-          totalOps++;
           xp_set(row, 0, r->f[RC_DES]);
           xp_set(row, 1, r->f[RC_NAME]);
           xp_set(row, 2, qty);
-          xp_set(row, 3, r->tpName);
-          xp_set(row, 4, opNum);
-          xp_set(row, 5, o->name);
-          const CardRow *d = NULL;
-          for (int k = 0; k < nd && !d; k++)
-            if (dr[k].n1 == o->id) d = &dr[k];
-          wchar_t t1c[PLM_COL1];
-          op1c_text(d ? d->s1 : NULL, d ? d->s2 : NULL, o->ts ? o->tsName : NULL, o->name, t1c, PLM_COL1);
-          xp_set(row, 6, t1c);
-          xp_set(row, 7, xp_get(f, nf, o->id, o->ts, 0, L"Area"));
-          xp_set(row, 8, xp_get(f, nf, o->id, o->ts, 0, L"WorkShop"));
-          wchar_t eq[600], cr[600];
-          xp_join(f, nf, o->id, L"EquipmentList|Equipment|Equipment", eq, 600);
-          if (!eq[0]) xp_join(f, nf, o->id, L"EquipmentList|Equipment", eq, 600);
-          xp_join(f, nf, o->id, L"CraftList|Craft|Craft", cr, 600);
-          if (!cr[0]) xp_join(f, nf, o->id, L"CraftList|Craft", cr, 600);
-          xp_set(row, 9, eq);
-          xp_set(row, 10, cr);
-          const wchar_t *tpz = xp_get(f, nf, o->id, o->ts, 0, L"SetupTime|Value");
-          const wchar_t *tsh = xp_get(f, nf, o->id, o->ts, 0, L"TimePerPiece|Value");
-          const wchar_t *unit = xp_get(f, nf, o->id, o->ts, 0, L"TimePerPiece|ComputingUnit;SetupTime|ComputingUnit");
+          xp_set(row, 3, opNum);
+          xp_set(row, 4, o->name);
+          xp_set(row, 5, mat);
+          const wchar_t *nv = xp_get(f, nf, o->id, 0, rr[k], L"SummaryList|NormOfExpensesWithUnit|Value");
           double v;
           wchar_t nb[40];
-          if (xp_num(tpz, &v) && v != 0) xp_fmt3(v, nb, 40), xp_set(row, 11, nb);
-          if (xp_num(tsh, &v) && v != 0) {
+          if (xp_num(nv, &v)) {
             xp_fmt3(v, nb, 40);
-            xp_set(row, 12, nb);
-            xp_fmt3(v * pos[p].qtyAll, nb, 40);
-            xp_set(row, 14, nb);
+            xp_set(row, 6, nb);
+            xp_fmt3(v * pp->qtyAll, nb, 40);
+            xp_set(row, 8, nb);
           }
-          xp_set(row, 13, unit);
+          xp_set(row, 7, xp_get(f, nf, o->id, 0, rr[k], L"SummaryList|NormOfExpensesWithUnit|ComputingUnit"));
         }
-        if (wantMat) {
-          long rr[60];
-          int nr = xp_coll_rows(f, nf, o->id, L"SummaryList", rr, 60);
-          for (int k = 0; k < nr; k++) {
-            const wchar_t *mat = xp_get(f, nf, o->id, 0, rr[k], L"SummaryList|Material");
-            if (!mat) continue;
-            wchar_t **row = xp_row(&x->t[XP_MAT]);
-            if (!row) break;
-            xp_set(row, 0, r->f[RC_DES]);
-            xp_set(row, 1, r->f[RC_NAME]);
-            xp_set(row, 2, qty);
-            xp_set(row, 3, opNum);
-            xp_set(row, 4, o->name);
-            xp_set(row, 5, mat);
-            const wchar_t *nv = xp_get(f, nf, o->id, 0, rr[k], L"SummaryList|NormOfExpensesWithUnit|Value");
-            double v;
-            wchar_t nb[40];
-            if (xp_num(nv, &v)) {
-              xp_fmt3(v, nb, 40);
-              xp_set(row, 6, nb);
-              xp_fmt3(v * pos[p].qtyAll, nb, 40);
-              xp_set(row, 8, nb);
-            }
-            xp_set(row, 7, xp_get(f, nf, o->id, 0, rr[k], L"SummaryList|NormOfExpensesWithUnit|ComputingUnit"));
-          }
-        }
-        if (wantTool) {
-          long rr[80];
-          int nr = xp_coll_rows(f, nf, o->id, L"SummaryToolList", rr, 80);
-          for (int k = 0; k < nr; k++) {
-            const wchar_t *tl = xp_get(f, nf, o->id, 0, rr[k], L"SummaryToolList|Tooling");
-            if (!tl) continue;
-            wchar_t **row = xp_row(&x->t[XP_TOOL]);
-            if (!row) break;
-            xp_set(row, 0, r->f[RC_DES]);
-            xp_set(row, 1, r->f[RC_NAME]);
-            xp_set(row, 2, opNum);
-            xp_set(row, 3, o->name);
-            xp_set(row, 4, tl);
-            xp_set(row, 5, xp_get(f, nf, o->id, 0, rr[k], L"SummaryToolList|QuantityC|Value"));
-            xp_set(row, 6, xp_get(f, nf, o->id, 0, rr[k], L"SummaryToolList|zum_ToolApplicationRate"));
-          }
+      }
+      if (wantTool) {
+        long rr[80];
+        int nr = xp_coll_rows(f, nf, o->id, L"SummaryToolList", rr, 80);
+        for (int k = 0; k < nr; k++) {
+          const wchar_t *tl = xp_get(f, nf, o->id, 0, rr[k], L"SummaryToolList|Tooling");
+          if (!tl) continue;
+          wchar_t **row = xp_row(&out[XP_TOOL]);
+          if (!row) break;
+          xp_set(row, 0, r->f[RC_DES]);
+          xp_set(row, 1, r->f[RC_NAME]);
+          xp_set(row, 2, opNum);
+          xp_set(row, 3, o->name);
+          xp_set(row, 4, tl);
+          xp_set(row, 5, xp_get(f, nf, o->id, 0, rr[k], L"SummaryToolList|QuantityC|Value"));
+          xp_set(row, 6, xp_get(f, nf, o->id, 0, rr[k], L"SummaryToolList|zum_ToolApplicationRate"));
         }
       }
     }
-    xp_stage(x, XP_OPS, p + 1);
   }
-  rt_log(j, L"\r\nОпераций: %d, материалов: %d, инструмента: %d\r\n", totalOps, x->t[XP_MAT].n, x->t[XP_TOOL].n);
-  free(f);
-  free(dr);
-  free(ops);
+}
+
+/* Заготовки позиции — все из её карточки заготовок (ProductPreformsCard), по
+   строке на заготовку: материал, сортамент, размеры, припуск, норма. В
+   карточке бывают заготовки разных версий изделия — берутся этой версии
+   (ProductVersionConfiguration), нет таких — все. */
+static void xp_pos_pf(SQLHDBC dbc, XpJob *x, const XpPos *pp, XpTable *out, XpBuf *b) {
+  const RtRow *r = pp->r;
+  if (!((x->what >> XP_PF) & 1) || !r->pfCard) return;
+  wchar_t sql[4000], err[280];
+  _snwprintf(sql, 4000,
+             L"SELECT TOP 30 pf.PfId, pf.PfName, ISNULL(CAST(po.Name AS NVARCHAR(250)),N''), ISNULL(pvc.L,0), 0 "
+             L"FROM (SELECT %ld AS CardId) AS k " PF_APPLY(L"k.CardId")
+             L"OUTER APPLY (SELECT TOP 1 a.Link AS L FROM InfoObjectAttributes AS a WITH(NOLOCK) "
+             L"JOIN NameKeys AS nk WITH(NOLOCK) ON nk.NameKeyId=a.NameKeyId AND nk.Value=N'ProductVersionConfiguration' "
+             L"WHERE a.OwnerId=pf.PfId AND a.Outdated=0) AS pvc "
+             L"LEFT JOIN InfoObjects AS po WITH(NOLOCK) ON po.InfoObjectId=pvc.L "
+             L"ORDER BY pf.PfId",
+             r->pfCard);
+  sql[3999] = 0;
+  int n = card_query(dbc, sql, b->rows, 30, err, 280);
+  if (n < 0) {
+    rt_log(b->lg, L"  заготовки %s: запрос не выполнился — %s\r\n", r->f[RC_DES], err);
+    return;
+  }
+  int mine = 0;
+  for (int i = 0; i < n; i++) mine += b->rows[i].n2 == r->id;
+  CardRow pfs[30];
+  int np = 0;
+  for (int i = 0; i < n && np < 30; i++)
+    if (!mine || b->rows[i].n2 == r->id) pfs[np++] = b->rows[i];
+  wchar_t qty[40];
+  xp_fmt3(pp->qtyAll, qty, 40);
+  for (int i = 0; i < np && !xp_late(x); i++) {
+    RtPf pf;
+    rt_pf_read(dbc, pfs[i].n1, &pf, b->lg);
+    wchar_t **row = xp_row(&out[XP_PF]);
+    if (!row) return;
+    xp_set(row, 0, r->f[RC_DES]);
+    xp_set(row, 1, r->f[RC_NAME]);
+    xp_set(row, 2, qty);
+    xp_set(row, 3, pfs[i].s1);
+    xp_set(row, 4, pf.mat);
+    xp_set(row, 5, pf.sort);
+    xp_set(row, 6, pf.dims);
+    xp_set(row, 7, pf.add);
+    if (pf.hasNorm) {
+      wchar_t nb[40];
+      xp_fmt3(pf.normV, nb, 40);
+      xp_set(row, 8, nb);
+      xp_set(row, 9, pf.unit[0] ? pf.unit : L"кг");
+      xp_fmt3(pf.normV * pp->qtyAll, nb, 40);
+      xp_set(row, 10, nb);
+    }
+    xp_set(row, 11, pf.from);
+    xp_set(row, 12, pfs[i].s2);
+  }
+}
+
+typedef struct {
+  XpJob *x;
+  XpPos *pos;
+  int np;
+  XpTable (*out)[XP_NT];
+  char *done;
+  volatile LONG *next, *count;
+  XpBuf buf;
+  BOOL ok;
+} XpWork;
+
+static void xp_pos_one(SQLHDBC dbc, XpWork *k, int i) {
+  xp_pos_ops(dbc, k->x, &k->pos[i], k->out[i], &k->buf);
+  xp_pos_pf(dbc, k->x, &k->pos[i], k->out[i], &k->buf);
+  k->done[i] = 1;
+  xp_stage(k->x, XP_OPS, (int)InterlockedIncrement(k->count));
+}
+
+static DWORD WINAPI xp_worker(LPVOID param) {
+  XpWork *k = (XpWork *)param;
+  SQLHENV env = SQL_NULL_HENV;
+  SQLHDBC dbc = SQL_NULL_HDBC;
+  wchar_t err[280];
+  if (!k->ok || !plm_connect(&env, &dbc, err, 280)) return 0; /* позиции возьмут другие */
+  g_qTimeout = 60;
+  while (!xp_late(k->x)) {
+    LONG i = InterlockedIncrement(k->next) - 1;
+    if (i >= k->np) break;
+    xp_pos_one(dbc, k, (int)i);
+  }
+  SQLDisconnect(dbc);
+  SQLFreeHandle(SQL_HANDLE_DBC, dbc);
+  SQLFreeHandle(SQL_HANDLE_ENV, env);
+  return 0;
+}
+
+/* таблицу позиции — в общую: строки переходят целиком, без копирования */
+static void xp_move_rows(XpTable *dst, XpTable *src) {
+  for (int r = 0; r < src->n; r++) {
+    wchar_t **w = xp_row(dst);
+    if (!w) break;
+    for (int c = 0; c < dst->ncols; c++) {
+      w[c] = src->cell[(size_t)r * (size_t)src->ncols + (size_t)c];
+      src->cell[(size_t)r * (size_t)src->ncols + (size_t)c] = NULL;
+    }
+  }
+  for (size_t i = 0; i < (size_t)src->n * (size_t)src->ncols; i++) free(src->cell[i]);
+  free(src->cell);
+  src->cell = NULL;
+  src->n = src->cap = 0;
+}
+
+static void xp_pos_sheets(SQLHDBC dbc, XpJob *x, XpPos *pos, int np) {
+  RtJob *j = x->rt;
+  if (!(x->what & ((1u << XP_OPS) | (1u << XP_MAT) | (1u << XP_TOOL) | (1u << XP_PF)))) return;
+  XpTable(*out)[XP_NT] = (XpTable(*)[XP_NT])calloc((size_t)np, sizeof(XpTable[XP_NT]));
+  char *done = (char *)calloc((size_t)np, 1);
+  if (!out || !done) {
+    free(out);
+    free(done);
+    return;
+  }
+  for (int i = 0; i < np; i++)
+    for (int k = 0; k < XP_NT; k++) out[i][k].ncols = kXpSheets[k].ncols;
+  volatile LONG next = 0, count = 0;
+  int nw = np < XP_WORKERS ? np : XP_WORKERS;
+  XpWork work[XP_WORKERS + 1];
+  HANDLE th[XP_WORKERS];
+  int started = 0;
+  for (int k = 0; k <= nw; k++) {
+    work[k].x = x;
+    work[k].pos = pos;
+    work[k].np = np;
+    work[k].out = out;
+    work[k].done = done;
+    work[k].next = &next;
+    work[k].count = &count;
+    work[k].ok = xp_buf_new(&work[k].buf);
+  }
+  for (int k = 0; k < nw; k++) {
+    th[started] = CreateThread(NULL, 0, xp_worker, &work[k], 0, NULL);
+    if (th[started]) started++;
+  }
+  if (started) WaitForMultipleObjects((DWORD)started, th, TRUE, INFINITE);
+  for (int k = 0; k < started; k++) CloseHandle(th[k]);
+  /* что потоки не взяли — здесь, своим подключением */
+  XpWork *rest = &work[nw];
+  for (int i = 0; i < np && !xp_late(x) && rest->ok; i++)
+    if (!done[i]) xp_pos_one(dbc, rest, i);
+  for (int i = 0; i < np; i++)
+    for (int k = 0; k < XP_NT; k++) xp_move_rows(&x->t[k], &out[i][k]);
+  for (int k = 0; k <= nw; k++) {
+    if (work[k].buf.lg && work[k].buf.lg->logLen) {
+      rt_log(j, k < nw ? L"\r\n— поток %d —\r\n" : L"\r\n— без потоков —\r\n", k + 1);
+      rt_log_raw(j, work[k].buf.lg->log, work[k].buf.lg->logLen);
+    }
+    xp_buf_free(&work[k].buf);
+  }
+  free(out);
+  free(done);
+  rt_log(j, L"\r\nОпераций: %d, материалов: %d, инструмента: %d, заготовок: %d (потоков %d)\r\n", x->t[XP_OPS].n,
+         x->t[XP_MAT].n, x->t[XP_TOOL].n, x->t[XP_PF].n, started);
 }
 
 /* ---- лист «Извещения» ---------------------------------------------------------- */
@@ -539,8 +632,11 @@ static void xp_ops_sheets(SQLHDBC dbc, XpJob *x, XpPos *pos, int np, CardRow *ro
        CanceledControlledObject.
    И обратно: версия сама держит ECNDocument (извещение, по которому
    утверждена) и CanceledNotification (по которому аннулирована).
-   Цели: ТП позиции и все его версии; объект позиции, его версия изделия и
-   другие версии того же изделия. */
+   Цели позиции: она сама, её версия изделия и другие версии того же изделия;
+   ТП и все его версии; карточка техсостава и её версии.
+   С 2026.09.23.81 — общими запросами на все позиции сразу (прежде три запроса
+   на позицию, и поиск «кто ссылается» по каждой — долго): сначала прямые
+   ссылки целей на извещения (быстро), потом «кто ссылается» пачками. */
 static const wchar_t *xp_ecn_role(const wchar_t *key) {
   static const wchar_t *const k[][2] = {
       {L"ApprovedObject", L"утверждает"},  {L"CanceledObject", L"аннулирует"},
@@ -552,7 +648,96 @@ static const wchar_t *xp_ecn_role(const wchar_t *key) {
   return key;
 }
 
-/* извещений не нашлось — какие объекты ссылаются на цели (их шаблоны), раз */
+/* шаблон извещения: штатные ChangeNotification / TechChangeNotification, а на
+   случай заводских модификаторов — любой «…Notification» или «извещени…» */
+#define XP_ECN_TEMPLATE                                                                       \
+  L"JOIN Templates AS t WITH(NOLOCK) ON t.TemplateId=n.TemplateId "                           \
+  L"AND (t.NameKey IN (N'ChangeNotification',N'TechChangeNotification') "                     \
+  L"OR CAST(t.NameKey AS NVARCHAR(200)) LIKE N'%%Notification%%' "                            \
+  L"OR CAST(ISNULL(t.NameUI,N'') AS NVARCHAR(200)) LIKE N'%%звещени%%') "
+#define XP_ECN_KEY                                                                            \
+  L"CAST(nk.Value AS NVARCHAR(100)) + N'|' + CAST(t.NameKey AS NVARCHAR(100)) + N'|' + "      \
+  L"CAST(ISNULL(t.NameUI,N'') AS NVARCHAR(200))"
+
+typedef struct {
+  long id, parent, tpl;
+  wchar_t name[160];
+} XpTarget;
+
+typedef struct {
+  long notice, target;
+  BOOL tech;
+  wchar_t key[60], name[200];
+} XpLink;
+
+typedef struct {
+  long id;
+  wchar_t num[100], state[100];
+} XpNotice;
+
+static int xp_tg_cmp(const void *a, const void *b) {
+  long x = ((const XpTarget *)a)->id, y = ((const XpTarget *)b)->id;
+  return x < y ? -1 : x > y;
+}
+
+static const XpTarget *xp_tg_find(const XpTarget *t, int n, long id) {
+  XpTarget key;
+  key.id = id;
+  return (const XpTarget *)bsearch(&key, t, (size_t)n, sizeof(XpTarget), xp_tg_cmp);
+}
+
+/* список id через запятую из ids[from…to) */
+static void xp_idlist(const long *ids, int from, int to, wchar_t *out, int cap) {
+  int q = 0;
+  out[0] = 0;
+  for (int i = from; i < to && q < cap - 14; i++) q += _snwprintf(out + q, 13, q ? L",%ld" : L"%ld", ids[i]);
+  out[q] = 0;
+}
+
+/* объекты по id (by=0) или по родителю (by=1) — в targets без повторов */
+static int xp_tg_load(SQLHDBC dbc, const long *ids, int n, int by, XpTarget *tg, int ntg, int cap, CardRow *rows,
+                      wchar_t *sql, RtJob *j) {
+  wchar_t list[300 * 13], err[280];
+  for (int c = 0; c < n; c += 300) {
+    xp_idlist(ids, c, c + 300 < n ? c + 300 : n, list, 300 * 13);
+    if (!list[0]) continue;
+    _snwprintf(sql, 12000,
+               L"SELECT TOP 2000 o.InfoObjectId, CAST(o.Name AS NVARCHAR(250)), N'', ISNULL(o.ParentId,0), o.TemplateId "
+               L"FROM InfoObjects AS o WITH(NOLOCK) WHERE o.Erased=0 AND o.%s IN (%s)",
+               by ? L"ParentId" : L"InfoObjectId", list);
+    sql[11999] = 0;
+    int m = card_query(dbc, sql, rows, 2000, err, 280);
+    if (m < 0) rt_log(j, L"  извещения: объекты не прочитались — %s\r\n", err);
+    for (int i = 0; i < m && ntg < cap; i++) {
+      int dup = 0;
+      for (int k = 0; k < ntg && !dup; k++) dup = tg[k].id == rows[i].n1;
+      if (dup) continue;
+      tg[ntg].id = rows[i].n1;
+      tg[ntg].parent = rows[i].n2;
+      tg[ntg].tpl = rows[i].n3;
+      lstrcpynW(tg[ntg].name, rows[i].s1, 160);
+      ntg++;
+    }
+  }
+  return ntg;
+}
+
+static int xp_add_id(long *ids, int n, int cap, long id) {
+  if (!id || n >= cap) return n;
+  for (int i = 0; i < n; i++)
+    if (ids[i] == id) return n;
+  ids[n] = id;
+  return n + 1;
+}
+
+/* входит ли объект в цели позиции */
+static BOOL xp_tg_of(const RtRow *r, long prod, long ptpl, const XpTarget *t) {
+  if (t->id == r->id || t->id == r->par || t->id == r->tp || t->id == r->tcCard) return TRUE;
+  if (t->parent && (t->parent == r->tp || t->parent == r->tcCard)) return TRUE;
+  return prod && t->parent == prod && t->tpl == ptpl;
+}
+
+/* извещений нет совсем — кто ссылается на цели первой позиции (их шаблоны) */
 static void xp_ecn_diag(SQLHDBC dbc, RtJob *j, const RtRow *r, const wchar_t *list, CardRow *rows, wchar_t *sql) {
   wchar_t err[280];
   _snwprintf(sql, 12000,
@@ -572,195 +757,284 @@ static void xp_ecn_diag(SQLHDBC dbc, RtJob *j, const RtRow *r, const wchar_t *li
              list, list);
   sql[11999] = 0;
   int n = card_query(dbc, sql, rows, 30, err, 280);
-  rt_log(j, L"  извещений у %s не нашлось; на него, его версии, ТП и техсостав ссылаются (для проверки):\r\n",
-         r->f[RC_DES]);
+  rt_log(j, L"  извещений не нашлось; на %s, его версии, ТП и техсостав ссылаются (для проверки):\r\n", r->f[RC_DES]);
   if (n < 0) rt_log(j, L"    запрос не выполнился — %s\r\n", err);
   for (int i = 0; i < n; i++) rt_log(j, L"    %ld × %s — поле %s\r\n", rows[i].n1, rows[i].s1, rows[i].s2);
+  _snwprintf(sql, 12000,
+             L"SELECT TOP 30 COUNT(*), CAST(nk.Value AS NVARCHAR(200)), CAST(t.NameKey AS NVARCHAR(200)) + N' · ' + "
+             L"CAST(ISNULL(t.NameUI,N'') AS NVARCHAR(200)), 0, 0 FROM InfoObjectAttributes AS a WITH(NOLOCK) "
+             L"JOIN NameKeys AS nk WITH(NOLOCK) ON nk.NameKeyId=a.NameKeyId "
+             L"JOIN InfoObjects AS n WITH(NOLOCK) ON n.InfoObjectId=a.Link "
+             L"JOIN Templates AS t WITH(NOLOCK) ON t.TemplateId=n.TemplateId "
+             L"WHERE a.OwnerId IN (%s) AND a.Outdated=0 AND a.DataType=6 AND ISNULL(a.Link,0)<>0 "
+             L"GROUP BY nk.Value, t.NameKey, t.NameUI ORDER BY COUNT(*) DESC",
+             list);
+  sql[11999] = 0;
+  n = card_query(dbc, sql, rows, 30, err, 280);
+  rt_log(j, L"  а сами они ссылаются на:\r\n");
+  if (n < 0) rt_log(j, L"    запрос не выполнился — %s\r\n", err);
+  for (int i = 0; i < n; i++) rt_log(j, L"    %ld × поле %s → %s\r\n", rows[i].n1, rows[i].s1, rows[i].s2);
 }
 
-static void xp_ecn(SQLHDBC dbc, XpJob *x, XpPos *pos, int np, CardRow *rows) {
+#define XP_TG_MAX 20000
+#define XP_LINK_MAX 20000
+
+static void xp_ecn(SQLHDBC dbc, XpJob *x, XpPos *pos, int np) {
   RtJob *j = x->rt;
   wchar_t *sql = (wchar_t *)malloc(12000 * sizeof(wchar_t));
-  CardRow *tg = (CardRow *)malloc(sizeof(CardRow) * 200);
-  CardRow *nd = (CardRow *)malloc(sizeof(CardRow) * 400);
-  if (!sql || !tg || !nd) {
-    free(sql);
-    free(tg);
-    free(nd);
-    return;
-  }
-  wchar_t err[280];
-  int total = 0;
-  BOOL diag = FALSE;
-  for (int p = 0; p < np && !xp_late(x); p++) {
+  CardRow *rows = (CardRow *)malloc(sizeof(CardRow) * 2000);
+  XpTarget *tg = (XpTarget *)malloc(sizeof(XpTarget) * XP_TG_MAX);
+  XpLink *ln = (XpLink *)malloc(sizeof(XpLink) * XP_LINK_MAX);
+  long *ids = (long *)calloc(XP_TG_MAX, sizeof(long));
+  long *prod = (long *)calloc((size_t)np, sizeof(long)), *ptpl = (long *)calloc((size_t)np, sizeof(long));
+  XpNotice *nt = (XpNotice *)malloc(sizeof(XpNotice) * 3000);
+  if (!sql || !rows || !tg || !ln || !ids || !prod || !ptpl || !nt) goto out;
+  wchar_t err[280], list[300 * 13];
+  int ntg = 0, nl = 0, nn = 0, n;
+  /* 1. цели: сами позиции, их версии изделия, ТП, карточки техсостава */
+  n = 0;
+  for (int p = 0; p < np; p++) {
     const RtRow *r = pos[p].r;
-    long tp = r->tp, id = r->id, par = r->par, tc = r->tcCard;
-    /* цели: n1 — объект, s1 — его имя, n2 — 2 у ТП и его версий, 1 — изделие */
+    n = xp_add_id(ids, n, XP_TG_MAX, r->id);
+    n = xp_add_id(ids, n, XP_TG_MAX, r->par);
+    n = xp_add_id(ids, n, XP_TG_MAX, r->tp);
+    n = xp_add_id(ids, n, XP_TG_MAX, r->tcCard);
+  }
+  ntg = xp_tg_load(dbc, ids, n, 0, tg, 0, XP_TG_MAX, rows, sql, j);
+  /* изделие версии (её родитель) и шаблон версии — по ним другие версии */
+  for (int p = 0; p < np; p++)
+    for (int k = 0; k < ntg; k++)
+      if (tg[k].id == pos[p].r->par) {
+        prod[p] = tg[k].parent;
+        ptpl[p] = tg[k].tpl;
+        break;
+      }
+  /* 2. вложенные: версии ТП, версии техсостава, версии изделия */
+  n = 0;
+  for (int p = 0; p < np; p++) {
+    n = xp_add_id(ids, n, XP_TG_MAX, pos[p].r->tp);
+    n = xp_add_id(ids, n, XP_TG_MAX, pos[p].r->tcCard);
+    n = xp_add_id(ids, n, XP_TG_MAX, prod[p]);
+  }
+  ntg = xp_tg_load(dbc, ids, n, 1, tg, ntg, XP_TG_MAX, rows, sql, j);
+  /* чужое под изделием (исполнения, документы) — не цели: оставим только нужное */
+  int keep = 0;
+  for (int k = 0; k < ntg; k++) {
+    BOOL any = FALSE;
+    for (int p = 0; p < np && !any; p++) any = xp_tg_of(pos[p].r, prod[p], ptpl[p], &tg[k]);
+    if (any) tg[keep++] = tg[k];
+  }
+  ntg = keep;
+  qsort(tg, (size_t)ntg, sizeof(XpTarget), xp_tg_cmp);
+  for (int k = 0; k < ntg; k++) ids[k] = tg[k].id;
+  rt_log(j, L"\r\nИзвещения: целей %d (позиции, версии изделия, ТП, техсостав)\r\n", ntg);
+  xp_stage(x, XP_ECN, 0);
+  /* 3а. прямые ссылки целей на извещения (ECNDocument, CanceledNotification…) — быстро */
+  for (int c = 0; c < ntg && !xp_late(x); c += 300) {
+    xp_idlist(ids, c, c + 300 < ntg ? c + 300 : ntg, list, 300 * 13);
     _snwprintf(sql, 12000,
-               L"SELECT TOP 200 o.InfoObjectId, CAST(o.Name AS NVARCHAR(250)), N'', "
-               L"CASE WHEN %ld<>0 AND (o.InfoObjectId=%ld OR o.ParentId=%ld) THEN 2 ELSE 1 END, 0 "
-               L"FROM InfoObjects AS o WITH(NOLOCK) WHERE o.Erased=0 AND (o.InfoObjectId IN (%ld,%ld,%ld) "
-               L"OR (%ld<>0 AND o.ParentId=%ld) "
-               L"OR (%ld<>0 AND o.ParentId=(SELECT ParentId FROM InfoObjects WITH(NOLOCK) WHERE InfoObjectId=%ld) "
-               L"AND o.TemplateId=(SELECT TemplateId FROM InfoObjects WITH(NOLOCK) WHERE InfoObjectId=%ld)) "
-               /* карточка техсостава и её версии — их утверждают извещения (с 2026.09.23.80) */
-               L"OR (%ld<>0 AND (o.InfoObjectId=%ld OR o.ParentId=%ld)))",
-               tp, tp, tp, id, par ? par : id, tp ? tp : id, tp, tp, par, par, par, tc, tc, tc);
-    int nt = card_query(dbc, sql, tg, 200, err, 280);
-    if (nt <= 0) {
-      if (nt < 0) rt_log(j, L"  извещения %s: цели не прочитались — %s\r\n", r->f[RC_DES], err);
-      continue;
+               L"SELECT TOP 2000 n.InfoObjectId, CAST(n.Name AS NVARCHAR(250)), " XP_ECN_KEY L", a.OwnerId, 0 "
+               L"FROM InfoObjectAttributes AS a WITH(NOLOCK) "
+               L"JOIN NameKeys AS nk WITH(NOLOCK) ON nk.NameKeyId=a.NameKeyId "
+               L"JOIN InfoObjects AS n WITH(NOLOCK) ON n.InfoObjectId=a.Link AND n.Erased=0 " XP_ECN_TEMPLATE
+               L"WHERE a.OwnerId IN (%s) AND a.Outdated=0 AND a.DataType=6 AND ISNULL(a.Link,0)<>0",
+               list);
+    sql[11999] = 0;
+    int m = card_query(dbc, sql, rows, 2000, err, 280);
+    if (m < 0) rt_log(j, L"  прямые ссылки на извещения: запрос не выполнился — %s\r\n", err);
+    for (int i = 0; i < m && nl < XP_LINK_MAX; i++, nl++) {
+      ln[nl].notice = rows[i].n1;
+      ln[nl].target = rows[i].n2;
+      lstrcpynW(ln[nl].name, rows[i].s1, 200);
+      lstrcpynW(ln[nl].key, rows[i].s2, 60);
+      wchar_t *bar = wcschr(ln[nl].key, L'|');
+      if (bar) *bar = 0;
+      const wchar_t *tk = wcschr(rows[i].s2, L'|');
+      ln[nl].tech = tk && (wcsstr(tk, L"Tech") || wcsstr(tk, L"ТП") || wcsstr(tk, L"технол"));
     }
-    wchar_t list[200 * 12];
-    int q = 0;
-    for (int i = 0; i < nt; i++) q += _snwprintf(list + q, 12, q ? L",%ld" : L"%ld", tg[i].n1);
-    list[q] = 0;
+  }
+  int direct = nl;
+  /* 3б. «кто ссылается» — пачками по 150 целей; не уложилась пачка — дальше не ищем */
+  ULONGLONG tw = GetTickCount64();
+  int save = g_qTimeout;
+  g_qTimeout = 90;
+  for (int c = 0; c < ntg && !xp_late(x); c += 150) {
+    xp_idlist(ids, c, c + 150 < ntg ? c + 150 : ntg, list, 300 * 13);
     _snwprintf(sql, 12000,
-               L"SELECT TOP 300 n.InfoObjectId, CAST(n.Name AS NVARCHAR(250)), "
-               L"CAST(nk.Value AS NVARCHAR(100)) + N'|' + CAST(t.NameKey AS NVARCHAR(100)) + N'|' + "
-               L"CAST(ISNULL(t.NameUI,N'') AS NVARCHAR(200)), x.T, 0 "
+               L"SELECT TOP 2000 n.InfoObjectId, CAST(n.Name AS NVARCHAR(250)), " XP_ECN_KEY L", x.T, 0 "
                L"FROM (SELECT a.Link AS T, a.NameKeyId AS K, a.OwnerId AS O FROM InfoObjectAttributes AS a WITH(NOLOCK) "
                L"WHERE a.Link IN (%s) AND a.DataType=6 AND a.Outdated=0 AND ISNULL(a.CollectionElementId,0)=0 "
                L"UNION ALL SELECT a.Link, a.NameKeyId, la.OwnerId FROM InfoObjectAttributes AS a WITH(NOLOCK) "
                L"JOIN InfoObjectCollectionElements AS ce WITH(NOLOCK) "
                L"ON ce.CollectionElementId=a.CollectionElementId AND ce.Outdated=0 "
                L"JOIN InfoObjectAttributes AS la WITH(NOLOCK) ON la.AttributeId=ce.AttributeId "
-               L"WHERE a.Link IN (%s) AND a.DataType=6 AND a.Outdated=0 "
-               L"UNION ALL SELECT a.OwnerId, a.NameKeyId, a.Link FROM InfoObjectAttributes AS a WITH(NOLOCK) "
-               L"JOIN NameKeys AS k WITH(NOLOCK) ON k.NameKeyId=a.NameKeyId "
-               L"AND k.Value IN (N'ECNDocument',N'CanceledNotification') "
-               L"WHERE a.OwnerId IN (%s) AND a.Outdated=0 AND ISNULL(a.Link,0)<>0) AS x "
-               L"JOIN InfoObjects AS n WITH(NOLOCK) ON n.InfoObjectId=x.O AND n.Erased=0 "
-               /* шаблон извещения: штатные ChangeNotification / TechChangeNotification, а
-                  на случай заводских модификаторов — любой «…Notification» или «извещени…» */
-               L"JOIN Templates AS t WITH(NOLOCK) ON t.TemplateId=n.TemplateId "
-               L"AND (t.NameKey IN (N'ChangeNotification',N'TechChangeNotification') "
-               L"OR CAST(t.NameKey AS NVARCHAR(200)) LIKE N'%%Notification%%' "
-               L"OR CAST(ISNULL(t.NameUI,N'') AS NVARCHAR(200)) LIKE N'%%звещени%%') "
-               L"JOIN NameKeys AS nk WITH(NOLOCK) ON nk.NameKeyId=x.K "
-               L"ORDER BY n.InfoObjectId",
-               list, list, list);
+               L"WHERE a.Link IN (%s) AND a.DataType=6 AND a.Outdated=0) AS x "
+               L"JOIN InfoObjects AS n WITH(NOLOCK) ON n.InfoObjectId=x.O AND n.Erased=0 " XP_ECN_TEMPLATE
+               L"JOIN NameKeys AS nk WITH(NOLOCK) ON nk.NameKeyId=x.K",
+               list, list);
     sql[11999] = 0;
-    int nn = card_query(dbc, sql, rows, 300, err, 280);
-    if (nn < 0) {
-      rt_log(j, L"  извещения %s: запрос не выполнился — %s\r\n", r->f[RC_DES], err);
-      continue;
+    int m = card_query(dbc, sql, rows, 2000, err, 280);
+    if (m < 0) {
+      rt_log(j, L"  «кто ссылается» на извещения: пачка не уложилась — %s; дальше — только прямые ссылки\r\n", err);
+      break;
     }
-    if (!nn) {
-      if (!diag) { /* раз — кто вообще ссылается на эти объекты: по этому видно, где извещения */
-        diag = TRUE;
-        xp_ecn_diag(dbc, j, r, list, rows, sql);
-      }
-      continue;
+    for (int i = 0; i < m && nl < XP_LINK_MAX; i++, nl++) {
+      ln[nl].notice = rows[i].n1;
+      ln[nl].target = rows[i].n2;
+      lstrcpynW(ln[nl].name, rows[i].s1, 200);
+      lstrcpynW(ln[nl].key, rows[i].s2, 60);
+      wchar_t *bar = wcschr(ln[nl].key, L'|');
+      if (bar) *bar = 0;
+      const wchar_t *tk = wcschr(rows[i].s2, L'|');
+      ln[nl].tech = tk && (wcsstr(tk, L"Tech") || wcsstr(tk, L"ТП") || wcsstr(tk, L"технол"));
     }
-    /* номер и состояние извещений */
-    wchar_t nl[300 * 12];
-    q = 0;
-    for (int i = 0; i < nn; i++)
-      if (!i || rows[i].n1 != rows[i - 1].n1) q += _snwprintf(nl + q, 12, q ? L",%ld" : L"%ld", rows[i].n1);
-    nl[q] = 0;
+    xp_stage(x, XP_ECN, c + 150);
+  }
+  g_qTimeout = save;
+  rt_log(j, L"  ссылок на извещения: прямых %d, «кто ссылается» %d (%.0f с)\r\n", direct, nl - direct,
+         (double)(GetTickCount64() - tw) / 1000.0);
+  if (!nl) {
+    if (np) {
+      long first[200];
+      int nf = 0;
+      for (int k = 0; k < ntg && nf < 200; k++)
+        if (xp_tg_of(pos[0].r, prod[0], ptpl[0], &tg[k])) first[nf++] = tg[k].id;
+      xp_idlist(first, 0, nf, list, 300 * 13);
+      if (list[0]) xp_ecn_diag(dbc, j, pos[0].r, list, rows, sql);
+    }
+    goto out;
+  }
+  /* 4. номер и состояние извещений */
+  long *nids = ids; /* цели больше не нужны списком */
+  int nni = 0;
+  for (int i = 0; i < nl; i++) nni = xp_add_id(nids, nni, 3000, ln[i].notice);
+  for (int c = 0; c < nni; c += 300) {
+    xp_idlist(nids, c, c + 300 < nni ? c + 300 : nni, list, 300 * 13);
     _snwprintf(sql, 12000,
-               L"SELECT TOP 400 a.OwnerId, CAST(nk.Value AS NVARCHAR(100)), CAST(" XP_VALUE(L"a") L" AS NVARCHAR(600)), "
+               L"SELECT TOP 2000 a.OwnerId, CAST(nk.Value AS NVARCHAR(100)), CAST(" XP_VALUE(L"a") L" AS NVARCHAR(600)), "
                L"0, 0 FROM InfoObjectAttributes AS a WITH(NOLOCK) "
                L"JOIN NameKeys AS nk WITH(NOLOCK) ON nk.NameKeyId=a.NameKeyId AND nk.Value IN (N'ECNDesignation',"
                L"N'TechChangeNotificationDesignation',N'ChangeNotificationDocumentNumber',N'Designation',N'Number',"
                L"N'LifeCycleState') "
                L"LEFT JOIN InfoObjects AS lo WITH(NOLOCK) ON a.DataType=6 AND lo.InfoObjectId=a.Link "
                L"WHERE a.OwnerId IN (%s) AND a.Outdated=0 AND ISNULL(a.CollectionElementId,0)=0",
-               nl);
+               list);
     sql[11999] = 0;
-    int ndn = card_query(dbc, sql, nd, 400, err, 280);
-    if (ndn < 0) ndn = 0;
-    /* по извещению — одна строка: что делает и с чем — списком */
-    for (int i = 0; i < nn;) {
-      long nid = rows[i].n1;
-      wchar_t roles[300] = L"", objs[600] = L"", kind[8] = L"";
+    int m = card_query(dbc, sql, rows, 2000, err, 280);
+    static const wchar_t *const numKeys[] = {L"ECNDesignation", L"TechChangeNotificationDesignation",
+                                             L"ChangeNotificationDocumentNumber", L"Designation", L"Number"};
+    for (int i = c; i < nni && i < c + 300 && nn < 3000; i++) {
+      XpNotice *e = &nt[nn++];
+      e->id = nids[i];
+      e->num[0] = e->state[0] = 0;
+      for (int k = 0; k < 5 && !e->num[0]; k++)
+        for (int q = 0; q < m && !e->num[0]; q++)
+          if (rows[q].n1 == e->id && rows[q].s2[0] && !_wcsicmp(rows[q].s1, numKeys[k])) lstrcpynW(e->num, rows[q].s2, 100);
+      for (int q = 0; q < m && !e->state[0]; q++)
+        if (rows[q].n1 == e->id && rows[q].s2[0] && !_wcsicmp(rows[q].s1, L"LifeCycleState"))
+          lstrcpynW(e->state, rows[q].s2, 100);
+    }
+  }
+  /* 5. по позиции: её извещения — по строке, что делает и с чем — списком */
+  long *seen = (long *)malloc(sizeof(long) * 600);
+  for (int p = 0; seen && p < np; p++) {
+    const RtRow *r = pos[p].r;
+    int ns = 0;
+    for (int i = 0; i < nl && ns < 600; i++) {
+      const XpTarget *t = xp_tg_find(tg, ntg, ln[i].target);
+      if (!t || !xp_tg_of(r, prod[p], ptpl[p], t)) continue;
+      int dup = 0;
+      for (int k = 0; k < ns && !dup; k++) dup = seen[k] == ln[i].notice;
+      if (!dup) seen[ns++] = ln[i].notice;
+    }
+    for (int s = 0; s < ns; s++) {
+      wchar_t roles[300] = L"", objs[600] = L"";
       int lr = 0, lo = 0;
-      const wchar_t *name = rows[i].s1;
-      for (; i < nn && rows[i].n1 == nid; i++) {
-        wchar_t key[200];
-        lstrcpynW(key, rows[i].s2, 200);
-        wchar_t *bar = wcschr(key, L'|');
-        if (bar) { /* «ключ|шаблон|название шаблона» */
-          *bar = 0;
-          const wchar_t *tk = bar + 1, *tn = wcschr(tk, L'|');
-          BOOL tech = wcsstr(tk, L"Tech") != NULL || (tn && (wcsstr(tn, L"ТП") || wcsstr(tn, L"технол")));
-          lstrcpynW(kind, tech ? L"ТП" : L"КД", 8);
-        }
-        const wchar_t *role = xp_ecn_role(key);
+      BOOL tech = FALSE;
+      const wchar_t *name = L"";
+      for (int i = 0; i < nl; i++) {
+        if (ln[i].notice != seen[s]) continue;
+        const XpTarget *t = xp_tg_find(tg, ntg, ln[i].target);
+        if (!t || !xp_tg_of(r, prod[p], ptpl[p], t)) continue;
+        name = ln[i].name;
+        tech |= ln[i].tech;
+        const wchar_t *role = xp_ecn_role(ln[i].key);
         if (!wcsstr(roles, role)) {
           int w = _snwprintf(roles + lr, 300 - lr, L"%s%s", lr ? L", " : L"", role);
           if (w > 0 && lr + w < 299) lr += w;
         }
-        const wchar_t *on = NULL;
-        for (int k = 0; k < nt && !on; k++)
-          if (tg[k].n1 == rows[i].n2) on = tg[k].s1;
-        if (on && on[0] && !wcsstr(objs, on)) {
-          int w = _snwprintf(objs + lo, 600 - lo, L"%s%s", lo ? L"; " : L"", on);
+        if (t->name[0] && !wcsstr(objs, t->name)) {
+          int w = _snwprintf(objs + lo, 600 - lo, L"%s%s", lo ? L"; " : L"", t->name);
           if (w > 0 && lo + w < 599) lo += w;
         }
       }
       roles[299] = objs[599] = 0;
-      const wchar_t *numv = NULL, *state = NULL;
-      static const wchar_t *const numKeys[] = {L"ECNDesignation", L"TechChangeNotificationDesignation",
-                                               L"ChangeNotificationDocumentNumber", L"Designation", L"Number"};
-      for (int k = 0; k < 5 && !numv; k++)
-        for (int m = 0; m < ndn && !numv; m++)
-          if (nd[m].n1 == nid && nd[m].s2[0] && !_wcsicmp(nd[m].s1, numKeys[k])) numv = nd[m].s2;
-      for (int m = 0; m < ndn && !state; m++)
-        if (nd[m].n1 == nid && nd[m].s2[0] && !_wcsicmp(nd[m].s1, L"LifeCycleState")) state = nd[m].s2;
+      const XpNotice *e = NULL;
+      for (int k = 0; k < nn && !e; k++)
+        if (nt[k].id == seen[s]) e = &nt[k];
       wchar_t **row = xp_row(&x->t[XP_ECN]);
       if (!row) break;
-      total++;
       xp_set(row, 0, r->f[RC_DES]);
       xp_set(row, 1, r->f[RC_NAME]);
-      xp_set(row, 2, kind);
-      xp_set(row, 3, numv);
+      xp_set(row, 2, tech ? L"ТП" : L"КД");
+      xp_set(row, 3, e ? e->num : NULL);
       xp_set(row, 4, name);
-      xp_set(row, 5, state);
+      xp_set(row, 5, e ? e->state : NULL);
       xp_set(row, 6, roles);
       xp_set(row, 7, objs);
     }
-    xp_stage(x, XP_ECN, p + 1);
   }
-  rt_log(j, L"Извещений (строк): %d\r\n", total);
+  free(seen);
+  rt_log(j, L"Извещений (строк): %d\r\n", x->t[XP_ECN].n);
+out:
   free(sql);
+  free(rows);
   free(tg);
-  free(nd);
+  free(ln);
+  free(ids);
+  free(prod);
+  free(ptpl);
+  free(nt);
 }
 
 /* ---- весь сбор ------------------------------------------------------------------ */
 
 static void xp_build(XpJob *x) {
   RtJob *j = x->rt;
-  /* 1. обход ЭСИ — тот же, что у маршрутной ведомости */
+  ULONGLONG t0 = GetTickCount64();
+  /* 1. обход ЭСИ — тот же, что у маршрутной ведомости (параллельный) */
   xp_stage(x, XP_COMP, 0);
   rt_build(j);
+  x->secWalk = (double)(GetTickCount64() - t0) / 1000.0;
   if (!j->n) return;
   if ((x->what >> XP_COMP) & 1) xp_comp(x);
   if (xp_late(x)) return;
-  /* 2. листы по уникальным позициям — своим подключением */
+  /* 2. листы по уникальным позициям */
   XpPos *pos = (XpPos *)malloc(sizeof(XpPos) * RT_MAX);
-  CardRow *rows = (CardRow *)malloc(sizeof(CardRow) * 400);
   SQLHENV env = SQL_NULL_HENV;
   SQLHDBC dbc = SQL_NULL_HDBC;
   wchar_t err[280];
-  if (pos && rows && plm_connect(&env, &dbc, err, 280)) {
+  if (pos && plm_connect(&env, &dbc, err, 280)) {
     g_qTimeout = 60;
     int np = xp_positions(x, pos, RT_MAX);
-    rt_log(j, L"\r\n===== Выгрузка: позиций %d (разных %d) =====\r\n", j->n, np);
-    xp_ops_sheets(dbc, x, pos, np, rows);
-    if (((x->what >> XP_ECN) & 1) && !xp_late(x)) xp_ecn(dbc, x, pos, np, rows);
+    rt_log(j, L"\r\n===== Выгрузка: позиций %d (разных %d), обход %.0f с =====\r\n", j->n, np, x->secWalk);
+    ULONGLONG t1 = GetTickCount64();
+    xp_pos_sheets(dbc, x, pos, np);
+    x->secSheets = (double)(GetTickCount64() - t1) / 1000.0;
+    ULONGLONG t2 = GetTickCount64();
+    if (((x->what >> XP_ECN) & 1) && !xp_late(x)) xp_ecn(dbc, x, pos, np);
+    x->secEcn = (double)(GetTickCount64() - t2) / 1000.0;
+    rt_log(j, L"\r\nВремя: обход %.0f с, операции и заготовки %.0f с, извещения %.0f с\r\n", x->secWalk, x->secSheets,
+           x->secEcn);
     g_qTimeout = 0;
     SQLDisconnect(dbc);
     SQLFreeHandle(SQL_HANDLE_DBC, dbc);
     SQLFreeHandle(SQL_HANDLE_ENV, env);
-  } else if (pos && rows) {
+  } else if (pos) {
     _snwprintf(j->err, 400, L"Не удалось подключиться к PLM: %s", err);
   }
   if (rt_late(j) && !(j->cancel && *j->cancel)) rt_log(j, L"\r\nВремя вышло — собрано не всё.\r\n");
   free(pos);
-  free(rows);
 }
 
 /* ---- пакет для загрузки в PLM ---------------------------------------------------
