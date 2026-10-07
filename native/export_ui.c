@@ -10,6 +10,8 @@
 #define ID_XP_VIEW 287
 #define ID_XP_SAVE 288
 #define ID_XP_LOG 289
+#define ID_XP_PKG 290  /* «Пакет для загрузки…» — из собранной выгрузки */
+#define ID_XP_TMPL 291 /* «Шаблон пакета…» — пустой */
 
 static HWND g_xpWnd, g_xpDes, g_xpList, g_xpView, g_xpLog, g_xpChk[XP_NT];
 static XpJob *g_xpJob; /* последняя собранная выгрузка */
@@ -242,6 +244,67 @@ static void xp_save(void) {
   ShellExecuteW(NULL, L"open", file, NULL, NULL, SW_SHOWNORMAL);
 }
 
+/* Пакет для команды PLM «Загрузить ЭСИ из CursorPad»: из выгрузки или пустой */
+static void xp_save_package(BOOL fromJob) {
+  if (fromJob) {
+    int any = 0;
+    for (int k = 0; g_xpJob && k < XP_NT; k++) any += g_xpJob->t[k].n;
+    if (!any || !g_xpJob->t[XP_COMP].n) {
+      xp_status(L"Сначала «Собрать» с листом «Состав (ЭСИ)» — пакет делается из него");
+      return;
+    }
+  }
+  wchar_t file[MAX_PATH];
+  if (fromJob) _snwprintf(file, MAX_PATH - 6, L"Пакет для PLM %s", g_xpJob->rt->des);
+  else lstrcpynW(file, L"Пакет для PLM", MAX_PATH - 6);
+  file[MAX_PATH - 7] = 0;
+  for (wchar_t *p = file; *p; p++)
+    if (wcschr(L"\\/:*?\"<>|", *p)) *p = L'_';
+  wcscat(file, L".xlsx");
+  OPENFILENAMEW of;
+  memset(&of, 0, sizeof(of));
+  of.lStructSize = sizeof(of);
+  of.hwndOwner = g_xpWnd;
+  of.lpstrFilter = L"Книга Excel (*.xlsx)\0*.xlsx\0";
+  of.lpstrFile = file;
+  of.nMaxFile = MAX_PATH;
+  of.lpstrDefExt = L"xlsx";
+  of.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+  if (!GetSaveFileNameW(&of)) return;
+  XpTable pk[PK_NT];
+  memset(pk, 0, sizeof(pk));
+  xp_package(fromJob ? g_xpJob : NULL, pk);
+  XlSheet sh[PK_NT];
+  XlBookSheet bs[PK_NT];
+  for (int k = 0; k < PK_NT; k++) {
+    memset(&sh[k], 0, sizeof(sh[k]));
+    sh[k].ncols = kPkSheets[k].ncols;
+    sh[k].head = kPkSheets[k].head;
+    sh[k].width = kPkSheets[k].width;
+    sh[k].plain = 1;
+    bs[k].name = kPkSheets[k].name;
+    bs[k].title = NULL; /* шапка — в первой строке: так её ищет команда PLM */
+    bs[k].sh = &sh[k];
+    bs[k].nrows = pk[k].n;
+    bs[k].cell = xp_cell;
+    bs[k].ctx = &pk[k];
+  }
+  BOOL ok = xl_save_book(file, bs, PK_NT);
+  int ni = pk[PK_ITEMS].n, nl = pk[PK_LINKS].n, no = pk[PK_OPS].n;
+  xp_package_free(pk);
+  if (!ok) {
+    MessageBoxW(g_xpWnd, L"Не удалось записать файл — он не открыт сейчас в Excel?", L"Выгрузка из PLM",
+                MB_ICONWARNING);
+    return;
+  }
+  if (fromJob)
+    xp_status(L"Пакет: изделий %d, строк состава %d, операций %d%s — поменяйте обозначения и загрузите командой PLM",
+              ni, nl, no, no ? L"" : L" (лист «Операции» не собирали)");
+  else
+    xp_status(L"Шаблон пакета сохранён — заполните и загрузите командой PLM «Загрузить ЭСИ из CursorPad»");
+  ShellExecuteW(NULL, L"open", file, NULL, NULL, SW_SHOWNORMAL);
+}
+
 static void xp_show_log(void) {
   if (!g_xpJob || !g_xpJob->rt->log[0]) return;
   if (!g_xpLog) {
@@ -278,6 +341,8 @@ static void xp_layout(void) {
   MoveWindow(g_xpList, pad, ly, rc.right - pad * 2, by - XS(10) - ly, TRUE);
   MoveWindow(GetDlgItem(g_xpWnd, ID_XP_SAVE), pad, by, XS(170), XS(30), TRUE);
   MoveWindow(GetDlgItem(g_xpWnd, ID_XP_LOG), pad + XS(180), by, XS(120), XS(30), TRUE);
+  MoveWindow(GetDlgItem(g_xpWnd, ID_XP_PKG), pad + XS(310), by, XS(190), XS(30), TRUE);
+  MoveWindow(GetDlgItem(g_xpWnd, ID_XP_TMPL), pad + XS(510), by, XS(150), XS(30), TRUE);
 }
 
 static void xp_paint(HWND hwnd, HDC hdc) {
@@ -343,7 +408,7 @@ static LRESULT CALLBACK XpProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
     return panel_hittest(hwnd, lParam);
   case WM_GETMINMAXINFO: {
     MINMAXINFO *mm = (MINMAXINFO *)lParam;
-    mm->ptMinTrackSize.x = XS(660);
+    mm->ptMinTrackSize.x = XS(700);
     mm->ptMinTrackSize.y = XS(400);
     return 0;
   }
@@ -397,6 +462,8 @@ static LRESULT CALLBACK XpProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
     if (id == ID_XP_BUILD) xp_start();
     if (id == ID_XP_SAVE) xp_save();
     if (id == ID_XP_LOG) xp_show_log();
+    if (id == ID_XP_PKG) xp_save_package(TRUE);
+    if (id == ID_XP_TMPL) xp_save_package(FALSE);
     if (id >= ID_XP_CHK && id < ID_XP_CHK + XP_NT && HIWORD(wParam) == BN_CLICKED) xp_prefs_save();
     if (id == ID_XP_VIEW && HIWORD(wParam) == CBN_SELCHANGE) xp_fill_list();
     return 0;
@@ -454,6 +521,8 @@ static void export_show(void) {
     if (g_fontUi) SendMessageW(g_xpView, WM_SETFONT, (WPARAM)g_fontUi, FALSE);
     mk_btn(g_xpWnd, L"Сохранить в Excel…", ID_XP_SAVE);
     mk_btn(g_xpWnd, L"Подробности", ID_XP_LOG);
+    mk_btn(g_xpWnd, L"Пакет для загрузки…", ID_XP_PKG);
+    mk_btn(g_xpWnd, L"Шаблон пакета…", ID_XP_TMPL);
     g_xpList = CreateWindowExW(0, WC_LISTVIEWW, L"", WS_CHILD | WS_VISIBLE | WS_BORDER | LVS_REPORT | LVS_SHOWSELALWAYS,
                                0, 0, 10, 10, g_xpWnd, NULL, g_inst, NULL);
     SendMessageW(g_xpList, LVM_SETEXTENDEDLISTVIEWSTYLE, 0, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);

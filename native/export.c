@@ -720,3 +720,91 @@ static void xp_build(XpJob *x) {
   free(pos);
   free(rows);
 }
+
+/* ---- пакет для загрузки в PLM ---------------------------------------------------
+
+   Команда PLM «Загрузить ЭСИ из CursorPad» (pidrpen/cursor, папка «Загрузка ЭСИ
+   из CursorPad») создаёт по нему изделия, состав, техсостав и ТП с операциями —
+   от имени пользователя PLM. Три листа, шапки — ровно такие (команда ищет
+   столбцы по началу шапки). «Шаблон пакета…» — пустые листы; «Пакет для
+   загрузки…» — из собранной выгрузки: состав, изделия и операции похожего
+   изделия, чтобы поменять обозначения и загрузить как новое. */
+
+enum { PK_ITEMS, PK_LINKS, PK_OPS, PK_NT };
+static const wchar_t *const kPkItemsHead[] = {L"Обозначение", L"Наименование", L"Вид изделия", L"Материал",
+                                              L"Масса, кг"};
+static const int kPkItemsW[] = {26, 34, 18, 40, 10};
+static const wchar_t *const kPkLinksHead[] = {L"Сборка", L"Входящее", L"Кол-во", L"Позиция"};
+static const int kPkLinksW[] = {26, 26, 9, 9};
+static const wchar_t *const kPkOpsHead[] = {L"Обозначение", L"№ опер.", L"Операция", L"Участок",
+                                            L"Оборудование", L"Тпз, мин", L"Тшт, мин"};
+static const int kPkOpsW[] = {26, 8, 30, 20, 34, 9, 9};
+static const XpSheetDef kPkSheets[PK_NT] = {
+    {L"Изделия", XP_N(kPkItemsHead), kPkItemsHead, kPkItemsW},
+    {L"Состав", XP_N(kPkLinksHead), kPkLinksHead, kPkLinksW},
+    {L"Операции", XP_N(kPkOpsHead), kPkOpsHead, kPkOpsW},
+};
+
+static BOOL xp_seen2(XpTable *t, const wchar_t *a, const wchar_t *b) {
+  for (int r = 0; r < t->n; r++)
+    if (!_wcsicmp(xp_cell(t, r, 0), a) && !_wcsicmp(xp_cell(t, r, 1), b ? b : L"")) return TRUE;
+  return FALSE;
+}
+
+/* x — собранная выгрузка (NULL — пустой шаблон); pk — PK_NT таблиц */
+static void xp_package(const XpJob *x, XpTable *pk) {
+  for (int k = 0; k < PK_NT; k++) pk[k].ncols = kPkSheets[k].ncols;
+  if (!x) return;
+  const XpTable *comp = &x->t[XP_COMP], *ops = &x->t[XP_OPS];
+  for (int r = 0; r < comp->n; r++) {
+    const wchar_t *des = xp_cell((void *)comp, r, 1), *parent = xp_cell((void *)comp, r, 3);
+    if (!des[0]) continue;
+    if (!xp_seen2(&pk[PK_ITEMS], des, NULL)) {
+      wchar_t **w = xp_row(&pk[PK_ITEMS]);
+      if (!w) return;
+      xp_set(w, 0, des);
+      xp_set(w, 1, xp_cell((void *)comp, r, 2));
+      xp_set(w, 2, xp_cell((void *)comp, r, 4));
+      xp_set(w, 3, xp_cell((void *)comp, r, 7));
+      xp_set(w, 4, xp_cell((void *)comp, r, 10));
+    }
+    /* сборка в дереве встречается не раз — её строки состава один раз */
+    if (parent[0] && !xp_seen2(&pk[PK_LINKS], parent, des)) {
+      wchar_t **w = xp_row(&pk[PK_LINKS]);
+      if (!w) return;
+      xp_set(w, 0, parent);
+      xp_set(w, 1, des);
+      xp_set(w, 2, xp_cell((void *)comp, r, 5));
+    }
+  }
+  for (int r = 0; r < ops->n; r++) {
+    const wchar_t *des = xp_cell((void *)ops, r, 0), *num = xp_cell((void *)ops, r, 4);
+    if (!des[0] || xp_seen2(&pk[PK_OPS], des, num)) continue;
+    wchar_t **w = xp_row(&pk[PK_OPS]);
+    if (!w) return;
+    xp_set(w, 0, des);
+    xp_set(w, 1, num);
+    const wchar_t *op1c = xp_cell((void *)ops, r, 6);
+    xp_set(w, 2, op1c[0] ? op1c : xp_cell((void *)ops, r, 5)); /* операция — с кодом 1С: по нему команда найдёт её */
+    xp_set(w, 3, xp_cell((void *)ops, r, 7));
+    xp_set(w, 4, xp_cell((void *)ops, r, 9));
+    /* нормы — в минутах; в PLM бывают в часах (единица «ч», «час») */
+    const wchar_t *unit = xp_cell((void *)ops, r, 13);
+    double k = (unit[0] == L'ч' || unit[0] == L'Ч') ? 60.0 : 1.0;
+    for (int c = 0; c < 2; c++) {
+      double v;
+      if (!xp_num(xp_cell((void *)ops, r, 11 + c), &v)) continue;
+      wchar_t nb[40];
+      xp_fmt3(v * k, nb, 40);
+      xp_set(w, 5 + c, nb);
+    }
+  }
+}
+
+static void xp_package_free(XpTable *pk) {
+  for (int k = 0; k < PK_NT; k++) {
+    for (size_t i = 0; i < (size_t)pk[k].n * (size_t)pk[k].ncols; i++) free(pk[k].cell[i]);
+    free(pk[k].cell);
+    memset(&pk[k], 0, sizeof(pk[k]));
+  }
+}
