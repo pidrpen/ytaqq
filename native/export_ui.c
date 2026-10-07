@@ -394,11 +394,11 @@ static void xp_run_status(void) {
   LONG done = x->rt->progDone, total = x->rt->progTotal;
   wchar_t part[80] = L"";
   if (total > 0)
-    _snwprintf(part, 80, st == XP_COMP ? L" · веток %ld из %ld" : st == XP_ECN ? L" · пачек %ld из %ld"
+    _snwprintf(part, 80, st == XP_COMP ? L" · позиций %ld из %ld найденных" : st == XP_ECN ? L" · пачек %ld из %ld"
                                                                                : L" · позиций %ld из %ld",
                done, total);
   wchar_t walked[60] = L"";
-  if (st == XP_COMP) _snwprintf(walked, 60, L" · пройдено позиций %d", g_xpCount);
+  if (st == XP_COMP && total <= 0) _snwprintf(walked, 60, L" · пройдено позиций %d", g_xpCount);
   xp_status(L"Собираю %s… %d%%%s%s · %u:%02u", kXpStage[st][0] ? kXpStage[st] : L"состав", xp_permille(x) / 10,
             part, walked, (unsigned)(sec / 60), (unsigned)(sec % 60));
 }

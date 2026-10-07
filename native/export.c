@@ -249,7 +249,7 @@ static void xp_comp(XpJob *x) {
 
 #define XP_OPS_MAX 200
 #define XP_FIELDS 3000
-#define XP_WORKERS 4
+#define XP_WORKERS 12 /* с .86 — 12: запросы ждут сервер, а не процессор */
 
 typedef struct {
   long id, ts; /* операция и её TSOperation */
