@@ -191,7 +191,7 @@ static void rt_ws_code(const wchar_t *v, wchar_t *out, int cap) {
    После макроса — условие на nk.Value. */
 #define RT_HOLDERS(id)                                                                      \
   L"FROM (SELECT InfoObjectId AS Id, ISNULL(ParentId,0) AS Par "                            \
-  L"FROM InfoObjects WITH(NOLOCK) WHERE InfoObjectId=" id L") AS x "                         \
+  L"FROM InfoObjects WITH(NOLOCK) WHERE InfoObjectId IN (" id L")) AS x "                    \
   L"CROSS APPLY (SELECT x.Id AS H, 0 AS P UNION SELECT x.Par, 2 "                           \
   L"UNION SELECT hc.Link, 1 FROM InfoObjectAttributes AS hc WITH(NOLOCK) "                  \
   L"JOIN NameKeys AS nhc WITH(NOLOCK) ON nhc.NameKeyId=hc.NameKeyId "                       \
@@ -866,6 +866,8 @@ static int rt_kd_rows(SQLHDBC dbc, long pvc, CardRow *rows, wchar_t *sql, wchar_
   return card_query(dbc, sql, rows, 300, err, 280);
 }
 
+static int rt_children_fill(SQLHDBC dbc, CardRow *rows, int n, BOOL kd, RtJob *j, RtEl *el, int max, long *variant);
+
 static int rt_children(SQLHDBC dbc, const RtObj *o, CardRow *rows, RtJob *j, RtEl *el, int max, long *variant) {
   *variant = 0;
   wchar_t *sql = (wchar_t *)malloc(4000 * sizeof(wchar_t));
@@ -1008,10 +1010,17 @@ static int rt_children(SQLHDBC dbc, const RtObj *o, CardRow *rows, RtJob *j, RtE
       rt_log(j, L"    состав по КД: запрос не выполнился — %s\r\n", err);
     }
   }
-  if (n <= 0) {
-    free(sql);
-    return 0;
-  }
+  free(sql);
+  if (n <= 0) return 0;
+  return rt_children_fill(dbc, rows, n, kd, j, el, max, variant);
+}
+
+/* строки состава (n1 — строка, n2 — вариант техсостава) → входящие с количеством,
+   разделом, единицей; по порядку редактора PLM. kd — состав по КД */
+static int rt_children_fill(SQLHDBC dbc, CardRow *rows, int n, BOOL kd, RtJob *j, RtEl *el, int max, long *variant) {
+  wchar_t *sql = (wchar_t *)malloc(4000 * sizeof(wchar_t));
+  wchar_t err[280];
+  if (!sql) return 0;
   if (kd)
     for (int i = 0; i < n; i++) rows[i].n2 = 0; /* у состава КД нет исполнения техсостава */
   *variant = rows[0].n2; /* исполнение техсостава — у него и список изменений КД */
@@ -1737,6 +1746,339 @@ static long rt_find_root(SQLHDBC dbc, const wchar_t *des, CardRow *rows, RtJob *
   return best;
 }
 
+/* ---- пачкой (с 2026.09.23.90) ----------------------------------------------
+   Позиция до появления её состава — около девяти запросов (изделие, карточки,
+   версия техсостава, строки, их поля…), и N в строке хода растёт со скоростью
+   этих запросов. Когда в очереди много позиций, свободный поток берёт сразу
+   до RT_BATCH новых и читает их одним запросом на вид данных: свойства и
+   карточки, версии техсостава, строки состава, состав по КД. Что пачкой не
+   нашлось (техсостав не в первой версии, напрямую по исполнению и т. п.) —
+   по-старому, по одной (rt_children), со всеми запасными путями и журналом. */
+#define RT_BATCH 16
+
+static void rt_idlist(const long *ids, int n, wchar_t *out, int cap) {
+  int w = 0;
+  out[0] = 0;
+  for (int i = 0; i < n && w < cap - 16; i++) w += _snwprintf(out + w, cap - w, i ? L",%ld" : L"%ld", ids[i]);
+}
+
+static int rt_bk(const long *ids, int n, long id) { /* номер в пачке по id */
+  for (int k = 0; k < n; k++)
+    if (ids[k] == id) return k;
+  return -1;
+}
+
+/* свойства и карточки пачки изделий — те же запросы, что rt_obj, на всех сразу;
+   FALSE — запрос не прошёл, тогда по одной */
+static BOOL rt_obj_batch(SQLHDBC dbc, const long *ids, int n, RtObj *o, wchar_t (*note)[300]) {
+  wchar_t *sql = (wchar_t *)malloc(16000 * sizeof(wchar_t)), list[RT_BATCH * 14], err[280];
+  CardRow *rows = (CardRow *)malloc(sizeof(CardRow) * 80 * RT_BATCH);
+  BOOL ok = FALSE;
+  long desP[RT_BATCH] = {0};
+  if (!sql || !rows) goto out;
+  for (int k = 0; k < n; k++) {
+    memset(&o[k], 0, sizeof(RtObj));
+    note[k][0] = 0;
+  }
+  rt_idlist(ids, n, list, RT_BATCH * 14);
+  _snwprintf(sql, 16000,
+             L"SELECT TOP %d o.InfoObjectId, o.Name, N'', ISNULL(o.ParentId,0), 0 FROM InfoObjects AS o WITH(NOLOCK) "
+             L"WHERE o.InfoObjectId IN (%s)",
+             n, list);
+  int m = card_query(dbc, sql, rows, 80 * RT_BATCH, err, 280);
+  for (int i = 0; i < m; i++) {
+    int k = rt_bk(ids, n, rows[i].n1);
+    if (k < 0) continue;
+    lstrcpynW(o[k].objName, rows[i].s1, 260);
+    o[k].par = rows[i].n2;
+  }
+  _snwprintf(sql, 16000,
+             L"SELECT TOP %d x.Id, nk.Value, COALESCE(lo.Name, " CARD_VALUE_SQL L", N''), ISNULL(a.Link,0), h2.P "
+             RT_HOLDERS(L"%s")
+             L"AND nk.Value IN (N'Designation',N'Name',N'Section',N'Mass',N'MassMeasureUnit',"
+             L"N'TechnologicalProcessesCard',N'ProductPreformsCard',N'TechCompCard',N'ProductConfiguration',"
+             L"N'BaselineConfiguration',N'Material',N'MaterialLink') "
+             L"LEFT JOIN InfoObjects AS lo WITH(NOLOCK) ON a.DataType=6 AND lo.InfoObjectId=a.Link "
+             L"ORDER BY x.Id, h2.P",
+             80 * n, list);
+  sql[15999] = 0;
+  m = card_query(dbc, sql, rows, 80 * RT_BATCH, err, 280);
+  if (m < 0) goto out;
+  for (int i = 0; i < m; i++) { /* по порядку h2.P: ближнее важнее — первое */
+    int k = rt_bk(ids, n, rows[i].n1);
+    if (k < 0) continue;
+    RtObj *q = &o[k];
+    const wchar_t *key = rows[i].s1, *v = rows[i].s2;
+    long link = rows[i].n2;
+    if (!_wcsicmp(key, L"Designation") && !q->des[0] && v[0]) {
+      lstrcpynW(q->des, v, 200);
+      q->desAttr = TRUE;
+      desP[k] = rows[i].n3;
+    }
+    else if ((!_wcsicmp(key, L"Material") || !_wcsicmp(key, L"MaterialLink")) && !q->mat[0] && v[0])
+      lstrcpynW(q->mat, v, 200);
+    else if (!_wcsicmp(key, L"Name") && !q->name[0] && v[0]) lstrcpynW(q->name, v, 260);
+    else if (!_wcsicmp(key, L"Section") && !q->section[0] && v[0]) lstrcpynW(q->section, v, 120);
+    else if (!_wcsicmp(key, L"Mass") && !q->mass[0] && v[0]) lstrcpynW(q->mass, v, 64);
+    else if (!_wcsicmp(key, L"MassMeasureUnit") && !q->massUnit[0] && v[0]) lstrcpynW(q->massUnit, v, 40);
+    else if (!_wcsicmp(key, L"TechnologicalProcessesCard") && !q->tpCard) q->tpCard = link;
+    else if (!_wcsicmp(key, L"ProductPreformsCard") && !q->pfCard) q->pfCard = link;
+    else if (!_wcsicmp(key, L"TechCompCard") && !q->tcCard) q->tcCard = link;
+    else if (!_wcsicmp(key, L"ProductConfiguration") && !q->prodConf) q->prodConf = link;
+    else if (!_wcsicmp(key, L"BaselineConfiguration") && !q->prodConf) q->prodConf = link;
+  }
+  for (int k = 0; k < n; k++) {
+    o[k].id = ids[k];
+    if (desP[k] > 0 && o[k].objName[0]) { /* обозначение родителя или карты — своё имя точнее */
+      wchar_t nd[200];
+      card_des_from_name(o[k].objName, nd, 200);
+      if (rt_looks_des(nd) && _wcsicmp(nd, o[k].des)) {
+        _snwprintf(note[k], 300, L"    обозначение «%s» — из связанного объекта, по имени «%s»\r\n", o[k].des, nd);
+        lstrcpynW(o[k].des, nd, 200);
+      }
+    }
+  }
+  /* карточки — ещё и запросом карточки (PLM_HOLDERS), у кого чего-то нет */
+  long need[RT_BATCH];
+  int nn = 0;
+  for (int k = 0; k < n; k++)
+    if (!o[k].pfCard || !o[k].tcCard || !o[k].tpCard || !o[k].prodConf) need[nn++] = ids[k];
+  if (nn) {
+    rt_idlist(need, nn, list, RT_BATCH * 14);
+    _snwprintf(sql, 16000,
+               L"SELECT DISTINCT TOP %d x.Id, nkp.Value, N'', pa.Link, 0 " PLM_HOLDERS(L"%s")
+               L"AND nkp.Value IN (N'ProductPreformsCard',N'TechCompCard',N'ProductConfiguration',"
+               L"N'TechnologicalProcessesCard')",
+               20 * nn, list);
+    sql[15999] = 0;
+    m = card_query(dbc, sql, rows, 80 * RT_BATCH, err, 280);
+    for (int i = 0; i < m; i++) {
+      int k = rt_bk(ids, n, rows[i].n1);
+      if (k < 0) continue;
+      const wchar_t *key = rows[i].s1;
+      if (!_wcsicmp(key, L"ProductPreformsCard") && !o[k].pfCard) o[k].pfCard = rows[i].n2;
+      else if (!_wcsicmp(key, L"TechCompCard") && !o[k].tcCard) o[k].tcCard = rows[i].n2;
+      else if (!_wcsicmp(key, L"ProductConfiguration") && !o[k].prodConf) o[k].prodConf = rows[i].n2;
+      else if (!_wcsicmp(key, L"TechnologicalProcessesCard") && !o[k].tpCard) o[k].tpCard = rows[i].n2;
+    }
+  }
+  /* карта взаимосвязей ссылается на конфигурацию (Product) — с её стороны */
+  wchar_t vals[RT_BATCH * 3 * 30];
+  int vw = 0, nv = 0;
+  vals[0] = 0;
+  for (int k = 0; k < n; k++)
+    if (!o[k].pfCard || !o[k].tpCard) {
+      long l2 = o[k].prodConf ? o[k].prodConf : ids[k], l3 = o[k].par ? o[k].par : ids[k];
+      vw += _snwprintf(vals + vw, RT_BATCH * 90 - vw, L"%s(%ld,%ld),(%ld,%ld),(%ld,%ld)", vw ? L"," : L"", ids[k], ids[k],
+                       ids[k], l2, ids[k], l3);
+      nv++;
+    }
+  if (nv) {
+    _snwprintf(sql, 16000,
+               L"SELECT DISTINCT TOP %d v.O, nkc.Value, N'', ca.Link, 0 FROM (VALUES %s) AS v(O,L) "
+               L"JOIN InfoObjectAttributes AS pr WITH(NOLOCK) ON pr.Link=v.L AND pr.Outdated=0 "
+               L"AND ISNULL(pr.CollectionElementId,0)=0 "
+               L"JOIN NameKeys AS nkpr WITH(NOLOCK) ON nkpr.NameKeyId=pr.NameKeyId AND nkpr.Value=N'Product' "
+               L"JOIN InfoObjectAttributes AS ca WITH(NOLOCK) ON ca.OwnerId=pr.OwnerId AND ca.Outdated=0 "
+               L"AND ISNULL(ca.Link,0)<>0 AND ISNULL(ca.CollectionElementId,0)=0 "
+               L"JOIN NameKeys AS nkc WITH(NOLOCK) ON nkc.NameKeyId=ca.NameKeyId "
+               L"AND nkc.Value IN (N'ProductPreformsCard',N'TechCompCard',N'TechnologicalProcessesCard')",
+               20 * nv, vals);
+    sql[15999] = 0;
+    m = card_query(dbc, sql, rows, 80 * RT_BATCH, err, 280);
+    int got[RT_BATCH] = {0};
+    for (int i = 0; i < m; i++) {
+      int k = rt_bk(ids, n, rows[i].n1);
+      if (k < 0) continue;
+      const wchar_t *key = rows[i].s1;
+      if (!_wcsicmp(key, L"ProductPreformsCard") && !o[k].pfCard) o[k].pfCard = rows[i].n2, got[k]++;
+      else if (!_wcsicmp(key, L"TechCompCard") && !o[k].tcCard) o[k].tcCard = rows[i].n2, got[k]++;
+      else if (!_wcsicmp(key, L"TechnologicalProcessesCard") && !o[k].tpCard) o[k].tpCard = rows[i].n2, got[k]++;
+    }
+    for (int k = 0; k < n; k++)
+      if (got[k]) {
+        size_t l = wcslen(note[k]);
+        _snwprintf(note[k] + l, 300 - l, L"    карточки %ld: нашлись по обратной ссылке (Product)\r\n", ids[k]);
+      }
+  }
+  for (int k = 0; k < n; k++) {
+    if (!o[k].des[0] && o[k].objName[0]) card_des_from_name(o[k].objName, o[k].des, 200);
+    if (!o[k].name[0] && o[k].objName[0]) card_title_from_name(o[k].objName, o[k].name, 260);
+  }
+  ok = TRUE;
+out:
+  free(sql);
+  free(rows);
+  return ok;
+}
+
+/* состав пачки: что нашлось сразу — строки; лист без состава — 0; прочее — по одной */
+enum { RT_PRE_SINGLE, RT_PRE_ROWS, RT_PRE_LEAF };
+typedef struct {
+  int how;
+  BOOL kd;
+  CardRow *rows;
+  int n;
+  wchar_t note[300];
+} RtPre;
+
+static void rt_pre_take(RtPre *pre, int k, const CardRow *rows, int m, BOOL kd) {
+  int c = 0;
+  for (int i = 0; i < m; i++)
+    if (rows[i].n3 == k) c++;
+  if (!c) return;
+  if (c > 300) c = 300;
+  pre[k].rows = (CardRow *)malloc(sizeof(CardRow) * (size_t)c);
+  if (!pre[k].rows) return;
+  for (int i = 0; i < m && pre[k].n < c; i++)
+    if (rows[i].n3 == k) pre[k].rows[pre[k].n++] = rows[i];
+  pre[k].how = RT_PRE_ROWS;
+  pre[k].kd = kd;
+}
+
+static void rt_children_batch(SQLHDBC dbc, RtObj **o, const BOOL *use, int n, RtPre *pre, BOOL tcDiag) {
+  wchar_t *sql = (wchar_t *)malloc(20000 * sizeof(wchar_t)), err[280], list[RT_BATCH * 14], vals[RT_BATCH * 60];
+  CardRow *rows = (CardRow *)malloc(sizeof(CardRow) * 300 * RT_BATCH);
+  for (int k = 0; k < n; k++) memset(&pre[k], 0, sizeof(RtPre));
+  if (!sql || !rows) goto out;
+  /* А. с карточкой техсостава: версия — как в rt_children (утверждённая, иначе рабочая) */
+  long cards[RT_BATCH];
+  int nc = 0;
+  for (int k = 0; k < n; k++)
+    if (use[k] && o[k]->tcCard && rt_bk(cards, nc, o[k]->tcCard) < 0) cards[nc++] = o[k]->tcCard;
+  if (nc) {
+    rt_idlist(cards, nc, list, RT_BATCH * 14);
+    _snwprintf(sql, 20000,
+               L"SELECT TOP %d c.V, CAST(vo.Name AS NVARCHAR(200)), c.K, ISNULL(vn.N,0), c.C "
+               L"FROM (SELECT a.Link AS V, nk.Value AS K, a.OwnerId AS C FROM InfoObjectAttributes AS a WITH(NOLOCK) "
+               L"JOIN NameKeys AS nk WITH(NOLOCK) ON nk.NameKeyId=a.NameKeyId "
+               L"WHERE a.OwnerId IN (%s) AND a.Outdated=0 AND a.DataType=6 AND ISNULL(a.Link,0)<>0 "
+               L"AND ISNULL(a.CollectionElementId,0)=0 "
+               L"UNION SELECT o.InfoObjectId, N'', o.ParentId FROM InfoObjects AS o WITH(NOLOCK) "
+               L"WHERE o.ParentId IN (%s) AND o.Erased=0) AS c "
+               L"JOIN InfoObjects AS vo WITH(NOLOCK) ON vo.InfoObjectId=c.V AND vo.Erased=0 "
+               L"OUTER APPLY (SELECT TOP 1 vv.IntegerNumber AS N FROM InfoObjectAttributes AS vv WITH(NOLOCK) "
+               L"JOIN NameKeys AS nkv WITH(NOLOCK) ON nkv.NameKeyId=vv.NameKeyId AND nkv.Value=N'VersionNumber' "
+               L"WHERE vv.OwnerId=c.V AND vv.Outdated=0) AS vn "
+               L"WHERE EXISTS (SELECT 1 FROM InfoObjects AS ch WITH(NOLOCK) "
+               L"JOIN InfoObjectAttributes AS t WITH(NOLOCK) ON t.OwnerId=ch.InfoObjectId AND t.Outdated=0 "
+               L"JOIN NameKeys AS nkt WITH(NOLOCK) ON nkt.NameKeyId=t.NameKeyId AND nkt.Value=N'TechComposition' "
+               L"WHERE ch.ParentId=c.V AND ch.Erased=0) "
+               L"ORDER BY c.C, CASE WHEN c.K=N'ActualVersionTechComp' THEN 0 WHEN ISNULL(vn.N,0)<0 THEN 2 ELSE 1 END, "
+               L"ISNULL(vn.N,0) DESC, c.V DESC",
+               40 * nc, list, list);
+    int nvr = card_query(dbc, sql, rows, 300 * RT_BATCH, err, 280);
+    long ver[RT_BATCH] = {0}, vnum[RT_BATCH] = {0};
+    BOOL actual[RT_BATCH] = {0};
+    wchar_t vname[RT_BATCH][120];
+    int vw = 0;
+    vals[0] = 0;
+    for (int k = 0; k < n; k++) {
+      vname[k][0] = 0;
+      if (!use[k] || !o[k]->tcCard) continue;
+      for (int i = 0; i < nvr; i++) /* первая по порядку — версия этой карточки */
+        if (rows[i].n3 == o[k]->tcCard) {
+          ver[k] = rows[i].n1;
+          vnum[k] = rows[i].n2;
+          actual[k] = !_wcsicmp(rows[i].s2, L"ActualVersionTechComp");
+          lstrcpynW(vname[k], rows[i].s1, 120);
+          break;
+        }
+      if (ver[k]) vw += _snwprintf(vals + vw, RT_BATCH * 60 - vw, L"%s(%d,%ld,%ld)", vw ? L"," : L"", k, ver[k], o[k]->prodConf);
+    }
+    if (vw) {
+      _snwprintf(sql, 20000,
+                 L"SELECT DISTINCT TOP %d ce.CollectionElementId, N'', N'', ch.InfoObjectId, v.K "
+                 L"FROM (VALUES %s) AS v(K,V,P) "
+                 L"JOIN InfoObjects AS ch WITH(NOLOCK) ON ch.ParentId=v.V AND ch.Erased=0 "
+                 L"JOIN InfoObjectAttributes AS tc WITH(NOLOCK) ON tc.OwnerId=ch.InfoObjectId AND tc.Outdated=0 "
+                 L"JOIN NameKeys AS nktc WITH(NOLOCK) ON nktc.NameKeyId=tc.NameKeyId AND nktc.Value=N'TechComposition' "
+                 L"JOIN InfoObjectCollectionElements AS ce WITH(NOLOCK) ON ce.AttributeId IN (tc.AttributeId, ISNULL(tc.Link,0)) "
+                 L"AND ce.Outdated=0 "
+                 L"WHERE (v.P=0 OR EXISTS (SELECT 1 FROM InfoObjectAttributes AS pr WITH(NOLOCK) "
+                 L"JOIN NameKeys AS nkpr WITH(NOLOCK) ON nkpr.NameKeyId=pr.NameKeyId AND nkpr.Value=N'Product' "
+                 L"WHERE pr.OwnerId=ch.InfoObjectId AND pr.Outdated=0 AND pr.Link=v.P)) "
+                 L"AND NOT EXISTS (SELECT 1 FROM InfoObjectAttributes AS ir WITH(NOLOCK) "
+                 L"JOIN NameKeys AS nkr WITH(NOLOCK) ON nkr.NameKeyId=ir.NameKeyId AND nkr.Value=N'IsRemoved' "
+                 L"WHERE ir.CollectionElementId=ce.CollectionElementId AND ir.BoolValue=1) "
+                 L"ORDER BY v.K, ce.CollectionElementId",
+                 300 * n, vals);
+      int m = card_query(dbc, sql, rows, 300 * RT_BATCH, err, 280);
+      for (int k = 0; k < n && m > 0; k++) {
+        if (!ver[k]) continue;
+        rt_pre_take(pre, k, rows, m, FALSE);
+        if (pre[k].how == RT_PRE_ROWS && !actual[k])
+          _snwprintf(pre[k].note, 300, L"    техсостав не утверждён — беру %s версию №%ld «%s» (#%ld)\r\n",
+                     vnum[k] > 0 ? L"рабочую" : L"снимок, ", vnum[k], vname[k], ver[k]);
+      }
+    }
+  }
+  /* Б. без карточки техсостава: напрямую по исполнению есть вариант — по одной;
+     нет — состав по КД (Items); нет и его — позиция без состава */
+  int vw = 0;
+  vals[0] = 0;
+  BOOL firstLeft = !tcDiag; /* почему не нашёлся — разок по одной, с её журналом */
+  for (int k = 0; k < n; k++) {
+    if (!use[k] || o[k]->tcCard) continue;
+    if (firstLeft) {
+      firstLeft = FALSE;
+      continue;
+    }
+    pre[k].how = RT_PRE_LEAF; /* пока так; найдётся вариант или КД — поправим */
+    long pc1 = o[k]->prodConf ? o[k]->prodConf : o[k]->prodConfObj, pc2 = o[k]->prodConfObj ? o[k]->prodConfObj : pc1;
+    if (pc1) vw += _snwprintf(vals + vw, RT_BATCH * 60 - vw, L"%s(%d,%ld),(%d,%ld)", vw ? L"," : L"", k, pc1, k, pc2);
+  }
+  if (vw) {
+    _snwprintf(sql, 20000,
+               L"SELECT DISTINCT TOP %d v.K, N'', N'', 0, 0 FROM (VALUES %s) AS v(K,L) "
+               L"JOIN InfoObjectAttributes AS pr WITH(NOLOCK) ON pr.Link=v.L AND pr.Outdated=0 "
+               L"AND ISNULL(pr.CollectionElementId,0)=0 "
+               L"JOIN NameKeys AS nkp WITH(NOLOCK) ON nkp.NameKeyId=pr.NameKeyId AND nkp.Value=N'Product' "
+               L"JOIN InfoObjects AS ch WITH(NOLOCK) ON ch.InfoObjectId=pr.OwnerId AND ch.Erased=0 "
+               L"JOIN InfoObjects AS vv WITH(NOLOCK) ON vv.InfoObjectId=ch.ParentId AND vv.Erased=0 "
+               L"WHERE EXISTS (SELECT 1 FROM InfoObjectAttributes AS t WITH(NOLOCK) "
+               L"JOIN NameKeys AS nkt WITH(NOLOCK) ON nkt.NameKeyId=t.NameKeyId AND nkt.Value=N'TechComposition' "
+               L"WHERE t.OwnerId=ch.InfoObjectId AND t.Outdated=0)",
+               n, vals);
+    int m = card_query(dbc, sql, rows, 300 * RT_BATCH, err, 280);
+    if (m < 0) { /* не вышло — эти по одной */
+      for (int k = 0; k < n; k++)
+        if (pre[k].how == RT_PRE_LEAF) pre[k].how = RT_PRE_SINGLE;
+    }
+    for (int i = 0; i < m; i++)
+      if (rows[i].n1 >= 0 && rows[i].n1 < n) pre[rows[i].n1].how = RT_PRE_SINGLE; /* вариант есть — по одной */
+  }
+  vw = 0;
+  vals[0] = 0;
+  for (int k = 0; k < n; k++)
+    if (pre[k].how == RT_PRE_LEAF) vw += _snwprintf(vals + vw, RT_BATCH * 60 - vw, L"%s(%d,%ld)", vw ? L"," : L"", k, o[k]->id);
+  if (vw) {
+    _snwprintf(sql, 20000,
+               L"SELECT DISTINCT TOP %d ce.CollectionElementId, N'', N'', 0, v.K FROM (VALUES %s) AS v(K,O) "
+               L"JOIN InfoObjectAttributes AS it WITH(NOLOCK) ON it.OwnerId=v.O AND it.Outdated=0 "
+               L"AND ISNULL(it.CollectionElementId,0)=0 "
+               L"JOIN NameKeys AS nki WITH(NOLOCK) ON nki.NameKeyId=it.NameKeyId AND nki.Value=N'Items' "
+               L"JOIN InfoObjectCollectionElements AS ce WITH(NOLOCK) ON ce.AttributeId IN (it.AttributeId, ISNULL(it.Link,0)) "
+               L"AND ce.Outdated=0 "
+               L"ORDER BY v.K, ce.CollectionElementId",
+               300 * n, vals);
+    int m = card_query(dbc, sql, rows, 300 * RT_BATCH, err, 280);
+    for (int k = 0; k < n; k++) {
+      if (pre[k].how != RT_PRE_LEAF) continue;
+      if (m < 0) {
+        pre[k].how = RT_PRE_SINGLE;
+        continue;
+      }
+      rt_pre_take(pre, k, rows, m, TRUE);
+      if (pre[k].how == RT_PRE_ROWS)
+        _snwprintf(pre[k].note, 300, L"    техсостава нет — состав по КД (Items): строк %d\r\n", pre[k].n);
+    }
+  }
+out:
+  free(sql);
+  free(rows);
+}
+
 /* ---- параллельный обход (с 2026.09.23.86) ---------------------------------
    Каждая позиция — десяток-другой запросов (изделие, ТП, состав, заготовка).
    До .86 потокам доставались ветки двух верхних уровней: у глубокой сборки
@@ -1779,6 +2121,7 @@ typedef struct {
   double qty, tot;    /* tot — на изделие: произведение количеств по цепочке */
   BOOL qtyFound, hasSrc, deep;
   int cycles;         /* строк состава, которые вели бы в цикл, — пропущены */
+  int nomat;          /* строк раздела «Материалы» / «Документация» — не позиции, не запрашиваются (с .90) */
   RtEl src;           /* строка состава, которой вошла */
   int *kids, nk;
 } RtNode;
@@ -1796,6 +2139,8 @@ typedef struct {
   int nb;               /* задач «ТП и заготовка» — для полосы хода */
   int nskip;            /* вхождений-материалов и документов (под замком): в ведомость не идут — из счёта вон */
   int busy;           /* потоков с задачей на руках */
+  int nthreads;       /* сколько потоков: пачка — когда в очереди на каждого больше одного */
+  volatile LONG batches, batched; /* пачек и позиций в них — в подробности */
   ULONGLONG ms[5];    /* время по видам запросов (сумма по потокам): изделие, ТП, состав, КД, заготовка */
 } RtPool;
 
@@ -1907,25 +2252,16 @@ static void rt_flags_out(RtPool *p, RtJob *w, const ULONGLONG *ms) {
   ReleaseSRWLockExclusive(&p->lock);
 }
 
-/* Позиция собирается в две задачи (с 2026.09.23.88). Первая — изделие и его
-   состав: сразу после неё строки состава уходят в очередь, и дерево
-   раскрывается вглубь, не дожидаясь ТП и заготовки (прежде каждый уровень
-   ждал, пока у позиции над ним соберутся ещё и маршрут, и заготовка). Вторая —
-   ТП (маршрут) и заготовка — отдельной задачей, её берёт любой свободный поток. */
-static BOOL rt_item_eval_a(RtPool *p, SQLHDBC dbc, RtJob *w, CardRow *rows, const RtNode *nd, RtItem *it) {
-  ULONGLONG ms[5] = {0, 0, 0, 0, 0}, t;
-  rt_flags_in(p, w);
+/* часть 1: изделие прочитано — исполнение из строки состава, пропуск материалов и документов */
+static BOOL rt_item_a1(RtJob *w, const RtNode *nd, RtItem *it, BOOL got) {
   int level = nd->level;
   const RtEl *src = nd->hasSrc ? &nd->src : NULL;
   const wchar_t *elSection = src ? src->section : NULL;
   RtObj *o = &it->o;
   it->level = level;
-  t = GetTickCount64();
-  BOOL got = rt_obj(dbc, nd->id, o, rows, w);
-  ms[0] += GetTickCount64() - t;
   if (!got) {
     it->skip = TRUE;
-    goto done;
+    return FALSE;
   }
   if (src && src->pc && src->pc != o->prodConf) {
     rt_log(w, L"    исполнение — из строки техсостава #%ld (по изделию было #%ld)\r\n", src->pc, o->prodConf);
@@ -1936,13 +2272,24 @@ static BOOL rt_item_eval_a(RtPool *p, SQLHDBC dbc, RtJob *w, CardRow *rows, cons
   if (level > 0 && (!product || !rt_looks_des(o->des) || (elSection && wcsstr(elSection, L"атериал")))) {
     rt_log(w, L"  %*s· пропуск «%s» — нет обозначения (материал?)\r\n", level * 2, L"", o->objName);
     it->skip = TRUE;
-    goto done;
+    return FALSE;
   }
   if (level > 0 && (rt_is_doc(o->des, o->objName) || (elSection && wcsstr(elSection, L"окумент")))) {
     rt_log(w, L"  %*s· пропуск «%s» — документ\r\n", level * 2, L"", o->objName);
     it->skip = TRUE;
-    goto done;
+    return FALSE;
   }
+  return TRUE;
+}
+
+/* часть 2: строка позиции, состав (pre — уже прочитанный пачкой), изменения КД, вид */
+static void rt_item_a2(SQLHDBC dbc, RtJob *w, CardRow *rows, const RtNode *nd, RtItem *it, RtPre *pre,
+                       ULONGLONG *ms) {
+  ULONGLONG t;
+  int level = nd->level;
+  const RtEl *src = nd->hasSrc ? &nd->src : NULL;
+  const wchar_t *elSection = src ? src->section : NULL;
+  RtObj *o = &it->o;
   RtRow *r = &it->row;
   memset(r, 0, sizeof(*r));
   r->id = nd->id;
@@ -1961,8 +2308,17 @@ static BOOL rt_item_eval_a(RtPool *p, SQLHDBC dbc, RtJob *w, CardRow *rows, cons
   RtEl *el = (RtEl *)malloc(sizeof(RtEl) * RT_KIDS);
   long variant = 0;
   int kdBefore = w->kdUsed;
+  int ne = 0;
   t = GetTickCount64();
-  int ne = el ? rt_children(dbc, o, rows, w, el, RT_KIDS, &variant) : 0;
+  if (el && pre && pre->how == RT_PRE_ROWS) { /* строки уже есть (пачкой) — только их поля */
+    if (pre->note[0]) rt_log(w, L"%s", pre->note);
+    if (pre->kd) w->kdUsed++;
+    int n = pre->n > 300 ? 300 : pre->n;
+    memcpy(rows, pre->rows, sizeof(CardRow) * (size_t)n);
+    ne = rt_children_fill(dbc, rows, n, pre->kd, w, el, RT_KIDS, &variant);
+  } else if (el && !(pre && pre->how == RT_PRE_LEAF)) {
+    ne = rt_children(dbc, o, rows, w, el, RT_KIDS, &variant);
+  }
   ms[2] += GetTickCount64() - t;
   r->tcVariant = variant;
   r->tcCard = o->tcCard;
@@ -1982,10 +2338,76 @@ static BOOL rt_item_eval_a(RtPool *p, SQLHDBC dbc, RtJob *w, CardRow *rows, cons
   } else {
     free(el);
   }
-done:
+}
+
+/* Позиция собирается в две задачи (с 2026.09.23.88). Первая — изделие и его
+   состав: сразу после неё строки состава уходят в очередь, и дерево
+   раскрывается вглубь, не дожидаясь ТП и заготовки (прежде каждый уровень
+   ждал, пока у позиции над ним соберутся ещё и маршрут, и заготовка). Вторая —
+   ТП (маршрут) и заготовка — отдельной задачей, её берёт любой свободный поток. */
+static BOOL rt_item_eval_a(RtPool *p, SQLHDBC dbc, RtJob *w, CardRow *rows, const RtNode *nd, RtItem *it) {
+  ULONGLONG ms[5] = {0, 0, 0, 0, 0}, t;
+  rt_flags_in(p, w);
+  t = GetTickCount64();
+  BOOL got = rt_obj(dbc, nd->id, &it->o, rows, w);
+  ms[0] += GetTickCount64() - t;
+  if (rt_item_a1(w, nd, it, got)) rt_item_a2(dbc, w, rows, nd, it, NULL, ms);
   rt_item_log_add(it, w);
   rt_flags_out(p, w, ms);
   return !it->skip;
+}
+
+/* пачка новых позиций (с .90): свойства и карточки, потом состав — общими запросами;
+   more[k] — у позиции будет задача «ТП и заготовка» */
+static void rt_items_eval_a_batch(RtPool *p, SQLHDBC dbc, RtJob *w, CardRow *rows, RtNode **nds, RtItem **its, int m,
+                                  BOOL *more) {
+  if (m == 1) {
+    more[0] = rt_item_eval_a(p, dbc, w, rows, nds[0], its[0]);
+    return;
+  }
+  ULONGLONG ms[5] = {0, 0, 0, 0, 0}, t = GetTickCount64();
+  long ids[RT_BATCH];
+  RtObj ob[RT_BATCH];
+  wchar_t note[RT_BATCH][300];
+  for (int k = 0; k < m; k++) ids[k] = nds[k]->id;
+  if (!rt_obj_batch(dbc, ids, m, ob, note)) { /* не прошло — по одной */
+    for (int k = 0; k < m; k++) more[k] = rt_item_eval_a(p, dbc, w, rows, nds[k], its[k]);
+    return;
+  }
+  ms[0] += GetTickCount64() - t;
+  InterlockedIncrement(&p->batches);
+  InterlockedExchangeAdd(&p->batched, m);
+  BOOL use[RT_BATCH];
+  RtObj *po[RT_BATCH];
+  for (int k = 0; k < m; k++) {
+    ULONGLONG z[5] = {0, 0, 0, 0, 0};
+    its[k]->o = ob[k];
+    po[k] = &its[k]->o;
+    rt_flags_in(p, w);
+    if (note[k][0]) rt_log(w, L"%s", note[k]);
+    use[k] = rt_item_a1(w, nds[k], its[k], TRUE);
+    rt_item_log_add(its[k], w);
+    rt_flags_out(p, w, z);
+  }
+  t = GetTickCount64();
+  RtPre pre[RT_BATCH];
+  AcquireSRWLockExclusive(&p->lock);
+  BOOL tcDiag = p->j->tcDiag;
+  ReleaseSRWLockExclusive(&p->lock);
+  rt_children_batch(dbc, po, use, m, pre, tcDiag);
+  ms[2] += GetTickCount64() - t;
+  rt_flags_out(p, w, ms); /* время общих запросов пачки */
+  for (int k = 0; k < m; k++) {
+    ULONGLONG z[5] = {0, 0, 0, 0, 0};
+    if (use[k]) {
+      rt_flags_in(p, w);
+      rt_item_a2(dbc, w, rows, nds[k], its[k], &pre[k], z);
+      rt_item_log_add(its[k], w);
+      rt_flags_out(p, w, z);
+    }
+    free(pre[k].rows);
+    more[k] = !its[k]->skip;
+  }
 }
 
 static void rt_item_eval_b(RtPool *p, SQLHDBC dbc, RtJob *w, CardRow *rows, RtItem *it) {
@@ -2053,6 +2475,12 @@ static void rt_node_expand(RtPool *p, int ni) {
       nd->cycles++;
       continue;
     }
+    /* материал или документ — видно по разделу строки: в ведомость не идёт, и
+       читать его, чтобы это узнать, незачем (прежде — запросы на каждый) */
+    if (e->section[0] && (wcsstr(e->section, L"атериал") || wcsstr(e->section, L"окумент"))) {
+      nd->nomat++;
+      continue;
+    }
     int c = rt_node_new(p, e->child, ni, nd->level + 1, e->qty, e->qty * nd->tot, e->qtyFound, e);
     if (c < 0) {
       rt_full(j);
@@ -2068,46 +2496,55 @@ static void rt_node_expand(RtPool *p, int ni) {
   ReleaseSRWLockExclusive(&p->lock);
 }
 
-/* одно вхождение: позиция готова — сразу состав; собирает другой поток — ждать
-   в её списке; новая — собрать, потом раскрыть себя и всех ждавших */
-static void rt_pool_node(RtPool *p, SQLHDBC dbc, RtJob *w, CardRow *rows, int ni) {
-  RtNode *nd = rt_node(p, ni);
-  long pc = nd->hasSrc ? nd->src.pc : 0;
-  BOOL made;
+/* вхождения (одно или пачка): позиция готова — сразу состав; собирает другой
+   поток — ждать в её списке; новые — собрать (пачкой, если их несколько), потом
+   раскрыть себя и всех ждавших */
+static void rt_pool_nodes(RtPool *p, SQLHDBC dbc, RtJob *w, CardRow *rows, const int *nis, int cnt) {
+  RtNode *mnd[RT_BATCH];
+  RtItem *mit[RT_BATCH];
+  int mni[RT_BATCH], ready[RT_BATCH], nm = 0, nr = 0;
   AcquireSRWLockExclusive(&p->lock);
-  RtItem *it = rt_item_get(p, nd->id, pc, &made);
-  if (!it) {
-    ReleaseSRWLockExclusive(&p->lock);
-    return;
-  }
-  nd->item = it;
-  if (!made && it->state == 1) {
-    if (rt_grow_int(&it->wait, &it->capWait, it->nwait + 1)) it->wait[it->nwait++] = ni;
-    ReleaseSRWLockExclusive(&p->lock);
-    return;
-  }
-  if (made) it->first = ni;
-  ReleaseSRWLockExclusive(&p->lock);
-  if (made) {
-    BOOL more = rt_item_eval_a(p, dbc, w, rows, nd, it);
-    AcquireSRWLockExclusive(&p->lock);
-    it->state = 2;
-    if (more) { /* ТП и заготовка — отдельной задачей, раньше состава: состав (он позже) возьмут первым */
-      rt_queue_push(p, -(it->idx + 1));
-      p->nb++;
-      InterlockedExchange(&p->j->prog2Total, p->nb);
-      WakeAllConditionVariable(&p->cv);
+  for (int c = 0; c < cnt; c++) {
+    int ni = nis[c];
+    RtNode *nd = rt_node(p, ni);
+    long pc = nd->hasSrc ? nd->src.pc : 0;
+    BOOL made;
+    RtItem *it = rt_item_get(p, nd->id, pc, &made);
+    if (!it) continue;
+    nd->item = it;
+    if (made) {
+      it->first = ni;
+      mnd[nm] = nd, mit[nm] = it, mni[nm] = ni, nm++;
+    } else if (it->state == 1) { /* собирает другой поток (или эта же пачка) — ждать */
+      if (rt_grow_int(&it->wait, &it->capWait, it->nwait + 1)) it->wait[it->nwait++] = ni;
+    } else {
+      ready[nr++] = ni;
     }
-    int nw = it->nwait, *wl = it->wait;
-    it->wait = NULL;
-    it->nwait = it->capWait = 0;
-    ReleaseSRWLockExclusive(&p->lock);
-    rt_node_expand(p, ni);
-    for (int k = 0; k < nw; k++) rt_node_expand(p, wl[k]);
-    free(wl);
-  } else {
-    rt_node_expand(p, ni);
   }
+  ReleaseSRWLockExclusive(&p->lock);
+  if (nm) {
+    BOOL more[RT_BATCH];
+    rt_items_eval_a_batch(p, dbc, w, rows, mnd, mit, nm, more);
+    for (int k = 0; k < nm; k++) {
+      RtItem *it = mit[k];
+      AcquireSRWLockExclusive(&p->lock);
+      it->state = 2;
+      if (more[k]) { /* ТП и заготовка — отдельной задачей, раньше состава: состав (он позже) возьмут первым */
+        rt_queue_push(p, -(it->idx + 1));
+        p->nb++;
+        InterlockedExchange(&p->j->prog2Total, p->nb);
+        WakeAllConditionVariable(&p->cv);
+      }
+      int nw = it->nwait, *wl = it->wait;
+      it->wait = NULL;
+      it->nwait = it->capWait = 0;
+      ReleaseSRWLockExclusive(&p->lock);
+      rt_node_expand(p, mni[k]);
+      for (int q = 0; q < nw; q++) rt_node_expand(p, wl[q]);
+      free(wl);
+    }
+  }
+  for (int k = 0; k < nr; k++) rt_node_expand(p, ready[k]);
 }
 
 /* поток: брать вхождения из очереди, пока она не опустела и все не освободились */
@@ -2119,12 +2556,20 @@ static void rt_pool_run(RtPool *p, SQLHDBC dbc, RtJob *w, CardRow *rows) {
     int ni = p->queue[--p->nq]; /* с конца: в глубину — повторы чаще находят готовое */
     p->busy++;
     RtItem *it = ni < 0 ? p->items[-ni - 1] : NULL;
+    /* очередь длинная — взять пачку вхождений: на поток приходится больше одного */
+    int batch[RT_BATCH], nb = 0;
+    if (!it) {
+      batch[nb++] = ni;
+      int extra = p->nq / (p->nthreads > 0 ? p->nthreads : 1);
+      if (extra > RT_BATCH - 1) extra = RT_BATCH - 1;
+      while (extra-- > 0 && p->nq > 0 && p->queue[p->nq - 1] >= 0) batch[nb++] = p->queue[--p->nq];
+    }
     ReleaseSRWLockExclusive(&p->lock);
     if (it) {
       rt_item_eval_b(p, dbc, w, rows, it);
       InterlockedIncrement(&p->j->prog2Done);
     } else {
-      rt_pool_node(p, dbc, w, rows, ni);
+      rt_pool_nodes(p, dbc, w, rows, batch, nb);
     }
     AcquireSRWLockExclusive(&p->lock);
     p->busy--;
@@ -2190,6 +2635,8 @@ static void rt_pool_out(RtPool *p, RtJob *j, int ni, const wchar_t *parentDes) {
   if (it->first != ni)
     rt_log(j, L"%*s%s %s — повтор: из уже собранного, кол-во %s\r\n", nd->level * 2, L"", r->f[RC_DES],
            r->f[RC_NAME], r->f[RC_QTY]);
+  if (nd->nomat && it->first == ni)
+    rt_log(j, L"%*s    материалов и документов в составе: %d — в ведомость не идут\r\n", nd->level * 2, L"", nd->nomat);
   if (nd->cycles)
     rt_log(j, L"%*s    !!! в составе «%s» %d строк ведут в цикл (входящее уже есть выше по цепочке) — пропущены\r\n",
            nd->level * 2, L"", r->f[RC_DES], nd->cycles);
@@ -2222,6 +2669,7 @@ static void rt_walk_pool(SQLHDBC dbc, RtJob *j, CardRow *rows, long root) {
   HANDLE th[RT_WORKERS_MAX];
   int started = 0;
   int want = g_plmThreads < 1 ? 1 : g_plmThreads > RT_WORKERS_MAX ? RT_WORKERS_MAX : g_plmThreads;
+  p->nthreads = want;
   for (int k = 0; k < want - 1; k++) { /* и этот поток — тоже рабочий */
     work[started].p = p;
     work[started].w = rt_job_new();
@@ -2253,7 +2701,8 @@ static void rt_walk_pool(SQLHDBC dbc, RtJob *j, CardRow *rows, long root) {
   rt_job_free(me);
   double walk = (double)(GetTickCount64() - t0) / 1000.0;
   if (r0 >= 0) rt_pool_out(p, j, r0, j->order);
-  rt_log(j, L"\r\nОбход: вхождений %d, разных позиций %d, потоков %d — %.0f с\r\n", p->nn, p->ni, started + 1, walk);
+  rt_log(j, L"\r\nОбход: вхождений %d, разных позиций %d, потоков %d — %.0f с; пачками прочитано позиций %ld (пачек %ld)\r\n",
+         p->nn, p->ni, started + 1, walk, p->batched, p->batches);
   rt_log(j, L"  время запросов (сумма по потокам): изделие %.0f с, ТП %.0f с, состав %.0f с, изменения КД %.0f с, "
             L"заготовка %.0f с\r\n",
          p->ms[0] / 1000.0, p->ms[1] / 1000.0, p->ms[2] / 1000.0, p->ms[3] / 1000.0, p->ms[4] / 1000.0);
