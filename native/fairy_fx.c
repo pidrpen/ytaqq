@@ -18,7 +18,13 @@
    из точки нажатия вырывается немного пламени: дюжина мягких язычков
    поднимается вверх, колышется, по пути из жёлтых становятся оранжевыми,
    потом красными, уменьшаются и гаснут примерно за полсекунды. Выключается
-   отдельно — «пламя при нажатии» в меню значка у часов. */
+   отдельно — «пламя при нажатии» в меню значка у часов.
+
+   У «Чёрного кота» (с 2026.09.23.97) — пара царапин: из точки нажатия
+   наискосок одна за другой проводятся две светлые когтистые полосы,
+   сужающиеся к концам (тёмно-фиолетовый край, сиреневая середина, белая
+   жилка), держатся и гаснут примерно за полсекунды. Выключается отдельно —
+   «царапины при нажатии» в меню значка у часов. */
 
 #define WM_FAIRY_CLICK (WM_APP + 17)
 #define FX_WINDOWS 4    /* столько облачков может лететь одновременно */
@@ -27,7 +33,9 @@
 #define FX_SPR 8        /* 4 размера × (пятиконечная звезда, четырёхлучевая искра) */
 #define FX_FLAMES 12    /* язычков пламени у «Дракона» */
 #define FX_FLAME_FRAMES 34 /* ~0.55 с */
-#define FX_MAXP 12      /* больше из двух: звёздочек и язычков */
+#define FX_SCRATCHES 2  /* царапин у «Чёрного кота» */
+#define FX_SCRATCH_FRAMES 32 /* ~0.5 с */
+#define FX_MAXP 12      /* больше из трёх: звёздочек, язычков и царапин */
 
 typedef struct {
   float x, y, vx, vy;
@@ -47,13 +55,15 @@ typedef struct {
   int n, frames; /* сколько частиц и кадров у этого облачка */
   BOOL busy;
   BOOL flame;    /* пламя «Дракона», а не звёздочки «Феи» */
+  BOOL scratch;  /* царапины «Чёрного кота» */
   POINT org;
   FxPart p[FX_MAXP];
 } FxWin;
 
 static FxWin g_fx[FX_WINDOWS];
 static HHOOK g_fxHook;
-/* g_sparkle («звёздочки при нажатии») и g_flame («пламя при нажатии») — в cursorpad.c:
+/* g_sparkle («звёздочки при нажатии»), g_flame («пламя при нажатии») и g_scratch
+   («царапины при нажатии») — в cursorpad.c:
    их читают настройки */
 static BYTE *g_fxShape[FX_SPR], *g_fxCore[FX_SPR], *g_fxRim[FX_SPR];
 static int g_fxW[FX_SPR];
@@ -184,10 +194,70 @@ static void fx_flame_part(FxWin *f, const FxPart *p, int age) {
   }
 }
 
+/* царапина: отрезок от (x, y) на вектор (vx, vy), шире всего посередине и
+   тоньше к концам. Сначала её «проводят» (первые кадры), потом она держится
+   и гаснет. Край тёмно-фиолетовый — чтобы было видно на белом, середина
+   сиреневая, по оси — белая жилка */
+static void fx_scratch_part(FxWin *f, const FxPart *p, int age) {
+  if (age < 0 || age >= p->life) return;
+  float len = sqrtf(p->vx * p->vx + p->vy * p->vy);
+  if (len < 1.0f) return;
+  float ux = p->vx / len, uy = p->vy / len;
+  float reveal = (age + 1) / 6.0f; /* за шесть кадров дорисовывается до конца */
+  if (reveal > 1.0f) reveal = 1.0f;
+  float hold = p->life * 0.45f;
+  float a = age < hold ? 1.0f : 1.0f - (age - hold) / (p->life - hold);
+  float maxw = p->sz * g_fxScale;
+  int S = f->size;
+  float ex = p->x + p->vx, ey = p->y + p->vy;
+  int x0 = (int)(fminf(p->x, ex) - maxw - 2), x1 = (int)(fmaxf(p->x, ex) + maxw + 2);
+  int y0 = (int)(fminf(p->y, ey) - maxw - 2), y1 = (int)(fmaxf(p->y, ey) + maxw + 2);
+  for (int y = y0; y <= y1; y++) {
+    if (y < 0 || y >= S) continue;
+    BYTE *row = f->bits + (size_t)y * S * 4;
+    for (int x = x0; x <= x1; x++) {
+      if (x < 0 || x >= S) continue;
+      float rx = x + 0.5f - p->x, ry = y + 0.5f - p->y;
+      float s = (rx * ux + ry * uy) / len; /* 0..1 вдоль царапины */
+      if (s < 0.0f || s > reveal) continue;
+      float d = fabsf(-rx * uy + ry * ux);
+      float prof = sinf(3.14159265f * s);
+      float hw = maxw * (prof > 0 ? powf(prof, 0.7f) : 0.0f);
+      if (hw < 0.4f) continue;
+      float edge = hw - d; /* пикселей до края внутрь */
+      if (edge <= 0.0f) continue;
+      float sa = a * (edge < 1.0f ? edge : 1.0f);
+      if (reveal < 1.0f && s > reveal - 0.12f) /* головка ещё бежит — мягкий кончик */
+        sa *= (reveal - s) / 0.12f;
+      float m = d / hw;                      /* 0 по оси, 1 на краю */
+      float cr, cg, cb;
+      if (m < 0.18f) {                       /* белая жилка */
+        cr = 255, cg = 252, cb = 255;
+      } else if (m < 0.50f) {                /* сиреневая середина */
+        float u = (m - 0.18f) / 0.32f;
+        cr = fx_mix(255, 206, u), cg = fx_mix(252, 170, u), cb = fx_mix(255, 255, u);
+      } else {                               /* тёмно-фиолетовый край */
+        float u = (m - 0.50f) / 0.50f;
+        cr = fx_mix(206, 58, u), cg = fx_mix(170, 22, u), cb = fx_mix(255, 104, u);
+      }
+      BYTE *d4 = row + x * 4;
+      float inv = 1.0f - sa;
+      d4[0] = (BYTE)(cb * sa + d4[0] * inv);
+      d4[1] = (BYTE)(cg * sa + d4[1] * inv);
+      d4[2] = (BYTE)(cr * sa + d4[2] * inv);
+      d4[3] = (BYTE)(255 * sa + d4[3] * inv);
+    }
+  }
+}
+
 /* кадр: пустой буфер и поверх — каждая звёздочка своим цветом */
 static void fx_render(FxWin *f) {
   int S = f->size;
   memset(f->bits, 0, (size_t)S * S * 4);
+  if (f->scratch) {
+    for (int i = 0; i < f->n; i++) fx_scratch_part(f, &f->p[i], f->frame - f->p[i].delay);
+    goto show;
+  }
   if (f->flame) {
     /* сначала тёплая вспышка в точке нажатия, потом язычки — поздние сверху */
     if (f->frame < 5) {
@@ -276,6 +346,7 @@ show:;
 }
 
 static void fx_step(FxWin *f) {
+  if (f->scratch) return; /* царапины на месте, только проявляются и гаснут */
   for (int i = 0; i < f->n; i++) {
     FxPart *p = &f->p[i];
     if (f->frame < p->delay) continue;
@@ -381,6 +452,32 @@ static void fx_burst(int x, int y) {
   f->org.y = y - S / 2;
   f->frame = 0;
   f->flame = g_skin == 4;
+  f->scratch = g_skin == 5;
+  if (f->scratch) {
+    /* пара параллельных царапин наискосок, вниз и в одну из сторон; вторая
+       чуть позже и чуть короче, как будто провели лапой дважды */
+    f->n = FX_SCRATCHES;
+    f->frames = FX_SCRATCH_FRAMES;
+    float dir = fx_rand() < 0.5f ? 1.0f : -1.0f;
+    float ang = (0.95f + (fx_rand() - 0.5f) * 0.3f); /* от вертикали, ~55° */
+    float dx = dir * cosf(ang), dy = sinf(ang);      /* вдоль царапины */
+    float nx = -dy, ny = dx;                         /* поперёк */
+    for (int i = 0; i < FX_SCRATCHES; i++) {
+      FxPart *p = &f->p[i];
+      memset(p, 0, sizeof(*p));
+      float len = (i == 0 ? 88.0f : 74.0f) * g_fxScale;
+      float off = (i == 0 ? -9.0f : 9.0f) * g_fxScale;
+      float along = (i == 0 ? -0.5f : -0.42f) * len;
+      p->x = S / 2.0f + dx * along + nx * off;
+      p->y = S / 2.0f + dy * along + ny * off;
+      p->vx = dx * len;
+      p->vy = dy * len;
+      p->sz = i == 0 ? 5.8f : 5.0f;
+      p->delay = i * 5;
+      p->life = FX_SCRATCH_FRAMES - p->delay;
+    }
+    goto start;
+  }
   if (f->flame) {
     /* немного пламени: язычки из точки нажатия, вверх и чуть в стороны */
     f->n = FX_FLAMES;
@@ -445,10 +542,10 @@ static LRESULT CALLBACK fx_mouse_hook(int code, WPARAM wParam, LPARAM lParam) {
   return CallNextHookEx(g_fxHook, code, wParam, lParam);
 }
 
-/* хук стоит, только пока он нужен: фея выбрана и искорки включены
-   или дракон выбран и включено пламя */
+/* хук стоит, только пока он нужен: фея выбрана и искорки включены,
+   дракон выбран и включено пламя или кот выбран и включены царапины */
 static void fx_sync(void) {
-  BOOL want = (g_skin == 3 && g_sparkle) || (g_skin == 4 && g_flame);
+  BOOL want = (g_skin == 3 && g_sparkle) || (g_skin == 4 && g_flame) || (g_skin == 5 && g_scratch);
   if (want && !g_fxHook) g_fxHook = SetWindowsHookExW(WH_MOUSE_LL, fx_mouse_hook, g_inst, 0);
   else if (!want && g_fxHook) {
     UnhookWindowsHookEx(g_fxHook);
