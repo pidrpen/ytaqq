@@ -35,7 +35,7 @@
 #define FX_FLAMES 12    /* язычков пламени у «Дракона» */
 #define FX_FLAME_FRAMES 34 /* ~0.55 с */
 #define FX_SCRATCHES 2  /* царапин у «Чёрного кота» */
-#define FX_SCRATCH_FRAMES 32 /* ~0.5 с */
+#define FX_SCRATCH_FRAMES 18 /* ~0.3 с */
 #define FX_MAXP 12      /* больше из трёх: звёздочек, язычков и царапин */
 
 typedef struct {
@@ -204,7 +204,7 @@ static void fx_scratch_part(FxWin *f, const FxPart *p, int age) {
   float len = sqrtf(p->vx * p->vx + p->vy * p->vy);
   if (len < 1.0f) return;
   float ux = p->vx / len, uy = p->vy / len;
-  float reveal = (age + 1) / 6.0f; /* за шесть кадров дорисовывается до конца */
+  float reveal = (age + 1) / 3.0f; /* за три кадра дорисовывается до конца */
   if (reveal > 1.0f) reveal = 1.0f;
   float hold = p->life * 0.45f;
   float a = age < hold ? 1.0f : 1.0f - (age - hold) / (p->life - hold);
@@ -466,15 +466,15 @@ static void fx_burst(int x, int y) {
     for (int i = 0; i < FX_SCRATCHES; i++) {
       FxPart *p = &f->p[i];
       memset(p, 0, sizeof(*p));
-      float len = (i == 0 ? 88.0f : 74.0f) * g_fxScale;
-      float off = (i == 0 ? -9.0f : 9.0f) * g_fxScale;
+      float len = (i == 0 ? 56.0f : 48.0f) * g_fxScale;
+      float off = (i == 0 ? -6.0f : 6.0f) * g_fxScale;
       float along = (i == 0 ? -0.5f : -0.42f) * len;
       p->x = S / 2.0f + dx * along + nx * off;
       p->y = S / 2.0f + dy * along + ny * off;
       p->vx = dx * len;
       p->vy = dy * len;
-      p->sz = i == 0 ? 5.8f : 5.0f;
-      p->delay = i * 5;
+      p->sz = i == 0 ? 3.4f : 3.0f;
+      p->delay = i * 3;
       p->life = FX_SCRATCH_FRAMES - p->delay;
     }
     goto start;
