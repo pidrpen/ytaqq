@@ -351,7 +351,7 @@ static HINSTANCE g_inst;
 static int g_skin = 1; /* 0 system, 1 sword, 2 gauntlet, 3 fairy, 4 dragon, 5 black cat */
 static BOOL g_sparkle = TRUE; /* у «Феи» — звёздочки при нажатии */
 static BOOL g_flame = TRUE;   /* у «Дракона» — пламя при нажатии */
-static BOOL g_scratch = TRUE; /* у «Чёрного кота» — царапины при нажатии */
+static int g_catFx = 1;       /* у «Чёрного кота» при нажатии: 0 ничего, 1 царапины, 2 звёздочки как у Феи */
 static int g_balloonKind; /* куда ведёт щелчок по всплывашке: 0 — изменения в папке, 1 — нарды */
 static HCURSOR g_staticCur[5];
 static HCURSOR g_ibeamCur[5];
@@ -1037,13 +1037,13 @@ static void load_cursor_pref(void) {
   int sparkle = -1; /* нет в файле — искорки включены */
   int padMode = 0;
   int flame = -1; /* нет в файле — пламя включено */
-  int scratch = -1; /* нет в файле — царапины включены */
+  int catFx = -1; /* нет в файле — царапины */
   sscanf(buf, "%15s %d %d %15s %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d", skin,
          &bg, &fg, eng, &autoOn, &theme, &aw, &ah, &cw, &ch, &pt, &keep, &ax, &ay, &cx, &cy, &cpt,
-         &ox, &oy, &ow, &oh, &opt, &sparkle, &padMode, &flame, &scratch);
+         &ox, &oy, &ow, &oh, &opt, &sparkle, &padMode, &flame, &catFx);
   g_sparkle = sparkle != 0;
   g_flame = flame != 0;
-  g_scratch = scratch != 0;
+  g_catFx = catFx == 0 ? 0 : (catFx == 2 ? 2 : 1);
   g_padMode = padMode == 1 ? 1 : 0;
   g_cardX = cx;
   g_cardY = cy;
@@ -1087,7 +1087,7 @@ static void save_cursor_pref(void) {
            v, g_alphaFollow, g_alphaPinned, e, g_autostart ? 1 : 0, g_theme, g_ansW, g_ansH,
            g_cardW, g_cardH, g_ansPt, g_ansKeepPos ? 1 : 0, g_ansX, g_ansY, g_cardX, g_cardY,
            g_cardPt, g_ocrX, g_ocrY, g_ocrW, g_ocrH, g_ocrPt, g_sparkle ? 1 : 0, g_padMode,
-           g_flame ? 1 : 0, g_scratch ? 1 : 0);
+           g_flame ? 1 : 0, g_catFx);
   HANDLE h = CreateFileW(g_prefPath, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
                          FILE_ATTRIBUTE_NORMAL, NULL);
   if (h == INVALID_HANDLE_VALUE) return;
@@ -2476,8 +2476,10 @@ static void tray_menu(HWND hwnd) {
   AppendMenuW(menu, MF_STRING | (g_flame ? MF_CHECKED : 0) | (g_skin == 4 ? 0 : MF_GRAYED), 26,
               L"   пламя при нажатии");
   AppendMenuW(menu, MF_STRING | (g_skin == 5 ? MF_CHECKED : 0), 27, L"Курсор: Чёрный кот");
-  AppendMenuW(menu, MF_STRING | (g_scratch ? MF_CHECKED : 0) | (g_skin == 5 ? 0 : MF_GRAYED), 28,
+  AppendMenuW(menu, MF_STRING | (g_catFx == 1 ? MF_CHECKED : 0) | (g_skin == 5 ? 0 : MF_GRAYED), 28,
               L"   царапины при нажатии");
+  AppendMenuW(menu, MF_STRING | (g_catFx == 2 ? MF_CHECKED : 0) | (g_skin == 5 ? 0 : MF_GRAYED), 29,
+              L"   звёздочки при нажатии");
   AppendMenuW(menu, MF_STRING | (g_skin == 0 ? MF_CHECKED : 0), 12, L"Курсор: обычный Windows");
   AppendMenuW(menu, MF_STRING, 13, mCur);
   AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
@@ -2511,10 +2513,16 @@ static void tray_menu(HWND hwnd) {
     show_status(g_flame ? L"Пламя при нажатии включено" : L"Пламя при нажатии выключено");
   }
   else if (cmd == 28) {
-    g_scratch = !g_scratch;
+    g_catFx = g_catFx == 1 ? 0 : 1; /* повторный выбор выключает */
     save_cursor_pref();
     fx_sync();
-    show_status(g_scratch ? L"Царапины при нажатии включены" : L"Царапины при нажатии выключены");
+    show_status(g_catFx ? L"Царапины при нажатии включены" : L"Эффект при нажатии выключен");
+  }
+  else if (cmd == 29) {
+    g_catFx = g_catFx == 2 ? 0 : 2;
+    save_cursor_pref();
+    fx_sync();
+    show_status(g_catFx ? L"Звёздочки при нажатии включены" : L"Эффект при нажатии выключен");
   }
   else if (cmd == 12) set_skin(0);
   else if (cmd == 13) cycle_skin();

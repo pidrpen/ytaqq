@@ -23,8 +23,9 @@
    У «Чёрного кота» (с 2026.09.23.97) — пара царапин: из точки нажатия
    наискосок одна за другой проводятся две светлые когтистые полосы,
    сужающиеся к концам (тёмно-фиолетовый край, сиреневая середина, белая
-   жилка), держатся и гаснут примерно за полсекунды. Выключается отдельно —
-   «царапины при нажатии» в меню значка у часов. */
+   жилка), держатся и гаснут примерно за полсекунды. Вместо царапин коту можно
+   включить звёздочки, как у Феи (g_catFx == 2), или выключить эффект совсем:
+   «царапины при нажатии» и «звёздочки при нажатии» в меню значка у часов. */
 
 #define WM_FAIRY_CLICK (WM_APP + 17)
 #define FX_WINDOWS 4    /* столько облачков может лететь одновременно */
@@ -62,8 +63,8 @@ typedef struct {
 
 static FxWin g_fx[FX_WINDOWS];
 static HHOOK g_fxHook;
-/* g_sparkle («звёздочки при нажатии»), g_flame («пламя при нажатии») и g_scratch
-   («царапины при нажатии») — в cursorpad.c:
+/* g_sparkle («звёздочки при нажатии»), g_flame («пламя при нажатии») и g_catFx
+   (эффект у «Чёрного кота») — в cursorpad.c:
    их читают настройки */
 static BYTE *g_fxShape[FX_SPR], *g_fxCore[FX_SPR], *g_fxRim[FX_SPR];
 static int g_fxW[FX_SPR];
@@ -452,7 +453,7 @@ static void fx_burst(int x, int y) {
   f->org.y = y - S / 2;
   f->frame = 0;
   f->flame = g_skin == 4;
-  f->scratch = g_skin == 5;
+  f->scratch = g_skin == 5 && g_catFx == 1; /* при g_catFx == 2 у кота — звёздочки, как у Феи */
   if (f->scratch) {
     /* пара параллельных царапин наискосок, вниз и в одну из сторон; вторая
        чуть позже и чуть короче, как будто провели лапой дважды */
@@ -545,7 +546,7 @@ static LRESULT CALLBACK fx_mouse_hook(int code, WPARAM wParam, LPARAM lParam) {
 /* хук стоит, только пока он нужен: фея выбрана и искорки включены,
    дракон выбран и включено пламя или кот выбран и включены царапины */
 static void fx_sync(void) {
-  BOOL want = (g_skin == 3 && g_sparkle) || (g_skin == 4 && g_flame) || (g_skin == 5 && g_scratch);
+  BOOL want = (g_skin == 3 && g_sparkle) || (g_skin == 4 && g_flame) || (g_skin == 5 && g_catFx != 0);
   if (want && !g_fxHook) g_fxHook = SetWindowsHookExW(WH_MOUSE_LL, fx_mouse_hook, g_inst, 0);
   else if (!want && g_fxHook) {
     UnhookWindowsHookEx(g_fxHook);
