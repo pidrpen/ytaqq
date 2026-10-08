@@ -210,6 +210,7 @@ static int xp_positions(XpJob *x, XpPos *out, int max) {
   RtJob *j = x->rt;
   for (int i = 0; i < j->n; i++) {
     const RtRow *r = &j->rows[i];
+    if (r->light) continue; /* материал, стандартное: ни ТП, ни заготовки, ни своих извещений */
     int k = 0;
     while (k < n && out[k].r->id != r->id) k++;
     if (k < n) {

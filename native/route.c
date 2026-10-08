@@ -15,8 +15,10 @@
    Откуда что (те же пути, что у карточки, — они проверены на базе):
      • состав — техсостав сборки: TechCompCard → ActualVersionTechComp →
        вариант этой конфигурации → коллекция TechComposition; строка
-       ссылается на входящее изделие. Строки без обозначения (материалы,
-       нормали без него) в ведомость не идут;
+       ссылается на входящее изделие. Материалы, стандартные и прочие
+       изделия (без своего обозначения или карточек изделия) — строкой
+       состава: наименование, вид, количество; ТП, заготовку и состав у них
+       не ищем (с 2026.09.23.95; прежде в ведомость не шли). Документы — мимо;
      • количество — число в строке техсостава; какое поле — ищется по
        названию (Count, Quantity, Amount…); не нашлось — 1 и пометка;
      • «на изделие» — перемножается вниз по дереву;
@@ -59,6 +61,8 @@ typedef struct {
   long tcVariant;        /* вариант техсостава этого исполнения */
   long tcCard;           /* карточка техсостава — её версии бывают в извещениях */
   long pfCard;           /* карточка заготовок — лист «Заготовки» */
+  BOOL light;            /* материал, стандартное или прочее изделие — только строка состава
+                            (с .95): листам по позициям (операции, заготовки, извещения) не нужна */
   wchar_t tpName[200];
 } RtRow;
 
@@ -1266,6 +1270,34 @@ static BOOL rt_is_doc(const wchar_t *des, const wchar_t *objName) {
   return code || wcsstr(low, L"чертеж") || wcsstr(low, L"чертёж");
 }
 
+/* материал, стандартное или прочее изделие — строкой состава (с 2026.09.23.95;
+   прежде такие строки пропускались как «материал?»): обозначение — только своё,
+   наименование — имя объекта (у нормалей и материалов в нём всё: «Болт
+   М8-6gx20 ГОСТ 7798-70», «Круг 20 ГОСТ 2590-2006»), вид — раздел строки
+   состава. ТП, заготовку и состав у них не ищем. Место в дереве (уровень,
+   кол-во, «входит в») заполняет вызывающий. */
+static void rt_light_row(const RtObj *o, const wchar_t *elSection, RtRow *r) {
+  memset(r, 0, sizeof(*r));
+  r->light = TRUE;
+  r->id = o->id;
+  r->par = o->par;
+  r->prodConf = o->prodConf;
+  BOOL ownDes = o->desAttr && rt_looks_des(o->des);
+  if (ownDes) lstrcpynW(r->f[RC_DES], o->des, 200);
+  lstrcpynW(r->f[RC_NAME], ownDes || !o->objName[0] ? o->name : o->objName, 200);
+  const wchar_t *kind = elSection && elSection[0] ? elSection : (o->section[0] ? o->section : L"Прочие изделия");
+  lstrcpynW(r->f[RC_KIND], kind, 200);
+  double v;
+  if (o->mass[0] && rt_num(o->mass, &v)) rt_fmt(v, 3, r->f[RC_MASS], 200);
+}
+
+/* без своего обозначения или карточек изделия, или в разделе «Материалы» —
+   не деталь и не сборка: строка состава без ТП и заготовки */
+static BOOL rt_is_light(const RtObj *o, const wchar_t *elSection) {
+  BOOL product = o->desAttr || o->tpCard || o->pfCard || o->tcCard;
+  return !product || !rt_looks_des(o->des) || (elSection && wcsstr(elSection, L"атериал"));
+}
+
 /* ни ТП, ни заготовки — один раз выписать, с чем изделие связано: ссылки
    его самого и родителя и кто ссылается на него; по этому видно, где карточки */
 static void rt_diag(SQLHDBC dbc, const RtObj *o, CardRow *rows, RtJob *j) {
@@ -1450,7 +1482,7 @@ static void rt_dump_product(SQLHDBC dbc, const RtObj *o, CardRow *rows, RtJob *j
    собранного, пометки строки состава (кол-во, единица) — новые. */
 typedef struct {
   long id, pc;
-  int row0, row1; /* строки в rows; row0 < 0 — позиция пропущена (материал, документ) */
+  int row0, row1; /* строки в rows; row0 < 0 — позиция пропущена (документ) */
   wchar_t note[200];
 } RtMemo;
 
@@ -1565,18 +1597,33 @@ static void rt_walk(SQLHDBC dbc, long id, int level, const wchar_t *parentDes, d
     o.prodConfObj = o.prodConf;
     o.prodConf = src->pc;
   }
-  /* материалы и покупные в ведомость не идут: у них нет ни своего
-     обозначения, ни карточек изделия (ТП, заготовки, техсостава) */
-  BOOL product = o.desAttr || o.tpCard || o.pfCard || o.tcCard;
-  if (level > 0 && (!product || !rt_looks_des(o.des) || (elSection && wcsstr(elSection, L"атериал")))) {
-    rt_log(j, L"  %*s· пропуск «%s» — нет обозначения (материал?)\r\n", level * 2, L"", o.objName);
-    return; /* memo->row0 < 0: повтор — тоже пропуск */
-  }
   if (level > 0 && (rt_is_doc(o.des, o.objName) || (elSection && wcsstr(elSection, L"окумент")))) {
     rt_log(j, L"  %*s· пропуск «%s» — документ\r\n", level * 2, L"", o.objName);
-    return;
+    return; /* memo->row0 < 0: повтор — тоже пропуск */
   }
   int myRow = j->n;
+  /* материал, стандартное или прочее изделие — строкой, без ТП, заготовки и состава */
+  if (level > 0 && rt_is_light(&o, elSection)) {
+    RtRow *r = rt_row_add(j);
+    if (!r) {
+      rt_full(j);
+      return;
+    }
+    rt_light_row(&o, elSection, r);
+    r->level = level;
+    r->qty = qty;
+    r->qtyTot = qty * parentTot;
+    lstrcpynW(r->f[RC_PARENT], parentDes, 200);
+    rt_fmt(r->qty, 3, r->f[RC_QTY], 200);
+    rt_fmt(r->qtyTot, 3, r->f[RC_QTYTOT], 200);
+    rt_src_notes(level, qtyFound, src, r->f[RC_NOTE]);
+    rt_log(j, L"%*s%s «%s» (%ld), кол-во %s — %s: строкой, без ТП и заготовки\r\n", level * 2, L"", r->f[RC_DES],
+           r->f[RC_NAME], id, r->f[RC_QTY], r->f[RC_KIND]);
+    if (j->notify)
+      PostMessageW(j->notify, WM_RT_PROGRESS, (WPARAM)(j->shared ? InterlockedIncrement(j->shared) : j->n), 0);
+    if (RT_MEMO) RT_MEMO->row0 = myRow, RT_MEMO->row1 = j->n;
+    return;
+  }
   RtRow *r = rt_row_add(j); /* до обхода детей: дальше строки могут переехать — r только до него */
   if (!r) {
     rt_full(j);
@@ -2098,7 +2145,8 @@ static int g_plmThreads = 24; /* потоков сбора: окно «Выгр�
 typedef struct {
   long id, pc;
   int state;          /* 1 — собирается, 2 — изделие и состав готовы (ТП и заготовка — второй задачей) */
-  BOOL skip;          /* материал, документ — не позиция ведомости */
+  BOOL skip;          /* документ — не позиция ведомости */
+  BOOL light;         /* материал, стандартное, прочее — строка без ТП, заготовки и состава (с .95) */
   BOOL assy;          /* сборка: заготовку не берём */
   int level;          /* уровень первого вхождения — отступ в журнале */
   RtObj o;            /* изделие — для второй задачи */
@@ -2121,7 +2169,7 @@ typedef struct {
   double qty, tot;    /* tot — на изделие: произведение количеств по цепочке */
   BOOL qtyFound, hasSrc, deep;
   int cycles;         /* строк состава, которые вели бы в цикл, — пропущены */
-  int nomat;          /* строк раздела «Материалы» / «Документация» — не позиции, не запрашиваются (с .90) */
+  int nomat;          /* строк раздела «Документация» — не позиции, не запрашиваются (с .90; материалы с .95 — строками) */
   RtEl src;           /* строка состава, которой вошла */
   int *kids, nk;
 } RtNode;
@@ -2137,7 +2185,7 @@ typedef struct {
   int *hash;          /* RT_HASH: номер позиции + 1 */
   int *queue, nq, capQ; /* ≥0 — вхождение: изделие и состав; <0 — позиция −(k+1): ТП и заготовка */
   int nb;               /* задач «ТП и заготовка» — для полосы хода */
-  int nskip;            /* вхождений-материалов и документов (под замком): в ведомость не идут — из счёта вон */
+  int nskip;            /* вхождений-документов (под замком): в ведомость не идут — из счёта вон */
   int busy;           /* потоков с задачей на руках */
   int nthreads;       /* сколько потоков: пачка — когда в очереди на каждого больше одного */
   volatile LONG batches, batched; /* пачек и позиций в них — в подробности */
@@ -2252,7 +2300,8 @@ static void rt_flags_out(RtPool *p, RtJob *w, const ULONGLONG *ms) {
   ReleaseSRWLockExclusive(&p->lock);
 }
 
-/* часть 1: изделие прочитано — исполнение из строки состава, пропуск материалов и документов */
+/* часть 1: изделие прочитано — исполнение из строки состава, пропуск документов; материал,
+   стандартное или прочее изделие — сразу строка (it->light), дальше не собирается */
 static BOOL rt_item_a1(RtJob *w, const RtNode *nd, RtItem *it, BOOL got) {
   int level = nd->level;
   const RtEl *src = nd->hasSrc ? &nd->src : NULL;
@@ -2268,15 +2317,17 @@ static BOOL rt_item_a1(RtJob *w, const RtNode *nd, RtItem *it, BOOL got) {
     o->prodConfObj = o->prodConf;
     o->prodConf = src->pc;
   }
-  BOOL product = o->desAttr || o->tpCard || o->pfCard || o->tcCard;
-  if (level > 0 && (!product || !rt_looks_des(o->des) || (elSection && wcsstr(elSection, L"атериал")))) {
-    rt_log(w, L"  %*s· пропуск «%s» — нет обозначения (материал?)\r\n", level * 2, L"", o->objName);
-    it->skip = TRUE;
-    return FALSE;
-  }
   if (level > 0 && (rt_is_doc(o->des, o->objName) || (elSection && wcsstr(elSection, L"окумент")))) {
     rt_log(w, L"  %*s· пропуск «%s» — документ\r\n", level * 2, L"", o->objName);
     it->skip = TRUE;
+    return FALSE;
+  }
+  if (level > 0 && rt_is_light(o, elSection)) {
+    o->id = nd->id;
+    rt_light_row(o, elSection, &it->row);
+    it->light = TRUE;
+    rt_log(w, L"%*s%s «%s» (%ld) — %s: строкой, без ТП и заготовки\r\n", level * 2, L"", it->row.f[RC_DES],
+           it->row.f[RC_NAME], nd->id, it->row.f[RC_KIND]);
     return FALSE;
   }
   return TRUE;
@@ -2354,7 +2405,7 @@ static BOOL rt_item_eval_a(RtPool *p, SQLHDBC dbc, RtJob *w, CardRow *rows, cons
   if (rt_item_a1(w, nd, it, got)) rt_item_a2(dbc, w, rows, nd, it, NULL, ms);
   rt_item_log_add(it, w);
   rt_flags_out(p, w, ms);
-  return !it->skip;
+  return !it->skip && !it->light;
 }
 
 /* пачка новых позиций (с .90): свойства и карточки, потом состав — общими запросами;
@@ -2406,7 +2457,7 @@ static void rt_items_eval_a_batch(RtPool *p, SQLHDBC dbc, RtJob *w, CardRow *row
       rt_flags_out(p, w, z);
     }
     free(pre[k].rows);
-    more[k] = !its[k]->skip;
+    more[k] = !its[k]->skip && !its[k]->light;
   }
 }
 
@@ -2448,7 +2499,7 @@ static void rt_node_expand(RtPool *p, int ni) {
   RtJob *j = p->j;
   RtNode *nd = rt_node(p, ni);
   RtItem *it = nd->item;
-  if (it->skip) { /* материал, документ: не позиция — из «найденных» вон */
+  if (it->skip) { /* документ: не позиция — из «найденных» вон */
     AcquireSRWLockExclusive(&p->lock);
     p->nskip++;
     InterlockedExchange(&j->progTotal, p->nn - p->nskip);
@@ -2475,9 +2526,10 @@ static void rt_node_expand(RtPool *p, int ni) {
       nd->cycles++;
       continue;
     }
-    /* материал или документ — видно по разделу строки: в ведомость не идёт, и
-       читать его, чтобы это узнать, незачем (прежде — запросы на каждый) */
-    if (e->section[0] && (wcsstr(e->section, L"атериал") || wcsstr(e->section, L"окумент"))) {
+    /* документ — видно по разделу строки: в ведомость не идёт, и читать его,
+       чтобы это узнать, незачем (прежде — запросы на каждый). Материалы с .95
+       читаются: они идут строкой, нужно наименование */
+    if (e->section[0] && wcsstr(e->section, L"окумент")) {
       nd->nomat++;
       continue;
     }
@@ -2636,7 +2688,7 @@ static void rt_pool_out(RtPool *p, RtJob *j, int ni, const wchar_t *parentDes) {
     rt_log(j, L"%*s%s %s — повтор: из уже собранного, кол-во %s\r\n", nd->level * 2, L"", r->f[RC_DES],
            r->f[RC_NAME], r->f[RC_QTY]);
   if (nd->nomat && it->first == ni)
-    rt_log(j, L"%*s    материалов и документов в составе: %d — в ведомость не идут\r\n", nd->level * 2, L"", nd->nomat);
+    rt_log(j, L"%*s    документов в составе: %d — в ведомость не идут\r\n", nd->level * 2, L"", nd->nomat);
   if (nd->cycles)
     rt_log(j, L"%*s    !!! в составе «%s» %d строк ведут в цикл (входящее уже есть выше по цепочке) — пропущены\r\n",
            nd->level * 2, L"", r->f[RC_DES], nd->cycles);
