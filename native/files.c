@@ -909,7 +909,9 @@ static BOOL wp_init(WalkPath *p, const wchar_t *root) {
      компилятор считает, что размер копирования может переполниться */
   if (n > 32767) return FALSE;
   if (!wp_reserve(p, n + 2)) return FALSE;
-  memcpy(p->w, root, (n + 1) * sizeof(wchar_t));
+  /* lstrcpynW, а не memcpy: новый gcc видит root как g_filesRoot[MAX_PATH] и
+     ругается на границу, хотя копируем ровно n + 1 знаков */
+  lstrcpynW(p->w, root, (int)n + 1);
   p->len = n;
   while (p->len > 0 && p->w[p->len - 1] == L'\\') p->w[--p->len] = 0;
   return TRUE;

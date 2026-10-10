@@ -2459,6 +2459,13 @@ static void tray_menu(HWND hwnd) {
   AppendMenuW(menu, MF_STRING, 14, mMin);
   AppendMenuW(menu, MF_STRING, 16, L"Настройки");
   AppendMenuW(menu, MF_STRING, 15, mOcr);
+  ocr_engine_load();
+  if (tess_ready())
+    AppendMenuW(menu, MF_STRING | (g_ocrWinOnly ? 0 : MF_CHECKED), 25,
+                L"   точное распознавание (Tesseract)");
+  else
+    AppendMenuW(menu, MF_STRING | MF_GRAYED, 25,
+                L"   точное распознавание — скачает «Проверить обновления»");
   AppendMenuW(menu, MF_STRING, 17, L"Проверить обновления");
   /* с 2026.09.23.75 — выключено: сама программа себя не обновляет (update.c) */
   AppendMenuW(menu, MF_STRING | MF_GRAYED, 22, L"   обновляться самостоятельно — пока не работает");
@@ -2530,6 +2537,11 @@ static void tray_menu(HWND hwnd) {
     if (g_hidden) restore_from_tray();
     else hide_to_tray();
   } else if (cmd == 15) run_ocr_test();
+  else if (cmd == 25) {
+    g_ocrWinOnly = !g_ocrWinOnly;
+    ocr_engine_save();
+    show_status(g_ocrWinOnly ? L"Распознаёт Windows OCR" : L"Распознаёт Tesseract (точнее)");
+  }
   else if (cmd == 17) start_update();
   else if (cmd == 23 && 0) msg_compose_show(); /* чат выключен с 2026.09.23.75 */
   else if (cmd == 22 && !UPD_AUTO_DISABLED) {
@@ -4053,7 +4065,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     if (text && text[0]) {
       /* только в своё окно: в блокнот — кнопкой «В блокнот», если нужно */
       show_ocr_text(text);
-      show_status(L"Распознано — текст в отдельном окне");
+      wchar_t s[96];
+      _snwprintf(s, 96, L"Распознано (%s) — текст в отдельном окне", g_ocrBy[0] ? g_ocrBy : L"OCR");
+      show_status(s);
     } else {
       show_status(g_ocrNote[0] ? g_ocrNote : L"Текст не распознан");
     }
@@ -4248,6 +4262,26 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
       LocalFree(argv);
       return rc;
     }
+#ifdef TESS_SELFTEST /* только проверочная сборка: пакет и чтение Tesseract без окна */
+    if (argv && argc >= 6 && wcscmp(argv[1], L"--tess-selftest") == 0) {
+      /* <папка данных> <общая папка> <картинка.bmp> <отчёт.txt> */
+      lstrcpynW(g_dataDir, argv[2], MAX_PATH);
+      lstrcpynW(g_shareRoot, argv[3], MAX_PATH);
+      BOOL synced = tess_pack_sync(TRUE);
+      wchar_t helper[MAX_PATH];
+      exe_dir(helper, MAX_PATH);
+      wcsncat(helper, L"\\CursorPadOcr.exe", MAX_PATH - wcslen(helper) - 1);
+      wchar_t *t = tess_ocr(argv[4], helper);
+      wchar_t *rep = (wchar_t *)calloc(16000, sizeof(wchar_t));
+      _snwprintf(rep, 16000, L"%s\r\n\r\nsync=%d note=%s\r\n--- OCR ---\r\n%s\r\n", g_updLog, synced,
+                 g_tessNote, t ? t : L"(NULL)");
+      char *u = (char *)malloc(64000);
+      int k = WideCharToMultiByte(CP_UTF8, 0, rep, -1, u, 64000, NULL, NULL);
+      write_all(argv[5], u, k > 0 ? (DWORD)k - 1 : 0);
+      LocalFree(argv);
+      return t ? 0 : 1;
+    }
+#endif
     if (argv) LocalFree(argv);
   }
   clear_runas_layer();

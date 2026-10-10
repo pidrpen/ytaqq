@@ -7,6 +7,7 @@
    corporate policy often restricts.
 
    Called as:  CursorPadOcr.exe <bmp-path> [lang]
+               CursorPadOcr.exe --prep <in.bmp> <out.bmp>   (picture for Tesseract)
    Writes UTF-8 text to stdout, one recognised line per output line.
    Exit codes: 0 text, 2 no recognition engine, 3 nothing recognised, 1 error.
 
@@ -486,9 +487,26 @@ static int emit_result(CpOcrResult *res) {
   return printed;
 }
 
+/* --prep: only the preparation step, for Tesseract. It reads screen text as
+   badly at native size as Windows OCR does, so it gets the same picture. */
+static int prep_only(const wchar_t *in, const wchar_t *out) {
+  Pix pix;
+  memset(&pix, 0, sizeof(pix));
+  if (!load_bmp24(in, &pix)) {
+    note("cannot read bitmap\n");
+    return 1;
+  }
+  int ok = enhance(&pix, pix.w < 700 ? 3 : 2);
+  if (ok) save_gray_bmp(out, &pix);
+  free(pix.bgra);
+  if (!ok) note("out of memory\n");
+  return ok ? 0 : 1;
+}
+
 int wmain(int argc, wchar_t **argv) {
+  if (argc == 4 && !wcscmp(argv[1], L"--prep")) return prep_only(argv[2], argv[3]);
   if (argc < 2) {
-    note("usage: CursorPadOcr.exe <bmp> [lang]\n");
+    note("usage: CursorPadOcr.exe <bmp> [lang] | --prep <in.bmp> <out.bmp>\n");
     return 1;
   }
   const wchar_t *lang = argc > 2 ? argv[2] : L"ru";

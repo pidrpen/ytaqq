@@ -136,6 +136,9 @@ static const UpdSrc kUpdSrc[] = {
      L"Accept: application/vnd.github+json\r\nX-GitHub-Api-Version: 2022-11-28", 1, 0},
 };
 
+static BOOL tess_pack_sync(BOOL fromNet); /* tess.c — пакет Tesseract */
+static wchar_t g_tessNote[160];
+
 static void upd_fail(const wchar_t *why, DWORD err) {
   if (err)
     _snwprintf(g_updErr, 240, L"%s (код %lu)", why, err);
@@ -1297,6 +1300,9 @@ static DWORD WINAPI update_thread(LPVOID param) {
   lstrcpynW(g_updPath, tmpe, MAX_PATH);
   code = 2;
 done:
+  /* после программы — пакет Tesseract (tess.c): у него свой номер и свои
+     отпечатки, обновляется без перезапуска; нет интернета — из общей папки */
+  if (!g_updAuto) tess_pack_sync(answered > 0);
   InterlockedExchange(&g_updBusy, 0);
   if (g_hwnd) PostMessageW(g_hwnd, WM_UPDATE_DONE, (WPARAM)code, 0);
   return 0;
@@ -1363,9 +1369,9 @@ static void on_update_done(int code) {
   }
   if (code == 1) {
     /* naming both versions saves the "it keeps saying latest" puzzlement */
-    wchar_t m[160];
-    _snwprintf(m, 160, L"Уже последняя: у вас %s, на GitHub %s", APP_VERSION_STR,
-               g_updRemote[0] ? g_updRemote : L"—");
+    wchar_t m[340];
+    _snwprintf(m, 340, L"Уже последняя: у вас %s, на GitHub %s%s%s", APP_VERSION_STR,
+               g_updRemote[0] ? g_updRemote : L"—", g_tessNote[0] ? L" · " : L"", g_tessNote);
     show_status(m);
     return;
   }

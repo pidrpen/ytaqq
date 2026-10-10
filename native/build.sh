@@ -20,12 +20,19 @@ set -eu
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/.." && pwd)
 PUB="$ROOT/public"
-CC=x86_64-w64-mingw32-gcc
-RC=x86_64-w64-mingw32-windres
+CC=${CC:-x86_64-w64-mingw32-gcc}
+RC=${RC:-x86_64-w64-mingw32-windres}
+PY=${PY:-python3}
+# На самой Windows (Git Bash + WinLibs из winget, gcc 16):
+#   CC=gcc RC=windres PY=python LDX=-static sh native/build.sh
+# -static — у WinLibs потоки POSIX, без него exe просит libwinpthread-1.dll.
+# У WinLibs свой default-manifest.o спорит с нашим манифестом («multiple
+# non-default manifests»): переименуйте его в mingw64/x86_64-w64-mingw32/lib.
+LDX=${LDX:-}
 # предупреждение компилятора — это ошибка: сейчас их ноль, пусть так и будет
 CFLAGS="-O2 -Wall -Werror -Wno-unknown-pragmas"
 
-for tool in "$CC" "$RC" python3; do
+for tool in "$CC" "$RC" "$PY"; do
   command -v "$tool" >/dev/null 2>&1 || { echo "нет $tool — см. шапку build.sh"; exit 1; }
 done
 
@@ -43,17 +50,17 @@ trap 'rm -rf "$TMP"' EXIT
 
 cd "$HERE"
 # помощник распознавания зашит в exe ресурсом, поэтому собирается первым
-$CC $CFLAGS -o CursorPadOcr.exe ocr_module.c -lole32 -lruntimeobject -luser32 -municode
+$CC $CFLAGS -o CursorPadOcr.exe ocr_module.c -lole32 -lruntimeobject -luser32 -municode $LDX
 $RC cursorpad.rc -O coff -o "$TMP/cursorpad.res"
 $CC $CFLAGS -finput-charset=UTF-8 -o "$PUB/CursorPad.exe" cursorpad.c "$TMP/cursorpad.res" \
   -luser32 -lgdi32 -lshell32 -lole32 -lcomctl32 -lwinhttp -ladvapi32 -lodbc32 -lcrypt32 -lcomdlg32 -lmsimg32 \
-  -Wl,--subsystem,windows -municode
+  -Wl,--subsystem,windows -municode $LDX
 
 cp -f cursorpad.manifest "$PUB/CursorPad.exe.manifest"
 mkdir -p "$PUB/cursors-win"
 cp -f cursors/*.cur "$PUB/cursors-win/"
 
-python3 - "$PUB" "$HERE" <<'PY'
+"$PY" - "$PUB" "$HERE" <<'PY'
 import sys, zipfile, pathlib
 pub, native = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
 with zipfile.ZipFile(pub / "CursorPad.zip", "w", zipfile.ZIP_DEFLATED) as z:

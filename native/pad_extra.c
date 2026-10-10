@@ -1415,7 +1415,7 @@ static void save_plm_pref(void) {
   WideCharToMultiByte(CP_UTF8, 0, g_sqlUser, -1, user, 96, NULL, NULL);
   char share[MAX_PATH * 3];
   WideCharToMultiByte(CP_UTF8, 0, g_shareRoot, -1, share, sizeof(share), NULL, NULL);
-  char buf[400 + MAX_PATH * 3];
+  char buf[600 + MAX_PATH * 3]; /* все поля по максимуму — около 1250 байт */
   snprintf(buf, sizeof(buf), "sql %s\nplm %s\nport %s\ndb %s\nuser %s\nshare %s\nserve %d\n",
            sql[0] ? sql : "UM-SQLSRV", plm[0] ? plm : "um-splmsrv",
            port[0] ? port : "4450", db[0] ? db : "-", user[0] ? user : "", share,
@@ -5713,9 +5713,10 @@ static BOOL save_rect_bmp(int x, int y, int bw, int bh, const wchar_t *path) {
 }
 
 /* Spawn a helper and collect everything it writes. The old code stopped at a
-   fixed 4 KB, which silently cut off anything past about a page. */
-static BOOL run_capture(wchar_t *cmd, char **out, DWORD *outn, DWORD *code,
-                        char *err, int errcap) {
+   fixed 4 KB, which silently cut off anything past about a page.
+   cwd — working folder of the helper, NULL — ours. */
+static BOOL run_capture_in(wchar_t *cmd, const wchar_t *cwd, char **out, DWORD *outn,
+                           DWORD *code, char *err, int errcap) {
   *out = NULL;
   *outn = 0;
   *code = (DWORD)-1;
@@ -5742,7 +5743,7 @@ static BOOL run_capture(wchar_t *cmd, char **out, DWORD *outn, DWORD *code,
   si.wShowWindow = SW_HIDE;
   si.hStdOutput = owr;
   si.hStdError = ewr;
-  BOOL ok = CreateProcessW(NULL, cmd, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
+  BOOL ok = CreateProcessW(NULL, cmd, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, cwd, &si, &pi);
   CloseHandle(owr);
   CloseHandle(ewr);
   if (!ok) {
@@ -5785,6 +5786,11 @@ static BOOL run_capture(wchar_t *cmd, char **out, DWORD *outn, DWORD *code,
   return buf != NULL;
 }
 
+static BOOL run_capture(wchar_t *cmd, char **out, DWORD *outn, DWORD *code,
+                        char *err, int errcap) {
+  return run_capture_in(cmd, NULL, out, outn, code, err, errcap);
+}
+
 static wchar_t *utf8_to_alloc(const char *s, DWORD n) {
   if (!s || !n) return NULL;
   int wlen = MultiByteToWideChar(CP_UTF8, 0, s, (int)n, NULL, 0);
@@ -5814,10 +5820,13 @@ static void ocr_explain(const char *reason) {
     lstrcpynW(g_ocrNote, L"Текст не распознан", 160);
 }
 
+#include "tess.c" /* Tesseract — точнее Windows OCR; нет пакета — читает Windows */
+
 /* Recognition runs in a helper process on purpose: it reaches into system
-   codecs, and a crash there must not take the notepad down. The companion
-   module is tried first; the PowerShell script stays as a fallback so an
-   older or stripped-down install is no worse off than before. */
+   codecs, and a crash there must not take the notepad down. Tesseract goes
+   first when its pack is here; then the companion module with Windows OCR;
+   the PowerShell script stays as a last fallback so an older or
+   stripped-down install is no worse off than before. */
 static wchar_t *ocr_file_sync(const wchar_t *bmp) {
   wchar_t dir[MAX_PATH], path[MAX_PATH], cmd[1024];
   char err[256] = {0}, *out = NULL;
@@ -5826,6 +5835,13 @@ static wchar_t *ocr_file_sync(const wchar_t *bmp) {
   g_ocrNote[0] = 0;
 
   _snwprintf(path, MAX_PATH, L"%s\\CursorPadOcr.exe", g_dataDir[0] ? g_dataDir : dir);
+  wchar_t *t = tess_ocr(bmp, path);
+  if (t) {
+    lstrcpynW(g_ocrBy, L"Tesseract", 24);
+    return t;
+  }
+  lstrcpynW(g_ocrBy, L"Windows OCR", 24);
+  if (!g_ocrWinOnly) tess_share_sync_async();
   if (GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES) {
     _snwprintf(cmd, 1024, L"\"%s\" \"%s\" ru", path, bmp);
     if (run_capture(cmd, &out, &n, &code, err, 256)) {
