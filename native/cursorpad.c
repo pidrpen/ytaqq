@@ -2993,12 +2993,18 @@ static void clip_settings_children(void) {
     RECT wr;
     GetWindowRect(h, &wr);
     MapWindowPoints(HWND_DESKTOP, g_setHwnd, (POINT *)&wr, 2);
-    int ht = wr.bottom - wr.top, w = wr.right - wr.left;
-    int a = top - wr.top > 0 ? top - wr.top : 0;
-    int b = bot - wr.top < ht ? bot - wr.top : ht;
-    if (b < a) b = a;
-    if (a == 0 && b == ht) SetWindowRgn(h, NULL, TRUE);
-    else SetWindowRgn(h, CreateRectRgn(0, a, w, b), TRUE);
+    /* то, что не помещается в полосе между шапкой и подвалом, прячем целиком:
+       частично видимый элемент наезжал бы на шапку или подвал */
+    BOOL inBand = wr.top >= top && wr.bottom <= bot;
+    BOOL hidden = GetPropW(h, L"CpScrollHide") != NULL;
+    BOOL shown = (GetWindowLongW(h, GWL_STYLE) & WS_VISIBLE) != 0;
+    if (inBand && hidden) {
+      RemovePropW(h, L"CpScrollHide");
+      ShowWindow(h, SW_SHOW);
+    } else if (!inBand && !hidden && shown) {
+      SetPropW(h, L"CpScrollHide", (HANDLE)1);
+      ShowWindow(h, SW_HIDE);
+    }
   }
 }
 
@@ -3144,7 +3150,9 @@ static void scroll_settings(int pos) {
   if (pos == g_setScroll) return;
   g_setScroll = pos;
   layout_settings();
-  InvalidateRect(g_setHwnd, NULL, TRUE);
+  /* двигаются и прячутся дочерние окна — перерисовать всё вместе с ними, иначе
+     на старых местах остаются их следы */
+  RedrawWindow(g_setHwnd, NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
 }
 
 static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
