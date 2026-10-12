@@ -431,6 +431,17 @@ static BOOL fx_prepare(FxWin *f, int S) {
   return TRUE;
 }
 
+/* какой эффект при нажатии сейчас: 0 нет, 1 звёздочки, 2 пламя, 3 царапины.
+   Если эффект выбран в меню отдельно (g_fxPick >= 0), он важнее курсора;
+   иначе — как раньше: фея со звёздочками, дракон с пламенем, кот с царапинами */
+static int fx_kind(void) {
+  if (g_fxPick >= 0) return g_fxPick;
+  if (g_skin == 3) return g_sparkle ? 1 : 0;
+  if (g_skin == 4) return g_flame ? 2 : 0;
+  if (g_skin == 5) return g_catFx == 1 ? 3 : (g_catFx == 2 ? 1 : 0);
+  return 0;
+}
+
 /* облачко из точки нажатия */
 static void fx_burst(int x, int y) {
   fx_init_sprites();
@@ -452,8 +463,9 @@ static void fx_burst(int x, int y) {
   f->org.x = x - S / 2;
   f->org.y = y - S / 2;
   f->frame = 0;
-  f->flame = g_skin == 4;
-  f->scratch = g_skin == 5 && g_catFx == 1; /* при g_catFx == 2 у кота — звёздочки, как у Феи */
+  int kind = fx_kind();
+  f->flame = kind == 2;
+  f->scratch = kind == 3;
   if (f->scratch) {
     /* пара параллельных царапин наискосок, вниз и в одну из сторон; вторая
        чуть позже и чуть короче, как будто провели лапой дважды */
@@ -543,10 +555,9 @@ static LRESULT CALLBACK fx_mouse_hook(int code, WPARAM wParam, LPARAM lParam) {
   return CallNextHookEx(g_fxHook, code, wParam, lParam);
 }
 
-/* хук стоит, только пока он нужен: фея выбрана и искорки включены,
-   дракон выбран и включено пламя или кот выбран и включены царапины */
+/* хук стоит, только пока он нужен: есть эффект при нажатии */
 static void fx_sync(void) {
-  BOOL want = (g_skin == 3 && g_sparkle) || (g_skin == 4 && g_flame) || (g_skin == 5 && g_catFx != 0);
+  BOOL want = fx_kind() != 0;
   if (want && !g_fxHook) g_fxHook = SetWindowsHookExW(WH_MOUSE_LL, fx_mouse_hook, g_inst, 0);
   else if (!want && g_fxHook) {
     UnhookWindowsHookEx(g_fxHook);
