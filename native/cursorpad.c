@@ -354,6 +354,10 @@ static int g_skin = 1; /* 0 system, 1 sword, 2 gauntlet, 3 fairy, 4 dragon, 5 bl
 static BOOL g_sparkle = TRUE; /* у «Феи» — звёздочки при нажатии */
 static BOOL g_flame = TRUE;   /* у «Дракона» — пламя при нажатии */
 static int g_catFx = 1;       /* у «Чёрного кота» при нажатии: 0 ничего, 1 царапины, 2 звёздочки как у Феи */
+/* эффект при нажатии, выбранный отдельно от курсора (меню → «Эффект при нажатии»):
+   -1 — как у выбранного курсора, как раньше; 0 нет; 1 звёздочки; 2 пламя; 3 царапины.
+   Так любой курсор можно сочетать с любым эффектом. */
+static int g_fxPick = -1;
 static int g_balloonKind; /* куда ведёт щелчок по всплывашке: 0 — изменения в папке, 1 — нарды */
 static HCURSOR g_staticCur[5];
 static HCURSOR g_ibeamCur[5];
@@ -1085,12 +1089,14 @@ static void load_cursor_pref(void) {
   int padMode = 0;
   int flame = -1; /* нет в файле — пламя включено */
   int catFx = -1; /* нет в файле — царапины */
-  sscanf(buf, "%15s %d %d %15s %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d", skin,
+  int fxPick = -1; /* нет в файле — эффект как у курсора */
+  sscanf(buf, "%15s %d %d %15s %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d", skin,
          &bg, &fg, eng, &autoOn, &theme, &aw, &ah, &cw, &ch, &pt, &keep, &ax, &ay, &cx, &cy, &cpt,
-         &ox, &oy, &ow, &oh, &opt, &sparkle, &padMode, &flame, &catFx);
+         &ox, &oy, &ow, &oh, &opt, &sparkle, &padMode, &flame, &catFx, &fxPick);
   g_sparkle = sparkle != 0;
   g_flame = flame != 0;
   g_catFx = catFx == 0 ? 0 : (catFx == 2 ? 2 : 1);
+  g_fxPick = fxPick >= 0 && fxPick <= 3 ? fxPick : -1;
   g_padMode = padMode == 1 ? 1 : 0;
   g_cardX = cx;
   g_cardY = cy;
@@ -1132,11 +1138,11 @@ static void save_cursor_pref(void) {
                   : g_skin == 3 ? "k4" : (g_skin == 2 ? "k3" : (g_skin == 0 ? "system" : "k2"));
   const char *e = g_engine == 4 ? "plm" : (g_engine == 5 ? "files" : "ai");
   char buf[280];
-  snprintf(buf, sizeof(buf), "%s %d %d %s %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d\n",
+  snprintf(buf, sizeof(buf), "%s %d %d %s %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d\n",
            v, g_alphaFollow, g_alphaPinned, e, g_autostart ? 1 : 0, g_theme, g_ansW, g_ansH,
            g_cardW, g_cardH, g_ansPt, g_ansKeepPos ? 1 : 0, g_ansX, g_ansY, g_cardX, g_cardY,
            g_cardPt, g_ocrX, g_ocrY, g_ocrW, g_ocrH, g_ocrPt, g_sparkle ? 1 : 0, g_padMode,
-           g_flame ? 1 : 0, g_catFx);
+           g_flame ? 1 : 0, g_catFx, g_fxPick);
   HANDLE h = CreateFileW(g_prefPath, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
                          FILE_ATTRIBUTE_NORMAL, NULL);
   if (h == INVALID_HANDLE_VALUE) return;
@@ -1177,6 +1183,43 @@ static void set_skin(int skin) {
     SetTimer(g_hwnd, TIMER_STATUS, 1600, NULL);
     InvalidateRect(g_hwnd, NULL, FALSE);
   }
+}
+
+/* эффект при нажатии отдельно от курсора: имена для строки состояния */
+static const wchar_t *fx_pick_name(int pick) {
+  return pick == 1 ? L"звёздочки" : pick == 2 ? L"пламя" : pick == 3 ? L"царапины"
+         : pick == 0 ? L"нет" : L"как у курсора";
+}
+
+static void set_fx_pick(int pick) {
+  g_fxPick = pick;
+  save_cursor_pref();
+  fx_sync();
+  wchar_t msg[160];
+  _snwprintf(msg, 160, L"Эффект при нажатии: %s", fx_pick_name(pick));
+  show_status(msg);
+}
+
+/* сетапы: курсор и эффект при нажатии одним пунктом меню */
+static const struct {
+  const wchar_t *name;
+  int skin, fx;
+} g_setups[] = {
+    {L"Фея + пламя", 3, 2},
+    {L"Дракон + звёздочки", 4, 1},
+    {L"Кот + пламя", 5, 2},
+    {L"Риас + царапины", 6, 3},
+    {L"Рукавица + царапины", 2, 3},
+    {L"Мечник без эффектов", 1, 0},
+};
+#define SETUP_COUNT ((int)(sizeof(g_setups) / sizeof(g_setups[0])))
+
+static void apply_setup(int i) {
+  g_fxPick = g_setups[i].fx;
+  set_skin(g_setups[i].skin); /* сохраняет настройки и ставит хук эффекта */
+  wchar_t msg[160];
+  _snwprintf(msg, 160, L"Сетап: %s", g_setups[i].name);
+  show_status(msg);
 }
 
 static void cycle_skin(void) {
@@ -2544,6 +2587,17 @@ static void tray_menu(HWND hwnd) {
   AppendMenuW(menu, MF_STRING | (g_skin == 0 ? MF_CHECKED : 0), 12, L"Курсор: обычный Windows");
   AppendMenuW(menu, MF_STRING, 13, mCur);
   AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
+  AppendMenuW(menu, MF_STRING | MF_GRAYED, 39, L"Эффект при нажатии (любой курсор):");
+  AppendMenuW(menu, MF_STRING | (g_fxPick == -1 ? MF_CHECKED : 0), 40, L"   как у курсора");
+  AppendMenuW(menu, MF_STRING | (g_fxPick == 0 ? MF_CHECKED : 0), 41, L"   нет");
+  AppendMenuW(menu, MF_STRING | (g_fxPick == 1 ? MF_CHECKED : 0), 42, L"   звёздочки");
+  AppendMenuW(menu, MF_STRING | (g_fxPick == 2 ? MF_CHECKED : 0), 43, L"   пламя");
+  AppendMenuW(menu, MF_STRING | (g_fxPick == 3 ? MF_CHECKED : 0), 44, L"   царапины");
+  AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
+  AppendMenuW(menu, MF_STRING | MF_GRAYED, 38, L"Сетапы (курсор + эффект):");
+  for (int i = 0; i < SETUP_COUNT; i++)
+    AppendMenuW(menu, MF_STRING, 50 + i, g_setups[i].name);
+  AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
   AppendMenuW(menu, MF_STRING, 2, L"Открыть файл заметок");
   AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
   AppendMenuW(menu, MF_STRING, 3, L"Выход");
@@ -2586,6 +2640,12 @@ static void tray_menu(HWND hwnd) {
     fx_sync();
     show_status(g_catFx ? L"Звёздочки при нажатии включены" : L"Эффект при нажатии выключен");
   }
+  else if (cmd == 40) set_fx_pick(-1);
+  else if (cmd == 41) set_fx_pick(0);
+  else if (cmd == 42) set_fx_pick(1);
+  else if (cmd == 43) set_fx_pick(2);
+  else if (cmd == 44) set_fx_pick(3);
+  else if (cmd >= 50 && cmd < 50 + SETUP_COUNT) apply_setup(cmd - 50);
   else if (cmd == 12) set_skin(0);
   else if (cmd == 13) cycle_skin();
   else if (cmd == 14) {
