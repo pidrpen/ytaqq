@@ -47,6 +47,10 @@
 #define ID_CUR_K5 120 /* «Дракон» */
 #define ID_CUR_K6 121 /* «Чёрный кот» */
 #define ID_CUR_K7 136 /* «Риас» */
+#define ID_FX_BASE 160    /* 160..164: эффект при нажатии в Настройках */
+#define ID_SETUP_BASE 170 /* 170..175: сетапы в Настройках */
+#define ID_CHK_TESS 176   /* точное распознавание (Tesseract) */
+#define SETUP_COUNT 6
 #define ID_MIN 106
 #define ID_OCR 107
 #define ID_ALPHA_BG 108
@@ -147,7 +151,8 @@ static wchar_t g_hkName[HK_COUNT][40]; /* на чём работает сейч�
 #define PAD 12
 #define GUTTER 26
 #define SET_W 312
-#define SET_H 1005 /* темы в два ряда: четыре и рыцарская под ними; «Нарды»; «Горячие клавиши» */
+#define SET_FOOT_H 34 /* внизу окна Настроек — подвал с версией, прокрутка под него не заходит */
+#define SET_H 1259 /* полная высота содержимого Настроек: окно прокручивается, если выше экрана */
 #define ASK_W 312
 #define ASK_H 224 /* room for the drawn header */
 #define ID_THEME_BASE 140
@@ -246,6 +251,9 @@ static HWND g_btnK4;
 static HWND g_btnK5;
 static HWND g_btnK6;
 static HWND g_btnK7;
+static HWND g_btnFx[5];      /* эффект при нажатии: как у курсора, нет, звёздочки, пламя, царапины */
+static HWND g_btnSetup[SETUP_COUNT]; /* сетапы: курсор и эффект разом */
+static HWND g_chkTess;
 static HWND g_min;
 static HWND g_ocr;
 static HWND g_btnUp;
@@ -1151,6 +1159,18 @@ static void save_cursor_pref(void) {
   CloseHandle(h);
 }
 
+/* кнопки эффекта в Настройках: порядок совпадает с ID_FX_BASE */
+static const wchar_t *const kFxNames[5] = {L"Как у курсора", L"Нет", L"Звёздочки", L"Пламя", L"Царапины"};
+static const int kFxPick[5] = {-1, 0, 1, 2, 3};
+static void update_fx_buttons(void) {
+  for (int i = 0; i < 5; i++) {
+    if (!g_btnFx[i]) continue;
+    wchar_t t[32];
+    _snwprintf(t, 32, L"%s%s", g_fxPick == kFxPick[i] ? L"● " : L"", kFxNames[i]);
+    SetWindowTextW(g_btnFx[i], t);
+  }
+}
+
 static void update_cursor_buttons(void) {
   if (g_btnK2)
     SetWindowTextW(g_btnK2, g_skin == 1 ? L"● Мечник" : L"Мечник");
@@ -1164,6 +1184,7 @@ static void update_cursor_buttons(void) {
     SetWindowTextW(g_btnK6, g_skin == 5 ? L"● Чёрный кот" : L"Чёрный кот");
   if (g_btnK7)
     SetWindowTextW(g_btnK7, g_skin == 6 ? L"● Риас" : L"Риас");
+  update_fx_buttons();
 }
 
 static void set_skin(int skin) {
@@ -1195,6 +1216,7 @@ static void set_fx_pick(int pick) {
   g_fxPick = pick;
   save_cursor_pref();
   fx_sync();
+  update_fx_buttons();
   wchar_t msg[160];
   _snwprintf(msg, 160, L"Эффект при нажатии: %s", fx_pick_name(pick));
   show_status(msg);
@@ -1212,7 +1234,7 @@ static const struct {
     {L"Рукавица + царапины", 2, 3},
     {L"Мечник без эффектов", 1, 0},
 };
-#define SETUP_COUNT ((int)(sizeof(g_setups) / sizeof(g_setups[0])))
+_Static_assert(sizeof(g_setups) / sizeof(g_setups[0]) == SETUP_COUNT, "сетапов должно быть SETUP_COUNT");
 
 static void apply_setup(int i) {
   g_fxPick = g_setups[i].fx;
@@ -2555,13 +2577,6 @@ static void tray_menu(HWND hwnd) {
   AppendMenuW(menu, MF_STRING, 14, mMin);
   AppendMenuW(menu, MF_STRING, 16, L"Настройки");
   AppendMenuW(menu, MF_STRING, 15, mOcr);
-  ocr_engine_load();
-  if (tess_ready())
-    AppendMenuW(menu, MF_STRING | (g_ocrWinOnly ? 0 : MF_CHECKED), 30,
-                L"   точное распознавание (Tesseract)");
-  else
-    AppendMenuW(menu, MF_STRING | MF_GRAYED, 30,
-                L"   точное распознавание — скачает «Проверить обновления»");
   AppendMenuW(menu, MF_STRING, 17, L"Проверить обновления");
   /* с 2026.09.23.75 — выключено: сама программа себя не обновляет (update.c) */
   AppendMenuW(menu, MF_STRING | MF_GRAYED, 22, L"   обновляться самостоятельно — пока не работает");
@@ -2570,33 +2585,7 @@ static void tray_menu(HWND hwnd) {
   AppendMenuW(menu, MF_STRING, 21, L"Нарды");
   AppendMenuW(menu, MF_STRING, 24, L"Шашки");
   AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
-  AppendMenuW(menu, MF_STRING | (g_skin == 1 ? MF_CHECKED : 0), 10, L"Курсор: Мечник");
-  AppendMenuW(menu, MF_STRING | (g_skin == 2 ? MF_CHECKED : 0), 11, L"Курсор: Рукавица");
-  AppendMenuW(menu, MF_STRING | (g_skin == 3 ? MF_CHECKED : 0), 19, L"Курсор: Фея");
-  AppendMenuW(menu, MF_STRING | (g_sparkle ? MF_CHECKED : 0) | (g_skin == 3 ? 0 : MF_GRAYED), 20,
-              L"   звёздочки при нажатии");
-  AppendMenuW(menu, MF_STRING | (g_skin == 4 ? MF_CHECKED : 0), 25, L"Курсор: Дракон");
-  AppendMenuW(menu, MF_STRING | (g_flame ? MF_CHECKED : 0) | (g_skin == 4 ? 0 : MF_GRAYED), 26,
-              L"   пламя при нажатии");
-  AppendMenuW(menu, MF_STRING | (g_skin == 5 ? MF_CHECKED : 0), 27, L"Курсор: Чёрный кот");
-  AppendMenuW(menu, MF_STRING | (g_catFx == 1 ? MF_CHECKED : 0) | (g_skin == 5 ? 0 : MF_GRAYED), 28,
-              L"   царапины при нажатии");
-  AppendMenuW(menu, MF_STRING | (g_catFx == 2 ? MF_CHECKED : 0) | (g_skin == 5 ? 0 : MF_GRAYED), 29,
-              L"   звёздочки при нажатии");
-  AppendMenuW(menu, MF_STRING | (g_skin == 6 ? MF_CHECKED : 0), 31, L"Курсор: Риас");
-  AppendMenuW(menu, MF_STRING | (g_skin == 0 ? MF_CHECKED : 0), 12, L"Курсор: обычный Windows");
   AppendMenuW(menu, MF_STRING, 13, mCur);
-  AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
-  AppendMenuW(menu, MF_STRING | MF_GRAYED, 39, L"Эффект при нажатии (любой курсор):");
-  AppendMenuW(menu, MF_STRING | (g_fxPick == -1 ? MF_CHECKED : 0), 40, L"   как у курсора");
-  AppendMenuW(menu, MF_STRING | (g_fxPick == 0 ? MF_CHECKED : 0), 41, L"   нет");
-  AppendMenuW(menu, MF_STRING | (g_fxPick == 1 ? MF_CHECKED : 0), 42, L"   звёздочки");
-  AppendMenuW(menu, MF_STRING | (g_fxPick == 2 ? MF_CHECKED : 0), 43, L"   пламя");
-  AppendMenuW(menu, MF_STRING | (g_fxPick == 3 ? MF_CHECKED : 0), 44, L"   царапины");
-  AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
-  AppendMenuW(menu, MF_STRING | MF_GRAYED, 38, L"Сетапы (курсор + эффект):");
-  for (int i = 0; i < SETUP_COUNT; i++)
-    AppendMenuW(menu, MF_STRING, 50 + i, g_setups[i].name);
   AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
   AppendMenuW(menu, MF_STRING, 2, L"Открыть файл заметок");
   AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
@@ -2610,53 +2599,11 @@ static void tray_menu(HWND hwnd) {
     ShellExecuteW(NULL, L"open", g_notesPath, NULL, NULL, SW_SHOWNORMAL);
   } else if (cmd == 3) {
     DestroyWindow(hwnd);
-  } else if (cmd == 10) set_skin(1);
-  else if (cmd == 11) set_skin(2);
-  else if (cmd == 19) set_skin(3);
-  else if (cmd == 25) set_skin(4);
-  else if (cmd == 27) set_skin(5);
-  else if (cmd == 31) set_skin(6);
-  else if (cmd == 20) {
-    g_sparkle = !g_sparkle;
-    save_cursor_pref();
-    fx_sync();
-    show_status(g_sparkle ? L"Звёздочки при нажатии включены" : L"Звёздочки при нажатии выключены");
-  }
-  else if (cmd == 26) {
-    g_flame = !g_flame;
-    save_cursor_pref();
-    fx_sync();
-    show_status(g_flame ? L"Пламя при нажатии включено" : L"Пламя при нажатии выключено");
-  }
-  else if (cmd == 28) {
-    g_catFx = g_catFx == 1 ? 0 : 1; /* повторный выбор выключает */
-    save_cursor_pref();
-    fx_sync();
-    show_status(g_catFx ? L"Царапины при нажатии включены" : L"Эффект при нажатии выключен");
-  }
-  else if (cmd == 29) {
-    g_catFx = g_catFx == 2 ? 0 : 2;
-    save_cursor_pref();
-    fx_sync();
-    show_status(g_catFx ? L"Звёздочки при нажатии включены" : L"Эффект при нажатии выключен");
-  }
-  else if (cmd == 40) set_fx_pick(-1);
-  else if (cmd == 41) set_fx_pick(0);
-  else if (cmd == 42) set_fx_pick(1);
-  else if (cmd == 43) set_fx_pick(2);
-  else if (cmd == 44) set_fx_pick(3);
-  else if (cmd >= 50 && cmd < 50 + SETUP_COUNT) apply_setup(cmd - 50);
-  else if (cmd == 12) set_skin(0);
-  else if (cmd == 13) cycle_skin();
+  } else if (cmd == 13) cycle_skin();
   else if (cmd == 14) {
     if (g_hidden) restore_from_tray();
     else hide_to_tray();
   } else if (cmd == 15) run_ocr_test();
-  else if (cmd == 30) {
-    g_ocrWinOnly = !g_ocrWinOnly;
-    ocr_engine_save();
-    show_status(g_ocrWinOnly ? L"Распознаёт Windows OCR" : L"Распознаёт Tesseract (точнее)");
-  }
   else if (cmd == 17) start_update();
   else if (cmd == 23 && 0) msg_compose_show(); /* чат выключен с 2026.09.23.75 */
   else if (cmd == 22 && !UPD_AUTO_DISABLED) {
@@ -3031,10 +2978,45 @@ static void share_apply_root(void) {
   else show_status(L"Общая папка задана");
 }
 
+/* Настройки прокручиваются: всё расставляется в полной высоте SET_H, а окно
+   показывает часть. Шапка и подвал не двигаются; то, что уехало под шапку или
+   под подвал, обрезается регионом, а подписи не рисуются вне полосы. */
+static int g_setScroll; /* сколько точек содержимого уехало вверх */
+#define MOVE_SET(h, x, yy, w, hh, rp) MoveWindow((h), (x), (yy) - g_setScroll, (w), (hh), (rp))
+
+static void clip_settings_children(void) {
+  RECT rc;
+  GetClientRect(g_setHwnd, &rc);
+  int top = PANEL_TITLE_H, bot = rc.bottom - SET_FOOT_H;
+  for (HWND h = GetWindow(g_setHwnd, GW_CHILD); h; h = GetWindow(h, GW_HWNDNEXT)) {
+    if (GetDlgCtrlID(h) == ID_PANEL_CLOSE) continue;
+    RECT wr;
+    GetWindowRect(h, &wr);
+    MapWindowPoints(HWND_DESKTOP, g_setHwnd, (POINT *)&wr, 2);
+    int ht = wr.bottom - wr.top, w = wr.right - wr.left;
+    int a = top - wr.top > 0 ? top - wr.top : 0;
+    int b = bot - wr.top < ht ? bot - wr.top : ht;
+    if (b < a) b = a;
+    if (a == 0 && b == ht) SetWindowRgn(h, NULL, TRUE);
+    else SetWindowRgn(h, CreateRectRgn(0, a, w, b), TRUE);
+  }
+}
+
+static void draw_set_label(HDC hdc, const wchar_t *text, RECT r, int clientBottom) {
+  if (r.top < PANEL_TITLE_H || r.bottom > clientBottom - SET_FOOT_H) return;
+  DrawTextW(hdc, text, -1, &r, DT_LEFT | DT_SINGLELINE);
+}
+
+static void layout_settings(void);
+
 static void layout_settings(void) {
   if (!g_setHwnd) return;
   RECT rc;
   GetClientRect(g_setHwnd, &rc);
+  int maxScroll = SET_H - rc.bottom;
+  if (maxScroll < 0) maxScroll = 0;
+  if (g_setScroll > maxScroll) g_setScroll = maxScroll;
+  if (g_setScroll < 0) g_setScroll = 0;
   int pad = 14, gap = 7, btnH = 28, y = PANEL_TITLE_H + 26;
   int cw = rc.right - pad;
   int half = (cw - pad - gap) / 2;
@@ -3042,46 +3024,46 @@ static void layout_settings(void) {
   {
     int browseW = 78;
     if (g_filesRootEdit)
-      MoveWindow(g_filesRootEdit, pad, y, cw - pad - browseW - gap, btnH, TRUE);
+      MOVE_SET(g_filesRootEdit, pad, y, cw - pad - browseW - gap, btnH, TRUE);
     HWND br = GetDlgItem(g_setHwnd, ID_FILES_BROWSE);
-    if (br) MoveWindow(br, cw - browseW, y, browseW, btnH, TRUE);
+    if (br) MOVE_SET(br, cw - browseW, y, browseW, btnH, TRUE);
   }
   y += btnH + gap;
-  if (g_btnIdx) MoveWindow(g_btnIdx, pad, y, cw - pad, btnH, TRUE);
+  if (g_btnIdx) MOVE_SET(g_btnIdx, pad, y, cw - pad, btnH, TRUE);
   y += btnH + gap;
-  if (g_filesStat) MoveWindow(g_filesStat, pad, y, cw - pad, btnH, TRUE);
-  if (g_filesBar) MoveWindow(g_filesBar, pad, y + btnH - 8, cw - pad, 6, TRUE);
+  if (g_filesStat) MOVE_SET(g_filesStat, pad, y, cw - pad, btnH, TRUE);
+  if (g_filesBar) MOVE_SET(g_filesBar, pad, y + btnH - 8, cw - pad, 6, TRUE);
   y += btnH + gap;
-  if (g_chkNotify) MoveWindow(g_chkNotify, pad, y, cw - pad, btnH, TRUE);
+  if (g_chkNotify) MOVE_SET(g_chkNotify, pad, y, cw - pad, btnH, TRUE);
   y += btnH + gap;
   {
     int browseW = 78;
     if (g_filesWatchEdit)
-      MoveWindow(g_filesWatchEdit, pad, y, cw - pad - browseW - gap, btnH, TRUE);
+      MOVE_SET(g_filesWatchEdit, pad, y, cw - pad - browseW - gap, btnH, TRUE);
     HWND br = GetDlgItem(g_setHwnd, ID_WATCH_BROWSE);
-    if (br) MoveWindow(br, cw - browseW, y, browseW, btnH, TRUE);
+    if (br) MOVE_SET(br, cw - browseW, y, browseW, btnH, TRUE);
   }
   y += btnH + gap;
-  if (g_plmServer) MoveWindow(g_plmServer, pad, y, half, btnH, TRUE);
-  if (g_plmDb) MoveWindow(g_plmDb, pad + half + gap, y, half, btnH, TRUE);
+  if (g_plmServer) MOVE_SET(g_plmServer, pad, y, half, btnH, TRUE);
+  if (g_plmDb) MOVE_SET(g_plmDb, pad + half + gap, y, half, btnH, TRUE);
   y += btnH + gap;
-  if (g_plmUser) MoveWindow(g_plmUser, pad, y, half, btnH, TRUE);
-  if (g_plmPass) MoveWindow(g_plmPass, pad + half + gap, y, half, btnH, TRUE);
+  if (g_plmUser) MOVE_SET(g_plmUser, pad, y, half, btnH, TRUE);
+  if (g_plmPass) MOVE_SET(g_plmPass, pad + half + gap, y, half, btnH, TRUE);
   y += btnH + gap + 22;
   {
     int browseW = 78;
-    if (g_shareEdit) MoveWindow(g_shareEdit, pad, y, cw - pad - browseW - gap, btnH, TRUE);
+    if (g_shareEdit) MOVE_SET(g_shareEdit, pad, y, cw - pad - browseW - gap, btnH, TRUE);
     HWND br = GetDlgItem(g_setHwnd, ID_SHARE_BROWSE);
-    if (br) MoveWindow(br, cw - browseW, y, browseW, btnH, TRUE);
+    if (br) MOVE_SET(br, cw - browseW, y, browseW, btnH, TRUE);
   }
   y += btnH + gap;
-  if (g_chkServe) MoveWindow(g_chkServe, pad, y, cw - pad, btnH, TRUE);
+  if (g_chkServe) MOVE_SET(g_chkServe, pad, y, cw - pad, btnH, TRUE);
   y += btnH + gap;
   /* нарды и шашки идут через ту же общую папку — поэтому здесь, в ряд */
   {
     int half = (cw - pad - gap) / 2;
-    if (g_btnNd) MoveWindow(g_btnNd, pad, y, half, btnH, TRUE);
-    if (g_btnSh) MoveWindow(g_btnSh, pad + half + gap, y, cw - pad - half - gap, btnH, TRUE);
+    if (g_btnNd) MOVE_SET(g_btnNd, pad, y, half, btnH, TRUE);
+    if (g_btnSh) MOVE_SET(g_btnSh, pad + half + gap, y, cw - pad - half - gap, btnH, TRUE);
   }
   y += btnH + gap + 22;
   /* семь кнопок в два ряда, чтобы окно не росло: оно и так почти во всю
@@ -3091,10 +3073,10 @@ static void layout_settings(void) {
     int w = cw - pad - gap * 3;
     int w2 = w * 27 / 100, w3 = w * 30 / 100, w4 = w * 18 / 100;
     int x3 = pad + w2 + gap, x4 = x3 + w3 + gap, x5 = x4 + w4 + gap;
-    if (g_btnK2) MoveWindow(g_btnK2, pad, y, w2, btnH, TRUE);
-    if (g_btnK3) MoveWindow(g_btnK3, x3, y, w3, btnH, TRUE);
-    if (g_btnK4) MoveWindow(g_btnK4, x4, y, w4, btnH, TRUE);
-    if (g_btnK5) MoveWindow(g_btnK5, x5, y, cw - x5, btnH, TRUE);
+    if (g_btnK2) MOVE_SET(g_btnK2, pad, y, w2, btnH, TRUE);
+    if (g_btnK3) MOVE_SET(g_btnK3, x3, y, w3, btnH, TRUE);
+    if (g_btnK4) MOVE_SET(g_btnK4, x4, y, w4, btnH, TRUE);
+    if (g_btnK5) MOVE_SET(g_btnK5, x5, y, cw - x5, btnH, TRUE);
   }
   y += btnH + gap;
   {
@@ -3102,24 +3084,40 @@ static void layout_settings(void) {
     int w = cw - pad - gap * 2;
     int w6 = w * 33 / 100, w7 = w * 22 / 100;
     int x7 = pad + w6 + gap, xs = x7 + w7 + gap;
-    if (g_btnK6) MoveWindow(g_btnK6, pad, y, w6, btnH, TRUE);
-    if (g_btnK7) MoveWindow(g_btnK7, x7, y, w7, btnH, TRUE);
-    if (g_btnSys) MoveWindow(g_btnSys, xs, y, cw - xs, btnH, TRUE);
+    if (g_btnK6) MOVE_SET(g_btnK6, pad, y, w6, btnH, TRUE);
+    if (g_btnK7) MOVE_SET(g_btnK7, x7, y, w7, btnH, TRUE);
+    if (g_btnSys) MOVE_SET(g_btnSys, xs, y, cw - xs, btnH, TRUE);
   }
   y += btnH + gap;
-  if (g_chkAuto) MoveWindow(g_chkAuto, pad, y, cw - pad, btnH, TRUE);
+  /* эффект при нажатии и сетапы — кнопками, по три в ряд и по два */
+  y += 22;
+  {
+    int bw = (cw - pad - gap * 2) / 3;
+    for (int i = 0; i < 5; i++)
+      if (g_btnFx[i]) MOVE_SET(g_btnFx[i], pad + (i % 3) * (bw + gap), y + (i / 3) * (btnH + gap), bw, btnH, TRUE);
+  }
+  y += 2 * (btnH + gap) + 22;
+  {
+    int bw = (cw - pad - gap) / 2;
+    for (int i = 0; i < SETUP_COUNT; i++)
+      if (g_btnSetup[i]) MOVE_SET(g_btnSetup[i], pad + (i % 2) * (bw + gap), y + (i / 2) * (btnH + gap), bw, btnH, TRUE);
+  }
+  y += 3 * (btnH + gap);
+  if (g_chkTess) MOVE_SET(g_chkTess, pad, y, cw - pad, btnH, TRUE);
   y += btnH + gap;
-  if (g_chkAnsPin) MoveWindow(g_chkAnsPin, pad, y, cw - pad, btnH, TRUE);
+  if (g_chkAuto) MOVE_SET(g_chkAuto, pad, y, cw - pad, btnH, TRUE);
+  y += btnH + gap;
+  if (g_chkAnsPin) MOVE_SET(g_chkAnsPin, pad, y, cw - pad, btnH, TRUE);
   y += btnH + gap + 22;
-  if (g_tbBg) MoveWindow(g_tbBg, pad, y, cw - pad, btnH, TRUE);
+  if (g_tbBg) MOVE_SET(g_tbBg, pad, y, cw - pad, btnH, TRUE);
   y += btnH + 24;
-  if (g_tbFg) MoveWindow(g_tbFg, pad, y, cw - pad, btnH, TRUE);
+  if (g_tbFg) MOVE_SET(g_tbFg, pad, y, cw - pad, btnH, TRUE);
   y += btnH + 22;
-  if (g_ocr) MoveWindow(g_ocr, pad, y, cw - pad, btnH, TRUE);
+  if (g_ocr) MOVE_SET(g_ocr, pad, y, cw - pad, btnH, TRUE);
   y += btnH + gap;
-  if (g_btnHk) MoveWindow(g_btnHk, pad, y, cw - pad, btnH, TRUE);
+  if (g_btnHk) MOVE_SET(g_btnHk, pad, y, cw - pad, btnH, TRUE);
   y += btnH + gap;
-  if (g_btnUp) MoveWindow(g_btnUp, pad, y, cw - pad, btnH, TRUE);
+  if (g_btnUp) MOVE_SET(g_btnUp, pad, y, cw - pad, btnH, TRUE);
   y += btnH + gap + 18;
   {
     int cols = 4;
@@ -3130,9 +3128,23 @@ static void layout_settings(void) {
       int col = i % cols;
       /* пятая, рыцарская, — отдельным рядом во всю ширину */
       int bw = (row > 0 && THEME_COUNT - cols == 1) ? cw - pad : tw;
-      MoveWindow(g_btnTheme[i], pad + col * (tw + gap), y + row * (btnH + gap), bw, btnH, TRUE);
+      MOVE_SET(g_btnTheme[i], pad + col * (tw + gap), y + row * (btnH + gap), bw, btnH, TRUE);
     }
   }
+  clip_settings_children();
+}
+
+static void scroll_settings(int pos) {
+  RECT rc;
+  GetClientRect(g_setHwnd, &rc);
+  int maxScroll = SET_H - rc.bottom;
+  if (maxScroll < 0) maxScroll = 0;
+  if (pos < 0) pos = 0;
+  if (pos > maxScroll) pos = maxScroll;
+  if (pos == g_setScroll) return;
+  g_setScroll = pos;
+  layout_settings();
+  InvalidateRect(g_setHwnd, NULL, TRUE);
 }
 
 static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -3148,49 +3160,77 @@ static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
     if (g_fontSmall) SelectObject(hdc, g_fontSmall);
     SetTextColor(hdc, COL_MUTED);
     {
-      RECT cap = {14, PANEL_TITLE_H + 6, rc.right - 14, PANEL_TITLE_H + 24};
-      DrawTextW(hdc, L"PLM и файлы", -1, &cap, DT_LEFT | DT_SINGLELINE);
+      RECT cap = {14, PANEL_TITLE_H + 6 - g_setScroll, rc.right - 14, PANEL_TITLE_H + 24 - g_setScroll};
+      draw_set_label(hdc, L"PLM и файлы", cap, rc.bottom);
     }
     if (g_shareEdit) {
       RECT wr;
       GetWindowRect(g_shareEdit, &wr);
       MapWindowPoints(HWND_DESKTOP, hwnd, (POINT *)&wr, 2);
       RECT a = {14, wr.top - 18, rc.right - 14, wr.top - 2};
-      DrawTextW(hdc, L"общая папка — PLM для коллег", -1, &a, DT_LEFT | DT_SINGLELINE);
+      draw_set_label(hdc, L"общая папка — PLM для коллег", a, rc.bottom);
     }
     if (g_btnK2) {
       RECT wr;
       GetWindowRect(g_btnK2, &wr);
       MapWindowPoints(HWND_DESKTOP, hwnd, (POINT *)&wr, 2);
       RECT a = {14, wr.top - 18, rc.right - 14, wr.top - 2};
-      DrawTextW(hdc, L"курсор", -1, &a, DT_LEFT | DT_SINGLELINE);
+      draw_set_label(hdc, L"курсор", a, rc.bottom);
+    }
+    if (g_btnFx[0]) {
+      RECT wr;
+      GetWindowRect(g_btnFx[0], &wr);
+      MapWindowPoints(HWND_DESKTOP, hwnd, (POINT *)&wr, 2);
+      RECT a = {14, wr.top - 18, rc.right - 14, wr.top - 2};
+      draw_set_label(hdc, L"эффект при нажатии", a, rc.bottom);
+    }
+    if (g_btnSetup[0]) {
+      RECT wr;
+      GetWindowRect(g_btnSetup[0], &wr);
+      MapWindowPoints(HWND_DESKTOP, hwnd, (POINT *)&wr, 2);
+      RECT a = {14, wr.top - 18, rc.right - 14, wr.top - 2};
+      draw_set_label(hdc, L"сетапы: курсор и эффект", a, rc.bottom);
     }
     if (g_tbBg) {
       RECT wr;
       GetWindowRect(g_tbBg, &wr);
       MapWindowPoints(HWND_DESKTOP, hwnd, (POINT *)&wr, 2);
       RECT a = {14, wr.top - 18, rc.right - 14, wr.top - 2};
-      DrawTextW(hdc, L"прозрачность следования", -1, &a, DT_LEFT | DT_SINGLELINE);
+      draw_set_label(hdc, L"прозрачность следования", a, rc.bottom);
     }
     if (g_tbFg) {
       RECT wr;
       GetWindowRect(g_tbFg, &wr);
       MapWindowPoints(HWND_DESKTOP, hwnd, (POINT *)&wr, 2);
       RECT b = {14, wr.top - 18, rc.right - 14, wr.top - 2};
-      DrawTextW(hdc, L"прозрачность закреплённого окна", -1, &b, DT_LEFT | DT_SINGLELINE);
+      draw_set_label(hdc, L"прозрачность закреплённого окна", b, rc.bottom);
     }
     if (g_btnTheme[0]) {
       RECT wr;
       GetWindowRect(g_btnTheme[0], &wr);
       MapWindowPoints(HWND_DESKTOP, hwnd, (POINT *)&wr, 2);
       RECT c = {14, wr.top - 18, rc.right - 14, wr.top - 2};
-      DrawTextW(hdc, L"тема", -1, &c, DT_LEFT | DT_SINGLELINE);
+      draw_set_label(hdc, L"тема", c, rc.bottom);
     }
     {
       RECT ver = {14, rc.bottom - 28, rc.right - 14, rc.bottom - 10};
       wchar_t vs[64];
       _snwprintf(vs, 64, L"CursorPad  %s", APP_VERSION_STR);
       DrawTextW(hdc, vs, -1, &ver, DT_LEFT | DT_SINGLELINE);
+    }
+    {
+      /* полоска прокрутки справа: видно, что окно выше экрана */
+      int bandTop = PANEL_TITLE_H, bandBot = rc.bottom - SET_FOOT_H;
+      if (SET_H > rc.bottom && bandBot > bandTop) {
+        int bandH = bandBot - bandTop, maxScroll = SET_H - rc.bottom;
+        int thumbH = bandH * rc.bottom / SET_H;
+        if (thumbH < 24) thumbH = 24;
+        int thumbY = bandTop + (bandH - thumbH) * g_setScroll / maxScroll;
+        RECT th = {rc.right - 5, thumbY, rc.right - 2, thumbY + thumbH};
+        HBRUSH br = CreateSolidBrush(COL_MUTED);
+        FillRect(hdc, &th, br);
+        DeleteObject(br);
+      }
     }
     EndPaint(hwnd, &ps);
     return 0;
@@ -3224,6 +3264,9 @@ static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
   }
   case WM_NCHITTEST:
     return panel_hittest(hwnd, lParam);
+  case WM_MOUSEWHEEL:
+    scroll_settings(g_setScroll - GET_WHEEL_DELTA_WPARAM(wParam) * 48 / WHEEL_DELTA);
+    return 0;
   case WM_COMMAND:
     if (LOWORD(wParam) == ID_PANEL_CLOSE) {
       ShowWindow(hwnd, SW_HIDE);
@@ -3244,6 +3287,15 @@ static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
     if (LOWORD(wParam) == ID_CUR_K6) set_skin(5);
     if (LOWORD(wParam) == ID_CUR_K7) set_skin(6);
     if (LOWORD(wParam) == ID_SYS_CUR) set_skin(0);
+    if (LOWORD(wParam) >= ID_FX_BASE && LOWORD(wParam) < ID_FX_BASE + 5)
+      set_fx_pick(kFxPick[LOWORD(wParam) - ID_FX_BASE]);
+    if (LOWORD(wParam) >= ID_SETUP_BASE && LOWORD(wParam) < ID_SETUP_BASE + SETUP_COUNT)
+      apply_setup(LOWORD(wParam) - ID_SETUP_BASE);
+    if (LOWORD(wParam) == ID_CHK_TESS && g_chkTess) {
+      g_ocrWinOnly = SendMessageW(g_chkTess, BM_GETCHECK, 0, 0) != BST_CHECKED;
+      ocr_engine_save();
+      show_status(g_ocrWinOnly ? L"Распознаёт Windows OCR" : L"Распознаёт Tesseract (точнее)");
+    }
     if (LOWORD(wParam) == ID_OCR) run_ocr_test();
     if (LOWORD(wParam) == ID_UPDATE) start_update();
     if (LOWORD(wParam) == ID_HOTKEYS && HIWORD(wParam) == BN_CLICKED) hk_show();
@@ -3644,6 +3696,11 @@ static void create_settings(HWND owner) {
   g_btnK6 = mk_btn(g_setHwnd, L"Чёрный кот", ID_CUR_K6);
   g_btnK7 = mk_btn(g_setHwnd, L"Риас", ID_CUR_K7);
   g_btnSys = mk_btn(g_setHwnd, L"Курсор Windows", ID_SYS_CUR);
+  for (int i = 0; i < 5; i++) g_btnFx[i] = mk_btn(g_setHwnd, kFxNames[i], ID_FX_BASE + i);
+  for (int i = 0; i < SETUP_COUNT; i++) g_btnSetup[i] = mk_btn(g_setHwnd, g_setups[i].name, ID_SETUP_BASE + i);
+  g_chkTess = CreateWindowExW(0, L"BUTTON", L"точное распознавание (Tesseract)",
+                              WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 0, 0, 240, 26,
+                              g_setHwnd, (HMENU)(INT_PTR)ID_CHK_TESS, NULL, NULL);
   g_chkAuto = CreateWindowExW(0, L"BUTTON", L"Автозапуск с Windows",
                               WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 0, 0, 200, 26,
                               g_setHwnd, (HMENU)(INT_PTR)ID_AUTOSTART, NULL, NULL);
@@ -3695,6 +3752,12 @@ static void create_settings(HWND owner) {
   /* вторая галочка шрифта не получала и рисовалась системным — и теме не подчинялась */
   if (g_chkAnsPin) SendMessageW(g_chkAnsPin, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
   if (g_chkAuto) SendMessageW(g_chkAuto, BM_SETCHECK, g_autostart ? BST_CHECKED : BST_UNCHECKED, 0);
+  if (g_chkTess) {
+    ocr_engine_load();
+    SendMessageW(g_chkTess, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
+    SendMessageW(g_chkTess, BM_SETCHECK, g_ocrWinOnly ? BST_UNCHECKED : BST_CHECKED, 0);
+    EnableWindow(g_chkTess, tess_ready());
+  }
   if (g_chkAnsPin)
     SendMessageW(g_chkAnsPin, BM_SETCHECK, g_ansKeepPos ? BST_CHECKED : BST_UNCHECKED, 0);
   if (g_chkNotify) {
