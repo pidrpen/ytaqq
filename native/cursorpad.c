@@ -151,7 +151,8 @@ static wchar_t g_hkName[HK_COUNT][40]; /* на чём работает сейч�
 #define PAD 12
 #define GUTTER 26
 #define SET_W 312
-#define SET_H 1259 /* темы в два ряда: четыре и рыцарская под ними; «Нарды»; «Горячие клавиши» */
+#define SET_FOOT_H 34 /* внизу окна Настроек — подвал с версией, прокрутка под него не заходит */
+#define SET_H 1259 /* полная высота содержимого Настроек: окно прокручивается, если выше экрана */
 #define ASK_W 312
 #define ASK_H 224 /* room for the drawn header */
 #define ID_THEME_BASE 140
@@ -2977,10 +2978,45 @@ static void share_apply_root(void) {
   else show_status(L"Общая папка задана");
 }
 
+/* Настройки прокручиваются: всё расставляется в полной высоте SET_H, а окно
+   показывает часть. Шапка и подвал не двигаются; то, что уехало под шапку или
+   под подвал, обрезается регионом, а подписи не рисуются вне полосы. */
+static int g_setScroll; /* сколько точек содержимого уехало вверх */
+#define MOVE_SET(h, x, yy, w, hh, rp) MoveWindow((h), (x), (yy) - g_setScroll, (w), (hh), (rp))
+
+static void clip_settings_children(void) {
+  RECT rc;
+  GetClientRect(g_setHwnd, &rc);
+  int top = PANEL_TITLE_H, bot = rc.bottom - SET_FOOT_H;
+  for (HWND h = GetWindow(g_setHwnd, GW_CHILD); h; h = GetWindow(h, GW_HWNDNEXT)) {
+    if (GetDlgCtrlID(h) == ID_PANEL_CLOSE) continue;
+    RECT wr;
+    GetWindowRect(h, &wr);
+    MapWindowPoints(HWND_DESKTOP, g_setHwnd, (POINT *)&wr, 2);
+    int ht = wr.bottom - wr.top, w = wr.right - wr.left;
+    int a = top - wr.top > 0 ? top - wr.top : 0;
+    int b = bot - wr.top < ht ? bot - wr.top : ht;
+    if (b < a) b = a;
+    if (a == 0 && b == ht) SetWindowRgn(h, NULL, TRUE);
+    else SetWindowRgn(h, CreateRectRgn(0, a, w, b), TRUE);
+  }
+}
+
+static void draw_set_label(HDC hdc, const wchar_t *text, RECT r, int clientBottom) {
+  if (r.top < PANEL_TITLE_H || r.bottom > clientBottom - SET_FOOT_H) return;
+  DrawTextW(hdc, text, -1, &r, DT_LEFT | DT_SINGLELINE);
+}
+
+static void layout_settings(void);
+
 static void layout_settings(void) {
   if (!g_setHwnd) return;
   RECT rc;
   GetClientRect(g_setHwnd, &rc);
+  int maxScroll = SET_H - rc.bottom;
+  if (maxScroll < 0) maxScroll = 0;
+  if (g_setScroll > maxScroll) g_setScroll = maxScroll;
+  if (g_setScroll < 0) g_setScroll = 0;
   int pad = 14, gap = 7, btnH = 28, y = PANEL_TITLE_H + 26;
   int cw = rc.right - pad;
   int half = (cw - pad - gap) / 2;
@@ -2988,46 +3024,46 @@ static void layout_settings(void) {
   {
     int browseW = 78;
     if (g_filesRootEdit)
-      MoveWindow(g_filesRootEdit, pad, y, cw - pad - browseW - gap, btnH, TRUE);
+      MOVE_SET(g_filesRootEdit, pad, y, cw - pad - browseW - gap, btnH, TRUE);
     HWND br = GetDlgItem(g_setHwnd, ID_FILES_BROWSE);
-    if (br) MoveWindow(br, cw - browseW, y, browseW, btnH, TRUE);
+    if (br) MOVE_SET(br, cw - browseW, y, browseW, btnH, TRUE);
   }
   y += btnH + gap;
-  if (g_btnIdx) MoveWindow(g_btnIdx, pad, y, cw - pad, btnH, TRUE);
+  if (g_btnIdx) MOVE_SET(g_btnIdx, pad, y, cw - pad, btnH, TRUE);
   y += btnH + gap;
-  if (g_filesStat) MoveWindow(g_filesStat, pad, y, cw - pad, btnH, TRUE);
-  if (g_filesBar) MoveWindow(g_filesBar, pad, y + btnH - 8, cw - pad, 6, TRUE);
+  if (g_filesStat) MOVE_SET(g_filesStat, pad, y, cw - pad, btnH, TRUE);
+  if (g_filesBar) MOVE_SET(g_filesBar, pad, y + btnH - 8, cw - pad, 6, TRUE);
   y += btnH + gap;
-  if (g_chkNotify) MoveWindow(g_chkNotify, pad, y, cw - pad, btnH, TRUE);
+  if (g_chkNotify) MOVE_SET(g_chkNotify, pad, y, cw - pad, btnH, TRUE);
   y += btnH + gap;
   {
     int browseW = 78;
     if (g_filesWatchEdit)
-      MoveWindow(g_filesWatchEdit, pad, y, cw - pad - browseW - gap, btnH, TRUE);
+      MOVE_SET(g_filesWatchEdit, pad, y, cw - pad - browseW - gap, btnH, TRUE);
     HWND br = GetDlgItem(g_setHwnd, ID_WATCH_BROWSE);
-    if (br) MoveWindow(br, cw - browseW, y, browseW, btnH, TRUE);
+    if (br) MOVE_SET(br, cw - browseW, y, browseW, btnH, TRUE);
   }
   y += btnH + gap;
-  if (g_plmServer) MoveWindow(g_plmServer, pad, y, half, btnH, TRUE);
-  if (g_plmDb) MoveWindow(g_plmDb, pad + half + gap, y, half, btnH, TRUE);
+  if (g_plmServer) MOVE_SET(g_plmServer, pad, y, half, btnH, TRUE);
+  if (g_plmDb) MOVE_SET(g_plmDb, pad + half + gap, y, half, btnH, TRUE);
   y += btnH + gap;
-  if (g_plmUser) MoveWindow(g_plmUser, pad, y, half, btnH, TRUE);
-  if (g_plmPass) MoveWindow(g_plmPass, pad + half + gap, y, half, btnH, TRUE);
+  if (g_plmUser) MOVE_SET(g_plmUser, pad, y, half, btnH, TRUE);
+  if (g_plmPass) MOVE_SET(g_plmPass, pad + half + gap, y, half, btnH, TRUE);
   y += btnH + gap + 22;
   {
     int browseW = 78;
-    if (g_shareEdit) MoveWindow(g_shareEdit, pad, y, cw - pad - browseW - gap, btnH, TRUE);
+    if (g_shareEdit) MOVE_SET(g_shareEdit, pad, y, cw - pad - browseW - gap, btnH, TRUE);
     HWND br = GetDlgItem(g_setHwnd, ID_SHARE_BROWSE);
-    if (br) MoveWindow(br, cw - browseW, y, browseW, btnH, TRUE);
+    if (br) MOVE_SET(br, cw - browseW, y, browseW, btnH, TRUE);
   }
   y += btnH + gap;
-  if (g_chkServe) MoveWindow(g_chkServe, pad, y, cw - pad, btnH, TRUE);
+  if (g_chkServe) MOVE_SET(g_chkServe, pad, y, cw - pad, btnH, TRUE);
   y += btnH + gap;
   /* нарды и шашки идут через ту же общую папку — поэтому здесь, в ряд */
   {
     int half = (cw - pad - gap) / 2;
-    if (g_btnNd) MoveWindow(g_btnNd, pad, y, half, btnH, TRUE);
-    if (g_btnSh) MoveWindow(g_btnSh, pad + half + gap, y, cw - pad - half - gap, btnH, TRUE);
+    if (g_btnNd) MOVE_SET(g_btnNd, pad, y, half, btnH, TRUE);
+    if (g_btnSh) MOVE_SET(g_btnSh, pad + half + gap, y, cw - pad - half - gap, btnH, TRUE);
   }
   y += btnH + gap + 22;
   /* семь кнопок в два ряда, чтобы окно не росло: оно и так почти во всю
@@ -3037,10 +3073,10 @@ static void layout_settings(void) {
     int w = cw - pad - gap * 3;
     int w2 = w * 27 / 100, w3 = w * 30 / 100, w4 = w * 18 / 100;
     int x3 = pad + w2 + gap, x4 = x3 + w3 + gap, x5 = x4 + w4 + gap;
-    if (g_btnK2) MoveWindow(g_btnK2, pad, y, w2, btnH, TRUE);
-    if (g_btnK3) MoveWindow(g_btnK3, x3, y, w3, btnH, TRUE);
-    if (g_btnK4) MoveWindow(g_btnK4, x4, y, w4, btnH, TRUE);
-    if (g_btnK5) MoveWindow(g_btnK5, x5, y, cw - x5, btnH, TRUE);
+    if (g_btnK2) MOVE_SET(g_btnK2, pad, y, w2, btnH, TRUE);
+    if (g_btnK3) MOVE_SET(g_btnK3, x3, y, w3, btnH, TRUE);
+    if (g_btnK4) MOVE_SET(g_btnK4, x4, y, w4, btnH, TRUE);
+    if (g_btnK5) MOVE_SET(g_btnK5, x5, y, cw - x5, btnH, TRUE);
   }
   y += btnH + gap;
   {
@@ -3048,9 +3084,9 @@ static void layout_settings(void) {
     int w = cw - pad - gap * 2;
     int w6 = w * 33 / 100, w7 = w * 22 / 100;
     int x7 = pad + w6 + gap, xs = x7 + w7 + gap;
-    if (g_btnK6) MoveWindow(g_btnK6, pad, y, w6, btnH, TRUE);
-    if (g_btnK7) MoveWindow(g_btnK7, x7, y, w7, btnH, TRUE);
-    if (g_btnSys) MoveWindow(g_btnSys, xs, y, cw - xs, btnH, TRUE);
+    if (g_btnK6) MOVE_SET(g_btnK6, pad, y, w6, btnH, TRUE);
+    if (g_btnK7) MOVE_SET(g_btnK7, x7, y, w7, btnH, TRUE);
+    if (g_btnSys) MOVE_SET(g_btnSys, xs, y, cw - xs, btnH, TRUE);
   }
   y += btnH + gap;
   /* эффект при нажатии и сетапы — кнопками, по три в ряд и по два */
@@ -3058,30 +3094,30 @@ static void layout_settings(void) {
   {
     int bw = (cw - pad - gap * 2) / 3;
     for (int i = 0; i < 5; i++)
-      if (g_btnFx[i]) MoveWindow(g_btnFx[i], pad + (i % 3) * (bw + gap), y + (i / 3) * (btnH + gap), bw, btnH, TRUE);
+      if (g_btnFx[i]) MOVE_SET(g_btnFx[i], pad + (i % 3) * (bw + gap), y + (i / 3) * (btnH + gap), bw, btnH, TRUE);
   }
   y += 2 * (btnH + gap) + 22;
   {
     int bw = (cw - pad - gap) / 2;
     for (int i = 0; i < SETUP_COUNT; i++)
-      if (g_btnSetup[i]) MoveWindow(g_btnSetup[i], pad + (i % 2) * (bw + gap), y + (i / 2) * (btnH + gap), bw, btnH, TRUE);
+      if (g_btnSetup[i]) MOVE_SET(g_btnSetup[i], pad + (i % 2) * (bw + gap), y + (i / 2) * (btnH + gap), bw, btnH, TRUE);
   }
   y += 3 * (btnH + gap);
-  if (g_chkTess) MoveWindow(g_chkTess, pad, y, cw - pad, btnH, TRUE);
+  if (g_chkTess) MOVE_SET(g_chkTess, pad, y, cw - pad, btnH, TRUE);
   y += btnH + gap;
-  if (g_chkAuto) MoveWindow(g_chkAuto, pad, y, cw - pad, btnH, TRUE);
+  if (g_chkAuto) MOVE_SET(g_chkAuto, pad, y, cw - pad, btnH, TRUE);
   y += btnH + gap;
-  if (g_chkAnsPin) MoveWindow(g_chkAnsPin, pad, y, cw - pad, btnH, TRUE);
+  if (g_chkAnsPin) MOVE_SET(g_chkAnsPin, pad, y, cw - pad, btnH, TRUE);
   y += btnH + gap + 22;
-  if (g_tbBg) MoveWindow(g_tbBg, pad, y, cw - pad, btnH, TRUE);
+  if (g_tbBg) MOVE_SET(g_tbBg, pad, y, cw - pad, btnH, TRUE);
   y += btnH + 24;
-  if (g_tbFg) MoveWindow(g_tbFg, pad, y, cw - pad, btnH, TRUE);
+  if (g_tbFg) MOVE_SET(g_tbFg, pad, y, cw - pad, btnH, TRUE);
   y += btnH + 22;
-  if (g_ocr) MoveWindow(g_ocr, pad, y, cw - pad, btnH, TRUE);
+  if (g_ocr) MOVE_SET(g_ocr, pad, y, cw - pad, btnH, TRUE);
   y += btnH + gap;
-  if (g_btnHk) MoveWindow(g_btnHk, pad, y, cw - pad, btnH, TRUE);
+  if (g_btnHk) MOVE_SET(g_btnHk, pad, y, cw - pad, btnH, TRUE);
   y += btnH + gap;
-  if (g_btnUp) MoveWindow(g_btnUp, pad, y, cw - pad, btnH, TRUE);
+  if (g_btnUp) MOVE_SET(g_btnUp, pad, y, cw - pad, btnH, TRUE);
   y += btnH + gap + 18;
   {
     int cols = 4;
@@ -3092,9 +3128,23 @@ static void layout_settings(void) {
       int col = i % cols;
       /* пятая, рыцарская, — отдельным рядом во всю ширину */
       int bw = (row > 0 && THEME_COUNT - cols == 1) ? cw - pad : tw;
-      MoveWindow(g_btnTheme[i], pad + col * (tw + gap), y + row * (btnH + gap), bw, btnH, TRUE);
+      MOVE_SET(g_btnTheme[i], pad + col * (tw + gap), y + row * (btnH + gap), bw, btnH, TRUE);
     }
   }
+  clip_settings_children();
+}
+
+static void scroll_settings(int pos) {
+  RECT rc;
+  GetClientRect(g_setHwnd, &rc);
+  int maxScroll = SET_H - rc.bottom;
+  if (maxScroll < 0) maxScroll = 0;
+  if (pos < 0) pos = 0;
+  if (pos > maxScroll) pos = maxScroll;
+  if (pos == g_setScroll) return;
+  g_setScroll = pos;
+  layout_settings();
+  InvalidateRect(g_setHwnd, NULL, TRUE);
 }
 
 static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -3110,63 +3160,77 @@ static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
     if (g_fontSmall) SelectObject(hdc, g_fontSmall);
     SetTextColor(hdc, COL_MUTED);
     {
-      RECT cap = {14, PANEL_TITLE_H + 6, rc.right - 14, PANEL_TITLE_H + 24};
-      DrawTextW(hdc, L"PLM и файлы", -1, &cap, DT_LEFT | DT_SINGLELINE);
+      RECT cap = {14, PANEL_TITLE_H + 6 - g_setScroll, rc.right - 14, PANEL_TITLE_H + 24 - g_setScroll};
+      draw_set_label(hdc, L"PLM и файлы", cap, rc.bottom);
     }
     if (g_shareEdit) {
       RECT wr;
       GetWindowRect(g_shareEdit, &wr);
       MapWindowPoints(HWND_DESKTOP, hwnd, (POINT *)&wr, 2);
       RECT a = {14, wr.top - 18, rc.right - 14, wr.top - 2};
-      DrawTextW(hdc, L"общая папка — PLM для коллег", -1, &a, DT_LEFT | DT_SINGLELINE);
+      draw_set_label(hdc, L"общая папка — PLM для коллег", a, rc.bottom);
     }
     if (g_btnK2) {
       RECT wr;
       GetWindowRect(g_btnK2, &wr);
       MapWindowPoints(HWND_DESKTOP, hwnd, (POINT *)&wr, 2);
       RECT a = {14, wr.top - 18, rc.right - 14, wr.top - 2};
-      DrawTextW(hdc, L"курсор", -1, &a, DT_LEFT | DT_SINGLELINE);
+      draw_set_label(hdc, L"курсор", a, rc.bottom);
     }
     if (g_btnFx[0]) {
       RECT wr;
       GetWindowRect(g_btnFx[0], &wr);
       MapWindowPoints(HWND_DESKTOP, hwnd, (POINT *)&wr, 2);
       RECT a = {14, wr.top - 18, rc.right - 14, wr.top - 2};
-      DrawTextW(hdc, L"эффект при нажатии", -1, &a, DT_LEFT | DT_SINGLELINE);
+      draw_set_label(hdc, L"эффект при нажатии", a, rc.bottom);
     }
     if (g_btnSetup[0]) {
       RECT wr;
       GetWindowRect(g_btnSetup[0], &wr);
       MapWindowPoints(HWND_DESKTOP, hwnd, (POINT *)&wr, 2);
       RECT a = {14, wr.top - 18, rc.right - 14, wr.top - 2};
-      DrawTextW(hdc, L"сетапы: курсор и эффект", -1, &a, DT_LEFT | DT_SINGLELINE);
+      draw_set_label(hdc, L"сетапы: курсор и эффект", a, rc.bottom);
     }
     if (g_tbBg) {
       RECT wr;
       GetWindowRect(g_tbBg, &wr);
       MapWindowPoints(HWND_DESKTOP, hwnd, (POINT *)&wr, 2);
       RECT a = {14, wr.top - 18, rc.right - 14, wr.top - 2};
-      DrawTextW(hdc, L"прозрачность следования", -1, &a, DT_LEFT | DT_SINGLELINE);
+      draw_set_label(hdc, L"прозрачность следования", a, rc.bottom);
     }
     if (g_tbFg) {
       RECT wr;
       GetWindowRect(g_tbFg, &wr);
       MapWindowPoints(HWND_DESKTOP, hwnd, (POINT *)&wr, 2);
       RECT b = {14, wr.top - 18, rc.right - 14, wr.top - 2};
-      DrawTextW(hdc, L"прозрачность закреплённого окна", -1, &b, DT_LEFT | DT_SINGLELINE);
+      draw_set_label(hdc, L"прозрачность закреплённого окна", b, rc.bottom);
     }
     if (g_btnTheme[0]) {
       RECT wr;
       GetWindowRect(g_btnTheme[0], &wr);
       MapWindowPoints(HWND_DESKTOP, hwnd, (POINT *)&wr, 2);
       RECT c = {14, wr.top - 18, rc.right - 14, wr.top - 2};
-      DrawTextW(hdc, L"тема", -1, &c, DT_LEFT | DT_SINGLELINE);
+      draw_set_label(hdc, L"тема", c, rc.bottom);
     }
     {
       RECT ver = {14, rc.bottom - 28, rc.right - 14, rc.bottom - 10};
       wchar_t vs[64];
       _snwprintf(vs, 64, L"CursorPad  %s", APP_VERSION_STR);
       DrawTextW(hdc, vs, -1, &ver, DT_LEFT | DT_SINGLELINE);
+    }
+    {
+      /* полоска прокрутки справа: видно, что окно выше экрана */
+      int bandTop = PANEL_TITLE_H, bandBot = rc.bottom - SET_FOOT_H;
+      if (SET_H > rc.bottom && bandBot > bandTop) {
+        int bandH = bandBot - bandTop, maxScroll = SET_H - rc.bottom;
+        int thumbH = bandH * rc.bottom / SET_H;
+        if (thumbH < 24) thumbH = 24;
+        int thumbY = bandTop + (bandH - thumbH) * g_setScroll / maxScroll;
+        RECT th = {rc.right - 5, thumbY, rc.right - 2, thumbY + thumbH};
+        HBRUSH br = CreateSolidBrush(COL_MUTED);
+        FillRect(hdc, &th, br);
+        DeleteObject(br);
+      }
     }
     EndPaint(hwnd, &ps);
     return 0;
@@ -3200,6 +3264,9 @@ static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
   }
   case WM_NCHITTEST:
     return panel_hittest(hwnd, lParam);
+  case WM_MOUSEWHEEL:
+    scroll_settings(g_setScroll - GET_WHEEL_DELTA_WPARAM(wParam) * 48 / WHEEL_DELTA);
+    return 0;
   case WM_COMMAND:
     if (LOWORD(wParam) == ID_PANEL_CLOSE) {
       ShowWindow(hwnd, SW_HIDE);
