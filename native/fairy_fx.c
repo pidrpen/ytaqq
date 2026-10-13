@@ -31,7 +31,12 @@
    наискосок проводятся два тонких алых росчерка, пересекаясь, — быстро, за
    четверть секунды. Каждое десятое нажатие ещё и рисует большой разрез через
    весь экран того монитора, где кликнули: толстый и тонкий рядом, с красным
-   свечением, проводится за долю секунды и гаснет. */
+   свечением, проводится за долю секунды и гаснет.
+
+   Каждое двадцатое нажатие вместо одиночного большого разреза раскалывает
+   экран: снимок экрана режется несколькими большими разрезами на куски, куски
+   разъезжаются и падают, экран становится чёрным, потом куски возвращаются
+   на место. Всё в том же окне на весь монитор. */
 
 #define WM_FAIRY_CLICK (WM_APP + 17)
 #define FX_WINDOWS 4    /* столько облачков может лететь одновременно */
@@ -48,6 +53,15 @@
 #define FX_BIG_CUTS 2   /* толстый разрез и тонкая спутница рядом */
 #define FX_BIG_FRAMES 40 /* ~0.65 с */
 #define FX_BIG_EVERY 10 /* каждое десятое нажатие — большой разрез на весь экран */
+#define FX_SHATTER_EVERY 20 /* каждое двадцатое — раскол экрана на куски вместо одиночного разреза */
+#define FX_SHATTER_CUTS 7 /* столько больших разрезов режут экран */
+#define FX_SHATTER_PIECES (1 << FX_SHATTER_CUTS) /* кусков — не больше */
+#define FX_SHATTER_CUT_FRAMES 8  /* разрезы проводятся поверх экрана */
+#define FX_SHATTER_SPLIT_FRAMES 32 /* куски разъезжаются и падают */
+#define FX_SHATTER_HOLD_FRAMES 12  /* экран чёрный */
+#define FX_SHATTER_BACK_FRAMES 36  /* куски возвращаются на место */
+#define FX_SHATTER_FRAMES (FX_SHATTER_CUT_FRAMES + FX_SHATTER_SPLIT_FRAMES + \
+                           FX_SHATTER_HOLD_FRAMES + FX_SHATTER_BACK_FRAMES)
 #define FX_MAXP 12      /* больше из трёх: звёздочек, язычков и царапин */
 
 typedef struct {
@@ -71,13 +85,30 @@ typedef struct {
   BOOL flame;    /* пламя «Дракона», а не звёздочки «Феи» */
   BOOL scratch;  /* царапины «Чёрного кота» */
   BOOL slash;    /* красный «Разрез» — и обычный, и большой */
+  BOOL shatter;  /* раскол экрана на куски (каждое двадцатое нажатие) */
   POINT org;
   FxPart p[FX_MAXP];
 } FxWin;
 
 static FxWin g_fx[FX_ALL];
-static int g_slashClicks; /* сколько нажатий в «Разрезе» с последнего большого */
+static int g_slashClicks; /* сколько нажатий в «Разрезе» с последнего раскола */
 static HHOOK g_fxHook;
+
+/* раскол экрана: снимок в момент нажатия, номер куска у каждого пикселя и
+   на сколько каждый кусок уезжает к концу разъезда. Живёт, пока идёт анимация */
+typedef struct {
+  BYTE *src;   /* экран в момент нажатия, непрозрачный */
+  BYTE *shard; /* кусок каждого пикселя: битовая маска «по какую сторону» каждого разреза */
+  float outx[FX_SHATTER_PIECES], outy[FX_SHATTER_PIECES];
+} FxShatter;
+static FxShatter g_shat;
+
+static void fx_shatter_free(void) {
+  free(g_shat.src);
+  free(g_shat.shard);
+  g_shat.src = NULL;
+  g_shat.shard = NULL;
+}
 /* g_sparkle («звёздочки при нажатии»), g_flame («пламя при нажатии») и g_catFx
    (эффект у «Чёрного кота») — в cursorpad.c:
    их читают настройки */
@@ -289,10 +320,64 @@ static void fx_scratch_part(FxWin *f, const FxPart *p, int age) {
   }
 }
 
+/* раскол: сколько кусков уехало на этом кадре, от 0 (на месте) до 1 (уехали).
+   Сначала разрезы проводятся поверх экрана, потом куски разъезжаются, экран
+   чёрный, потом куски возвращаются */
+static float fx_shatter_k(int fr) {
+  if (fr < FX_SHATTER_CUT_FRAMES) return 0.0f;
+  int sp = fr - FX_SHATTER_CUT_FRAMES;
+  if (sp < FX_SHATTER_SPLIT_FRAMES) {
+    float t = sp / (float)FX_SHATTER_SPLIT_FRAMES;
+    return t * t * (3.0f - 2.0f * t);
+  }
+  sp -= FX_SHATTER_SPLIT_FRAMES;
+  if (sp < FX_SHATTER_HOLD_FRAMES) return 1.0f;
+  sp -= FX_SHATTER_HOLD_FRAMES;
+  if (sp < FX_SHATTER_BACK_FRAMES) {
+    float t = sp / (float)FX_SHATTER_BACK_FRAMES;
+    return 1.0f - t * t * (3.0f - 2.0f * t);
+  }
+  return 0.0f;
+}
+
+static void fx_shatter_render(FxWin *f) {
+  int W = f->W, H = f->H;
+  size_t n = (size_t)W * H;
+  float k = fx_shatter_k(f->frame);
+  if (k <= 0.0f) {
+    memcpy(f->bits, g_shat.src, n * 4);
+  } else {
+    DWORD *dst = (DWORD *)f->bits;
+    const DWORD *src = (const DWORD *)g_shat.src;
+    int ox[FX_SHATTER_PIECES], oy[FX_SHATTER_PIECES];
+    for (int s = 0; s < FX_SHATTER_PIECES; s++) {
+      ox[s] = (int)floorf(g_shat.outx[s] * k + 0.5f);
+      oy[s] = (int)floorf(g_shat.outy[s] * k + 0.5f);
+    }
+    for (size_t i = 0; i < n; i++) dst[i] = 0xFF000000u; /* между кусками — чёрное */
+    /* каждый пиксель снимка уходит со своим куском; что вышло за край — пропадает */
+    for (int y = 0; y < H; y++) {
+      for (int x = 0; x < W; x++) {
+        size_t i = (size_t)y * W + x;
+        int s = g_shat.shard[i];
+        int nx = x + ox[s], ny = y + oy[s];
+        if (nx < 0 || nx >= W || ny < 0 || ny >= H) continue;
+        dst[(size_t)ny * W + nx] = src[i];
+      }
+    }
+  }
+  /* разрезы поверх экрана; через 12 кадров гаснут окончательно */
+  for (int i = 0; i < f->n; i++) fx_scratch_part(f, &f->p[i], f->frame - f->p[i].delay);
+}
+
 /* кадр: пустой буфер и поверх — каждая звёздочка своим цветом */
 static void fx_render(FxWin *f) {
   int W = f->W, H = f->H;
   int S = W; /* звёздочки, язычки и кольцо — только в квадратных окнах */
+  if (f->shatter) {
+    fx_shatter_render(f);
+    goto show;
+  }
   memset(f->bits, 0, (size_t)W * H * 4);
   if (f->scratch || f->slash) {
     for (int i = 0; i < f->n; i++) fx_scratch_part(f, &f->p[i], f->frame - f->p[i].delay);
@@ -416,6 +501,10 @@ static LRESULT CALLBACK FxProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
         KillTimer(hwnd, 1);
         ShowWindow(hwnd, SW_HIDE);
         f->busy = FALSE;
+        if (f->shatter) {
+          f->shatter = FALSE;
+          fx_shatter_free();
+        }
         return 0;
       }
       fx_step(f);
@@ -482,6 +571,17 @@ static int fx_kind(void) {
   return 0;
 }
 
+/* бросить то, что сейчас идёт на большом окне: и разрез, и раскол */
+static void fx_big_reset(FxWin *f) {
+  if (f->busy) {
+    KillTimer(f->w, 1);
+    ShowWindow(f->w, SW_HIDE);
+    f->busy = FALSE;
+  }
+  f->shatter = FALSE;
+  fx_shatter_free();
+}
+
 /* большой разрез на весь монитор, где щёлкнули: по диагонали через середину
    экрана, толстый и рядом тонкий; проводится быстро и гаснет. Окно у него своё
    (g_fx[FX_WINDOWS]), поэтому не мешает обычным облачкам */
@@ -492,6 +592,7 @@ static void fx_big_slash(int x, int y) {
   mi.cbSize = sizeof(mi);
   if (!GetMonitorInfoW(MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST), &mi)) return;
   FxWin *f = &g_fx[FX_WINDOWS];
+  fx_big_reset(f);
   int W = mi.rcMonitor.right - mi.rcMonitor.left;
   int H = mi.rcMonitor.bottom - mi.rcMonitor.top;
   if (!fx_prepare_wh(f, W, H)) return;
@@ -529,13 +630,126 @@ static void fx_big_slash(int x, int y) {
   SetTimer(f->w, 1, 16, NULL);
 }
 
+/* подготовка раскола: снимок из буфера окна, разрезы через середину, номер куска
+   у каждого пикселя и куда он уедет. Вызывается после того, как экран снят */
+static BOOL fx_shatter_setup(FxWin *f) {
+  int W = f->W, H = f->H;
+  size_t n = (size_t)W * H;
+  fx_shatter_free();
+  g_shat.src = (BYTE *)malloc(n * 4);
+  g_shat.shard = (BYTE *)malloc(n);
+  if (!g_shat.src || !g_shat.shard) {
+    fx_shatter_free();
+    return FALSE;
+  }
+  DWORD *src = (DWORD *)g_shat.src;
+  const DWORD *cap = (const DWORD *)f->bits;
+  for (size_t i = 0; i < n; i++) src[i] = cap[i] | 0xFF000000u; /* экран непрозрачный */
+
+  /* разрезы: прямые через середину, под разными углами, чуть в стороны */
+  float la[FX_SHATTER_CUTS], lb[FX_SHATTER_CUTS], lc[FX_SHATTER_CUTS];
+  float cx = W / 2.0f, cy = H / 2.0f;
+  float side = fminf((float)W, (float)H);
+  float R = sqrtf((float)W * W + (float)H * H) / 2.0f; /* полдиагонали — линия пересечёт весь экран */
+  for (int i = 0; i < FX_SHATTER_CUTS; i++) {
+    float th = i * 3.14159265f / FX_SHATTER_CUTS + (fx_rand() - 0.5f) * 0.3f;
+    float ux = cosf(th), uy = sinf(th); /* вдоль разреза */
+    float nx = -uy, ny = ux;            /* поперёк */
+    float off = (fx_rand() - 0.5f) * 0.6f * side;
+    float qx = cx + nx * off, qy = cy + ny * off;
+    la[i] = nx;
+    lb[i] = ny;
+    lc[i] = -(nx * qx + ny * qy);
+    FxPart *p = &f->p[i];
+    memset(p, 0, sizeof(*p));
+    p->x = qx - ux * R;
+    p->y = qy - uy * R;
+    p->vx = ux * 2.0f * R;
+    p->vy = uy * 2.0f * R;
+    p->sz = 5.0f;
+    p->rev = 5.0f;
+    p->life = FX_SHATTER_CUT_FRAMES + 4;
+  }
+  f->n = FX_SHATTER_CUTS;
+
+  /* кусок — это набор пикселей с одинаковой маской «по какую сторону» каждого разреза */
+  double sumx[FX_SHATTER_PIECES], sumy[FX_SHATTER_PIECES];
+  int cnt[FX_SHATTER_PIECES];
+  memset(sumx, 0, sizeof(sumx));
+  memset(sumy, 0, sizeof(sumy));
+  memset(cnt, 0, sizeof(cnt));
+  for (int y = 0; y < H; y++) {
+    for (int x = 0; x < W; x++) {
+      float px = x + 0.5f, py = y + 0.5f;
+      int m = 0;
+      for (int i = 0; i < FX_SHATTER_CUTS; i++)
+        if (la[i] * px + lb[i] * py + lc[i] > 0.0f) m |= 1 << i;
+      g_shat.shard[(size_t)y * W + x] = (BYTE)m;
+      sumx[m] += px;
+      sumy[m] += py;
+      cnt[m]++;
+    }
+  }
+  /* куда уезжает кусок: от середины экрана в сторону его центра, с разбросом,
+     и вниз — так, что к концу разъезда он уже за краем */
+  for (int m = 0; m < FX_SHATTER_PIECES; m++) {
+    float dx0 = 0.0f, dy0 = 0.0f;
+    if (cnt[m]) {
+      dx0 = (float)(sumx[m] / cnt[m]) - cx;
+      dy0 = (float)(sumy[m] / cnt[m]) - cy;
+    }
+    float ang = atan2f(dy0, dx0) + (fx_rand() - 0.5f) * 0.8f;
+    float dist = side * (0.25f + fx_rand() * 0.15f);
+    g_shat.outx[m] = cosf(ang) * dist;
+    g_shat.outy[m] = sinf(ang) * dist + H * (1.6f + fx_rand() * 0.3f);
+  }
+  return TRUE;
+}
+
+/* раскол экрана на куски: снимок экрана в момент нажатия, семь больших разрезов
+   через середину под разными углами, у каждого куска — свой уход: от середины
+   в сторону и вниз за край. Разрезы сначала видны поверх экрана, потом куски
+   разъезжаются, экран темнеет и куски возвращаются на место */
+static void fx_shatter(int x, int y) {
+  POINT pt = {x, y};
+  MONITORINFO mi;
+  memset(&mi, 0, sizeof(mi));
+  mi.cbSize = sizeof(mi);
+  if (!GetMonitorInfoW(MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST), &mi)) return;
+  FxWin *f = &g_fx[FX_WINDOWS];
+  fx_big_reset(f); /* чтобы в снимок не попал прошлый разрез */
+  RECT r = mi.rcMonitor;
+  int W = r.right - r.left, H = r.bottom - r.top;
+  if (!fx_prepare_wh(f, W, H)) return;
+  HDC scr = GetDC(NULL);
+  BitBlt(f->dc, 0, 0, W, H, scr, r.left, r.top, SRCCOPY); /* экран — прямо в буфер окна */
+  ReleaseDC(NULL, scr);
+  if (!fx_shatter_setup(f)) return;
+  f->shatter = TRUE;
+  f->flame = FALSE;
+  f->scratch = FALSE;
+  f->slash = TRUE;
+  f->org.x = r.left;
+  f->org.y = r.top;
+  f->frame = 0;
+  f->frames = FX_SHATTER_FRAMES;
+  f->busy = TRUE;
+  fx_render(f);
+  SetWindowPos(f->w, HWND_TOPMOST, f->org.x, f->org.y, W, H, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+  SetTimer(f->w, 1, 16, NULL);
+}
+
 /* облачко из точки нажатия */
 static void fx_burst(int x, int y) {
   fx_init_sprites();
   int kind = fx_kind();
-  if (kind == 4 && ++g_slashClicks >= FX_BIG_EVERY) {
-    g_slashClicks = 0;
-    fx_big_slash(x, y);
+  if (kind == 4) {
+    /* каждое десятое — большой разрез, каждое двадцатое — раскол вместо него */
+    if (++g_slashClicks == FX_BIG_EVERY) fx_big_slash(x, y);
+    if (g_slashClicks == FX_SHATTER_EVERY) {
+      g_slashClicks = 0;
+      fx_shatter(x, y);
+    }
   }
   static const BYTE pal[][3] = {
       {255, 105, 180}, {255, 215, 64},  {186, 120, 255}, {90, 200, 255},
@@ -685,6 +899,7 @@ static void fx_sync(void) {
 static void fx_shutdown(void) {
   if (g_fxHook) UnhookWindowsHookEx(g_fxHook);
   g_fxHook = NULL;
+  fx_shatter_free();
   for (int k = 0; k < FX_ALL; k++) {
     FxWin *f = &g_fx[k];
     if (f->w) DestroyWindow(f->w);
