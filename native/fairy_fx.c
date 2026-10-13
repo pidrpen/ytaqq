@@ -25,10 +25,17 @@
    сужающиеся к концам (тёмно-фиолетовый край, сиреневая середина, белая
    жилка), держатся и гаснут примерно за полсекунды. Вместо царапин коту можно
    включить звёздочки, как у Феи (g_catFx == 2), или выключить эффект совсем:
-   «Эффект при нажатии» в Настройках. */
+   «Эффект при нажатии» в Настройках.
+
+   «Разрез» (g_fxPick == 4) — красный разрез в духе Сукуны: из точки нажатия
+   наискосок проводятся два тонких алых росчерка, пересекаясь, — быстро, за
+   четверть секунды. Каждое десятое нажатие ещё и рисует большой разрез через
+   весь экран того монитора, где кликнули: толстый и тонкий рядом, с красным
+   свечением, проводится за долю секунды и гаснет. */
 
 #define WM_FAIRY_CLICK (WM_APP + 17)
 #define FX_WINDOWS 4    /* столько облачков может лететь одновременно */
+#define FX_ALL (FX_WINDOWS + 1) /* + отдельное окно на весь экран для большого разреза */
 #define FX_PARTS 4   /* четыре звёздочки (было 34, потом 7) */
 #define FX_FRAMES 22    /* ~0.35 с при 16 мс на кадр (было 44 — медленно) */
 #define FX_SPR 8        /* 4 размера × (пятиконечная звезда, четырёхлучевая искра) */
@@ -36,6 +43,11 @@
 #define FX_FLAME_FRAMES 34 /* ~0.55 с */
 #define FX_SCRATCHES 2  /* царапин у «Чёрного кота» */
 #define FX_SCRATCH_FRAMES 18 /* ~0.3 с */
+#define FX_SLASHES 2    /* красных разрезов на каждое нажатие у «Разреза» */
+#define FX_SLASH_FRAMES 16 /* ~0.27 с */
+#define FX_BIG_CUTS 2   /* толстый разрез и тонкая спутница рядом */
+#define FX_BIG_FRAMES 40 /* ~0.65 с */
+#define FX_BIG_EVERY 10 /* каждое десятое нажатие — большой разрез на весь экран */
 #define FX_MAXP 12      /* больше из трёх: звёздочек, язычков и царапин */
 
 typedef struct {
@@ -43,6 +55,7 @@ typedef struct {
   int spr, delay;
   float tw;
   float sz;  /* язычок пламени: радиус в начале, точки при 100 % */
+  float rev; /* царапина и разрез: за сколько кадров их проводят */
   int life;  /* язычок пламени: сколько кадров горит */
   BYTE r, g, b;
 } FxPart;
@@ -52,16 +65,18 @@ typedef struct {
   HDC dc;
   HBITMAP bmp, old;
   BYTE *bits;
-  int size, frame;
+  int W, H, frame; /* окно квадратное, кроме большого разреза — он на весь монитор */
   int n, frames; /* сколько частиц и кадров у этого облачка */
   BOOL busy;
   BOOL flame;    /* пламя «Дракона», а не звёздочки «Феи» */
   BOOL scratch;  /* царапины «Чёрного кота» */
+  BOOL slash;    /* красный «Разрез» — и обычный, и большой */
   POINT org;
   FxPart p[FX_MAXP];
 } FxWin;
 
-static FxWin g_fx[FX_WINDOWS];
+static FxWin g_fx[FX_ALL];
+static int g_slashClicks; /* сколько нажатий в «Разрезе» с последнего большого */
 static HHOOK g_fxHook;
 /* g_sparkle («звёздочки при нажатии»), g_flame («пламя при нажатии») и g_catFx
    (эффект у «Чёрного кота») — в cursorpad.c:
@@ -162,7 +177,7 @@ static void fx_flame_part(FxWin *f, const FxPart *p, int age) {
   if (age < 2) a *= (age + 1) / 2.0f;
   float r = p->sz * g_fxScale * (1.0f - 0.55f * t);
   if (r < 0.8f) return;
-  int S = f->size;
+  int S = f->W; /* язычки только в квадратных окнах */
   int x0 = (int)(p->x - r - 1), x1 = (int)(p->x + r + 1);
   int y0 = (int)(p->y - r * 2.2f - 1), y1 = (int)(p->y + r + 1);
   for (int y = y0; y <= y1; y++) {
@@ -195,51 +210,74 @@ static void fx_flame_part(FxWin *f, const FxPart *p, int age) {
   }
 }
 
-/* царапина: отрезок от (x, y) на вектор (vx, vy), шире всего посередине и
-   тоньше к концам. Сначала её «проводят» (первые кадры), потом она держится
-   и гаснет. Край тёмно-фиолетовый — чтобы было видно на белом, середина
-   сиреневая, по оси — белая жилка */
+/* царапина или разрез: отрезок от (x, y) на вектор (vx, vy), шире всего
+   посередине и тоньше к концам. Сначала его «проводят» (за p->rev кадров),
+   потом он держится и гаснет. У царапин край тёмно-фиолетовый — чтобы было
+   видно на белом, середина сиреневая, по оси — белая жилка. У «Разреза»
+   (f->slash) — красный: бледная жилка, алая середина, тёмно-бордовый край и
+   мягкое красное свечение вокруг */
 static void fx_scratch_part(FxWin *f, const FxPart *p, int age) {
   if (age < 0 || age >= p->life) return;
   float len = sqrtf(p->vx * p->vx + p->vy * p->vy);
   if (len < 1.0f) return;
   float ux = p->vx / len, uy = p->vy / len;
-  float reveal = (age + 1) / 3.0f; /* за три кадра дорисовывается до конца */
+  float reveal = (age + 1) / p->rev; /* дорисовывается до конца за p->rev кадров */
   if (reveal > 1.0f) reveal = 1.0f;
   float hold = p->life * 0.45f;
   float a = age < hold ? 1.0f : 1.0f - (age - hold) / (p->life - hold);
   float maxw = p->sz * g_fxScale;
-  int S = f->size;
-  float ex = p->x + p->vx, ey = p->y + p->vy;
-  int x0 = (int)(fminf(p->x, ex) - maxw - 2), x1 = (int)(fmaxf(p->x, ex) + maxw + 2);
-  int y0 = (int)(fminf(p->y, ey) - maxw - 2), y1 = (int)(fmaxf(p->y, ey) + maxw + 2);
+  float reach = f->slash ? maxw * 1.7f + 3.0f : maxw; /* у красного разреза есть свечение */
+  float ex = p->x + p->vx * reveal, ey = p->y + p->vy * reveal;
+  int x0 = (int)(fminf(p->x, ex) - reach - 2), x1 = (int)(fmaxf(p->x, ex) + reach + 2);
+  int y0 = (int)(fminf(p->y, ey) - reach - 2), y1 = (int)(fmaxf(p->y, ey) + reach + 2);
+  if (x0 < 0) x0 = 0;
+  if (y0 < 0) y0 = 0;
+  if (x1 >= f->W) x1 = f->W - 1;
+  if (y1 >= f->H) y1 = f->H - 1;
   for (int y = y0; y <= y1; y++) {
-    if (y < 0 || y >= S) continue;
-    BYTE *row = f->bits + (size_t)y * S * 4;
+    BYTE *row = f->bits + (size_t)y * f->W * 4;
     for (int x = x0; x <= x1; x++) {
-      if (x < 0 || x >= S) continue;
       float rx = x + 0.5f - p->x, ry = y + 0.5f - p->y;
-      float s = (rx * ux + ry * uy) / len; /* 0..1 вдоль царапины */
+      float s = (rx * ux + ry * uy) / len; /* 0..1 вдоль разреза */
       if (s < 0.0f || s > reveal) continue;
       float d = fabsf(-rx * uy + ry * ux);
+      if (d >= reach) continue;
       float prof = sinf(3.14159265f * s);
       float hw = maxw * (prof > 0 ? powf(prof, 0.7f) : 0.0f);
-      if (hw < 0.4f) continue;
+      /* головка ещё бежит — мягкий кончик */
+      float head = reveal < 1.0f && s > reveal - 0.12f ? (reveal - s) / 0.12f : 1.0f;
+      float sa = 0.0f, cr = 0.0f, cg = 0.0f, cb = 0.0f;
       float edge = hw - d; /* пикселей до края внутрь */
-      if (edge <= 0.0f) continue;
-      float sa = a * (edge < 1.0f ? edge : 1.0f);
-      if (reveal < 1.0f && s > reveal - 0.12f) /* головка ещё бежит — мягкий кончик */
-        sa *= (reveal - s) / 0.12f;
-      float m = d / hw;                      /* 0 по оси, 1 на краю */
-      float cr, cg, cb;
-      if (m < 0.18f) {                       /* белая жилка */
-        cr = 255, cg = 252, cb = 255;
-      } else if (m < 0.50f) {                /* сиреневая середина */
-        float u = (m - 0.18f) / 0.32f;
-        cr = fx_mix(255, 206, u), cg = fx_mix(252, 170, u), cb = fx_mix(255, 255, u);
-      } else {                               /* тёмно-фиолетовый край */
-        float u = (m - 0.50f) / 0.50f;
-        cr = fx_mix(206, 58, u), cg = fx_mix(170, 22, u), cb = fx_mix(255, 104, u);
+      if (edge > 0.0f && hw >= 0.4f) {
+        sa = a * (edge < 1.0f ? edge : 1.0f) * head;
+        float m = d / hw; /* 0 по оси, 1 на краю */
+        if (f->slash) {                      /* бледная жилка, алая середина, бордо по краю */
+          if (m < 0.18f) {
+            cr = 255, cg = 226, cb = 222;
+          } else if (m < 0.50f) {
+            float u = (m - 0.18f) / 0.32f;
+            cr = fx_mix(255, 226, u), cg = fx_mix(70, 22, u), cb = fx_mix(60, 30, u);
+          } else {
+            float u = (m - 0.50f) / 0.50f;
+            cr = fx_mix(226, 84, u), cg = fx_mix(22, 0, u), cb = fx_mix(30, 14, u);
+          }
+        } else if (m < 0.18f) {              /* белая жилка */
+          cr = 255, cg = 252, cb = 255;
+        } else if (m < 0.50f) {              /* сиреневая середина */
+          float u = (m - 0.18f) / 0.32f;
+          cr = fx_mix(255, 206, u), cg = fx_mix(252, 170, u), cb = fx_mix(255, 255, u);
+        } else {                             /* тёмно-фиолетовый край */
+          float u = (m - 0.50f) / 0.50f;
+          cr = fx_mix(206, 58, u), cg = fx_mix(170, 22, u), cb = fx_mix(255, 104, u);
+        }
+      } else if (f->slash) {                 /* мимо красного разреза — свечение, тает к краю */
+        float gr = hw * 0.7f + 2.5f * g_fxScale;
+        float g = 1.0f - fmaxf(d - hw, 0.0f) / gr;
+        if (g <= 0.0f) continue;
+        sa = 0.42f * a * g * g * head;
+        cr = 220, cg = 20, cb = 30;
+      } else {
+        continue;
       }
       BYTE *d4 = row + x * 4;
       float inv = 1.0f - sa;
@@ -253,9 +291,10 @@ static void fx_scratch_part(FxWin *f, const FxPart *p, int age) {
 
 /* кадр: пустой буфер и поверх — каждая звёздочка своим цветом */
 static void fx_render(FxWin *f) {
-  int S = f->size;
-  memset(f->bits, 0, (size_t)S * S * 4);
-  if (f->scratch) {
+  int W = f->W, H = f->H;
+  int S = W; /* звёздочки, язычки и кольцо — только в квадратных окнах */
+  memset(f->bits, 0, (size_t)W * H * 4);
+  if (f->scratch || f->slash) {
     for (int i = 0; i < f->n; i++) fx_scratch_part(f, &f->p[i], f->frame - f->p[i].delay);
     goto show;
   }
@@ -341,13 +380,13 @@ static void fx_render(FxWin *f) {
   }
 show:;
   POINT src = {0, 0};
-  SIZE sz = {S, S};
+  SIZE sz = {W, H};
   BLENDFUNCTION bf = {AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
   UpdateLayeredWindow(f->w, NULL, &f->org, &sz, f->dc, &src, 0, &bf, ULW_ALPHA);
 }
 
 static void fx_step(FxWin *f) {
-  if (f->scratch) return; /* царапины на месте, только проявляются и гаснут */
+  if (f->scratch || f->slash) return; /* царапины и разрезы на месте, только проявляются и гаснут */
   for (int i = 0; i < f->n; i++) {
     FxPart *p = &f->p[i];
     if (f->frame < p->delay) continue;
@@ -369,7 +408,7 @@ static void fx_step(FxWin *f) {
 
 static LRESULT CALLBACK FxProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
   if (msg == WM_TIMER) {
-    for (int k = 0; k < FX_WINDOWS; k++) {
+    for (int k = 0; k < FX_ALL; k++) {
       FxWin *f = &g_fx[k];
       if (f->w != hwnd || !f->busy) continue;
       f->frame++;
@@ -388,8 +427,8 @@ static LRESULT CALLBACK FxProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
   return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
-static BOOL fx_prepare(FxWin *f, int S) {
-  if (f->w && f->size == S) return TRUE;
+static BOOL fx_prepare_wh(FxWin *f, int W, int H) {
+  if (f->w && f->W == W && f->H == H) return TRUE;
   static BOOL reg = FALSE;
   if (!reg) {
     WNDCLASSEXW wc;
@@ -404,7 +443,7 @@ static BOOL fx_prepare(FxWin *f, int S) {
   if (!f->w)
     f->w = CreateWindowExW(WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_TOOLWINDOW |
                                WS_EX_NOACTIVATE,
-                           L"CursorPadFx", L"", WS_POPUP, 0, 0, S, S, NULL, NULL, g_inst, NULL);
+                           L"CursorPadFx", L"", WS_POPUP, 0, 0, W, H, NULL, NULL, g_inst, NULL);
   if (!f->w) return FALSE;
   if (f->dc) {
     SelectObject(f->dc, f->old);
@@ -415,8 +454,8 @@ static BOOL fx_prepare(FxWin *f, int S) {
   BITMAPINFO bi;
   memset(&bi, 0, sizeof(bi));
   bi.bmiHeader.biSize = sizeof(bi.bmiHeader);
-  bi.bmiHeader.biWidth = S;
-  bi.bmiHeader.biHeight = -S; /* сверху вниз */
+  bi.bmiHeader.biWidth = W;
+  bi.bmiHeader.biHeight = -H; /* сверху вниз */
   bi.bmiHeader.biPlanes = 1;
   bi.bmiHeader.biBitCount = 32;
   HDC scr = GetDC(NULL);
@@ -427,12 +466,13 @@ static BOOL fx_prepare(FxWin *f, int S) {
   if (!f->dc || !f->bmp || !bits) return FALSE;
   f->old = (HBITMAP)SelectObject(f->dc, f->bmp);
   f->bits = (BYTE *)bits;
-  f->size = S;
+  f->W = W;
+  f->H = H;
   return TRUE;
 }
 
-/* какой эффект при нажатии сейчас: 0 нет, 1 звёздочки, 2 пламя, 3 царапины.
-   Если эффект выбран в меню отдельно (g_fxPick >= 0), он важнее курсора;
+/* какой эффект при нажатии сейчас: 0 нет, 1 звёздочки, 2 пламя, 3 царапины,
+   4 разрез. Если эффект выбран в меню отдельно (g_fxPick >= 0), он важнее курсора;
    иначе — как раньше: фея со звёздочками, дракон с пламенем, кот с царапинами */
 static int fx_kind(void) {
   if (g_fxPick >= 0) return g_fxPick;
@@ -442,9 +482,61 @@ static int fx_kind(void) {
   return 0;
 }
 
+/* большой разрез на весь монитор, где щёлкнули: по диагонали через середину
+   экрана, толстый и рядом тонкий; проводится быстро и гаснет. Окно у него своё
+   (g_fx[FX_WINDOWS]), поэтому не мешает обычным облачкам */
+static void fx_big_slash(int x, int y) {
+  POINT pt = {x, y};
+  MONITORINFO mi;
+  memset(&mi, 0, sizeof(mi));
+  mi.cbSize = sizeof(mi);
+  if (!GetMonitorInfoW(MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST), &mi)) return;
+  FxWin *f = &g_fx[FX_WINDOWS];
+  int W = mi.rcMonitor.right - mi.rcMonitor.left;
+  int H = mi.rcMonitor.bottom - mi.rcMonitor.top;
+  if (!fx_prepare_wh(f, W, H)) return;
+  f->org.x = mi.rcMonitor.left;
+  f->org.y = mi.rcMonitor.top;
+  f->frame = 0;
+  f->flame = FALSE;
+  f->scratch = FALSE;
+  f->slash = TRUE;
+  f->n = FX_BIG_CUTS;
+  f->frames = FX_BIG_FRAMES;
+  /* угол от горизонтали ~26…43°, в одну из сторон */
+  float dir = fx_rand() < 0.5f ? 1.0f : -1.0f;
+  float ang = 0.45f + fx_rand() * 0.3f;
+  float ux = dir * cosf(ang), uy = sinf(ang);
+  /* половина длины — до края экрана по той оси, что раньше упрётся (+5 %, чтобы не оборвалось) */
+  float tx = (W / 2.0f) / fabsf(ux), ty = (H / 2.0f) / fabsf(uy);
+  float t = fminf(tx, ty) * 1.05f;
+  for (int i = 0; i < FX_BIG_CUTS; i++) {
+    FxPart *p = &f->p[i];
+    memset(p, 0, sizeof(*p));
+    float off = i == 0 ? 0.0f : 56.0f * g_fxScale; /* спутница — поперёк, в стороне */
+    p->x = W / 2.0f - ux * t - uy * off;
+    p->y = H / 2.0f - uy * t + ux * off;
+    p->vx = ux * 2.0f * t;
+    p->vy = uy * 2.0f * t;
+    p->sz = i == 0 ? 20.0f : 6.0f; /* полуширина в середине, в пикселях × масштаб */
+    p->delay = i * 3;
+    p->rev = i == 0 ? 6.0f : 5.0f;
+    p->life = FX_BIG_FRAMES - p->delay;
+  }
+  f->busy = TRUE;
+  fx_render(f);
+  SetWindowPos(f->w, HWND_TOPMOST, f->org.x, f->org.y, W, H, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+  SetTimer(f->w, 1, 16, NULL);
+}
+
 /* облачко из точки нажатия */
 static void fx_burst(int x, int y) {
   fx_init_sprites();
+  int kind = fx_kind();
+  if (kind == 4 && ++g_slashClicks >= FX_BIG_EVERY) {
+    g_slashClicks = 0;
+    fx_big_slash(x, y);
+  }
   static const BYTE pal[][3] = {
       {255, 105, 180}, {255, 215, 64},  {186, 120, 255}, {90, 200, 255},
       {80, 230, 170},  {255, 140, 90},  {255, 255, 255}, {255, 70, 140},
@@ -458,14 +550,38 @@ static void fx_burst(int x, int y) {
       if (g_fx[k].frame > f->frame) f = &g_fx[k];
   }
   int S = (int)(200 * g_fxScale);
-  if (!fx_prepare(f, S)) return;
+  if (!fx_prepare_wh(f, S, S)) return;
   g_fxSeed ^= GetTickCount() * 2654435761u;
   f->org.x = x - S / 2;
   f->org.y = y - S / 2;
   f->frame = 0;
-  int kind = fx_kind();
   f->flame = kind == 2;
   f->scratch = kind == 3;
+  f->slash = kind == 4;
+  if (f->slash) {
+    /* два тонких красных разреза через точку нажатия, под разным углом — крест;
+       второй чуть позже и короче */
+    f->n = FX_SLASHES;
+    f->frames = FX_SLASH_FRAMES;
+    float dir = fx_rand() < 0.5f ? 1.0f : -1.0f;
+    float ang = 0.75f + (fx_rand() - 0.5f) * 0.3f; /* ~45° от горизонтали */
+    for (int i = 0; i < FX_SLASHES; i++) {
+      float a = ang + i * 0.45f;
+      float dx = dir * cosf(a), dy = sinf(a);
+      float len = (i == 0 ? 84.0f : 66.0f) * g_fxScale;
+      FxPart *p = &f->p[i];
+      memset(p, 0, sizeof(*p));
+      p->x = S / 2.0f - dx * len / 2;
+      p->y = S / 2.0f - dy * len / 2; /* по центру: через точку нажатия */
+      p->vx = dx * len;
+      p->vy = dy * len;
+      p->sz = i == 0 ? 2.6f : 2.2f;
+      p->delay = i * 2;
+      p->rev = 2.0f;
+      p->life = FX_SLASH_FRAMES - p->delay;
+    }
+    goto start;
+  }
   if (f->scratch) {
     /* пара параллельных царапин наискосок, вниз и в одну из сторон; вторая
        чуть позже и чуть короче, как будто провели лапой дважды */
@@ -487,6 +603,7 @@ static void fx_burst(int x, int y) {
       p->vy = dy * len;
       p->sz = i == 0 ? 3.4f : 3.0f;
       p->delay = i * 3;
+      p->rev = 3.0f;
       p->life = FX_SCRATCH_FRAMES - p->delay;
     }
     goto start;
@@ -568,7 +685,7 @@ static void fx_sync(void) {
 static void fx_shutdown(void) {
   if (g_fxHook) UnhookWindowsHookEx(g_fxHook);
   g_fxHook = NULL;
-  for (int k = 0; k < FX_WINDOWS; k++) {
+  for (int k = 0; k < FX_ALL; k++) {
     FxWin *f = &g_fx[k];
     if (f->w) DestroyWindow(f->w);
     if (f->dc) {

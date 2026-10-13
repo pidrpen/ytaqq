@@ -47,7 +47,8 @@
 #define ID_CUR_K5 120 /* «Дракон» */
 #define ID_CUR_K6 121 /* «Чёрный кот» */
 #define ID_CUR_K7 136 /* «Риас» */
-#define ID_FX_BASE 160    /* 160..164: эффект при нажатии в Настройках */
+#define ID_FX_BASE 160    /* 160..165: эффект при нажатии в Настройках */
+#define FX_OPTIONS 6     /* сколько вариантов в «Эффект при нажатии» */
 #define ID_SETUP_BASE 170 /* 170..175: сетапы в Настройках */
 #define ID_CHK_TESS 176   /* точное распознавание (Tesseract) */
 #define SETUP_COUNT 6
@@ -251,7 +252,7 @@ static HWND g_btnK4;
 static HWND g_btnK5;
 static HWND g_btnK6;
 static HWND g_btnK7;
-static HWND g_btnFx[5];      /* эффект при нажатии: как у курсора, нет, звёздочки, пламя, царапины */
+static HWND g_btnFx[FX_OPTIONS]; /* эффект при нажатии: как у курсора, нет, звёздочки, пламя, царапины, разрез */
 static HWND g_btnSetup[SETUP_COUNT]; /* сетапы: курсор и эффект разом */
 static HWND g_chkTess;
 static HWND g_min;
@@ -363,7 +364,8 @@ static BOOL g_sparkle = TRUE; /* у «Феи» — звёздочки при н�
 static BOOL g_flame = TRUE;   /* у «Дракона» — пламя при нажатии */
 static int g_catFx = 1;       /* у «Чёрного кота» при нажатии: 0 ничего, 1 царапины, 2 звёздочки как у Феи */
 /* эффект при нажатии, выбранный отдельно от курсора (меню → «Эффект при нажатии»):
-   -1 — как у выбранного курсора, как раньше; 0 нет; 1 звёздочки; 2 пламя; 3 царапины.
+   -1 — как у выбранного курсора, как раньше; 0 нет; 1 звёздочки; 2 пламя; 3 царапины;
+   4 разрез (красный, в духе Сукуны; каждое десятое нажатие — большой разрез на экран).
    Так любой курсор можно сочетать с любым эффектом. */
 static int g_fxPick = -1;
 static int g_balloonKind; /* куда ведёт щелчок по всплывашке: 0 — изменения в папке, 1 — нарды */
@@ -1104,7 +1106,7 @@ static void load_cursor_pref(void) {
   g_sparkle = sparkle != 0;
   g_flame = flame != 0;
   g_catFx = catFx == 0 ? 0 : (catFx == 2 ? 2 : 1);
-  g_fxPick = fxPick >= 0 && fxPick <= 3 ? fxPick : -1;
+  g_fxPick = fxPick >= 0 && fxPick <= 4 ? fxPick : -1;
   g_padMode = padMode == 1 ? 1 : 0;
   g_cardX = cx;
   g_cardY = cy;
@@ -1160,10 +1162,10 @@ static void save_cursor_pref(void) {
 }
 
 /* кнопки эффекта в Настройках: порядок совпадает с ID_FX_BASE */
-static const wchar_t *const kFxNames[5] = {L"Как у курсора", L"Нет", L"Звёздочки", L"Пламя", L"Царапины"};
-static const int kFxPick[5] = {-1, 0, 1, 2, 3};
+static const wchar_t *const kFxNames[FX_OPTIONS] = {L"Как у курсора", L"Нет", L"Звёздочки", L"Пламя", L"Царапины", L"Разрез"};
+static const int kFxPick[FX_OPTIONS] = {-1, 0, 1, 2, 3, 4};
 static void update_fx_buttons(void) {
-  for (int i = 0; i < 5; i++) {
+  for (int i = 0; i < FX_OPTIONS; i++) {
     if (!g_btnFx[i]) continue;
     wchar_t t[32];
     _snwprintf(t, 32, L"%s%s", g_fxPick == kFxPick[i] ? L"● " : L"", kFxNames[i]);
@@ -1209,7 +1211,7 @@ static void set_skin(int skin) {
 /* эффект при нажатии отдельно от курсора: имена для строки состояния */
 static const wchar_t *fx_pick_name(int pick) {
   return pick == 1 ? L"звёздочки" : pick == 2 ? L"пламя" : pick == 3 ? L"царапины"
-         : pick == 0 ? L"нет" : L"как у курсора";
+         : pick == 4 ? L"разрез" : pick == 0 ? L"нет" : L"как у курсора";
 }
 
 static void set_fx_pick(int pick) {
@@ -3099,7 +3101,7 @@ static void layout_settings(void) {
   y += 22;
   {
     int bw = (cw - pad - gap * 2) / 3;
-    for (int i = 0; i < 5; i++)
+    for (int i = 0; i < FX_OPTIONS; i++)
       if (g_btnFx[i]) MOVE_SET(g_btnFx[i], pad + (i % 3) * (bw + gap), y + (i / 3) * (btnH + gap), bw, btnH, TRUE);
   }
   y += 2 * (btnH + gap) + 22;
@@ -3295,7 +3297,7 @@ static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
     if (LOWORD(wParam) == ID_CUR_K6) set_skin(5);
     if (LOWORD(wParam) == ID_CUR_K7) set_skin(6);
     if (LOWORD(wParam) == ID_SYS_CUR) set_skin(0);
-    if (LOWORD(wParam) >= ID_FX_BASE && LOWORD(wParam) < ID_FX_BASE + 5)
+    if (LOWORD(wParam) >= ID_FX_BASE && LOWORD(wParam) < ID_FX_BASE + FX_OPTIONS)
       set_fx_pick(kFxPick[LOWORD(wParam) - ID_FX_BASE]);
     if (LOWORD(wParam) >= ID_SETUP_BASE && LOWORD(wParam) < ID_SETUP_BASE + SETUP_COUNT)
       apply_setup(LOWORD(wParam) - ID_SETUP_BASE);
@@ -3704,7 +3706,7 @@ static void create_settings(HWND owner) {
   g_btnK6 = mk_btn(g_setHwnd, L"Чёрный кот", ID_CUR_K6);
   g_btnK7 = mk_btn(g_setHwnd, L"Риас", ID_CUR_K7);
   g_btnSys = mk_btn(g_setHwnd, L"Курсор Windows", ID_SYS_CUR);
-  for (int i = 0; i < 5; i++) g_btnFx[i] = mk_btn(g_setHwnd, kFxNames[i], ID_FX_BASE + i);
+  for (int i = 0; i < FX_OPTIONS; i++) g_btnFx[i] = mk_btn(g_setHwnd, kFxNames[i], ID_FX_BASE + i);
   for (int i = 0; i < SETUP_COUNT; i++) g_btnSetup[i] = mk_btn(g_setHwnd, g_setups[i].name, ID_SETUP_BASE + i);
   g_chkTess = CreateWindowExW(0, L"BUTTON", L"точное распознавание (Tesseract)",
                               WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 0, 0, 240, 26,
