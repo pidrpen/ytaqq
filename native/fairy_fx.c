@@ -28,15 +28,14 @@
    «Эффект при нажатии» в Настройках.
 
    «Разрез» (g_fxPick == 4) — красный разрез в духе Сукуны: из точки нажатия
-   наискосок проводятся два тонких алых росчерка, пересекаясь, — быстро, за
-   четверть секунды. Каждое десятое нажатие ещё и рисует большой разрез через
-   весь экран того монитора, где кликнули: толстый и тонкий рядом, с красным
-   свечением, проводится за долю секунды и гаснет.
+   наискосок проводится один тонкий алый росчерк. Он проводится быстрым взмахом,
+   держится и тонеет, закрываясь, примерно за треть секунды.
 
-   Каждое двадцатое нажатие вместо одиночного большого разреза раскалывает
-   экран: снимок экрана режется несколькими большими разрезами на куски, куски
-   разъезжаются и падают, экран становится чёрным, потом куски возвращаются
-   на место. Всё в том же окне на весь монитор. */
+   Редкие удачи, каждое нажатие отдельно: с шансом 5 % большой разрез через весь
+   монитор, где кликнули — толстый и тонкий рядом, с красным свечением; с шансом
+   2 % экран раскалывается: снимок режется большими разрезами на куски, куски
+   разъезжаются и падают, экран становится чёрным, потом куски возвращаются на
+   место. Всё в том же окне на весь монитор. */
 
 #define WM_FAIRY_CLICK (WM_APP + 17)
 #define FX_WINDOWS 4    /* столько облачков может лететь одновременно */
@@ -48,12 +47,11 @@
 #define FX_FLAME_FRAMES 34 /* ~0.55 с */
 #define FX_SCRATCHES 2  /* царапин у «Чёрного кота» */
 #define FX_SCRATCH_FRAMES 18 /* ~0.3 с */
-#define FX_SLASHES 2    /* красных разрезов на каждое нажатие у «Разреза» */
-#define FX_SLASH_FRAMES 16 /* ~0.27 с */
+#define FX_SLASH_FRAMES 22 /* ~0.35 с: разрез проводится, держится и тонеет */
 #define FX_BIG_CUTS 2   /* толстый разрез и тонкая спутница рядом */
 #define FX_BIG_FRAMES 40 /* ~0.65 с */
-#define FX_BIG_EVERY 10 /* каждое десятое нажатие — большой разрез на весь экран */
-#define FX_SHATTER_EVERY 20 /* каждое двадцатое — раскол экрана на куски вместо одиночного разреза */
+#define FX_BIG_CHANCE 0.05f /* шанс на нажатие в «Разрезе»: большой разрез через весь монитор */
+#define FX_SHATTER_CHANCE 0.02f /* шанс раскола экрана на куски; проверяется раньше большого */
 #define FX_SHATTER_CUTS 7 /* столько больших разрезов режут экран */
 #define FX_SHATTER_PIECES (1 << FX_SHATTER_CUTS) /* кусков — не больше */
 #define FX_SHATTER_CUT_FRAMES 8  /* разрезы проводятся поверх экрана */
@@ -91,7 +89,6 @@ typedef struct {
 } FxWin;
 
 static FxWin g_fx[FX_ALL];
-static int g_slashClicks; /* сколько нажатий в «Разрезе» с последнего раскола */
 static HHOOK g_fxHook;
 
 /* раскол экрана: снимок в момент нажатия, номер куска у каждого пикселя и
@@ -252,11 +249,15 @@ static void fx_scratch_part(FxWin *f, const FxPart *p, int age) {
   float len = sqrtf(p->vx * p->vx + p->vy * p->vy);
   if (len < 1.0f) return;
   float ux = p->vx / len, uy = p->vy / len;
-  float reveal = (age + 1) / p->rev; /* дорисовывается до конца за p->rev кадров */
+  float t = (age + 1) / p->rev; /* за p->rev кадров дорисовывается до конца */
+  if (t > 1.0f) t = 1.0f;
+  /* у красного разреза — быстрый взмах, потом дотягивает; у царапин — ровно */
+  float reveal = f->slash ? 1.0f - (1.0f - t) * (1.0f - t) : t;
   if (reveal > 1.0f) reveal = 1.0f;
   float hold = p->life * 0.45f;
   float a = age < hold ? 1.0f : 1.0f - (age - hold) / (p->life - hold);
-  float maxw = p->sz * g_fxScale;
+  /* красный разрез тонеет к концу жизни: закрывается, а не просто гаснет */
+  float maxw = p->sz * g_fxScale * (f->slash ? 1.0f - 0.45f * age / (float)p->life : 1.0f);
   float reach = f->slash ? maxw * 1.7f + 3.0f : maxw; /* у красного разреза есть свечение */
   float ex = p->x + p->vx * reveal, ey = p->y + p->vy * reveal;
   int x0 = (int)(fminf(p->x, ex) - reach - 2), x1 = (int)(fmaxf(p->x, ex) + reach + 2);
@@ -744,12 +745,10 @@ static void fx_burst(int x, int y) {
   fx_init_sprites();
   int kind = fx_kind();
   if (kind == 4) {
-    /* каждое десятое — большой разрез, каждое двадцатое — раскол вместо него */
-    if (++g_slashClicks == FX_BIG_EVERY) fx_big_slash(x, y);
-    if (g_slashClicks == FX_SHATTER_EVERY) {
-      g_slashClicks = 0;
-      fx_shatter(x, y);
-    }
+    /* редкие удачи поверх обычного разреза: раскол экрана или большой разрез */
+    float r = fx_rand();
+    if (r < FX_SHATTER_CHANCE) fx_shatter(x, y);
+    else if (r < FX_SHATTER_CHANCE + FX_BIG_CHANCE) fx_big_slash(x, y);
   }
   static const BYTE pal[][3] = {
       {255, 105, 180}, {255, 215, 64},  {186, 120, 255}, {90, 200, 255},
@@ -773,27 +772,22 @@ static void fx_burst(int x, int y) {
   f->scratch = kind == 3;
   f->slash = kind == 4;
   if (f->slash) {
-    /* два тонких красных разреза через точку нажатия, под разным углом — крест;
-       второй чуть позже и короче */
-    f->n = FX_SLASHES;
+    /* один тонкий красный разрез через точку нажатия, примерно под 45° */
+    f->n = 1;
     f->frames = FX_SLASH_FRAMES;
     float dir = fx_rand() < 0.5f ? 1.0f : -1.0f;
-    float ang = 0.75f + (fx_rand() - 0.5f) * 0.3f; /* ~45° от горизонтали */
-    for (int i = 0; i < FX_SLASHES; i++) {
-      float a = ang + i * 0.45f;
-      float dx = dir * cosf(a), dy = sinf(a);
-      float len = (i == 0 ? 84.0f : 66.0f) * g_fxScale;
-      FxPart *p = &f->p[i];
-      memset(p, 0, sizeof(*p));
-      p->x = S / 2.0f - dx * len / 2;
-      p->y = S / 2.0f - dy * len / 2; /* по центру: через точку нажатия */
-      p->vx = dx * len;
-      p->vy = dy * len;
-      p->sz = i == 0 ? 2.6f : 2.2f;
-      p->delay = i * 2;
-      p->rev = 2.0f;
-      p->life = FX_SLASH_FRAMES - p->delay;
-    }
+    float a = 0.75f + (fx_rand() - 0.5f) * 0.3f;
+    float dx = dir * cosf(a), dy = sinf(a);
+    float len = 110.0f * g_fxScale;
+    FxPart *p = &f->p[0];
+    memset(p, 0, sizeof(*p));
+    p->x = S / 2.0f - dx * len / 2;
+    p->y = S / 2.0f - dy * len / 2; /* по центру: через точку нажатия */
+    p->vx = dx * len;
+    p->vy = dy * len;
+    p->sz = 3.2f;
+    p->rev = 4.0f;
+    p->life = FX_SLASH_FRAMES;
     goto start;
   }
   if (f->scratch) {
