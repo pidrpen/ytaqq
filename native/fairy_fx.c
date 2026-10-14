@@ -36,7 +36,14 @@
    раз в 340: снимок режется большими разрезами на куски, куски разъезжаются и
    падают, экран становится чёрным, потом куски возвращаются на место. На каждое
    нажатие один бросок: раскол проверяется первым, затем большой разрез.
-   Всё в том же окне на весь монитор. */
+   Всё в том же окне на весь монитор.
+
+   С 2026.10.14.2 — ещё четыре эффекта (styles.c добавил к ним курсоры):
+   «Кольца» — три водяных кольца расходятся из точки нажатия; «Конфетти» —
+   горсть цветных бумажек подлетает, кувыркается и осыпается; «Молния» — три
+   ломаных голубых разряда бьют из точки нажатия и мерцают; «Сердечки» — пять
+   сердечек всплывают, покачиваясь, и тают. Тот же движок рисует их и в
+   окошке просмотра Настроек (fx_seed и fx_paint без своего окна). */
 
 #define WM_FAIRY_CLICK (WM_APP + 17)
 #define FX_WINDOWS 4    /* столько облачков может лететь одновременно */
@@ -61,7 +68,15 @@
 #define FX_SHATTER_BACK_FRAMES 36  /* куски возвращаются на место */
 #define FX_SHATTER_FRAMES (FX_SHATTER_CUT_FRAMES + FX_SHATTER_SPLIT_FRAMES + \
                            FX_SHATTER_HOLD_FRAMES + FX_SHATTER_BACK_FRAMES)
-#define FX_MAXP 12      /* больше из трёх: звёздочек, язычков и царапин */
+#define FX_RINGS 3      /* «Кольца» */
+#define FX_RING_FRAMES 36
+#define FX_CONFETTI 16  /* «Конфетти» */
+#define FX_CONFETTI_FRAMES 48
+#define FX_BOLTS 3      /* «Молния» */
+#define FX_BOLT_FRAMES 18
+#define FX_HEARTS 5     /* «Сердечки» */
+#define FX_HEART_FRAMES 44
+#define FX_MAXP 16      /* больше всех частиц у конфетти */
 
 typedef struct {
   float x, y, vx, vy;
@@ -85,6 +100,7 @@ typedef struct {
   BOOL scratch;  /* царапины «Чёрного кота» */
   BOOL slash;    /* красный «Разрез» — и обычный, и большой */
   BOOL shatter;  /* раскол экрана на куски (каждое двадцатое нажатие) */
+  int kind;      /* какой эффект: как у fx_kind; 5…8 рисует fx_paint_new */
   POINT org;
   FxPart p[FX_MAXP];
 } FxWin;
@@ -372,18 +388,310 @@ static void fx_shatter_render(FxWin *f) {
   for (int i = 0; i < f->n; i++) fx_scratch_part(f, &f->p[i], f->frame - f->p[i].delay);
 }
 
-/* кадр: пустой буфер и поверх — каждая звёздочка своим цветом */
-static void fx_render(FxWin *f) {
+/* ---- «Кольца», «Конфетти», «Молния», «Сердечки» (с 2026.10.14.2) ---------- */
+
+/* одна точка буфера поверх того, что уже есть (буфер с домноженной альфой) */
+static void fx_put(FxWin *f, int x, int y, float cr, float cg, float cb, float sa) {
+  if (x < 0 || y < 0 || x >= f->W || y >= f->H || sa <= 0.0f) return;
+  if (sa > 1.0f) sa = 1.0f;
+  BYTE *d = f->bits + ((size_t)y * f->W + x) * 4;
+  float inv = 1.0f - sa;
+  d[0] = (BYTE)(cb * sa + d[0] * inv);
+  d[1] = (BYTE)(cg * sa + d[1] * inv);
+  d[2] = (BYTE)(cr * sa + d[2] * inv);
+  d[3] = (BYTE)(255 * sa + d[3] * inv);
+}
+
+static float fx_clamp01(float v) { return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v); }
+
+/* мягкое круглое пятно: вспышка в точке нажатия */
+static void fx_glow_dot(FxWin *f, float cx, float cy, float r, float cr, float cg, float cb, float a) {
+  if (r < 0.5f || a <= 0.0f) return;
+  for (int y = (int)(cy - r - 1); y <= (int)(cy + r + 1); y++)
+    for (int x = (int)(cx - r - 1); x <= (int)(cx + r + 1); x++) {
+      float d = sqrtf((x + 0.5f - cx) * (x + 0.5f - cx) + (y + 0.5f - cy) * (y + 0.5f - cy)) / r;
+      if (d < 1.0f) fx_put(f, x, y, cr, cg, cb, a * (1.0f - d) * (1.0f - d));
+    }
+}
+
+/* водяное кольцо: светлое изнутри, тёмно-синее снаружи — видно и на белом */
+static void fx_ring_part(FxWin *f, const FxPart *p, int age) {
+  if (age < 0 || age >= p->life) return;
+  float t = (float)age / p->life;
+  float ease = 1.0f - (1.0f - t) * (1.0f - t) * (1.0f - t);
+  float rad = (3.0f + p->sz * ease) * g_fxScale;
+  float thick = (2.6f - 1.5f * t) * g_fxScale;
+  float a = 0.9f * powf(1.0f - t, 1.4f);
+  int span = (int)(rad + thick + 2);
+  for (int y = (int)p->y - span; y <= (int)p->y + span; y++)
+    for (int x = (int)p->x - span; x <= (int)p->x + span; x++) {
+      float d = sqrtf((x + 0.5f - p->x) * (x + 0.5f - p->x) + (y + 0.5f - p->y) * (y + 0.5f - p->y));
+      float k = 1.0f - fabsf(d - rad) / thick;
+      if (k <= 0.0f) continue;
+      float u = fx_clamp01((d - rad) / thick * 0.5f + 0.5f); /* 0 изнутри, 1 снаружи */
+      fx_put(f, x, y, fx_mix(170, 28, u), fx_mix(235, 104, u), fx_mix(255, 196, u), a * fx_clamp01(k * 1.6f));
+    }
+}
+
+/* бумажка конфетти: повёрнутый прямоугольник; ширина «дышит» — она кувыркается */
+static void fx_confetti_part(FxWin *f, const FxPart *p, int age) {
+  if (age < 0 || age >= p->life) return;
+  float t = (float)age / p->life;
+  float a = t < 0.65f ? 1.0f : 1.0f - (t - 0.65f) / 0.35f;
+  float hl = p->sz * g_fxScale;
+  float hw = p->spr / 10.0f * g_fxScale * (0.25f + 0.75f * fabsf(cosf(p->tw * 1.3f)));
+  float c = cosf(p->tw), s = sinf(p->tw);
+  float shade = 0.75f + 0.25f * fabsf(cosf(p->tw * 1.3f)); /* повёрнутая ребром — темнее */
+  int span = (int)(hl + 2);
+  for (int y = (int)p->y - span; y <= (int)p->y + span; y++)
+    for (int x = (int)p->x - span; x <= (int)p->x + span; x++) {
+      float dx = x + 0.5f - p->x, dy = y + 0.5f - p->y;
+      float lx = dx * c + dy * s, ly = -dx * s + dy * c;
+      float k = fx_clamp01(hl - fabsf(lx) + 0.5f) * fx_clamp01(hw - fabsf(ly) + 0.5f);
+      if (k > 0.0f) fx_put(f, x, y, p->r * shade, p->g * shade, p->b * shade, a * k);
+    }
+}
+
+/* разряд целиком: ломаная из отрезков разной толщины. Каждую точку красим один
+   раз — по ближайшему отрезку, иначе на стыках свечение ложится дважды и молния
+   выходит «бусами». Белая сердцевина, насыщенно-синий край (видно на белом) и
+   голубое свечение вокруг */
+#define FX_BOLT_SEGS 9
+static void fx_bolt_draw(FxWin *f, const float (*sg)[5], int n, float a) {
+  if (n <= 0) return;
+  float glowMax = 6.0f * g_fxScale;
+  float xa = 1e9f, xb = -1e9f, ya = 1e9f, yb = -1e9f;
+  for (int k = 0; k < n; k++) {
+    xa = fminf(xa, fminf(sg[k][0], sg[k][2]));
+    xb = fmaxf(xb, fmaxf(sg[k][0], sg[k][2]));
+    ya = fminf(ya, fminf(sg[k][1], sg[k][3]));
+    yb = fmaxf(yb, fmaxf(sg[k][1], sg[k][3]));
+  }
+  for (int y = (int)(ya - glowMax - 1); y <= (int)(yb + glowMax + 1); y++)
+    for (int x = (int)(xa - glowMax - 1); x <= (int)(xb + glowMax + 1); x++) {
+      float core = 0.0f, edge = 0.0f, glow = 0.0f;
+      for (int k = 0; k < n; k++) {
+        float w = sg[k][4], vx = sg[k][2] - sg[k][0], vy = sg[k][3] - sg[k][1];
+        float l2 = vx * vx + vy * vy;
+        if (l2 < 0.01f) continue;
+        float px = x + 0.5f - sg[k][0], py = y + 0.5f - sg[k][1];
+        float s = fx_clamp01((px * vx + py * vy) / l2);
+        float ex = px - vx * s, ey = py - vy * s;
+        float d = sqrtf(ex * ex + ey * ey);
+        float rc = 0.9f * g_fxScale * w, re = rc + 1.4f * g_fxScale * w, rg = glowMax * w;
+        core = fmaxf(core, fx_clamp01(rc + 0.5f - d));
+        edge = fmaxf(edge, fx_clamp01(re + 0.5f - d));
+        if (d < rg) {
+          float g = 1.0f - d / rg;
+          glow = fmaxf(glow, g * g);
+        }
+      }
+      if (glow <= 0.0f) continue;
+      fx_put(f, x, y, 110, 170, 255, a * 0.45f * glow);
+      fx_put(f, x, y, 40, 90, 235, a * edge);
+      fx_put(f, x, y, 245, 250, 255, a * core);
+    }
+}
+
+/* ломаная молнии: каждые три кадра излом новый — разряд потрескивает */
+static void fx_bolt_part(FxWin *f, const FxPart *p, int age) {
+  if (age < 0 || age >= p->life) return;
+  float fade = age < 10 ? 1.0f : 1.0f - (age - 10) / (float)(p->life - 10);
+  float a = fade * (age % 4 == 2 ? 0.5f : 1.0f);
+  unsigned rs = (unsigned)p->spr * 2654435761u + (unsigned)(age / 3) * 7919u;
+#define FX_BOLT_RND() ((rs = rs * 1103515245u + 12345u), (float)((rs >> 8) & 0xFFFF) / 65535.0f)
+  float ux = cosf(p->tw), uy = sinf(p->tw), nx = -uy, ny = ux;
+  float len = p->sz * g_fxScale, jit = 7.0f * g_fxScale;
+  float px[7], py[7];
+  for (int j = 0; j < 7; j++) {
+    float s = j / 6.0f, off = j == 0 ? 0.0f : (FX_BOLT_RND() - 0.5f) * 2.0f * jit;
+    px[j] = p->x + ux * len * s + nx * off;
+    py[j] = p->y + uy * len * s + ny * off;
+  }
+  float sg[FX_BOLT_SEGS][5];
+  int n = 0;
+  int shown = (int)((age + 1) * 2.5f); /* разряд пробегает за пару кадров */
+  if (shown > 6) shown = 6;
+  for (int j = 0; j < shown; j++) {
+    sg[n][0] = px[j], sg[n][1] = py[j], sg[n][2] = px[j + 1], sg[n][3] = py[j + 1];
+    sg[n++][4] = 1.0f - j * 0.08f;
+  }
+  if (shown >= 5) { /* отросток от середины */
+    float side = FX_BOLT_RND() < 0.5f ? -1.0f : 1.0f;
+    float bx = cosf(p->tw + 0.7f * side), by = sinf(p->tw + 0.7f * side);
+    float qx = px[3] + bx * len * 0.22f + nx * (FX_BOLT_RND() - 0.5f) * jit;
+    float qy = py[3] + by * len * 0.22f + ny * (FX_BOLT_RND() - 0.5f) * jit;
+    sg[n][0] = px[3], sg[n][1] = py[3], sg[n][2] = qx, sg[n][3] = qy, sg[n++][4] = 0.7f;
+    sg[n][0] = qx, sg[n][1] = qy, sg[n][2] = qx + bx * len * 0.16f, sg[n][3] = qy + by * len * 0.16f;
+    sg[n++][4] = 0.55f;
+  }
+#undef FX_BOLT_RND
+  fx_bolt_draw(f, (const float(*)[5])sg, n, a);
+}
+
+/* сердечко: (u²+v²−1)³ − u²v³ ≤ 0, тёмная кайма, светлый блик */
+static int fx_heart_in(float u, float v) {
+  float q = u * u + v * v - 1.0f;
+  return q * q * q - u * u * v * v * v <= 0.0f;
+}
+
+static void fx_heart_part(FxWin *f, const FxPart *p, int age) {
+  if (age < 0 || age >= p->life) return;
+  float t = (float)age / p->life;
+  float a = t < 0.55f ? 1.0f : 1.0f - (t - 0.55f) / 0.45f;
+  float pop = age < 4 ? (age + 1) / 4.0f * 1.2f : (age < 7 ? 1.2f - 0.2f * (age - 3) / 3.0f : 1.0f);
+  float sc = p->sz * g_fxScale * pop;
+  if (sc < 1.0f) return;
+  float rim = sc * 1.2f;
+  int span = (int)(rim * 1.4f + 2);
+  for (int y = (int)p->y - span; y <= (int)p->y + span; y++)
+    for (int x = (int)p->x - span; x <= (int)p->x + span; x++) {
+      int in = 0, inR = 0;
+      for (int sy = 0; sy < 3; sy++)
+        for (int sx = 0; sx < 3; sx++) {
+          float ox = x + (sx + 0.5f) / 3.0f - p->x, oy = p->y - (y + (sy + 0.5f) / 3.0f) + 0.15f * sc;
+          in += fx_heart_in(ox / sc, oy / sc);
+          inR += fx_heart_in(ox / rim, oy / rim);
+        }
+      if (!inR) continue;
+      float fill = in / 9.0f, cov = inR / 9.0f;
+      float cr = fx_mix(p->r * 0.5f, p->r, fill), cg = fx_mix(p->g * 0.5f, p->g, fill),
+            cb = fx_mix(p->b * 0.5f, p->b, fill);
+      float hx = (x + 0.5f - p->x) / sc + 0.42f, hy = (y + 0.5f - p->y) / sc + 0.25f;
+      float hl = 1.0f - sqrtf(hx * hx + hy * hy) / 0.24f; /* блик слева вверху */
+      if (hl > 0.0f && fill > 0.5f) {
+        cr = fx_mix(cr, 255, hl * 0.7f), cg = fx_mix(cg, 255, hl * 0.7f), cb = fx_mix(cb, 255, hl * 0.7f);
+      }
+      fx_put(f, x, y, cr, cg, cb, a * cov);
+    }
+}
+
+static void fx_seed_new(FxWin *f, int kind, int S) {
+  float c = S / 2.0f;
+  if (kind == 5) { /* три кольца одно за другим */
+    f->n = FX_RINGS;
+    f->frames = FX_RING_FRAMES;
+    for (int i = 0; i < FX_RINGS; i++) {
+      FxPart *p = &f->p[i];
+      memset(p, 0, sizeof(*p));
+      p->x = c;
+      p->y = c;
+      p->delay = i * 5;
+      p->life = FX_RING_FRAMES - p->delay;
+      p->sz = 40.0f - i * 8.0f;
+    }
+  } else if (kind == 6) { /* конфетти: вверх и в стороны, потом осыпается */
+    static const BYTE pal[][3] = {{239, 68, 68},  {249, 115, 22}, {234, 179, 8},  {34, 197, 94},
+                                  {14, 165, 233}, {99, 102, 241}, {217, 70, 239}, {236, 72, 153}};
+    f->n = FX_CONFETTI;
+    f->frames = FX_CONFETTI_FRAMES;
+    for (int i = 0; i < FX_CONFETTI; i++) {
+      FxPart *p = &f->p[i];
+      memset(p, 0, sizeof(*p));
+      p->x = c + (fx_rand() - 0.5f) * 6.0f * g_fxScale;
+      p->y = c + (fx_rand() - 0.5f) * 6.0f * g_fxScale;
+      p->vx = (fx_rand() - 0.5f) * 5.0f * g_fxScale;
+      p->vy = -(2.6f + fx_rand() * 3.4f) * g_fxScale;
+      p->sz = 3.0f + fx_rand() * 2.0f;
+      p->spr = 14 + (int)(fx_rand() * 10);
+      p->tw = fx_rand() * 6.2832f;
+      p->rev = (fx_rand() - 0.5f) * 0.6f;
+      p->delay = (int)(fx_rand() * 3);
+      p->life = FX_CONFETTI_FRAMES - p->delay;
+      const BYTE *col = pal[i % 8];
+      p->r = col[0];
+      p->g = col[1];
+      p->b = col[2];
+    }
+  } else if (kind == 7) { /* три разряда в разные стороны */
+    f->n = FX_BOLTS;
+    f->frames = FX_BOLT_FRAMES;
+    float base = fx_rand() * 6.2832f;
+    for (int i = 0; i < FX_BOLTS; i++) {
+      FxPart *p = &f->p[i];
+      memset(p, 0, sizeof(*p));
+      p->x = c;
+      p->y = c;
+      p->tw = base + i * (6.2832f / FX_BOLTS) + (fx_rand() - 0.5f) * 0.8f;
+      p->sz = 58.0f + fx_rand() * 26.0f;
+      p->spr = (int)(fx_rand() * 100000);
+      p->delay = i;
+      p->life = FX_BOLT_FRAMES - p->delay;
+    }
+  } else { /* сердечки всплывают, покачиваясь */
+    static const BYTE pal[][3] = {{255, 77, 130}, {255, 120, 170}, {230, 30, 80}, {255, 150, 190}, {244, 63, 94}};
+    f->n = FX_HEARTS;
+    f->frames = FX_HEART_FRAMES;
+    for (int i = 0; i < FX_HEARTS; i++) {
+      FxPart *p = &f->p[i];
+      memset(p, 0, sizeof(*p));
+      p->x = c + (i - (FX_HEARTS - 1) / 2.0f) * 9.0f * g_fxScale + (fx_rand() - 0.5f) * 6.0f * g_fxScale;
+      p->y = c + (fx_rand() - 0.5f) * 6.0f * g_fxScale;
+      p->vy = -(1.0f + fx_rand() * 0.9f) * g_fxScale;
+      p->sz = 5.0f + fx_rand() * 3.0f;
+      p->tw = fx_rand() * 6.2832f;
+      p->delay = (int)(fx_rand() * 8);
+      p->life = FX_HEART_FRAMES - p->delay;
+      const BYTE *col = pal[i % 5];
+      p->r = col[0];
+      p->g = col[1];
+      p->b = col[2];
+    }
+  }
+}
+
+static void fx_paint_new(FxWin *f) {
+  float c = f->W / 2.0f;
+  if (f->kind == 5 && f->frame < 6)
+    fx_glow_dot(f, c, c, 5.0f * g_fxScale, 120, 210, 255, 0.8f * (1.0f - f->frame / 6.0f));
+  if (f->kind == 7 && f->frame < 5)
+    fx_glow_dot(f, c, c, 16.0f * g_fxScale, 150, 200, 255, 0.7f * (1.0f - f->frame / 5.0f));
+  for (int i = 0; i < f->n; i++) {
+    const FxPart *p = &f->p[i];
+    int age = f->frame - p->delay;
+    if (f->kind == 5) fx_ring_part(f, p, age);
+    else if (f->kind == 6) fx_confetti_part(f, p, age);
+    else if (f->kind == 7) fx_bolt_part(f, p, age);
+    else fx_heart_part(f, p, age);
+  }
+}
+
+static void fx_step_new(FxWin *f) {
+  for (int i = 0; i < f->n; i++) {
+    FxPart *p = &f->p[i];
+    int age = f->frame - p->delay;
+    if (age < 0) continue;
+    if (f->kind == 6) {
+      p->x += p->vx;
+      p->y += p->vy;
+      p->vx *= 0.96f;
+      p->vy = p->vy * 0.97f + 0.30f * g_fxScale;
+      p->tw += p->rev;
+    } else if (f->kind == 8) {
+      p->x += sinf(age * 0.18f + p->tw) * 0.7f * g_fxScale;
+      p->y += p->vy;
+      p->vy *= 0.985f;
+    }
+  }
+}
+
+/* кадр: пустой буфер и поверх — каждая звёздочка своим цветом. Только буфер:
+   на экран его выводит fx_render, а просмотр в Настройках — сам */
+static void fx_paint(FxWin *f) {
   int W = f->W, H = f->H;
   int S = W; /* звёздочки, язычки и кольцо — только в квадратных окнах */
   if (f->shatter) {
     fx_shatter_render(f);
-    goto show;
+    return;
   }
   memset(f->bits, 0, (size_t)W * H * 4);
+  if (f->kind >= 5) {
+    fx_paint_new(f);
+    return;
+  }
   if (f->scratch || f->slash) {
     for (int i = 0; i < f->n; i++) fx_scratch_part(f, &f->p[i], f->frame - f->p[i].delay);
-    goto show;
+    return;
   }
   if (f->flame) {
     /* сначала тёплая вспышка в точке нажатия, потом язычки — поздние сверху */
@@ -400,7 +708,7 @@ static void fx_render(FxWin *f) {
       int age = f->frame - f->p[i].delay;
       if (age >= 0) fx_flame_part(f, &f->p[i], age);
     }
-    goto show;
+    return;
   }
   /* вспышка в точке нажатия: розовое колечко расходится и тает */
   if (f->frame < 6) {
@@ -465,14 +773,21 @@ static void fx_render(FxWin *f) {
       }
     }
   }
-show:;
+}
+
+static void fx_render(FxWin *f) {
+  fx_paint(f);
   POINT src = {0, 0};
-  SIZE sz = {W, H};
+  SIZE sz = {f->W, f->H};
   BLENDFUNCTION bf = {AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
   UpdateLayeredWindow(f->w, NULL, &f->org, &sz, f->dc, &src, 0, &bf, ULW_ALPHA);
 }
 
 static void fx_step(FxWin *f) {
+  if (f->kind >= 5) {
+    fx_step_new(f);
+    return;
+  }
   if (f->scratch || f->slash) return; /* царапины и разрезы на месте, только проявляются и гаснут */
   for (int i = 0; i < f->n; i++) {
     FxPart *p = &f->p[i];
@@ -562,16 +877,24 @@ static BOOL fx_prepare_wh(FxWin *f, int W, int H) {
   return TRUE;
 }
 
-/* какой эффект при нажатии сейчас: 0 нет, 1 звёздочки, 2 пламя, 3 царапины,
-   4 разрез. Если эффект выбран в меню отдельно (g_fxPick >= 0), он важнее курсора;
-   иначе — как раньше: фея со звёздочками, дракон с пламенем, кот с царапинами */
-static int fx_kind(void) {
-  if (g_fxPick >= 0) return g_fxPick;
-  if (g_skin == 3) return g_sparkle ? 1 : 0;
-  if (g_skin == 4) return g_flame ? 2 : 0;
-  if (g_skin == 5) return g_catFx == 1 ? 3 : (g_catFx == 2 ? 1 : 0);
+/* какой эффект при нажатии: 0 нет, 1 звёздочки, 2 пламя, 3 царапины, 4 разрез,
+   5 кольца, 6 конфетти, 7 молния, 8 сердечки. Если эффект выбран отдельно
+   (pick >= 0), он важнее курсора; иначе — свой у курсора: фея со звёздочками,
+   дракон с пламенем, кот с царапинами, у новых стилей (styles.c) — свои */
+static int fx_kind_for(int skin, int pick) {
+  if (pick >= 0) return pick;
+  if (skin == 3) return g_sparkle ? 1 : 0;
+  if (skin == 4) return g_flame ? 2 : 0;
+  if (skin == 5) return g_catFx == 1 ? 3 : (g_catFx == 2 ? 1 : 0);
+  if (skin == 7) return 7;  /* Неон — молния */
+  if (skin == 8) return 5;  /* Лёд — кольца */
+  if (skin == 9) return 6;  /* Золото — конфетти */
+  if (skin == 10) return 2; /* Лава — пламя */
+  if (skin == 11) return 1; /* Космос — звёздочки */
   return 0;
 }
+
+static int fx_kind(void) { return fx_kind_for(g_skin, g_fxPick); }
 
 /* бросить то, что сейчас идёт на большом окне: и разрез, и раскол */
 static void fx_big_reset(FxWin *f) {
@@ -601,6 +924,7 @@ static void fx_big_slash(int x, int y) {
   f->org.x = mi.rcMonitor.left;
   f->org.y = mi.rcMonitor.top;
   f->frame = 0;
+  f->kind = 4;
   f->flame = FALSE;
   f->scratch = FALSE;
   f->slash = TRUE;
@@ -728,6 +1052,7 @@ static void fx_shatter(int x, int y) {
   ReleaseDC(NULL, scr);
   if (!fx_shatter_setup(f)) return;
   f->shatter = TRUE;
+  f->kind = 4;
   f->flame = FALSE;
   f->scratch = FALSE;
   f->slash = TRUE;
@@ -741,6 +1066,8 @@ static void fx_shatter(int x, int y) {
   SetTimer(f->w, 1, 16, NULL);
 }
 
+static void fx_seed(FxWin *f, int kind, int S);
+
 /* облачко из точки нажатия */
 static void fx_burst(int x, int y) {
   fx_init_sprites();
@@ -751,10 +1078,6 @@ static void fx_burst(int x, int y) {
     if (r < FX_SHATTER_CHANCE) fx_shatter(x, y);
     else if (r < FX_SHATTER_CHANCE + FX_BIG_CHANCE) fx_big_slash(x, y);
   }
-  static const BYTE pal[][3] = {
-      {255, 105, 180}, {255, 215, 64},  {186, 120, 255}, {90, 200, 255},
-      {80, 230, 170},  {255, 140, 90},  {255, 255, 255}, {255, 70, 140},
-  };
   FxWin *f = NULL;
   for (int k = 0; k < FX_WINDOWS && !f; k++)
     if (!g_fx[k].busy) f = &g_fx[k];
@@ -768,10 +1091,31 @@ static void fx_burst(int x, int y) {
   g_fxSeed ^= GetTickCount() * 2654435761u;
   f->org.x = x - S / 2;
   f->org.y = y - S / 2;
+  fx_seed(f, kind, S);
+  f->busy = TRUE;
+  fx_render(f);
+  SetWindowPos(f->w, HWND_TOPMOST, f->org.x, f->org.y, S, S,
+               SWP_NOACTIVATE | SWP_SHOWWINDOW);
+  SetTimer(f->w, 1, 16, NULL);
+}
+
+/* частицы эффекта kind в квадратном буфере S×S, точка нажатия — посередине.
+   Окна не трогает: так же заводится облачко в окошке просмотра Настроек */
+static void fx_seed(FxWin *f, int kind, int S) {
+  static const BYTE pal[][3] = {
+      {255, 105, 180}, {255, 215, 64},  {186, 120, 255}, {90, 200, 255},
+      {80, 230, 170},  {255, 140, 90},  {255, 255, 255}, {255, 70, 140},
+  };
   f->frame = 0;
+  f->kind = kind;
+  f->shatter = FALSE;
   f->flame = kind == 2;
   f->scratch = kind == 3;
   f->slash = kind == 4;
+  if (kind >= 5) {
+    fx_seed_new(f, kind, S);
+    return;
+  }
   if (f->slash) {
     /* один тонкий красный разрез через точку нажатия, примерно под 45° */
     f->n = 1;
@@ -789,7 +1133,7 @@ static void fx_burst(int x, int y) {
     p->sz = 3.2f;
     p->rev = 4.0f;
     p->life = FX_SLASH_FRAMES;
-    goto start;
+    return;
   }
   if (f->scratch) {
     /* пара параллельных царапин наискосок, вниз и в одну из сторон; вторая
@@ -815,7 +1159,7 @@ static void fx_burst(int x, int y) {
       p->rev = 3.0f;
       p->life = FX_SCRATCH_FRAMES - p->delay;
     }
-    goto start;
+    return;
   }
   if (f->flame) {
     /* немного пламени: язычки из точки нажатия, вверх и чуть в стороны */
@@ -834,7 +1178,7 @@ static void fx_burst(int x, int y) {
       if (p->delay + p->life > FX_FLAME_FRAMES) p->life = FX_FLAME_FRAMES - p->delay;
       p->tw = fx_rand() * 6.2832f;
     }
-    goto start;
+    return;
   }
   f->n = FX_PARTS;
   f->frames = FX_FRAMES;
@@ -864,12 +1208,6 @@ static void fx_burst(int x, int y) {
     p->g = c[1];
     p->b = c[2];
   }
-start:
-  f->busy = TRUE;
-  fx_render(f);
-  SetWindowPos(f->w, HWND_TOPMOST, f->org.x, f->org.y, S, S,
-               SWP_NOACTIVATE | SWP_SHOWWINDOW);
-  SetTimer(f->w, 1, 16, NULL);
 }
 
 static LRESULT CALLBACK fx_mouse_hook(int code, WPARAM wParam, LPARAM lParam) {
