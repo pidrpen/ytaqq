@@ -47,11 +47,17 @@
 #define ID_CUR_K5 120 /* «Дракон» */
 #define ID_CUR_K6 121 /* «Чёрный кот» */
 #define ID_CUR_K7 136 /* «Риас» */
-#define ID_FX_BASE 262    /* 262..269: эффект при нажатии в Настройках (160… заняты окном карточки) */
-#define FX_OPTIONS 6     /* сколько вариантов в «Эффект при нажатии» */
-#define ID_SETUP_BASE 270 /* 270..279: сетапы в Настройках (170 — ID_ANS_OPENTP, кнопка красилась синим) */
+#define ID_FX_BASE 400    /* 400..409: эффект при нажатии в Настройках (до 2026.10.14 — 160…) */
+#define FX_OPTIONS 10    /* сколько вариантов в «Эффект при нажатии» */
+#define ID_SETUP_BASE 420 /* 420..429: сетапы в Настройках */
 #define ID_CHK_TESS 176   /* точное распознавание (Tesseract) */
-#define SETUP_COUNT 6
+#define SETUP_COUNT 10
+#define ID_SEC_BASE 440   /* 440..445: заголовки разделов Настроек — щелчок сворачивает */
+#define SEC_COUNT 6
+#define ID_CUR_ST_BASE 460 /* 460..464: стили «Неон»…«Космос» (styles.c) */
+#define ST_COUNT 5
+#define ST_SKIN0 7          /* g_skin первого из них; 7…11 */
+#define ID_PREVIEW 470      /* окошко просмотра курсора и эффекта */
 #define ID_MIN 106
 #define ID_OCR 107
 #define ID_ALPHA_BG 108
@@ -153,7 +159,8 @@ static wchar_t g_hkName[HK_COUNT][40]; /* на чём работает сейч�
 #define GUTTER 26
 #define SET_W 312
 #define SET_FOOT_H 34 /* внизу окна Настроек — подвал с версией, прокрутка под него не заходит */
-#define SET_H 1259 /* полная высота содержимого Настроек: окно прокручивается, если выше экрана */
+/* полная высота содержимого Настроек считается при раскладке (g_setContentH):
+   она зависит от того, какие разделы раскрыты; окно прокручивается, если выше экрана */
 #define ASK_W 312
 #define ASK_H 224 /* room for the drawn header */
 #define ID_THEME_BASE 140
@@ -254,6 +261,10 @@ static HWND g_btnK6;
 static HWND g_btnK7;
 static HWND g_btnFx[FX_OPTIONS]; /* эффект при нажатии: как у курсора, нет, звёздочки, пламя, царапины, разрез */
 static HWND g_btnSetup[SETUP_COUNT]; /* сетапы: курсор и эффект разом */
+static HWND g_btnSt[ST_COUNT];       /* стили, нарисованные кодом */
+static HWND g_btnSec[SEC_COUNT];     /* заголовки разделов Настроек */
+static HWND g_preview;               /* просмотр курсора и эффекта (styles.c) */
+static int g_secOpen = 1;            /* какие разделы раскрыты: бит на раздел; сначала — только первый */
 static HWND g_chkTess;
 static HWND g_min;
 static HWND g_ocr;
@@ -359,13 +370,15 @@ static int g_ocrPt = 11;
 static HFONT g_ocrFontZoom;
 static BOOL g_statusOn = FALSE;
 static HINSTANCE g_inst;
-static int g_skin = 1; /* 0 system, 1 sword, 2 gauntlet, 3 fairy, 4 dragon, 5 black cat, 6 rias */
+static int g_skin = 1; /* 0 system, 1 sword, 2 gauntlet, 3 fairy, 4 dragon, 5 black cat, 6 rias,
+                          7…11 нарисованные кодом стили (styles.c): неон, лёд, золото, лава, космос */
 static BOOL g_sparkle = TRUE; /* у «Феи» — звёздочки при нажатии */
 static BOOL g_flame = TRUE;   /* у «Дракона» — пламя при нажатии */
 static int g_catFx = 1;       /* у «Чёрного кота» при нажатии: 0 ничего, 1 царапины, 2 звёздочки как у Феи */
 /* эффект при нажатии, выбранный отдельно от курсора (меню → «Эффект при нажатии»):
    -1 — как у выбранного курсора, как раньше; 0 нет; 1 звёздочки; 2 пламя; 3 царапины;
-   4 разрез (красный, в духе Сукуны; изредка большой разрез и раскол экрана).
+   4 разрез (красный, в духе Сукуны; изредка большой разрез и раскол экрана);
+   5 кольца; 6 конфетти; 7 молния; 8 сердечки.
    Так любой курсор можно сочетать с любым эффектом. */
 static int g_fxPick = -1;
 static int g_balloonKind; /* куда ведёт щелчок по всплывашке: 0 — изменения в папке, 1 — нарды */
@@ -634,7 +647,15 @@ static void rias_apply(void) {
   }
 }
 
+static void style_apply(int st); /* styles.c */
+
 static void apply_scheme_slots(void) {
+  if (g_skin >= ST_SKIN0 && g_skin < ST_SKIN0 + ST_COUNT) {
+    style_apply(g_skin - ST_SKIN0);
+    g_cursorOn = TRUE;
+    mark_cursor_dirty(TRUE);
+    return;
+  }
   if (g_skin == 6) {
     rias_apply();
     g_cursorOn = TRUE;
@@ -1100,13 +1121,15 @@ static void load_cursor_pref(void) {
   int flame = -1; /* нет в файле — пламя включено */
   int catFx = -1; /* нет в файле — царапины */
   int fxPick = -1; /* нет в файле — эффект как у курсора */
-  sscanf(buf, "%15s %d %d %15s %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d", skin,
+  int secOpen = -1; /* нет в файле — раскрыт только первый раздел Настроек */
+  sscanf(buf, "%15s %d %d %15s %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d", skin,
          &bg, &fg, eng, &autoOn, &theme, &aw, &ah, &cw, &ch, &pt, &keep, &ax, &ay, &cx, &cy, &cpt,
-         &ox, &oy, &ow, &oh, &opt, &sparkle, &padMode, &flame, &catFx, &fxPick);
+         &ox, &oy, &ow, &oh, &opt, &sparkle, &padMode, &flame, &catFx, &fxPick, &secOpen);
+  if (secOpen >= 0 && secOpen < (1 << SEC_COUNT)) g_secOpen = secOpen;
   g_sparkle = sparkle != 0;
   g_flame = flame != 0;
   g_catFx = catFx == 0 ? 0 : (catFx == 2 ? 2 : 1);
-  g_fxPick = fxPick >= 0 && fxPick <= 4 ? fxPick : -1;
+  g_fxPick = fxPick >= 0 && fxPick <= 8 ? fxPick : -1;
   g_padMode = padMode == 1 ? 1 : 0;
   g_cardX = cx;
   g_cardY = cy;
@@ -1124,7 +1147,8 @@ static void load_cursor_pref(void) {
   if (cw >= 320 && cw <= 4000) g_cardW = cw;
   if (ch >= 200 && ch <= 3000) g_cardH = ch;
   if (pt >= 7 && pt <= 22) g_ansPt = pt;
-  if (skin[0] == 'k' && skin[1] == '7') g_skin = 6;
+  if (skin[0] == 't' && skin[1] >= '1' && skin[1] < '1' + ST_COUNT) g_skin = ST_SKIN0 + (skin[1] - '1');
+  else if (skin[0] == 'k' && skin[1] == '7') g_skin = 6;
   else if (skin[0] == 'k' && skin[1] == '6') g_skin = 5;
   else if (skin[0] == 'k' && skin[1] == '5') g_skin = 4;
   else if (skin[0] == 'k' && skin[1] == '4') g_skin = 3;
@@ -1142,17 +1166,19 @@ static void load_cursor_pref(void) {
 }
 
 static void save_cursor_pref(void) {
-  const char *v = g_skin == 6 ? "k7"
+  static const char *const kSt[ST_COUNT] = {"t1", "t2", "t3", "t4", "t5"};
+  const char *v = g_skin >= ST_SKIN0 && g_skin < ST_SKIN0 + ST_COUNT ? kSt[g_skin - ST_SKIN0]
+                  : g_skin == 6 ? "k7"
                   : g_skin == 5 ? "k6"
                   : g_skin == 4 ? "k5"
                   : g_skin == 3 ? "k4" : (g_skin == 2 ? "k3" : (g_skin == 0 ? "system" : "k2"));
   const char *e = g_engine == 4 ? "plm" : (g_engine == 5 ? "files" : "ai");
   char buf[280];
-  snprintf(buf, sizeof(buf), "%s %d %d %s %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d\n",
+  snprintf(buf, sizeof(buf), "%s %d %d %s %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d\n",
            v, g_alphaFollow, g_alphaPinned, e, g_autostart ? 1 : 0, g_theme, g_ansW, g_ansH,
            g_cardW, g_cardH, g_ansPt, g_ansKeepPos ? 1 : 0, g_ansX, g_ansY, g_cardX, g_cardY,
            g_cardPt, g_ocrX, g_ocrY, g_ocrW, g_ocrH, g_ocrPt, g_sparkle ? 1 : 0, g_padMode,
-           g_flame ? 1 : 0, g_catFx, g_fxPick);
+           g_flame ? 1 : 0, g_catFx, g_fxPick, g_secOpen);
   HANDLE h = CreateFileW(g_prefPath, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
                          FILE_ATTRIBUTE_NORMAL, NULL);
   if (h == INVALID_HANDLE_VALUE) return;
@@ -1162,8 +1188,12 @@ static void save_cursor_pref(void) {
 }
 
 /* кнопки эффекта в Настройках: порядок совпадает с ID_FX_BASE */
-static const wchar_t *const kFxNames[FX_OPTIONS] = {L"Как у курсора", L"Нет", L"Звёздочки", L"Пламя", L"Царапины", L"Разрез"};
-static const int kFxPick[FX_OPTIONS] = {-1, 0, 1, 2, 3, 4};
+static const wchar_t *const kFxNames[FX_OPTIONS] = {L"Как у курсора", L"Нет",    L"Звёздочки", L"Пламя",
+                                                    L"Царапины",      L"Разрез", L"Кольца",    L"Конфетти",
+                                                    L"Молния",        L"Сердечки"};
+static const int kFxPick[FX_OPTIONS] = {-1, 0, 1, 2, 3, 4, 5, 6, 7, 8};
+static const wchar_t *const kStyleNames[ST_COUNT] = {L"Неон", L"Лёд", L"Золото", L"Лава", L"Космос"};
+
 static void update_fx_buttons(void) {
   for (int i = 0; i < FX_OPTIONS; i++) {
     if (!g_btnFx[i]) continue;
@@ -1173,19 +1203,29 @@ static void update_fx_buttons(void) {
   }
 }
 
+/* имя набора курсоров: для кнопок, строки состояния и просмотра */
+static const wchar_t *skin_name(int skin) {
+  static const wchar_t *const kOld[7] = {L"Windows", L"Мечник", L"Рукавица", L"Фея", L"Дракон", L"Чёрный кот", L"Риас"};
+  if (skin >= ST_SKIN0 && skin < ST_SKIN0 + ST_COUNT) return kStyleNames[skin - ST_SKIN0];
+  return skin >= 0 && skin < 7 ? kOld[skin] : L"Мечник";
+}
+
+static void set_mark(HWND b, BOOL on, const wchar_t *name) {
+  if (!b) return;
+  wchar_t t[40];
+  _snwprintf(t, 40, L"%s%s", on ? L"● " : L"", name);
+  SetWindowTextW(b, t);
+}
+
 static void update_cursor_buttons(void) {
-  if (g_btnK2)
-    SetWindowTextW(g_btnK2, g_skin == 1 ? L"● Мечник" : L"Мечник");
-  if (g_btnK3)
-    SetWindowTextW(g_btnK3, g_skin == 2 ? L"● Рукавица" : L"Рукавица");
-  if (g_btnK4)
-    SetWindowTextW(g_btnK4, g_skin == 3 ? L"● Фея" : L"Фея");
-  if (g_btnK5)
-    SetWindowTextW(g_btnK5, g_skin == 4 ? L"● Дракон" : L"Дракон");
-  if (g_btnK6)
-    SetWindowTextW(g_btnK6, g_skin == 5 ? L"● Чёрный кот" : L"Чёрный кот");
-  if (g_btnK7)
-    SetWindowTextW(g_btnK7, g_skin == 6 ? L"● Риас" : L"Риас");
+  set_mark(g_btnK2, g_skin == 1, L"Мечник");
+  set_mark(g_btnK3, g_skin == 2, L"Рукавица");
+  set_mark(g_btnK4, g_skin == 3, L"Фея");
+  set_mark(g_btnK5, g_skin == 4, L"Дракон");
+  set_mark(g_btnK6, g_skin == 5, L"Чёрный кот");
+  set_mark(g_btnK7, g_skin == 6, L"Риас");
+  for (int i = 0; i < ST_COUNT; i++) set_mark(g_btnSt[i], g_skin == ST_SKIN0 + i, kStyleNames[i]);
+  set_mark(g_btnSys, g_skin == 0, L"Курсор Windows");
   update_fx_buttons();
 }
 
@@ -1196,11 +1236,7 @@ static void set_skin(int skin) {
   if (skin == 0) restore_system_cursor();
   else install_scheme_cursors();
   fx_sync();
-  _snwprintf(g_status, 160, L"Курсор: %s",
-             skin == 6 ? L"Риас"
-             : skin == 5 ? L"Чёрный кот"
-             : skin == 4 ? L"Дракон"
-             : skin == 3 ? L"Фея" : (skin == 2 ? L"Рукавица" : (skin == 0 ? L"Windows" : L"Мечник")));
+  _snwprintf(g_status, 160, L"Курсор: %s", skin_name(skin));
   g_statusOn = TRUE;
   if (g_hwnd) {
     SetTimer(g_hwnd, TIMER_STATUS, 1600, NULL);
@@ -1210,8 +1246,14 @@ static void set_skin(int skin) {
 
 /* эффект при нажатии отдельно от курсора: имена для строки состояния */
 static const wchar_t *fx_pick_name(int pick) {
-  return pick == 1 ? L"звёздочки" : pick == 2 ? L"пламя" : pick == 3 ? L"царапины"
-         : pick == 4 ? L"разрез" : pick == 0 ? L"нет" : L"как у курсора";
+  static const wchar_t *const kNames[9] = {L"нет",   L"звёздочки", L"пламя",  L"царапины", L"разрез",
+                                           L"кольца", L"конфетти", L"молния", L"сердечки"};
+  return pick >= 0 && pick < 9 ? kNames[pick] : L"как у курсора";
+}
+
+/* то же с большой буквы — для окошка просмотра (там всегда сам эффект) */
+static const wchar_t *fx_pick_label(int kind) {
+  return kind > 0 && kind < FX_OPTIONS - 1 ? kFxNames[kind + 1] : L"без эффекта";
 }
 
 static void set_fx_pick(int pick) {
@@ -1235,6 +1277,10 @@ static const struct {
     {L"Риас + царапины", 6, 3},
     {L"Рукавица + царапины", 2, 3},
     {L"Мечник без эффектов", 1, 0},
+    {L"Неон + молния", ST_SKIN0 + 0, 7},
+    {L"Лёд + кольца", ST_SKIN0 + 1, 5},
+    {L"Золото + конфетти", ST_SKIN0 + 2, 6},
+    {L"Космос + сердечки", ST_SKIN0 + 4, 8},
 };
 _Static_assert(sizeof(g_setups) / sizeof(g_setups[0]) == SETUP_COUNT, "сетапов должно быть SETUP_COUNT");
 
@@ -1248,8 +1294,21 @@ static void apply_setup(int i) {
 
 static void cycle_skin(void) {
   int next = g_skin + 1;
-  if (next > 6) next = 0;
+  if (next >= ST_SKIN0 + ST_COUNT) next = 0;
   set_skin(next);
+}
+
+/* кнопка какого курсора в Настройках; -1 — не кнопка курсора */
+static int settings_skin_of_id(int id) {
+  if (id == ID_CUR_K2) return 1;
+  if (id == ID_CUR_K3) return 2;
+  if (id == ID_CUR_K4) return 3;
+  if (id == ID_CUR_K5) return 4;
+  if (id == ID_CUR_K6) return 5;
+  if (id == ID_CUR_K7) return 6;
+  if (id == ID_SYS_CUR) return 0;
+  if (id >= ID_CUR_ST_BASE && id < ID_CUR_ST_BASE + ST_COUNT) return ST_SKIN0 + id - ID_CUR_ST_BASE;
+  return -1;
 }
 
 /* «Фея» чуть крупнее прочих: 1,25 размера системного курсора (40 точек при
@@ -1572,6 +1631,8 @@ static void apply_follow_state(void) {
   if (g_tbBg) EnableWindow(g_tbBg, !g_follow);
   if (g_tbFg) EnableWindow(g_tbFg, !g_follow);
   if (g_btnSys) EnableWindow(g_btnSys, !g_follow);
+  for (int i = 0; i < ST_COUNT; i++)
+    if (g_btnSt[i]) EnableWindow(g_btnSt[i], !g_follow);
   if (g_btnAi) EnableWindow(g_btnAi, !g_follow);
   if (g_btnPlm) EnableWindow(g_btnPlm, !g_follow);
   if (g_btnFiles) EnableWindow(g_btnFiles, !g_follow);
@@ -2069,6 +2130,7 @@ static void round_corners(HWND hwnd);
 
 #include "pad_extra.c"
 #include "fairy_fx.c"
+#include "styles.c" /* курсоры, нарисованные кодом, и просмотр в Настройках */
 
 static void fill_round_rect(HDC hdc, RECT rc, COLORREF fill, COLORREF border, int rad) {
   int d = rad * 2;
@@ -2325,12 +2387,52 @@ static int ui_glyph_of(int id) {
   return id == ID_PIN ? GL_PIN : id == ID_MORE_BTN ? GL_DOTS : id == ID_SETTINGS ? GL_GEAR : -1;
 }
 
+/* заголовок раздела Настроек: строка во всю ширину, слева треугольник —
+   вниз у раскрытого раздела, вправо у свёрнутого */
+static void draw_section_header(const DRAWITEMSTRUCT *dis, int sec) {
+  HDC dc = dis->hDC;
+  RECT rc = dis->rcItem;
+  BOOL open = (g_secOpen >> sec) & 1, press = (dis->itemState & ODS_SELECTED) != 0;
+  int tr = kThemes[g_theme].radius, h = rc.bottom - rc.top;
+  int rad = tr < 0 ? h / 2 : tr;
+  COLORREF fill = open ? COL_PAPER : blend_rgb(COL_PAPER, COL_PAPER_DARK, 128);
+  if (press) fill = blend_rgb(fill, COL_INK, 24);
+  fill_round_rect(dc, rc, fill, open ? COL_SAGE : COL_LINE, rad);
+  int cx = rc.left + 15, cy = (rc.top + rc.bottom) / 2;
+  POINT tri[3];
+  if (open) {
+    tri[0].x = cx - 5, tri[0].y = cy - 3, tri[1].x = cx + 5, tri[1].y = cy - 3, tri[2].x = cx, tri[2].y = cy + 3;
+  } else {
+    tri[0].x = cx - 2, tri[0].y = cy - 5, tri[1].x = cx - 2, tri[1].y = cy + 5, tri[2].x = cx + 4, tri[2].y = cy;
+  }
+  COLORREF tc = open ? COL_SAGE : COL_MUTED;
+  HBRUSH br = CreateSolidBrush(tc);
+  HPEN pn = CreatePen(PS_SOLID, 1, tc);
+  HGDIOBJ ob = SelectObject(dc, br), op = SelectObject(dc, pn);
+  Polygon(dc, tri, 3);
+  SelectObject(dc, ob);
+  SelectObject(dc, op);
+  DeleteObject(br);
+  DeleteObject(pn);
+  wchar_t t[64] = {0};
+  GetWindowTextW(dis->hwndItem, t, 64);
+  RECT tx = {rc.left + 28, rc.top, rc.right - 8, rc.bottom};
+  SetBkMode(dc, TRANSPARENT);
+  SetTextColor(dc, COL_INK);
+  if (g_fontUi) SelectObject(dc, g_fontUi);
+  DrawTextW(dc, t, -1, &tx, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+}
+
 static void draw_pad_button(const DRAWITEMSTRUCT *dis) {
   if (!dis || dis->CtlType != ODT_BUTTON) return;
   RECT rc = dis->rcItem;
   BOOL press = (dis->itemState & ODS_SELECTED) != 0;
   BOOL disab = (dis->itemState & ODS_DISABLED) != 0;
   int id = (int)dis->CtlID;
+  if (id >= ID_SEC_BASE && id < ID_SEC_BASE + SEC_COUNT) {
+    draw_section_header(dis, id - ID_SEC_BASE);
+    return;
+  }
   wchar_t t[96] = {0};
   GetWindowTextW(dis->hwndItem, t, 96);
   BOOL themeBtn = id >= ID_THEME_BASE && id < ID_THEME_BASE + THEME_COUNT;
@@ -2980,7 +3082,7 @@ static void share_apply_root(void) {
   else show_status(L"Общая папка задана");
 }
 
-/* Настройки прокручиваются: всё расставляется в полной высоте SET_H, а окно
+/* Настройки прокручиваются: всё расставляется в полной высоте g_setContentH, а окно
    показывает часть. Шапка и подвал не двигаются; то, что уехало под шапку или
    под подвал, обрезается регионом, а подписи не рисуются вне полосы. */
 static int g_setScroll; /* сколько точек содержимого уехало вверх */
@@ -3015,137 +3117,150 @@ static void draw_set_label(HDC hdc, const wchar_t *text, RECT r, int clientBotto
   DrawTextW(hdc, text, -1, &r, DT_LEFT | DT_SINGLELINE);
 }
 
-static void layout_settings(void);
+/* Настройки разбиты на разделы, раскрываются щелчком по заголовку (с
+   2026.10.14.2): раньше всё вываливалось одной простынёй в 1259 точек. Какие
+   разделы раскрыты, запоминается (g_secOpen). Элементы свёрнутого раздела
+   уезжают далеко за край — их прячет clip_settings_children, как и всё, что
+   ушло под шапку при прокрутке. */
+static const wchar_t *const kSecNames[SEC_COUNT] = {
+    L"Курсор и эффекты", L"Вид окна", L"Поиск: PLM и файлы", L"Общая папка, нарды и шашки",
+    L"Распознавание и клавиши", L"Программа"};
+#define SET_SEC_H 30
+static int g_setContentH = 600; /* высота содержимого при нынешних раскрытых разделах */
+static BOOL g_layOpen;          /* раскладывается раскрытый раздел */
+
+static void set_place(HWND h, int x, int y, int w, int hh) {
+  if (!h) return;
+  if (g_layOpen) MOVE_SET(h, x, y, w, hh, TRUE);
+  else MoveWindow(h, x, -4000, w, hh, FALSE);
+}
+
+/* кнопки сеткой по cols в ряд; последний ряд растягивается на всю ширину.
+   Возвращает, сколько места по высоте заняли */
+static int set_grid(HWND *b, int n, int cols, int x, int y, int w, int bh, int gap) {
+  int rows = (n + cols - 1) / cols;
+  for (int i = 0; i < n; i++) {
+    int row = i / cols, col = i % cols;
+    int inRow = row == rows - 1 ? n - row * cols : cols;
+    int bw = (w - gap * (inRow - 1)) / inRow;
+    int bx = x + col * (bw + gap);
+    if (col == inRow - 1) bw = x + w - bx; /* без щели справа от округления */
+    set_place(b[i], bx, y + row * (bh + gap), bw, bh);
+  }
+  return rows * (bh + gap);
+}
 
 static void layout_settings(void) {
   if (!g_setHwnd) return;
   RECT rc;
   GetClientRect(g_setHwnd, &rc);
-  int maxScroll = SET_H - rc.bottom;
+  int maxScroll = g_setContentH - rc.bottom;
   if (maxScroll < 0) maxScroll = 0;
   if (g_setScroll > maxScroll) g_setScroll = maxScroll;
   if (g_setScroll < 0) g_setScroll = 0;
-  int pad = 14, gap = 7, btnH = 28, y = PANEL_TITLE_H + 26;
+  int pad = 14, gap = 7, btnH = 28, lab = 22, browseW = 78;
   int cw = rc.right - pad;
-  int half = (cw - pad - gap) / 2;
+  int fullW = cw - pad;
+  int half = (fullW - gap) / 2;
+  int y = PANEL_TITLE_H + 8;
   place_panel_close(g_setHwnd);
-  {
-    int browseW = 78;
-    if (g_filesRootEdit)
-      MOVE_SET(g_filesRootEdit, pad, y, cw - pad - browseW - gap, btnH, TRUE);
-    HWND br = GetDlgItem(g_setHwnd, ID_FILES_BROWSE);
-    if (br) MOVE_SET(br, cw - browseW, y, browseW, btnH, TRUE);
+  for (int sec = 0; sec < SEC_COUNT; sec++) {
+    if (g_btnSec[sec]) MOVE_SET(g_btnSec[sec], pad, y, fullW, SET_SEC_H, TRUE);
+    y += SET_SEC_H + gap;
+    g_layOpen = (g_secOpen >> sec) & 1;
+    int y0 = y;
+    switch (sec) {
+    case 0: { /* просмотр, курсоры, эффекты, сетапы */
+      set_place(g_preview, pad, y, fullW, 150);
+      y += 150 + gap + lab;
+      HWND sk[7 + ST_COUNT] = {g_btnK2, g_btnK3, g_btnK4, g_btnK5, g_btnK6, g_btnK7};
+      for (int i = 0; i < ST_COUNT; i++) sk[6 + i] = g_btnSt[i];
+      sk[6 + ST_COUNT] = g_btnSys;
+      y += set_grid(sk, 7 + ST_COUNT, 3, pad, y, fullW, btnH, gap) + lab;
+      y += set_grid(g_btnFx, FX_OPTIONS, 3, pad, y, fullW, btnH, gap) + lab;
+      y += set_grid(g_btnSetup, SETUP_COUNT, 2, pad, y, fullW, btnH, gap);
+      break;
+    }
+    case 1: /* тема и прозрачность */
+      y += lab;
+      y += set_grid(g_btnTheme, THEME_COUNT, 4, pad, y, fullW, btnH, gap) + lab;
+      set_place(g_tbBg, pad, y, fullW, btnH);
+      y += btnH + 24;
+      set_place(g_tbFg, pad, y, fullW, btnH);
+      y += btnH + gap;
+      break;
+    case 2: /* где искать файлы и вход в PLM */
+      set_place(g_filesRootEdit, pad, y, fullW - browseW - gap, btnH);
+      set_place(GetDlgItem(g_setHwnd, ID_FILES_BROWSE), cw - browseW, y, browseW, btnH);
+      y += btnH + gap;
+      set_place(g_btnIdx, pad, y, fullW, btnH);
+      y += btnH + gap;
+      set_place(g_filesStat, pad, y, fullW, btnH);
+      set_place(g_filesBar, pad, y + btnH - 8, fullW, 6);
+      y += btnH + gap;
+      set_place(g_chkNotify, pad, y, fullW, btnH);
+      y += btnH + gap;
+      set_place(g_filesWatchEdit, pad, y, fullW - browseW - gap, btnH);
+      set_place(GetDlgItem(g_setHwnd, ID_WATCH_BROWSE), cw - browseW, y, browseW, btnH);
+      y += btnH + gap;
+      set_place(g_plmServer, pad, y, half, btnH);
+      set_place(g_plmDb, pad + half + gap, y, fullW - half - gap, btnH);
+      y += btnH + gap;
+      set_place(g_plmUser, pad, y, half, btnH);
+      set_place(g_plmPass, pad + half + gap, y, fullW - half - gap, btnH);
+      y += btnH + gap;
+      break;
+    case 3: /* общая папка; нарды и шашки идут через неё же — поэтому здесь */
+      y += lab;
+      set_place(g_shareEdit, pad, y, fullW - browseW - gap, btnH);
+      set_place(GetDlgItem(g_setHwnd, ID_SHARE_BROWSE), cw - browseW, y, browseW, btnH);
+      y += btnH + gap;
+      set_place(g_chkServe, pad, y, fullW, btnH);
+      y += btnH + gap;
+      set_place(g_btnNd, pad, y, half, btnH);
+      set_place(g_btnSh, pad + half + gap, y, fullW - half - gap, btnH);
+      y += btnH + gap;
+      break;
+    case 4:
+      set_place(g_chkTess, pad, y, fullW, btnH);
+      y += btnH + gap;
+      set_place(g_ocr, pad, y, fullW, btnH);
+      y += btnH + gap;
+      set_place(g_btnHk, pad, y, fullW, btnH);
+      y += btnH + gap;
+      break;
+    default:
+      set_place(g_chkAuto, pad, y, fullW, btnH);
+      y += btnH + gap;
+      set_place(g_chkAnsPin, pad, y, fullW, btnH);
+      y += btnH + gap;
+      set_place(g_btnUp, pad, y, fullW, btnH);
+      y += btnH + gap;
+      break;
+    }
+    if (!g_layOpen) y = y0;
+    else y += 6; /* раскрытый раздел чуть отступает от следующего заголовка */
   }
-  y += btnH + gap;
-  if (g_btnIdx) MOVE_SET(g_btnIdx, pad, y, cw - pad, btnH, TRUE);
-  y += btnH + gap;
-  if (g_filesStat) MOVE_SET(g_filesStat, pad, y, cw - pad, btnH, TRUE);
-  if (g_filesBar) MOVE_SET(g_filesBar, pad, y + btnH - 8, cw - pad, 6, TRUE);
-  y += btnH + gap;
-  if (g_chkNotify) MOVE_SET(g_chkNotify, pad, y, cw - pad, btnH, TRUE);
-  y += btnH + gap;
-  {
-    int browseW = 78;
-    if (g_filesWatchEdit)
-      MOVE_SET(g_filesWatchEdit, pad, y, cw - pad - browseW - gap, btnH, TRUE);
-    HWND br = GetDlgItem(g_setHwnd, ID_WATCH_BROWSE);
-    if (br) MOVE_SET(br, cw - browseW, y, browseW, btnH, TRUE);
-  }
-  y += btnH + gap;
-  if (g_plmServer) MOVE_SET(g_plmServer, pad, y, half, btnH, TRUE);
-  if (g_plmDb) MOVE_SET(g_plmDb, pad + half + gap, y, half, btnH, TRUE);
-  y += btnH + gap;
-  if (g_plmUser) MOVE_SET(g_plmUser, pad, y, half, btnH, TRUE);
-  if (g_plmPass) MOVE_SET(g_plmPass, pad + half + gap, y, half, btnH, TRUE);
-  y += btnH + gap + 22;
-  {
-    int browseW = 78;
-    if (g_shareEdit) MOVE_SET(g_shareEdit, pad, y, cw - pad - browseW - gap, btnH, TRUE);
-    HWND br = GetDlgItem(g_setHwnd, ID_SHARE_BROWSE);
-    if (br) MOVE_SET(br, cw - browseW, y, browseW, btnH, TRUE);
-  }
-  y += btnH + gap;
-  if (g_chkServe) MOVE_SET(g_chkServe, pad, y, cw - pad, btnH, TRUE);
-  y += btnH + gap;
-  /* нарды и шашки идут через ту же общую папку — поэтому здесь, в ряд */
-  {
-    int half = (cw - pad - gap) / 2;
-    if (g_btnNd) MOVE_SET(g_btnNd, pad, y, half, btnH, TRUE);
-    if (g_btnSh) MOVE_SET(g_btnSh, pad + half + gap, y, cw - pad - half - gap, btnH, TRUE);
-  }
-  y += btnH + gap + 22;
-  /* семь кнопок в два ряда, чтобы окно не росло: оно и так почти во всю
-     высоту экрана и не прокручивается. Ширина — по длине надписи. */
-  {
-    /* Мечник · Рукавица · Фея · Дракон */
-    int w = cw - pad - gap * 3;
-    int w2 = w * 27 / 100, w3 = w * 30 / 100, w4 = w * 18 / 100;
-    int x3 = pad + w2 + gap, x4 = x3 + w3 + gap, x5 = x4 + w4 + gap;
-    if (g_btnK2) MOVE_SET(g_btnK2, pad, y, w2, btnH, TRUE);
-    if (g_btnK3) MOVE_SET(g_btnK3, x3, y, w3, btnH, TRUE);
-    if (g_btnK4) MOVE_SET(g_btnK4, x4, y, w4, btnH, TRUE);
-    if (g_btnK5) MOVE_SET(g_btnK5, x5, y, cw - x5, btnH, TRUE);
-  }
-  y += btnH + gap;
-  {
-    /* Чёрный кот · Риас · Курсор Windows */
-    int w = cw - pad - gap * 2;
-    int w6 = w * 33 / 100, w7 = w * 22 / 100;
-    int x7 = pad + w6 + gap, xs = x7 + w7 + gap;
-    if (g_btnK6) MOVE_SET(g_btnK6, pad, y, w6, btnH, TRUE);
-    if (g_btnK7) MOVE_SET(g_btnK7, x7, y, w7, btnH, TRUE);
-    if (g_btnSys) MOVE_SET(g_btnSys, xs, y, cw - xs, btnH, TRUE);
-  }
-  y += btnH + gap;
-  /* эффект при нажатии и сетапы — кнопками, по три в ряд и по два */
-  y += 22;
-  {
-    int bw = (cw - pad - gap * 2) / 3;
-    for (int i = 0; i < FX_OPTIONS; i++)
-      if (g_btnFx[i]) MOVE_SET(g_btnFx[i], pad + (i % 3) * (bw + gap), y + (i / 3) * (btnH + gap), bw, btnH, TRUE);
-  }
-  y += 2 * (btnH + gap) + 22;
-  {
-    int bw = (cw - pad - gap) / 2;
-    for (int i = 0; i < SETUP_COUNT; i++)
-      if (g_btnSetup[i]) MOVE_SET(g_btnSetup[i], pad + (i % 2) * (bw + gap), y + (i / 2) * (btnH + gap), bw, btnH, TRUE);
-  }
-  y += 3 * (btnH + gap);
-  if (g_chkTess) MOVE_SET(g_chkTess, pad, y, cw - pad, btnH, TRUE);
-  y += btnH + gap;
-  if (g_chkAuto) MOVE_SET(g_chkAuto, pad, y, cw - pad, btnH, TRUE);
-  y += btnH + gap;
-  if (g_chkAnsPin) MOVE_SET(g_chkAnsPin, pad, y, cw - pad, btnH, TRUE);
-  y += btnH + gap + 22;
-  if (g_tbBg) MOVE_SET(g_tbBg, pad, y, cw - pad, btnH, TRUE);
-  y += btnH + 24;
-  if (g_tbFg) MOVE_SET(g_tbFg, pad, y, cw - pad, btnH, TRUE);
-  y += btnH + 22;
-  if (g_ocr) MOVE_SET(g_ocr, pad, y, cw - pad, btnH, TRUE);
-  y += btnH + gap;
-  if (g_btnHk) MOVE_SET(g_btnHk, pad, y, cw - pad, btnH, TRUE);
-  y += btnH + gap;
-  if (g_btnUp) MOVE_SET(g_btnUp, pad, y, cw - pad, btnH, TRUE);
-  y += btnH + gap + 18;
-  {
-    int cols = 4;
-    int tw = (cw - pad - gap * (cols - 1)) / cols;
-    for (int i = 0; i < THEME_COUNT; i++) {
-      if (!g_btnTheme[i]) continue;
-      int row = i / cols;
-      int col = i % cols;
-      /* пятая, рыцарская, — отдельным рядом во всю ширину */
-      int bw = (row > 0 && THEME_COUNT - cols == 1) ? cw - pad : tw;
-      MOVE_SET(g_btnTheme[i], pad + col * (tw + gap), y + row * (btnH + gap), bw, btnH, TRUE);
+  g_layOpen = TRUE;
+  int contentH = y + 4 + SET_FOOT_H;
+  if (contentH != g_setContentH) {
+    g_setContentH = contentH;
+    int newMax = contentH - rc.bottom;
+    if (newMax < 0) newMax = 0;
+    if (g_setScroll > newMax) { /* раздел свернули внизу — прокрутка сжимается, разложить заново */
+      g_setScroll = newMax;
+      layout_settings();
+      return;
     }
   }
   clip_settings_children();
+  preview_wake();
 }
 
 static void scroll_settings(int pos) {
   RECT rc;
   GetClientRect(g_setHwnd, &rc);
-  int maxScroll = SET_H - rc.bottom;
+  int maxScroll = g_setContentH - rc.bottom;
   if (maxScroll < 0) maxScroll = 0;
   if (pos < 0) pos = 0;
   if (pos > maxScroll) pos = maxScroll;
@@ -3154,6 +3269,35 @@ static void scroll_settings(int pos) {
   layout_settings();
   /* двигаются и прячутся дочерние окна — перерисовать всё вместе с ними, иначе
      на старых местах остаются их следы */
+  RedrawWindow(g_setHwnd, NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+}
+
+/* высота окна Настроек — по содержимому: раскрыли раздел — окно выросло (до
+   высоты экрана, дальше прокрутка), свернули — сжалось. Верх остаётся на месте,
+   пока окно не упрётся в низ экрана */
+static void settings_fit_height(void) {
+  if (!g_setHwnd || !IsWindowVisible(g_setHwnd)) return;
+  RECT wr, wa;
+  GetWindowRect(g_setHwnd, &wr);
+  POINT pt = {wr.left + 8, wr.top + 8};
+  get_work_area(pt, &wa);
+  int h = g_setContentH, maxh = wa.bottom - wa.top - 16;
+  if (maxh < 160) maxh = 160;
+  if (h > maxh) h = maxh;
+  int y = wr.top;
+  if (y + h > wa.bottom - 4) y = wa.bottom - h - 8;
+  if (y < wa.top + 4) y = wa.top + 8;
+  if (h == wr.bottom - wr.top && y == wr.top) return;
+  SetWindowPos(g_setHwnd, NULL, wr.left, y, wr.right - wr.left, h, SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
+static void toggle_section(int sec) {
+  g_secOpen ^= 1 << sec;
+  save_cursor_pref();
+  if (g_btnSec[sec]) InvalidateRect(g_btnSec[sec], NULL, FALSE);
+  layout_settings();
+  settings_fit_height();
+  layout_settings(); /* высота окна могла смениться — прокрутка вместе с ней */
   RedrawWindow(g_setHwnd, NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
 }
 
@@ -3169,10 +3313,6 @@ static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
     SetBkMode(hdc, TRANSPARENT);
     if (g_fontSmall) SelectObject(hdc, g_fontSmall);
     SetTextColor(hdc, COL_MUTED);
-    {
-      RECT cap = {14, PANEL_TITLE_H + 6 - g_setScroll, rc.right - 14, PANEL_TITLE_H + 24 - g_setScroll};
-      draw_set_label(hdc, L"PLM и файлы", cap, rc.bottom);
-    }
     if (g_shareEdit) {
       RECT wr;
       GetWindowRect(g_shareEdit, &wr);
@@ -3231,9 +3371,9 @@ static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
     {
       /* полоска прокрутки справа: видно, что окно выше экрана */
       int bandTop = PANEL_TITLE_H, bandBot = rc.bottom - SET_FOOT_H;
-      if (SET_H > rc.bottom && bandBot > bandTop) {
-        int bandH = bandBot - bandTop, maxScroll = SET_H - rc.bottom;
-        int thumbH = bandH * rc.bottom / SET_H;
+      if (g_setContentH > rc.bottom && bandBot > bandTop) {
+        int bandH = bandBot - bandTop, maxScroll = g_setContentH - rc.bottom;
+        int thumbH = bandH * rc.bottom / g_setContentH;
         if (thumbH < 24) thumbH = 24;
         int thumbY = bandTop + (bandH - thumbH) * g_setScroll / maxScroll;
         RECT th = {rc.right - 5, thumbY, rc.right - 2, thumbY + thumbH};
@@ -3290,13 +3430,11 @@ static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
       }
       return 0;
     }
-    if (LOWORD(wParam) == ID_CUR_K2) set_skin(1);
-    if (LOWORD(wParam) == ID_CUR_K3) set_skin(2);
-    if (LOWORD(wParam) == ID_CUR_K4) set_skin(3);
-    if (LOWORD(wParam) == ID_CUR_K5) set_skin(4);
-    if (LOWORD(wParam) == ID_CUR_K6) set_skin(5);
-    if (LOWORD(wParam) == ID_CUR_K7) set_skin(6);
-    if (LOWORD(wParam) == ID_SYS_CUR) set_skin(0);
+    if (LOWORD(wParam) >= ID_SEC_BASE && LOWORD(wParam) < ID_SEC_BASE + SEC_COUNT) {
+      toggle_section(LOWORD(wParam) - ID_SEC_BASE);
+      return 0;
+    }
+    if (settings_skin_of_id(LOWORD(wParam)) >= 0) set_skin(settings_skin_of_id(LOWORD(wParam)));
     if (LOWORD(wParam) >= ID_FX_BASE && LOWORD(wParam) < ID_FX_BASE + FX_OPTIONS)
       set_fx_pick(kFxPick[LOWORD(wParam) - ID_FX_BASE]);
     if (LOWORD(wParam) >= ID_SETUP_BASE && LOWORD(wParam) < ID_SETUP_BASE + SETUP_COUNT)
@@ -3450,8 +3588,9 @@ static void place_popup(HWND win, int wantW, int wantH, BOOL prefer_left) {
 
 static void place_settings(void) {
   if (!g_setHwnd) return;
-  place_popup(g_setHwnd, SET_W, SET_H, FALSE);
+  place_popup(g_setHwnd, SET_W, g_setContentH, FALSE);
   layout_settings();
+  settings_fit_height();
 }
 
 static void refresh_search_cue(void) {
@@ -3659,9 +3798,11 @@ static void create_settings(HWND owner) {
   g_setHwnd = CreateWindowExW(
       WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED, L"CursorPadSettings",
       L"Настройки", WS_POPUP | WS_CLIPCHILDREN, 0, 0,
-      SET_W, SET_H, owner, NULL, g_inst, NULL);
+      SET_W, g_setContentH, owner, NULL, g_inst, NULL);
   mk_btn(g_setHwnd, L"×", ID_PANEL_CLOSE);
   round_corners(g_setHwnd);
+  for (int i = 0; i < SEC_COUNT; i++) g_btnSec[i] = mk_btn(g_setHwnd, kSecNames[i], ID_SEC_BASE + i);
+  g_preview = preview_create(g_setHwnd, ID_PREVIEW);
   g_filesRootEdit = CreateWindowExW(0, L"EDIT", g_filesRoot,
                                     WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
                                     0, 0, 200, 26, g_setHwnd, (HMENU)(INT_PTR)ID_FILES_ROOT, NULL, NULL);
@@ -3705,6 +3846,7 @@ static void create_settings(HWND owner) {
   g_btnK5 = mk_btn(g_setHwnd, L"Дракон", ID_CUR_K5);
   g_btnK6 = mk_btn(g_setHwnd, L"Чёрный кот", ID_CUR_K6);
   g_btnK7 = mk_btn(g_setHwnd, L"Риас", ID_CUR_K7);
+  for (int i = 0; i < ST_COUNT; i++) g_btnSt[i] = mk_btn(g_setHwnd, kStyleNames[i], ID_CUR_ST_BASE + i);
   g_btnSys = mk_btn(g_setHwnd, L"Курсор Windows", ID_SYS_CUR);
   for (int i = 0; i < FX_OPTIONS; i++) g_btnFx[i] = mk_btn(g_setHwnd, kFxNames[i], ID_FX_BASE + i);
   for (int i = 0; i < SETUP_COUNT; i++) g_btnSetup[i] = mk_btn(g_setHwnd, g_setups[i].name, ID_SETUP_BASE + i);
@@ -3788,6 +3930,7 @@ static void create_settings(HWND owner) {
   }
   watch_enable();
   update_engine_buttons();
+  update_cursor_buttons(); /* отметка ● у выбранного: в том числе у новых стилей */
   layout_settings();
 }
 
@@ -4362,6 +4505,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     InterlockedExchange(&g_quitting, 1);
     close_other_windows(hwnd);
     fx_shutdown();
+    styles_free();
     share_stop();
     save_notes();
     save_cursor_pref(); /* keeps the results panel's size across restarts */
@@ -4552,6 +4696,27 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
       wchar_t p[MAX_PATH];
       upd_data_file(p, L"sha-test.txt");
       write_all(p, h, (DWORD)strlen(h));
+    }
+    if (argv) LocalFree(argv);
+  }
+#endif
+#ifdef SET_TEST /* только проверочная сборка: --settings разделы [кнопка [прокрутка]] — открыть
+                   Настройки с этими раскрытыми разделами (битами), навести мышь на кнопку с этим id */
+  {
+    int argc = 0;
+    LPWSTR *argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    if (argv && argc >= 3 && !wcscmp(argv[1], L"--gallery")) st_gallery(argv[2]);
+    if (argv && argc >= 3 && !wcscmp(argv[1], L"--settings")) {
+      g_secOpen = (int)wcstol(argv[2], NULL, 10);
+      if (g_follow) toggle_follow(); /* как «Настройки» в меню значка */
+      toggle_settings();
+      if (argc >= 5) scroll_settings((int)wcstol(argv[4], NULL, 10));
+      HWND b = argc >= 4 ? GetDlgItem(g_setHwnd, (int)wcstol(argv[3], NULL, 10)) : NULL;
+      if (b) {
+        RECT r;
+        GetWindowRect(b, &r);
+        SetCursorPos((r.left + r.right) / 2, (r.top + r.bottom) / 2);
+      }
     }
     if (argv) LocalFree(argv);
   }
