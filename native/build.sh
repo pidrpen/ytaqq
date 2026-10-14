@@ -31,6 +31,7 @@ PY=${PY:-python3}
 LDX=${LDX:-}
 # предупреждение компилятора — это ошибка: сейчас их ноль, пусть так и будет
 CFLAGS="-O2 -Wall -Werror -Wno-unknown-pragmas"
+# -s при сборке: без отладочных символов exe меньше примерно на 0,7 МБ — быстрее качается обновление
 
 for tool in "$CC" "$RC" "$PY"; do
   command -v "$tool" >/dev/null 2>&1 || { echo "нет $tool — см. шапку build.sh"; exit 1; }
@@ -50,11 +51,11 @@ trap 'rm -rf "$TMP"' EXIT
 
 cd "$HERE"
 # помощник распознавания зашит в exe ресурсом, поэтому собирается первым
-$CC $CFLAGS -o CursorPadOcr.exe ocr_module.c -lole32 -lruntimeobject -luser32 -municode $LDX
+$CC $CFLAGS -o CursorPadOcr.exe ocr_module.c -lole32 -lruntimeobject -luser32 -municode -s $LDX
 $RC cursorpad.rc -O coff -o "$TMP/cursorpad.res"
 $CC $CFLAGS -finput-charset=UTF-8 -o "$PUB/CursorPad.exe" cursorpad.c "$TMP/cursorpad.res" \
   -luser32 -lgdi32 -lshell32 -lole32 -lcomctl32 -lwinhttp -ladvapi32 -lodbc32 -lcrypt32 -lcomdlg32 -lmsimg32 \
-  -Wl,--subsystem,windows -municode $LDX
+  -Wl,--subsystem,windows -municode -s $LDX
 
 cp -f cursorpad.manifest "$PUB/CursorPad.exe.manifest"
 mkdir -p "$PUB/cursors-win"
