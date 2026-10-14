@@ -55,7 +55,7 @@
 #define FX_FLAME_FRAMES 34 /* ~0.55 с */
 #define FX_SCRATCHES 2  /* царапин у «Чёрного кота» */
 #define FX_SCRATCH_FRAMES 18 /* ~0.3 с */
-#define FX_SLASH_FRAMES 22 /* ~0.35 с: разрез проводится, держится и тонеет */
+#define FX_SLASH_FRAMES 24 /* ~0.4 с: разрез проводится, раскалён, тонеет и гаснет */
 #define FX_BIG_CUTS 2   /* толстый разрез и тонкая спутница рядом */
 #define FX_BIG_FRAMES 40 /* ~0.65 с */
 #define FX_BIG_CHANCE (1.0f / 120.0f) /* в среднем раз в 120 нажатий в «Разрезе»: большой разрез через весь монитор */
@@ -63,8 +63,8 @@
 #define FX_SHATTER_CUTS 7 /* столько больших разрезов режут экран */
 #define FX_SHATTER_PIECES (1 << FX_SHATTER_CUTS) /* кусков — не больше */
 #define FX_SHATTER_CUT_FRAMES 8  /* разрезы проводятся поверх экрана */
-#define FX_SHATTER_SPLIT_FRAMES 32 /* куски разъезжаются и падают */
-#define FX_SHATTER_HOLD_FRAMES 12  /* экран чёрный */
+#define FX_SHATTER_SPLIT_FRAMES 32 /* куски расходятся трещинами */
+#define FX_SHATTER_HOLD_FRAMES 12  /* куски замерли врозь */
 #define FX_SHATTER_BACK_FRAMES 36  /* куски возвращаются на место */
 #define FX_SHATTER_FRAMES (FX_SHATTER_CUT_FRAMES + FX_SHATTER_SPLIT_FRAMES + \
                            FX_SHATTER_HOLD_FRAMES + FX_SHATTER_BACK_FRAMES)
@@ -338,6 +338,8 @@ static void fx_scratch_part(FxWin *f, const FxPart *p, int age) {
   }
 }
 
+static void fx_slash_part(FxWin *f, const FxPart *p, int age);
+
 /* раскол: сколько кусков уехало на этом кадре, от 0 (на месте) до 1 (уехали).
    Сначала разрезы проводятся поверх экрана, потом куски разъезжаются, экран
    чёрный, потом куски возвращаются */
@@ -372,7 +374,7 @@ static void fx_shatter_render(FxWin *f) {
       ox[s] = (int)floorf(g_shat.outx[s] * k + 0.5f);
       oy[s] = (int)floorf(g_shat.outy[s] * k + 0.5f);
     }
-    for (size_t i = 0; i < n; i++) dst[i] = 0xFF000000u; /* между кусками — чёрное */
+    for (size_t i = 0; i < n; i++) dst[i] = 0xFF1A0004u; /* между кусками — тёмно-бордовая пустота */
     /* каждый пиксель снимка уходит со своим куском; что вышло за край — пропадает */
     for (int y = 0; y < H; y++) {
       for (int x = 0; x < W; x++) {
@@ -380,12 +382,28 @@ static void fx_shatter_render(FxWin *f) {
         int s = g_shat.shard[i];
         int nx = x + ox[s], ny = y + oy[s];
         if (nx < 0 || nx >= W || ny < 0 || ny >= H) continue;
-        dst[(size_t)ny * W + nx] = src[i];
+        DWORD c = src[i];
+        /* край куска раскалён: алая кромка с обеих сторон разлома */
+        if ((x > 1 && (g_shat.shard[i - 1] != s || g_shat.shard[i - 2] != s)) ||
+            (x + 2 < W && (g_shat.shard[i + 1] != s || g_shat.shard[i + 2] != s)) ||
+            (y > 1 && (g_shat.shard[i - W] != s || g_shat.shard[i - 2 * W] != s)) ||
+            (y + 2 < H && (g_shat.shard[i + W] != s || g_shat.shard[i + 2 * W] != s)))
+          c = 0xFF000000u | (DWORD)(255 - ((255 - ((c >> 16) & 255)) >> 3)) << 16 |
+              (DWORD)(60 + (((c >> 8) & 255) >> 3)) << 8 | (DWORD)(40 + ((c & 255) >> 3));
+        dst[(size_t)ny * W + nx] = c;
       }
+    }
+    /* в миг раскола — белая вспышка */
+    int sp = f->frame - FX_SHATTER_CUT_FRAMES;
+    if (sp >= 0 && sp < 5) {
+      int fl = (int)(140 * (1.0f - sp / 5.0f));
+      BYTE *b = f->bits;
+      for (size_t i = 0; i < n * 4; i++)
+        if ((i & 3) != 3) b[i] = (BYTE)(b[i] + ((255 - b[i]) * fl >> 8));
     }
   }
   /* разрезы поверх экрана; через 12 кадров гаснут окончательно */
-  for (int i = 0; i < f->n; i++) fx_scratch_part(f, &f->p[i], f->frame - f->p[i].delay);
+  for (int i = 0; i < f->n; i++) fx_slash_part(f, &f->p[i], f->frame - f->p[i].delay);
 }
 
 /* ---- «Кольца», «Конфетти», «Молния», «Сердечки» (с 2026.10.14.2) ---------- */
@@ -412,6 +430,121 @@ static void fx_glow_dot(FxWin *f, float cx, float cy, float r, float cr, float c
       float d = sqrtf((x + 0.5f - cx) * (x + 0.5f - cx) + (y + 0.5f - cy) * (y + 0.5f - cy)) / r;
       if (d < 1.0f) fx_put(f, x, y, cr, cg, cb, a * (1.0f - d) * (1.0f - d));
     }
+}
+
+/* ---- «Разрез» (с 2026.10.14.7) ------------------------------------------- */
+
+/* искра из разреза: короткий штрих, летит от разреза и падает, белая с алым */
+static void fx_slash_spark(FxWin *f, const FxPart *p, int age) {
+  float t = (float)age / p->life, g = 0.22f * g_fxScale;
+  float x = p->x + p->vx * age, y = p->y + p->vy * age + g * age * age;
+  float tx = x - p->vx * 1.8f, ty = y - (p->vy + 2.0f * g * age) * 1.8f; /* хвост — назад по ходу */
+  float vx = x - tx, vy = y - ty, l2 = vx * vx + vy * vy;
+  float r = p->sz * g_fxScale * (1.0f - 0.6f * t), a = 1.0f - t * t;
+  if (l2 < 0.01f || r < 0.3f) return;
+  for (int py = (int)(fminf(y, ty) - r - 2); py <= (int)(fmaxf(y, ty) + r + 2); py++)
+    for (int px = (int)(fminf(x, tx) - r - 2); px <= (int)(fmaxf(x, tx) + r + 2); px++) {
+      float qx = px + 0.5f - tx, qy = py + 0.5f - ty;
+      float s = fx_clamp01((qx * vx + qy * vy) / l2);
+      float d = hypotf(qx - vx * s, qy - vy * s), rr = r * (0.35f + 0.65f * s);
+      fx_put(f, px, py, 255, 40, 50, a * 0.5f * fx_clamp01(1.0f - (d - rr) / (2.5f * g_fxScale)));
+      fx_put(f, px, py, 255, fx_mix(90, 245, s), fx_mix(80, 230, s), a * fx_clamp01(rr + 0.5f - d));
+    }
+}
+
+/* след клинка: полумесяц с острыми концами (p->tw — изгиб, доля длины). Его
+   проводят за p->rev кадров, на кончике — белая вспышка; сразу после взмаха он
+   раскалён добела по оси, потом тонеет до волоска и гаснет. Вокруг — алое
+   свечение. Края сглажены. p->spr = 1 — это не разрез, а искра */
+#define FX_SLASH_SEG 12
+static void fx_slash_part(FxWin *f, const FxPart *p, int age) {
+  if (age < 0 || age >= p->life) return;
+  if (p->spr) {
+    fx_slash_spark(f, p, age);
+    return;
+  }
+  float len = hypotf(p->vx, p->vy);
+  if (len < 1.0f) return;
+  float nx = -p->vy / len, ny = p->vx / len, bend = 4.0f * p->tw * len;
+  float t = fx_clamp01((age + 1) / p->rev);
+  float reveal = 1.0f - (1.0f - t) * (1.0f - t) * (1.0f - t);
+  float after = age + 1 <= p->rev ? 0.0f : (age + 1 - p->rev) / (p->life - p->rev);
+  float heat = 1.0f - fx_clamp01(after * 2.5f);  /* белый жар сразу после взмаха */
+  float a = after < 0.45f ? 1.0f : 1.0f - (after - 0.45f) / 0.55f;
+  float maxw = p->sz * g_fxScale * (1.0f - 0.72f * powf(after, 0.7f)) * (1.0f + 0.25f * heat);
+  float gr = (4.0f + p->sz * 1.1f) * g_fxScale, ga = 0.55f * (1.0f - after) * (1.0f - after);
+  int nseg = fabsf(p->tw) > 0.001f ? FX_SLASH_SEG : 1;
+  float sx[FX_SLASH_SEG + 1], sy[FX_SLASH_SEG + 1];
+  float xa = 1e9f, xb = -1e9f, ya = 1e9f, yb = -1e9f;
+  for (int k = 0; k <= nseg; k++) {
+    float s = reveal * k / nseg, b = bend * s * (1.0f - s);
+    sx[k] = p->x + p->vx * s + nx * b;
+    sy[k] = p->y + p->vy * s + ny * b;
+    xa = fminf(xa, sx[k]), xb = fmaxf(xb, sx[k]), ya = fminf(ya, sy[k]), yb = fmaxf(yb, sy[k]);
+  }
+  float pad = maxw + gr + 2.0f;
+  int x0 = (int)fmaxf(xa - pad, 0.0f), x1 = (int)fminf(xb + pad, f->W - 1.0f);
+  int y0 = (int)fmaxf(ya - pad, 0.0f), y1 = (int)fminf(yb + pad, f->H - 1.0f);
+  for (int y = y0; y <= y1; y++) {
+    /* в строке — только то, что рядом с отрезками: у большого разреза это узкая полоса */
+    float ra = 1e9f, rb = -1e9f;
+    for (int k = 0; k < nseg; k++)
+      if (y + pad >= fminf(sy[k], sy[k + 1]) && y - pad <= fmaxf(sy[k], sy[k + 1])) {
+        float ka = sy[k + 1] != sy[k] ? (y + 0.5f - sy[k]) / (sy[k + 1] - sy[k]) : 0.0f;
+        float kb = sy[k + 1] != sy[k] ? pad / fabsf(sy[k + 1] - sy[k]) : 1.0f;
+        float u0 = fx_clamp01(ka - kb), u1 = fx_clamp01(ka + kb);
+        float xu0 = sx[k] + (sx[k + 1] - sx[k]) * u0, xu1 = sx[k] + (sx[k + 1] - sx[k]) * u1;
+        ra = fminf(ra, fminf(xu0, xu1) - pad), rb = fmaxf(rb, fmaxf(xu0, xu1) + pad);
+      }
+    int xa0 = ra > x0 ? (int)ra : x0, xb1 = rb < x1 ? (int)rb : x1;
+    for (int x = xa0; x <= xb1; x++) {
+      float d = 1e9f, s = 0.0f;
+      for (int k = 0; k < nseg; k++) { /* ближайший отрезок ломаной */
+        float vx = sx[k + 1] - sx[k], vy = sy[k + 1] - sy[k], l2 = vx * vx + vy * vy;
+        float qx = x + 0.5f - sx[k], qy = y + 0.5f - sy[k];
+        float u = l2 > 0.0f ? fx_clamp01((qx * vx + qy * vy) / l2) : 0.0f;
+        float dd = hypotf(qx - vx * u, qy - vy * u);
+        if (dd < d) d = dd, s = reveal * (k + u) / nseg;
+      }
+      if (d >= pad) continue;
+      float prof = powf(sinf(3.14159265f * s), 0.85f);
+      float head = reveal < 1.0f ? fx_clamp01((reveal - s) / 0.18f) : 1.0f; /* бегущий острый кончик */
+      float hw = maxw * prof * sqrtf(head);
+      float g = 1.0f - fmaxf(d - hw, 0.0f) / gr;
+      if (g > 0.0f) fx_put(f, x, y, 255, 24, 40, a * ga * g * g * sqrtf(prof));
+      float body = fx_clamp01(hw + 0.5f - d);
+      if (body <= 0.0f || hw < 0.3f) continue;
+      float m = fx_clamp01(d / hw); /* 0 по оси, 1 на краю */
+      fx_put(f, x, y, fx_mix(255, 150, m), fx_mix(fx_mix(50, 140, heat), 0, m), fx_mix(fx_mix(60, 130, heat), 24, m), a * body);
+      fx_put(f, x, y, 255, 250, 244, a * fx_clamp01(hw * (0.2f + 0.2f * heat) + 0.5f - d));
+    }
+  }
+  if (reveal < 1.0f) { /* вспышка на кончике, пока клинок идёт */
+    float r = (5.0f + p->sz * 1.6f) * g_fxScale;
+    fx_glow_dot(f, sx[nseg], sy[nseg], r * 1.6f, 255, 40, 50, 0.6f);
+    fx_glow_dot(f, sx[nseg], sy[nseg], r * 0.7f, 255, 245, 235, 0.9f);
+  }
+}
+
+/* искры вдоль разреза p: n штук с задержкой delay, скорость speed, толщина sz */
+static int fx_slash_sparks(FxPart *out, const FxPart *p, int n, float speed, float sz, int delay) {
+  float len = hypotf(p->vx, p->vy), nx = -p->vy / len, ny = p->vx / len;
+  for (int i = 0; i < n; i++) {
+    FxPart *q = &out[i];
+    memset(q, 0, sizeof(*q));
+    float s = 0.2f + 0.6f * fx_rand(), b = 4.0f * p->tw * len * s * (1.0f - s);
+    float side = fx_rand() < 0.5f ? 1.0f : -1.0f, v = speed * (0.5f + fx_rand()) * g_fxScale;
+    float along = (fx_rand() - 0.3f) * 0.8f;
+    q->x = p->x + p->vx * s + nx * b;
+    q->y = p->y + p->vy * s + ny * b;
+    q->vx = (nx * side + p->vx / len * along) * v;
+    q->vy = (ny * side + p->vy / len * along) * v - 0.6f * v * (fx_rand() < 0.6f);
+    q->sz = sz * (0.7f + 0.6f * fx_rand());
+    q->spr = 1;
+    q->delay = delay + (int)(fx_rand() * 3);
+    q->life = 9 + (int)(fx_rand() * 7);
+  }
+  return n;
 }
 
 /* водяное кольцо: светлое изнутри, тёмно-синее снаружи — видно и на белом */
@@ -689,7 +822,16 @@ static void fx_paint(FxWin *f) {
     fx_paint_new(f);
     return;
   }
-  if (f->scratch || f->slash) {
+  if (f->slash) {
+    if (W != H && f->frame >= 2 && f->frame < 12) { /* большой разрез: экран на миг краснеет */
+      BYTE r = (BYTE)(26 * (1.0f - (f->frame - 2) / 10.0f));
+      DWORD c = (DWORD)r << 24 | (DWORD)r << 16;
+      for (size_t i = 0; i < (size_t)W * H; i++) ((DWORD *)f->bits)[i] = c;
+    }
+    for (int i = 0; i < f->n; i++) fx_slash_part(f, &f->p[i], f->frame - f->p[i].delay);
+    return;
+  }
+  if (f->scratch) {
     for (int i = 0; i < f->n; i++) fx_scratch_part(f, &f->p[i], f->frame - f->p[i].delay);
     return;
   }
@@ -911,6 +1053,7 @@ static void fx_big_reset(FxWin *f) {
 /* большой разрез на весь монитор, где щёлкнули: по диагонали через середину
    экрана, толстый и рядом тонкий; проводится быстро и гаснет. Окно у него своё
    (g_fx[FX_WINDOWS]), поэтому не мешает обычным облачкам */
+static void fx_big_seed(FxWin *f, int W, int H);
 static void fx_big_slash(int x, int y) {
   POINT pt = {x, y};
   MONITORINFO mi;
@@ -924,6 +1067,15 @@ static void fx_big_slash(int x, int y) {
   if (!fx_prepare_wh(f, W, H)) return;
   f->org.x = mi.rcMonitor.left;
   f->org.y = mi.rcMonitor.top;
+  fx_big_seed(f, W, H);
+  f->busy = TRUE;
+  fx_render(f);
+  SetWindowPos(f->w, HWND_TOPMOST, f->org.x, f->org.y, W, H, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+  SetTimer(f->w, 1, 16, NULL);
+}
+
+/* разрезы большого разреза в буфере W×H (без окна: так его снимает и проверка) */
+static void fx_big_seed(FxWin *f, int W, int H) {
   f->frame = 0;
   f->kind = 4;
   f->flame = FALSE;
@@ -931,6 +1083,7 @@ static void fx_big_slash(int x, int y) {
   f->slash = TRUE;
   f->n = FX_BIG_CUTS;
   f->frames = FX_BIG_FRAMES;
+  float bend = (fx_rand() < 0.5f ? 1.0f : -1.0f) * 0.035f;
   /* угол от горизонтали ~26…43°, в одну из сторон */
   float dir = fx_rand() < 0.5f ? 1.0f : -1.0f;
   float ang = 0.45f + fx_rand() * 0.3f;
@@ -946,15 +1099,13 @@ static void fx_big_slash(int x, int y) {
     p->y = H / 2.0f - uy * t + ux * off;
     p->vx = ux * 2.0f * t;
     p->vy = uy * 2.0f * t;
-    p->sz = i == 0 ? 20.0f : 6.0f; /* полуширина в середине, в пикселях × масштаб */
+    p->sz = i == 0 ? 22.0f : 5.0f; /* полуширина в середине, в пикселях × масштаб */
+    p->tw = bend;
     p->delay = i * 3;
-    p->rev = i == 0 ? 6.0f : 5.0f;
+    p->rev = i == 0 ? 5.0f : 4.0f;
     p->life = FX_BIG_FRAMES - p->delay;
   }
-  f->busy = TRUE;
-  fx_render(f);
-  SetWindowPos(f->w, HWND_TOPMOST, f->org.x, f->org.y, W, H, SWP_NOACTIVATE | SWP_SHOWWINDOW);
-  SetTimer(f->w, 1, 16, NULL);
+  f->n += fx_slash_sparks(&f->p[FX_BIG_CUTS], &f->p[0], 12, 9.0f, 3.0f, 3);
 }
 
 /* подготовка раскола: снимок из буфера окна, разрезы через середину, номер куска
@@ -993,8 +1144,8 @@ static BOOL fx_shatter_setup(FxWin *f) {
     p->y = qy - uy * R;
     p->vx = ux * 2.0f * R;
     p->vy = uy * 2.0f * R;
-    p->sz = 5.0f;
-    p->rev = 5.0f;
+    p->sz = 6.0f;
+    p->rev = 4.0f;
     p->life = FX_SHATTER_CUT_FRAMES + 4;
   }
   f->n = FX_SHATTER_CUTS;
@@ -1018,7 +1169,7 @@ static BOOL fx_shatter_setup(FxWin *f) {
     }
   }
   /* куда уезжает кусок: от середины экрана в сторону его центра, с разбросом,
-     и вниз — так, что к концу разъезда он уже за краем */
+     и чуть вниз: экран расходится трещинами, а не улетает */
   for (int m = 0; m < FX_SHATTER_PIECES; m++) {
     float dx0 = 0.0f, dy0 = 0.0f;
     if (cnt[m]) {
@@ -1026,17 +1177,17 @@ static BOOL fx_shatter_setup(FxWin *f) {
       dy0 = (float)(sumy[m] / cnt[m]) - cy;
     }
     float ang = atan2f(dy0, dx0) + (fx_rand() - 0.5f) * 0.8f;
-    float dist = side * (0.25f + fx_rand() * 0.15f);
+    float dist = side * (0.05f + fx_rand() * 0.07f);
     g_shat.outx[m] = cosf(ang) * dist;
-    g_shat.outy[m] = sinf(ang) * dist + H * (1.6f + fx_rand() * 0.3f);
+    g_shat.outy[m] = sinf(ang) * dist + H * (0.03f + fx_rand() * 0.08f);
   }
   return TRUE;
 }
 
 /* раскол экрана на куски: снимок экрана в момент нажатия, семь больших разрезов
-   через середину под разными углами, у каждого куска — свой уход: от середины
-   в сторону и вниз за край. Разрезы сначала видны поверх экрана, потом куски
-   разъезжаются, экран темнеет и куски возвращаются на место */
+   через середину под разными углами. Разрезы сначала видны поверх экрана, потом
+   белая вспышка, куски расходятся от середины с раскалёнными алыми краями,
+   замирают и сходятся обратно */
 static void fx_shatter(int x, int y) {
   POINT pt = {x, y};
   MONITORINFO mi;
@@ -1118,22 +1269,28 @@ static void fx_seed(FxWin *f, int kind, int S) {
     return;
   }
   if (f->slash) {
-    /* один тонкий красный разрез через точку нажатия, примерно под 45° */
-    f->n = 1;
+    /* изогнутый след клинка через точку нажатия, примерно под 45°, рядом —
+       тонкий отголосок, и из разреза летят искры */
     f->frames = FX_SLASH_FRAMES;
     float dir = fx_rand() < 0.5f ? 1.0f : -1.0f;
     float a = 0.75f + (fx_rand() - 0.5f) * 0.3f;
     float dx = dir * cosf(a), dy = sinf(a);
-    float len = 110.0f * g_fxScale;
-    FxPart *p = &f->p[0];
-    memset(p, 0, sizeof(*p));
-    p->x = S / 2.0f - dx * len / 2;
-    p->y = S / 2.0f - dy * len / 2; /* по центру: через точку нажатия */
-    p->vx = dx * len;
-    p->vy = dy * len;
-    p->sz = 3.2f;
-    p->rev = 4.0f;
-    p->life = FX_SLASH_FRAMES;
+    float len = 120.0f * g_fxScale, bend = dir * 0.11f;
+    for (int i = 0; i < 2; i++) {
+      FxPart *p = &f->p[i];
+      memset(p, 0, sizeof(*p));
+      float k = i ? 0.78f : 1.0f, off = i ? 9.0f * g_fxScale : 0.0f;
+      p->x = S / 2.0f - dx * len * k / 2 + dy * off; /* по центру: через точку нажатия */
+      p->y = S / 2.0f - dy * len * k / 2 - dx * off;
+      p->vx = dx * len * k;
+      p->vy = dy * len * k;
+      p->tw = bend;
+      p->sz = i ? 1.2f : 4.4f;
+      p->rev = 3.0f;
+      p->delay = i * 2;
+      p->life = FX_SLASH_FRAMES - 2 - p->delay;
+    }
+    f->n = 2 + fx_slash_sparks(&f->p[2], &f->p[0], 6, 2.6f, 1.6f, 2);
     return;
   }
   if (f->scratch) {
