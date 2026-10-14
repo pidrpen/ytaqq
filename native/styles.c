@@ -5,7 +5,8 @@
    указателя (32 / 48 / 64 точки) и ставятся так же, как наборы из .cur.
    С 2026.10.14.5 это персонажи с маленьким острием указателя, а не
    перекрашенная стрелка (до того были «Неон», «Лёд», «Золото», «Лава», «Космос»).
-   С 2026.10.14.11 к ним добавлены «Сукуна» и «Годжо» из «Магической битвы».
+   С 2026.10.14.11 к ним добавлены «Сукуна» и «Годжо» из «Магической битвы»,
+   с 2026.10.14.12 — свои, без общего острия, и со своими эффектами.
 
    У каждого свой эффект при нажатии, если в Настройках выбрано «Как у
    курсора» (fx_kind_for). Здесь же — окошко просмотра в Настройках: в нём
@@ -144,12 +145,6 @@ static BOOL st_ell(float u, float v, float cu, float cv, float ru, float rv) {
 }
 
 #define ST_SET(R, G, B) (c[0] = (R), c[1] = (G), c[2] = (B), 1)
-/* зубцы причёски: 0 у основания, 1 на кончике; n зубцов на ширину 2 */
-static float st_spike(float u, float n) {
-  float f = (u + 1.0f) * n * 0.5f;
-  f -= floorf(f);
-  return 1.0f - fabsf(f * 2.0f - 1.0f);
-}
 /* цвет персонажа st в точке (u, v); 0 — мимо */
 static int st_char_px(int st, float u, float v, float *c) {
   float au = fabsf(u);
@@ -210,43 +205,6 @@ static int st_char_px(int st, float u, float v, float *c) {
       return ST_SET(st_mix(252, 205, t), st_mix(248, 195, t), st_mix(235, 170, t));
     }
     return 0;
-  case 6: /* Сукуна: розовые волосы, красные глаза, чёрные полосы на щеках, тёмное кимоно */
-    if (st_ell(au, v, 0.22f, -0.01f, 0.12f, 0.07f)) /* глаза: красные, с тёмным краем */
-      return st_ell(au, v, 0.22f, -0.01f, 0.08f, 0.045f) ? ST_SET(235, 25, 35) : ST_SET(35, 10, 15);
-    if (v >= -0.14f && v <= -0.08f && au >= 0.1f && au <= 0.36f && v <= -0.08f - (au - 0.1f) * 0.25f)
-      return ST_SET(40, 15, 20); /* злые брови вниз к переносице */
-    if (au >= 0.14f && au <= 0.5f && v >= 0.12f && v <= 0.2f) return ST_SET(25, 15, 20); /* метки на щеках */
-    if (au <= 0.2f && fabsf(v - (0.44f - 1.5f * u * u)) <= 0.035f) return ST_SET(90, 20, 30); /* ухмылка */
-    if (v < -0.24f + 0.1f * st_spike(u, 7) &&
-        (st_ell(u, v, 0, -0.32f, 0.64f, 0.56f) ||
-         (au <= 0.6f && v >= -1.05f + 0.42f * (1.0f - 0.7f * st_spike(u, 6) - 0.3f * st_spike(u + 0.17f, 3)) && v < -0.6f))) {
-      float t = (v + 1.0f) / 0.9f; /* розовые торчащие волосы */
-      return ST_SET(st_mix(255, 215, t), st_mix(170, 95, t), st_mix(200, 140, t));
-    }
-    if (st_ell(u, v, 0, 0.1f, 0.52f, 0.62f) || (au <= 0.2f && v >= 0.5f && v <= 0.8f))
-      return v > 0.62f ? ST_SET(215, 170, 145) : ST_SET(250, 218, 192);
-    if (v >= 0.66f && v <= 1.0f && st_ell(u, v, 0, 1.2f, 0.95f, 0.56f)) {
-      float k = (v - 0.62f) * 0.55f;
-      if (au <= k) return ST_SET(215, 170, 145);             /* грудь в вырезе */
-      if (au <= k + 0.12f) return ST_SET(235, 228, 220);     /* светлый ворот */
-      return ST_SET(45, 35, 45);                             /* тёмное кимоно */
-    }
-    return 0;
-  case 7: /* Годжо: белые волосы торчком, чёрная повязка на глазах, тёмная форма с высоким воротом */
-    if (au <= 0.6f && v >= -0.12f && v <= 0.1f && st_ell(u, v, 0, 0.0f, 0.62f, 0.7f)) return ST_SET(20, 20, 28);
-    if (au <= 0.18f && fabsf(v - (0.4f - 1.0f * u * u)) <= 0.03f) return ST_SET(150, 80, 80); /* лёгкая улыбка */
-    if (v < -0.12f && (st_ell(u, v, 0, -0.32f, 0.64f, 0.5f) ||
-                       (au <= 0.6f && v >= -1.15f + 0.45f * (1.0f - 0.6f * st_spike(u, 6) - 0.4f * st_spike(u + 0.2f, 3)) &&
-                        v < -0.55f))) {
-      float t = (v + 1.15f) / 1.05f; /* белые с голубым отливом */
-      return ST_SET(st_mix(255, 205, t), st_mix(255, 215, t), st_mix(255, 235, t));
-    }
-    if (st_ell(u, v, 0, 0.1f, 0.5f, 0.6f)) return ST_SET(250, 222, 200);
-    if (au <= 0.3f && v >= 0.45f && v <= 0.8f) /* высокий ворот */
-      return au <= 0.025f ? ST_SET(120, 130, 170) : ST_SET(28, 32, 60);
-    if (v >= 0.66f && v <= 1.0f && st_ell(u, v, 0, 1.2f, 0.95f, 0.56f))
-      return au <= 0.025f ? ST_SET(120, 130, 170) : ST_SET(st_mix(40, 22, au), st_mix(46, 26, au), st_mix(80, 50, au));
-    return 0;
   case ST_KNIGHT: /* Рыцарь: топфхельм с Т-образной прорезью, золотой обод и алый плюмаж */
     if (st_ell(u, v, 0.22f, -0.9f, 0.5f, 0.17f)) return ST_SET(st_mix(235, 150, (v + 1.07f) / 0.34f), 30, 40);
     if ((v >= -0.14f && v <= 0.0f && au <= 0.56f) || (au <= 0.07f && v >= 0.0f && v <= 0.5f)) return ST_SET(25, 25, 35);
@@ -301,6 +259,126 @@ static const BYTE kCharTip[ST_DRAW][3] = {{40, 210, 255}, {225, 228, 255}, {90, 
 static const float kTip[] = {2, 1, 2, 15, 5.8f, 11.6f, 11, 11.2f};   /* острие стрелки */
 static const float kTipUp[] = {16, 1, 21, 8, 11, 8};                 /* острие руки — вверх */
 
+/* ---- «Сукуна» и «Годжо» (с 2026.10.14.12) ----
+   Свои, ни на кого не похожие: как у Дракона и Кота, указывает сам персонаж —
+   острый вихор волос тянется в левый верхний угол, отдельного острия нет.
+   Рука — своя у каждого: у Сукуны палец с длинным чёрным ногтем и чёрные
+   браслеты-метки на запястье, у Годжо два пальца вверх с голубым светом
+   («Синий»). В ожидании Сукуна открывает все четыре глаза, а Годжо снимает
+   повязку — под ней голубые «Шесть глаз». Рисуется прямо в сетке 32. */
+#define ST_SUKUNA 6
+#define ST_GOJO 7
+
+#define ST_C(R, G, B) (c[0] = (R), c[1] = (G), c[2] = (B), 1)
+/* отрезок толщиной w от (x0, y0) до (x1, y1) */
+static BOOL st_seg(float x, float y, float x0, float y0, float x1, float y1, float w) {
+  float vx = x1 - x0, vy = y1 - y0, l2 = vx * vx + vy * vy;
+  float t = l2 > 0 ? ((x - x0) * vx + (y - y0) * vy) / l2 : 0;
+  t = t < 0 ? 0 : (t > 1 ? 1 : t);
+  return hypotf(x - x0 - vx * t, y - y0 - vy * t) <= w * 0.5f;
+}
+
+/* глаз с тёмным краем, наклонён к переносице (tilt) */
+static int st_eye(float x, float y, float cx, float cy, float rx, float ry, float tilt, BYTE r, BYTE g, BYTE b, float *c) {
+  float yy = y - (x - cx) * tilt;
+  if (!st_ell(x, yy, cx, cy, rx + 0.55f, ry + 0.5f)) return 0;
+  if (st_ell(x, yy, cx, cy, rx, ry)) {
+    if (st_disc(x, yy, cx - rx * 0.3f, cy - ry * 0.3f, ry * 0.45f)) return ST_C(255, 255, 255); /* блик */
+    return ST_C(r, g, b);
+  }
+  return ST_C(30, 10, 15);
+}
+
+/* голова с плечами; wait — вид «ожидание»: без вихра-острия и с открытыми глазами */
+static int st_jjk_head(int st, float x, float y, BOOL wait, float *c) {
+  float dx = x - 18;
+  static const float kTipHair[] = {2, 1, 14, 6, 10.5f, 12};
+  static const float kSpS[4][6] = {{12.5f, 7, 15, 0.6f, 18.5f, 6}, {17, 6, 22.5f, 0.8f, 23.5f, 6.5f},
+                                   {22, 6, 29, 3, 26, 10.5f},      {25, 9, 31.2f, 9.5f, 26, 13.5f}};
+  static const float kSpG[4][6] = {{12.5f, 7.5f, 13.5f, 0, 17.5f, 6}, {16.5f, 6, 20.5f, -0.6f, 22, 6},
+                                   {21, 6, 27.5f, 0.6f, 25.5f, 9},    {24.5f, 9, 31, 6, 26, 13}};
+  if (st == ST_SUKUNA) {
+    /* глаза: верхняя пара и под ней вторая, поменьше — у Сукуны их четыре */
+    if (st_eye(x, y, 15, 17.3f, 1.9f, 1.05f, 0.3f, 235, 25, 35, c)) return 1;
+    if (st_eye(x, y, 21, 17.3f, 1.9f, 1.05f, -0.3f, 235, 25, 35, c)) return 1;
+    if (wait ? (st_eye(x, y, 14.8f, 19.8f, 1.3f, 0.7f, 0.3f, 255, 40, 50, c) || st_eye(x, y, 21.2f, 19.8f, 1.3f, 0.7f, -0.3f, 255, 40, 50, c))
+             : (fabsf(y - 19.9f - (x < 18 ? x - 14.8f : 21.2f - x) * 0.3f) <= 0.4f && fabsf(fabsf(dx) - 3.2f) <= 1.3f))
+      return ST_C(30, 10, 15); /* закрытые нижние глаза — чёрные черты */
+    if (st_seg(x, y, 12.6f, 15, 16.8f, 16.1f, 0.9f) || st_seg(x, y, 23.4f, 15, 19.2f, 16.1f, 0.9f)) return ST_C(40, 12, 18);
+    if (fabsf(fabsf(dx) - 5.9f) <= 0.9f && ((y >= 20.7f && y <= 21.4f) || (y >= 22 && y <= 22.7f))) return ST_C(25, 12, 18);
+    if (fabsf(dx) <= 0.45f && y >= 13.5f && y <= 15.6f) return ST_C(25, 12, 18); /* метка на лбу */
+    float yu = 23.3f - 0.06f * dx * dx, yl = 24.7f - 0.13f * dx * dx;
+    if (fabsf(dx) <= 3.6f && y >= yu && y <= yl) return y <= yu + 0.6f ? ST_C(250, 245, 240) : ST_C(90, 10, 22); /* оскал */
+    BOOL hair = (st_ell(x, y, 18, 12.5f, 8.8f, 7) && y < 13.6f + 1.3f * fabsf(sinf(x * 1.3f))) || (!wait && st_poly(kTipHair, 3, x, y));
+    for (int i = 0; i < 4 && !hair; i++) hair = st_poly(kSpS[i], 3, x, y);
+    if (hair) {
+      float t = fx_clamp01((y - 1) / 14);
+      if (fabsf(sinf((x * 0.8f + y * 0.35f) * 0.9f)) < 0.07f) return ST_C(205, 85, 125); /* пряди */
+      return ST_C(st_mix(255, 230, t), st_mix(185, 110, t), st_mix(210, 150, t));
+    }
+    if (st_ell(x, y, 18, 18.6f, 7, 8)) return ST_C(250, 218, 192);
+    if (fabsf(dx) <= 2.6f && y >= 25 && y <= 28.5f) return ST_C(215, 170, 145);
+    if (y >= 27 && st_ell(x, y, 18, 33.5f, 11.5f, 6.8f)) {
+      float k = (y - 26.6f) * 0.7f;
+      if (fabsf(dx) <= k) return ST_C(215, 170, 145);
+      if (fabsf(dx) <= k + 1.4f) return ST_C(240, 235, 228);
+      return ST_C(45, 35, 45);
+    }
+    return 0;
+  }
+  /* Годжо */
+  if (!wait && fabsf(dx) <= 8.2f && y >= 15.2f && y <= 18.7f) return y < 15.9f ? ST_C(70, 70, 88) : ST_C(22, 22, 30);
+  if (wait) {
+    if (st_eye(x, y, 15, 17, 1.8f, 1.15f, 0.12f, 70, 185, 255, c)) return 1;
+    if (st_eye(x, y, 21, 17, 1.8f, 1.15f, -0.12f, 70, 185, 255, c)) return 1;
+  }
+  if (dx >= -1.2f && dx <= 2.6f && fabsf(y - (23.4f - 0.15f * (dx - 0.7f))) <= 0.35f) return ST_C(165, 85, 85); /* усмешка */
+  BOOL hair = (st_ell(x, y, 18, 12.5f, 8.6f, 7.4f) && y < (wait ? 15.0f + 1.0f * fabsf(sinf(x * 1.4f)) : 15.2f)) ||
+              (!wait && st_poly(kTipHair, 3, x, y));
+  for (int i = 0; i < 4 && !hair; i++) hair = st_poly(kSpG[i], 3, x, y);
+  if (hair) {
+    float t = fx_clamp01((y - 1) / 14);
+    return ST_C(st_mix(255, 200, t), st_mix(255, 212, t), st_mix(255, 238, t)); /* белые, книзу голубоватые */
+  }
+  if (st_ell(x, y, 18, 19, 6.8f, 7.6f)) return ST_C(252, 224, 204);
+  if (fabsf(dx) <= 5 && y >= 24.5f && y <= 29.5f) return fabsf(dx) <= 0.35f ? ST_C(110, 120, 165) : ST_C(28, 32, 60); /* высокий ворот */
+  if (y >= 28 && st_ell(x, y, 18, 33.5f, 11.5f, 6.2f))
+    return fabsf(dx) <= 0.35f ? ST_C(110, 120, 165) : ST_C(st_mix(45, 22, fabsf(dx) / 11), st_mix(52, 26, fabsf(dx) / 11), st_mix(90, 50, fabsf(dx) / 11));
+  return 0;
+}
+
+/* рука над ссылками, указывает вверх (острие — 16,1) */
+static int st_jjk_hand(int st, float x, float y, float *c) {
+  if (st == ST_SUKUNA) {
+    static const float kNail[] = {14.2f, 5.2f, 16, 0.4f, 17.8f, 5.2f};
+    if (st_poly(kNail, 3, x, y)) return ST_C(25, 15, 20); /* длинный чёрный коготь */
+    /* указательный палец слева, остальные поджаты вправо, большой — снизу слева */
+    BOOL skin = (st_rect(x, y, 14.2f, 4.5f, 17.8f, 15) || st_ell(x, y, 21, 19.5f, 6.8f, 6) ||
+                 st_ell(x, y, 13.6f, 20.5f, 2.4f, 3.6f) || st_rect(x, y, 15, 24, 25, 32));
+    if (!skin) return 0;
+    if (y >= 27 && ((y <= 28.3f) || (y >= 29.8f && y <= 31.1f))) return ST_C(25, 12, 18); /* браслеты-метки */
+    if (x > 18.2f && x < 27 && y > 14 && y < 23 && fabsf(fmodf(y - 13.6f, 3.2f)) < 0.35f) return ST_C(205, 155, 130);
+    return ST_C(st_mix(252, 225, (y - 1) / 31), st_mix(220, 180, (y - 1) / 31), st_mix(196, 155, (y - 1) / 31));
+  }
+  if (st_rect(x, y, 13, 3, 16, 15) || st_rect(x, y, 16.4f, 3.6f, 19.4f, 15) || st_disc(x, y, 14.5f, 3, 1.5f) ||
+      st_disc(x, y, 17.9f, 3.6f, 1.5f)) { /* указательный и средний вместе — жест Годжо */
+    float g = fx_clamp01(1.0f - (y - 1.5f) / 5.5f); /* кончики светятся голубым */
+    return ST_C(st_mix(252, 130, g), st_mix(224, 205, g), st_mix(204, 255, g));
+  }
+  if (st_ell(x, y, 21, 19.5f, 6.6f, 5.8f) || st_ell(x, y, 12.4f, 20.5f, 2.3f, 3.6f))
+    return (x > 19.6f && x < 27 && y > 14 && y < 23 && fabsf(fmodf(y - 13.6f, 3.2f)) < 0.35f) ? ST_C(205, 160, 140)
+                                                                                                : ST_C(252, 224, 204);
+  if (st_rect(x, y, 14, 24, 25, 32)) return y < 25.5f ? ST_C(110, 120, 165) : ST_C(28, 32, 60); /* рукав формы */
+  return 0;
+}
+
+static int st_jjk_slot_px(int st, int slot, float x, float y, float *c) {
+  if (slot == 2) return st_jjk_hand(st, x, y, c);
+  if (slot == 14) return st_jjk_head(st, x + 2, y + 1, TRUE, c);
+  return st_jjk_head(st, x, y, FALSE, c);
+}
+#undef ST_C
+
 /* цвет вида slot стиля st в точке сетки 32: значок поверх острия, острие поверх персонажа */
 static int st_char_slot_px(int st, int slot, float x, float y, float *c) {
   float bx = 26, by = 6;
@@ -314,6 +392,7 @@ static int st_char_slot_px(int st, int slot, float x, float y, float *c) {
       return c[0] = 70, c[1] = 190, c[2] = 110, 1;
     }
   }
+  if (st == ST_SUKUNA || st == ST_GOJO) return st_jjk_slot_px(st, slot, x, y, c);
   if (st == ST_RAZREZ) { /* «Разрез»: сам курсор — алый клинок */
     if (slot == 2) return st_blade_px(st, x, y, 16, 1, 0, 1, 15, c);
     return st_blade_px(st, x, y, 2, 1, 0.70710678f, 0.70710678f, 19, c);
@@ -877,7 +956,7 @@ static void st_gallery(const wchar_t *path) {
   fx_init_sprites();
   int S = (int)(200 * g_fxScale), N = 48, cell = 56;
   int W = S * 4 > cell * ST_SLOTS ? S * 4 : cell * ST_SLOTS;
-  int rowsCur = ST_DRAW * 2, H = rowsCur * cell + 8 * (S / 2);
+  int rowsCur = ST_DRAW * 2, H = rowsCur * cell + 10 * (S / 2);
   BYTE *img = (BYTE *)malloc((size_t)W * H * 4);
   BYTE *cur = (BYTE *)malloc((size_t)N * N * 4);
   FxWin fw;
@@ -900,8 +979,8 @@ static void st_gallery(const wchar_t *path) {
             for (int c = 0; c < 3; c++) d[c] = (BYTE)((s[c] * s[3] + back * (255 - s[3])) / 255);
           }
       }
-  /* эффекты 1…8: по четыре кадра, половина облачка */
-  for (int kind = 1; kind <= 8; kind++) {
+  /* эффекты 1…10: по четыре кадра, половина облачка */
+  for (int kind = 1; kind <= 10; kind++) {
     g_fxSeed = 777u + kind;
     fx_seed(&fw, kind, S);
     int at[4] = {2, fw.frames / 4, fw.frames / 2, fw.frames * 3 / 4};
