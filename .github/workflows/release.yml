@@ -7,7 +7,7 @@ name: Релиз
 on:
   push:
     branches: [main]
-    paths: [public/CursorPad.bin, public/CursorPad.zip, public/version.txt]
+    paths: [public/CursorPad.bin, public/CursorPad.zip, public/version.txt, .github/workflows/release.yml]
   workflow_dispatch:
 
 permissions:
