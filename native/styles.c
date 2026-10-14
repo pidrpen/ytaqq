@@ -234,8 +234,8 @@ static int st_eye(float x, float y, float cx, float cy, float rx, float ry, floa
 }
 
 /* по пояс, с 2026.10.14.16: голова справа, рука вытянута влево-вверх, и
-   указательный палец упирается в рабочую точку курсора (2,1). Значок в 1,25
-   раза крупнее прочих (st_size_of). wait — вид «ожидание»: Годжо без повязки */
+   указательный палец упирается в рабочую точку курсора (2,1). Размер — как у
+   прочих (в 2026.10.14.16 был в 1,25 раза крупнее). wait — «ожидание»: Годжо без повязки */
 static int st_jjk_fig(int st, float x, float y, BOOL wait, float *c) {
   float dx = x - 21;
   BOOL suk = st == ST_SUKUNA;
@@ -716,16 +716,10 @@ static int st_cursor_size(void) {
   return sz < 32 ? 32 : (sz > 128 ? 128 : sz);
 }
 
-/* Сукуна и Годжо по пояс — в 1,25 раза крупнее, как Фея, иначе лицо не разглядеть */
-static int st_size_of(int st) {
-  int sz = st_cursor_size();
-  return st == ST_SUKUNA || st == ST_GOJO ? sz * 5 / 4 : sz;
-}
-
 /* курсоры стиля под нынешний размер указателя; рисуются один раз */
 static void st_ensure(int st) {
   if (st < 0 || st >= ST_DRAW) return;
-  int N = st_size_of(st);
+  int N = st_cursor_size();
   if (g_stSize[st] == N && g_stCur[st][0]) return;
   for (int i = 0; i < ST_SLOTS; i++) {
     if (g_stCur[st][i]) DestroyCursor(g_stCur[st][i]);
@@ -1062,11 +1056,11 @@ static void preview_wake(void) {
 static void st_write_bmp(const wchar_t *path, const BYTE *img, int W, int H);
 static void st_gallery(const wchar_t *path) {
   fx_init_sprites();
-  int S = (int)(200 * g_fxScale), N0 = 48, cell = 64;
+  int S = (int)(200 * g_fxScale), N = 48, cell = 56;
   int W = S * 4 > cell * ST_SLOTS ? S * 4 : cell * ST_SLOTS;
   int rowsCur = ST_DRAW * 2, H = rowsCur * cell + 13 * (S / 2);
   BYTE *img = (BYTE *)malloc((size_t)W * H * 4);
-  BYTE *cur = (BYTE *)malloc((size_t)64 * 64 * 4);
+  BYTE *cur = (BYTE *)malloc((size_t)N * N * 4);
   FxWin fw;
   memset(&fw, 0, sizeof(fw));
   fw.W = fw.H = S;
@@ -1077,7 +1071,6 @@ static void st_gallery(const wchar_t *path) {
   for (int st = 0; st < ST_DRAW; st++)
     for (int bg = 0; bg < 2; bg++)
       for (int sl = 0; sl < ST_SLOTS; sl++) {
-        int N = st == ST_SUKUNA || st == ST_GOJO ? N0 * 5 / 4 : N0; /* как в st_size_of */
         st_draw(st, sl, N, cur);
         int ox = sl * cell + 4, oy = (st * 2 + bg) * cell + 4;
         BYTE back = bg ? 40 : 255;
