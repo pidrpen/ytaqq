@@ -1040,6 +1040,8 @@ static int fx_kind_for(int skin, int pick) {
   if (skin == 10) return 2; /* Огонёк — пламя */
   if (skin == 11) return 3; /* Череп — царапины */
   if (skin == 12) return 4; /* Разрез — разрез */
+  if (skin == 13) return 4; /* Сукуна — разрез */
+  if (skin == 14) return 5; /* Годжо — кольца */
   return 0;
 }
 

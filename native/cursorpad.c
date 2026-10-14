@@ -52,11 +52,11 @@
 #define ID_CHK_TESS 176   /* точное распознавание (Tesseract) */
 #define ID_SEC_BASE 440   /* 440..444: вкладки Настроек */
 #define SEC_COUNT 5
-#define ID_CUR_ST_BASE 460 /* 460..465: персонажи «Робот»…«Череп» (styles.c) */
-#define ST_COUNT 6
+#define ID_CUR_ST_BASE 460 /* 460..467: персонажи «Робот»…«Годжо» (styles.c) */
+#define ST_COUNT 8
 #define ST_RAZREZ 5         /* «Разрез» — клинок вместо стрелки */
 #define ST_KNIGHT ST_COUNT  /* рыцарь (Мечник) рисуется кодом, но кнопки стиля у него нет */
-#define ST_SKIN0 7          /* g_skin первого из них; 7…11 */
+#define ST_SKIN0 7          /* g_skin первого из них; 7…14 */
 #define ID_PREVIEW 470      /* окошко просмотра курсора и эффекта */
 #define ID_MIN 106
 #define ID_OCR 107
@@ -1183,7 +1183,7 @@ static void load_cursor_pref(void) {
 }
 
 static void save_cursor_pref(void) {
-  static const char *const kSt[ST_COUNT] = {"t1", "t2", "t3", "t4", "t5", "t6"};
+  static const char *const kSt[ST_COUNT] = {"t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8"};
   const char *v = g_skin >= ST_SKIN0 && g_skin < ST_SKIN0 + ST_COUNT ? kSt[g_skin - ST_SKIN0]
                   : g_skin == 6 ? "k7"
                   : g_skin == 5 ? "k6"
@@ -1211,7 +1211,7 @@ static const wchar_t *const kFxNames[FX_OPTIONS] = {L"Как у курсора",
                                                     L"Царапины",      L"Разрез", L"Кольца",    L"Конфетти",
                                                     L"Молния",        L"Сердечки"};
 static const int kFxPick[FX_OPTIONS] = {-1, 0, 1, 2, 3, 4, 5, 6, 7, 8};
-static const wchar_t *const kStyleNames[ST_COUNT] = {L"Робот", L"Призрак", L"Слайм", L"Огонёк", L"Череп", L"Разрез"};
+static const wchar_t *const kStyleNames[ST_COUNT] = {L"Робот", L"Призрак", L"Слайм", L"Огонёк", L"Череп", L"Разрез", L"Сукуна", L"Годжо"};
 
 static void update_fx_buttons(void) {
   for (int i = 0; i < FX_OPTIONS; i++) {
