@@ -403,7 +403,7 @@ function Home() {
             );
           })}
           <a
-            href="/CursorPad.exe"
+            href="/CursorPad.bin"
             download="CursorPad.exe"
             className="inline-flex h-11 items-center gap-2 rounded-md bg-fg px-4 text-sm font-medium text-bg transition-transform duration-150 ease-out hover:opacity-90 active:scale-[0.96]"
           >
@@ -707,7 +707,7 @@ function Home() {
         <div className="flex flex-wrap items-center gap-2">
           {coarse ? (
             <a
-              href="/CursorPad.exe"
+              href="/CursorPad.bin"
               download="CursorPad.exe"
               className="inline-flex h-11 items-center gap-2 rounded-md bg-fg px-4 text-sm font-medium text-bg transition-transform duration-150 ease-out hover:opacity-90 active:scale-[0.96]"
             >

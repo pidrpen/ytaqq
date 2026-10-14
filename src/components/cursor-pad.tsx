@@ -421,7 +421,7 @@ export function CursorPad({
             Выделить и прочитать
           </button>
           <a
-            href="https://github.com/pidrpen/ytaqq/raw/main/public/CursorPad.exe"
+            href="https://github.com/pidrpen/ytaqq/raw/main/public/CursorPad.zip"
             className="inline-flex h-8 items-center justify-center rounded-md bg-paper-dark text-xs text-ink ring-1 ring-paper-line"
           >
             Обновить с GitHub
