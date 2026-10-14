@@ -52,8 +52,10 @@
 #define ID_CHK_TESS 176   /* точное распознавание (Tesseract) */
 #define ID_SEC_BASE 440   /* 440..444: вкладки Настроек */
 #define SEC_COUNT 5
-#define ID_CUR_ST_BASE 460 /* 460..464: персонажи «Робот»…«Череп» (styles.c) */
-#define ST_COUNT 5
+#define ID_CUR_ST_BASE 460 /* 460..465: персонажи «Робот»…«Череп» (styles.c) */
+#define ST_COUNT 6
+#define ST_RAZREZ 5         /* «Разрез» — клинок вместо стрелки */
+#define ST_KNIGHT ST_COUNT  /* рыцарь (Мечник) рисуется кодом, но кнопки стиля у него нет */
 #define ST_SKIN0 7          /* g_skin первого из них; 7…11 */
 #define ID_PREVIEW 470      /* окошко просмотра курсора и эффекта */
 #define ID_MIN 106
@@ -654,6 +656,12 @@ static void apply_scheme_slots(void) {
     mark_cursor_dirty(TRUE);
     return;
   }
+  if (g_skin == 1) { /* Мечник с 2026.10.14.6 — рыцарь, нарисованный кодом (styles.c) */
+    style_apply(ST_KNIGHT);
+    g_cursorOn = TRUE;
+    mark_cursor_dirty(TRUE);
+    return;
+  }
   if (g_skin == 6) {
     rias_apply();
     g_cursorOn = TRUE;
@@ -1175,7 +1183,7 @@ static void load_cursor_pref(void) {
 }
 
 static void save_cursor_pref(void) {
-  static const char *const kSt[ST_COUNT] = {"t1", "t2", "t3", "t4", "t5"};
+  static const char *const kSt[ST_COUNT] = {"t1", "t2", "t3", "t4", "t5", "t6"};
   const char *v = g_skin >= ST_SKIN0 && g_skin < ST_SKIN0 + ST_COUNT ? kSt[g_skin - ST_SKIN0]
                   : g_skin == 6 ? "k7"
                   : g_skin == 5 ? "k6"
@@ -1203,7 +1211,7 @@ static const wchar_t *const kFxNames[FX_OPTIONS] = {L"Как у курсора",
                                                     L"Царапины",      L"Разрез", L"Кольца",    L"Конфетти",
                                                     L"Молния",        L"Сердечки"};
 static const int kFxPick[FX_OPTIONS] = {-1, 0, 1, 2, 3, 4, 5, 6, 7, 8};
-static const wchar_t *const kStyleNames[ST_COUNT] = {L"Робот", L"Призрак", L"Слайм", L"Огонёк", L"Череп"};
+static const wchar_t *const kStyleNames[ST_COUNT] = {L"Робот", L"Призрак", L"Слайм", L"Огонёк", L"Череп", L"Разрез"};
 
 static void update_fx_buttons(void) {
   for (int i = 0; i < FX_OPTIONS; i++) {
