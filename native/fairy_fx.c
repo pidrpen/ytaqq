@@ -81,6 +81,12 @@
 #define FX_PURPLE_SPARKS 10 /* «Пурпур» Годжо */
 #define FX_PURPLE_MERGE 12  /* синий и красный сходятся за столько кадров */
 #define FX_PURPLE_FRAMES 44
+#define FX_FEATHERS 7    /* «Перья» Ворона */
+#define FX_FEATHER_FRAMES 52
+#define FX_INK_DROPS 10  /* «Чернила» Осьминога */
+#define FX_INK_FRAMES 42
+#define FX_VENOM_DROPS 12 /* «Яд» Скорпиона: капли и ещё 4 пузыря */
+#define FX_VENOM_FRAMES 42
 #define FX_MAXP 16      /* больше всех частиц у конфетти */
 
 typedef struct {
@@ -780,6 +786,83 @@ static void fx_purple_paint(FxWin *f) {
   }
 }
 
+/* ---- свои эффекты Ворона, Осьминога и Скорпиона (с 2026.10.14.13) ------ */
+
+/* чёрное перо с сиреневой кромкой: кувыркается (p->tw — поворот) и тает */
+static void fx_feather_part(FxWin *f, const FxPart *p, int age) {
+  if (age < 0 || age >= p->life) return;
+  float t = (float)age / p->life, a = (1.0f - t * t) * (age < 2 ? (age + 1) / 2.0f : 1.0f);
+  float L = p->sz * g_fxScale, dx = cosf(p->tw), dy = sinf(p->tw);
+  int span = (int)(L / 2 + 2);
+  for (int y = (int)p->y - span; y <= (int)p->y + span; y++)
+    for (int x = (int)p->x - span; x <= (int)p->x + span; x++) {
+      float qx = x + 0.5f - p->x, qy = y + 0.5f - p->y;
+      float sl = (qx * dx + qy * dy) / L + 0.5f, w = fabsf(qx * dy - qy * dx);
+      if (sl < 0 || sl > 1) continue;
+      float hw = L * 0.17f * sinf(3.14159265f * sl) + 0.4f;
+      if (w > hw + 0.7f) continue;
+      float cov = fx_clamp01(hw + 0.7f - w);
+      if (w < 0.55f * g_fxScale) fx_put(f, x, y, 200, 190, 170, a * cov);          /* очин */
+      else if (w > hw - 1.0f * g_fxScale) fx_put(f, x, y, 140, 125, 205, a * cov); /* кромка */
+      else fx_put(f, x, y, 38, 38, 62, a * cov);
+    }
+}
+
+/* «Чернила»: клякса с волнистым краем растекается из точки нажатия, вокруг
+   разлетаются капли; держится и тает */
+static void fx_ink_paint(FxWin *f) {
+  float c = f->W / 2.0f, sc = g_fxScale;
+  int fr = f->frame;
+  float grow = fx_clamp01((fr + 1) / 8.0f), a = fr < 18 ? 0.92f : 0.92f * (1.0f - (fr - 18.0f) / (FX_INK_FRAMES - 18));
+  float R = 24.0f * sc * (1.0f - (1.0f - grow) * (1.0f - grow)), ph = f->p[0].tw;
+  int span = (int)(R * 1.3f + 2);
+  for (int y = (int)c - span; y <= (int)c + span; y++)
+    for (int x = (int)c - span; x <= (int)c + span; x++) {
+      float qx = x + 0.5f - c, qy = y + 0.5f - c, d = hypotf(qx, qy), an = atan2f(qy, qx);
+      float edge = R * (1.0f + 0.17f * sinf(5 * an + ph) + 0.08f * sinf(9 * an + ph * 2));
+      if (d > edge + 1) continue;
+      float k = d / (edge + 0.01f);
+      fx_put(f, x, y, fx_mix(30, 85, k * k), fx_mix(18, 45, k * k), fx_mix(48, 130, k * k), a * fx_clamp01(edge + 1 - d));
+    }
+  for (int i = 0; i < f->n; i++) {
+    const FxPart *p = &f->p[i];
+    int age = fr - p->delay;
+    if (age < 0) continue;
+    float r = p->sz * sc;
+    for (int y = (int)(p->y - r - 1); y <= (int)(p->y + r + 1); y++)
+      for (int x = (int)(p->x - r - 1); x <= (int)(p->x + r + 1); x++) {
+        float d = hypotf(x + 0.5f - p->x, y + 0.5f - p->y);
+        if (d <= r + 1) fx_put(f, x, y, 34, 20, 55, a * fx_clamp01(r + 1 - d));
+      }
+  }
+}
+
+/* «Яд»: зелёные капли брызгами вверх и вниз, в точке нажатия пузыри лопаются */
+static void fx_venom_paint(FxWin *f) {
+  float c = f->W / 2.0f, sc = g_fxScale;
+  if (f->frame < 7) fx_glow_dot(f, c, c, 22.0f * sc, 90, 255, 60, 0.7f * (1.0f - f->frame / 7.0f));
+  for (int i = 0; i < f->n; i++) {
+    const FxPart *p = &f->p[i];
+    int age = f->frame - p->delay;
+    if (age < 0 || age >= p->life) continue;
+    float t = (float)age / p->life;
+    if (p->spr) { /* пузырь: растёт колечком и лопается */
+      float r = (2.0f + p->sz * t) * sc, th = 1.3f * sc, a = t < 0.85f ? 0.9f : 0.9f * (1.0f - (t - 0.85f) / 0.15f);
+      for (int y = (int)(p->y - r - 2); y <= (int)(p->y + r + 2); y++)
+        for (int x = (int)(p->x - r - 2); x <= (int)(p->x + r + 2); x++) {
+          float d = hypotf(x + 0.5f - p->x, y + 0.5f - p->y);
+          float k = 1.0f - fabsf(d - r) / th;
+          if (k > 0) fx_put(f, x, y, 150, 255, 120, a * fx_clamp01(k * 1.5f));
+          else if (d < r) fx_put(f, x, y, 60, 200, 50, a * 0.25f);
+        }
+      continue;
+    }
+    float a = 1.0f - t * t;
+    fx_glow_dot(f, p->x, p->y, p->sz * 2.4f * sc, 60, 230, 50, 0.7f * a);
+    fx_glow_dot(f, p->x, p->y, p->sz * sc, 200, 255, 160, a);
+  }
+}
+
 static void fx_seed_new(FxWin *f, int kind, int S) {
   float c = S / 2.0f;
   if (kind == 5) { /* три кольца одно за другим */
@@ -863,6 +946,62 @@ static void fx_seed_new(FxWin *f, int kind, int S) {
       p->delay = FX_PURPLE_MERGE + (int)(fx_rand() * 3);
       p->life = FX_PURPLE_FRAMES - p->delay;
     }
+  } else if (kind == 11) { /* перья разлетаются и плывут вниз, покачиваясь */
+    f->n = FX_FEATHERS;
+    f->frames = FX_FEATHER_FRAMES;
+    for (int i = 0; i < FX_FEATHERS; i++) {
+      FxPart *p = &f->p[i];
+      memset(p, 0, sizeof(*p));
+      float a = i * (6.2832f / FX_FEATHERS) + fx_rand() * 0.6f, v = (3.0f + fx_rand() * 2.5f) * g_fxScale;
+      p->x = c;
+      p->y = c;
+      p->vx = cosf(a) * v;
+      p->vy = sinf(a) * v - 1.2f * g_fxScale;
+      p->tw = a;
+      p->rev = (fx_rand() - 0.5f) * 0.16f;
+      p->sz = 15.0f + fx_rand() * 7.0f;
+      p->spr = (int)(fx_rand() * 100);
+      p->life = FX_FEATHER_FRAMES;
+    }
+  } else if (kind == 12) { /* чернила: капли из кляксы; p[0].tw — узор края */
+    f->n = FX_INK_DROPS;
+    f->frames = FX_INK_FRAMES;
+    for (int i = 0; i < FX_INK_DROPS; i++) {
+      FxPart *p = &f->p[i];
+      memset(p, 0, sizeof(*p));
+      float a = fx_rand() * 6.2832f, v = (4.0f + fx_rand() * 4.0f) * g_fxScale;
+      p->x = c;
+      p->y = c;
+      p->vx = cosf(a) * v;
+      p->vy = sinf(a) * v;
+      p->sz = 2.0f + fx_rand() * 3.0f;
+      p->tw = fx_rand() * 6.2832f;
+      p->delay = 1 + (int)(fx_rand() * 3);
+      p->life = FX_INK_FRAMES - p->delay;
+    }
+  } else if (kind == 13) { /* яд: брызги и четыре пузыря */
+    f->n = FX_VENOM_DROPS + 4;
+    f->frames = FX_VENOM_FRAMES;
+    for (int i = 0; i < f->n; i++) {
+      FxPart *p = &f->p[i];
+      memset(p, 0, sizeof(*p));
+      if (i < FX_VENOM_DROPS) {
+        p->x = c;
+        p->y = c;
+        p->vx = (fx_rand() - 0.5f) * 6.0f * g_fxScale;
+        p->vy = -(2.5f + fx_rand() * 4.0f) * g_fxScale;
+        p->sz = 2.8f + fx_rand() * 2.2f;
+        p->delay = (int)(fx_rand() * 3);
+        p->life = 26 + (int)(fx_rand() * 10);
+      } else {
+        p->spr = 1;
+        p->x = c + (fx_rand() - 0.5f) * 24.0f * g_fxScale;
+        p->y = c + (fx_rand() - 0.5f) * 16.0f * g_fxScale;
+        p->sz = 3.0f + fx_rand() * 4.0f;
+        p->delay = 4 + (int)(fx_rand() * 16);
+        p->life = 12 + (int)(fx_rand() * 8);
+      }
+    }
   } else { /* сердечки всплывают, покачиваясь */
     static const BYTE pal[][3] = {{255, 77, 130}, {255, 120, 170}, {230, 30, 80}, {255, 150, 190}, {244, 63, 94}};
     f->n = FX_HEARTS;
@@ -891,6 +1030,16 @@ static void fx_paint_new(FxWin *f) {
     fx_purple_paint(f);
     return;
   }
+  if (f->kind == 12) {
+    fx_ink_paint(f);
+    return;
+  }
+  if (f->kind == 13) {
+    fx_venom_paint(f);
+    return;
+  }
+  if (f->kind == 11 && f->frame < 5)
+    fx_glow_dot(f, c, c, 20.0f * g_fxScale, 90, 70, 150, 0.5f * (1.0f - f->frame / 5.0f));
   if (f->kind == 9 && f->frame < 5)
     fx_glow_dot(f, c, c, 26.0f * g_fxScale, 200, 0, 20, 0.45f * (1.0f - f->frame / 5.0f));
   if (f->kind == 5 && f->frame < 6)
@@ -904,6 +1053,7 @@ static void fx_paint_new(FxWin *f) {
     else if (f->kind == 6) fx_confetti_part(f, p, age);
     else if (f->kind == 7) fx_bolt_part(f, p, age);
     else if (f->kind == 9) fx_cut_part(f, p, age);
+    else if (f->kind == 11) fx_feather_part(f, p, age);
     else fx_heart_part(f, p, age);
   }
 }
@@ -919,11 +1069,23 @@ static void fx_step_new(FxWin *f) {
       p->vx *= 0.96f;
       p->vy = p->vy * 0.97f + 0.30f * g_fxScale;
       p->tw += p->rev;
-    } else if (f->kind == 10) {
+    } else if (f->kind == 10 || f->kind == 12) {
       p->x += p->vx;
       p->y += p->vy;
-      p->vx *= 0.93f;
-      p->vy *= 0.93f;
+      p->vx *= f->kind == 12 ? 0.82f : 0.93f;
+      p->vy *= f->kind == 12 ? 0.82f : 0.93f;
+    } else if (f->kind == 11) {
+      p->x += p->vx + sinf(age * 0.16f + p->spr) * 0.7f * g_fxScale;
+      p->y += p->vy;
+      p->vx *= 0.88f;
+      p->vy = p->vy * 0.88f + 0.10f * g_fxScale;
+      p->tw += p->rev + sinf(age * 0.16f + p->spr) * 0.03f;
+    } else if (f->kind == 13) {
+      if (p->spr) continue;
+      p->x += p->vx;
+      p->y += p->vy;
+      p->vx *= 0.97f;
+      p->vy += 0.35f * g_fxScale;
     } else if (f->kind == 8) {
       p->x += sinf(age * 0.18f + p->tw) * 0.7f * g_fxScale;
       p->y += p->vy;
@@ -1152,14 +1314,12 @@ static int fx_kind_for(int skin, int pick) {
   if (skin == 3) return g_sparkle ? 1 : 0;
   if (skin == 4) return g_flame ? 2 : 0;
   if (skin == 5) return g_catFx == 1 ? 3 : (g_catFx == 2 ? 1 : 0);
-  if (skin == 7) return 7;  /* Робот — молния */
-  if (skin == 8) return 5;  /* Призрак — кольца */
-  if (skin == 9) return 6;  /* Слайм — конфетти */
-  if (skin == 10) return 2; /* Огонёк — пламя */
-  if (skin == 11) return 3; /* Череп — царапины */
-  if (skin == 12) return 4; /* Разрез — разрез */
-  if (skin == 13) return 9;  /* Сукуна — своё «Рассечение» */
-  if (skin == 14) return 10; /* Годжо — свой «Пурпур» */
+  if (skin == 7) return 11;  /* Ворон — свои «Перья» */
+  if (skin == 8) return 12;  /* Осьминог — свои «Чернила» */
+  if (skin == 9) return 13;  /* Скорпион — свой «Яд» */
+  if (skin == 10) return 4;  /* Разрез — разрез */
+  if (skin == 11) return 9;  /* Сукуна — своё «Рассечение» */
+  if (skin == 12) return 10; /* Годжо — свой «Пурпур» */
   return 0;
 }
 

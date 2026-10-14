@@ -1,12 +1,14 @@
 /* ---- Стили курсоров, нарисованные кодом (с 2026.10.14.2) ------------------
 
-   «Робот», «Призрак», «Слайм», «Огонёк» и «Череп» — пять наборов курсоров
+   Персонажи — наборы курсоров
    без картинок: все шестнадцать видов рисуются при первом выборе под размер
    указателя (32 / 48 / 64 точки) и ставятся так же, как наборы из .cur.
    С 2026.10.14.5 это персонажи с маленьким острием указателя, а не
    перекрашенная стрелка (до того были «Неон», «Лёд», «Золото», «Лава», «Космос»).
    С 2026.10.14.11 к ним добавлены «Сукуна» и «Годжо» из «Магической битвы»,
    с 2026.10.14.12 — свои, без общего острия, и со своими эффектами.
+   С 2026.10.14.13 Робота, Призрака, Слайма, Огонька и Черепа сменили «Ворон»,
+   «Осьминог» и «Скорпион» — тоже свои, со своими эффектами.
 
    У каждого свой эффект при нажатии, если в Настройках выбрано «Как у
    курсора» (fx_kind_for). Здесь же — окошко просмотра в Настройках: в нём
@@ -111,11 +113,9 @@ typedef struct {
 
 /* прочие виды — прежние формы в цветах персонажа */
 static const StLook kLooks[ST_DRAW] = {
-    {{220, 226, 236}, {170, 178, 195}, {120, 128, 145}, {20, 30, 45}, {40, 210, 255}, 1.2f, 0.35f, 0},
-    {{252, 252, 255}, {225, 226, 250}, {196, 200, 240}, {40, 40, 80}, {200, 200, 255}, 1.2f, 0.35f, 0},
-    {{160, 245, 130}, {100, 200, 90}, {40, 150, 60}, {20, 60, 20}, {0, 0, 0}, 1.2f, 0.0f, 0},
-    {{255, 236, 120}, {255, 140, 20}, {200, 50, 10}, {50, 10, 0}, {255, 110, 0}, 1.2f, 0.45f, 0},
-    {{252, 248, 235}, {230, 222, 200}, {205, 195, 170}, {40, 30, 30}, {0, 0, 0}, 1.2f, 0.0f, 0},
+    {{120, 125, 175}, {65, 68, 105}, {35, 37, 60}, {15, 15, 25}, {150, 130, 230}, 1.2f, 0.40f, 0},   /* Ворон */
+    {{255, 160, 215}, {230, 95, 175}, {150, 40, 120}, {40, 10, 35}, {255, 120, 200}, 1.2f, 0.30f, 0},  /* Осьминог */
+    {{255, 210, 110}, {240, 150, 40}, {170, 70, 15}, {45, 20, 5}, {120, 230, 70}, 1.2f, 0.35f, 0},     /* Скорпион */
     {{255, 90, 90}, {200, 20, 30}, {110, 0, 10}, {20, 0, 5}, {255, 30, 40}, 1.2f, 0.40f, 0},     /* Разрез */
     {{255, 175, 200}, {235, 110, 150}, {150, 30, 60}, {30, 10, 15}, {255, 40, 60}, 1.2f, 0.35f, 0},   /* Сукуна */
     {{245, 248, 255}, {170, 210, 255}, {60, 120, 230}, {15, 20, 45}, {90, 190, 255}, 1.2f, 0.45f, 0}, /* Годжо */
@@ -149,62 +149,6 @@ static BOOL st_ell(float u, float v, float cu, float cv, float ru, float rv) {
 static int st_char_px(int st, float u, float v, float *c) {
   float au = fabsf(u);
   switch (st) {
-  case 0: /* Робот */
-    if (st_ell(au, v, 0.33f, -0.08f, 0.09f, 0.09f)) return ST_SET(235, 255, 255);
-    if (st_ell(au, v, 0.33f, -0.08f, 0.18f, 0.18f)) return ST_SET(30, 220, 255);
-    if (au <= 0.38f && v >= 0.3f && v <= 0.48f)
-      return fmodf(u + 0.38f, 0.19f) < 0.05f ? ST_SET(210, 214, 224) : ST_SET(40, 45, 60);
-    if (st_ell(u, v, 0, -0.95f, 0.16f, 0.16f)) return ST_SET(255, 70, 70);
-    if (au <= 0.07f && v >= -0.95f && v <= -0.5f) return ST_SET(120, 125, 140);
-    if (au <= 0.78f && v >= -0.55f && v <= 0.75f) {
-      float cu = au - 0.58f, cv = v < 0 ? v + 0.35f : v - 0.55f; /* скруглённые углы */
-      if (cu > 0 && fabsf(cv) > 0 && (v < -0.35f || v > 0.55f) && cu * cu + cv * cv > 0.04f) return 0;
-      float t = (v + 0.55f) / 1.3f;
-      return ST_SET(st_mix(215, 140, t), st_mix(222, 148, t), st_mix(235, 168, t));
-    }
-    if (au > 0.78f && au <= 0.94f && fabsf(v - 0.1f) <= 0.2f) return ST_SET(120, 125, 140);
-    return 0;
-  case 1: /* Призрак */
-    if (st_ell(au, v, 0.3f, -0.25f, 0.13f, 0.2f) || st_ell(u, v, 0, 0.17f, 0.11f, 0.11f)) return ST_SET(35, 35, 60);
-    if (st_ell(au, v, 0.52f, 0.0f, 0.1f, 0.07f)) return ST_SET(255, 170, 200);
-    if (st_ell(u, v, 0, -0.2f, 0.8f, 0.8f) ||
-        (au <= 0.8f && v >= -0.2f && v <= 0.66f + 0.14f * cosf(u * 3.14159265f * 2.5f))) {
-      float t = (v + 1.0f) / 1.8f;
-      return ST_SET(st_mix(252, 196, t), st_mix(252, 200, t), 255);
-    }
-    return 0;
-  case 2: /* Слайм */
-    if (st_ell(au, v, 0.23f, 0.01f, 0.05f, 0.05f)) return ST_SET(255, 255, 255);
-    if (st_ell(au, v, 0.27f, 0.05f, 0.13f, 0.14f)) return ST_SET(20, 35, 20);
-    if (st_ell(u, v, -0.35f, -0.3f, 0.16f, 0.1f)) return ST_SET(235, 255, 230);
-    if (st_ell(u, v, 0, 0.22f, 0.9f, 0.6f) || st_ell(u, v, 0, -0.22f, 0.52f, 0.52f)) {
-      float t = (v + 0.75f) / 1.6f;
-      return ST_SET(st_mix(160, 40, t), st_mix(245, 150, t), st_mix(130, 60, t));
-    }
-    return 0;
-  case 3: { /* Огонёк */
-    if (st_ell(au, v, 0.2f, 0.32f, 0.09f, 0.12f)) return ST_SET(70, 20, 10);
-    float dx = u / 0.62f, dy = (v - 0.32f) / 0.62f;
-    if (dy < 0) {
-      float w = 1.0f + dy / 2.1f * 0.95f;
-      dx /= w > 0.06f ? w : 0.06f;
-      dy /= 2.1f;
-    }
-    float d = sqrtf(dx * dx + dy * dy);
-    if (d > 1.0f) return 0;
-    if (d < 0.5f) return ST_SET(255, 232, 120);
-    float t = (d - 0.5f) / 0.5f;
-    return ST_SET(255, st_mix(170, 70, t), st_mix(40, 10, t));
-  }
-  default: /* Череп */
-    if (st_ell(au, v, 0.3f, -0.05f, 0.21f, 0.23f)) return ST_SET(45, 35, 40);
-    if (v >= 0.16f && v <= 0.36f && au <= (v - 0.16f) * 0.6f) return ST_SET(45, 35, 40);
-    if (v >= 0.5f && v <= 0.78f && au <= 0.45f && (au < 0.03f || fabsf(au - 0.2f) < 0.03f)) return ST_SET(90, 80, 75);
-    if (st_ell(u, v, 0, -0.15f, 0.75f, 0.75f) || (au <= 0.45f && v >= 0.3f && v <= 0.78f)) {
-      float t = (v + 0.9f) / 1.7f;
-      return ST_SET(st_mix(252, 205, t), st_mix(248, 195, t), st_mix(235, 170, t));
-    }
-    return 0;
   case ST_KNIGHT: /* Рыцарь: топфхельм с Т-образной прорезью, золотой обод и алый плюмаж */
     if (st_ell(u, v, 0.22f, -0.9f, 0.5f, 0.17f)) return ST_SET(st_mix(235, 150, (v + 1.07f) / 0.34f), 30, 40);
     if ((v >= -0.14f && v <= 0.0f && au <= 0.56f) || (au <= 0.07f && v >= 0.0f && v <= 0.5f)) return ST_SET(25, 25, 35);
@@ -219,6 +163,7 @@ static int st_char_px(int st, float u, float v, float *c) {
     }
     return 0;
   }
+  return 0;
 }
 #undef ST_SET
 
@@ -253,9 +198,8 @@ static int st_blade_px(int st, float x, float y, float tx, float ty, float dx, f
   return 0;
 }
 
-static const BYTE kCharTip[ST_DRAW][3] = {{40, 210, 255}, {225, 228, 255}, {90, 200, 90}, {255, 150, 30},
-                                          {240, 235, 220}, {255, 60, 60},   {230, 40, 50},  {90, 190, 255},
-                                          {225, 230, 240}};
+static const BYTE kCharTip[ST_DRAW][3] = {{150, 130, 230}, {255, 120, 200}, {120, 230, 70}, {255, 60, 60},
+                                          {230, 40, 50},   {90, 190, 255},  {225, 230, 240}};
 static const float kTip[] = {2, 1, 2, 15, 5.8f, 11.6f, 11, 11.2f};   /* острие стрелки */
 static const float kTipUp[] = {16, 1, 21, 8, 11, 8};                 /* острие руки — вверх */
 
@@ -266,8 +210,8 @@ static const float kTipUp[] = {16, 1, 21, 8, 11, 8};                 /* остр
    браслеты-метки на запястье, у Годжо два пальца вверх с голубым светом
    («Синий»). В ожидании Сукуна открывает все четыре глаза, а Годжо снимает
    повязку — под ней голубые «Шесть глаз». Рисуется прямо в сетке 32. */
-#define ST_SUKUNA 6
-#define ST_GOJO 7
+#define ST_SUKUNA 4
+#define ST_GOJO 5
 
 #define ST_C(R, G, B) (c[0] = (R), c[1] = (G), c[2] = (B), 1)
 /* отрезок толщиной w от (x0, y0) до (x1, y1) */
@@ -377,6 +321,150 @@ static int st_jjk_slot_px(int st, int slot, float x, float y, float *c) {
   if (slot == 14) return st_jjk_head(st, x + 2, y + 1, TRUE, c);
   return st_jjk_head(st, x, y, FALSE, c);
 }
+
+/* ---- «Ворон», «Осьминог», «Скорпион» (с 2026.10.14.13) ----
+   Пришли на место Робота, Призрака, Слайма, Огонька и Черепа — те были
+   головой в углу при общем цветном острие. Здесь, как у Дракона и Кота,
+   указывает сам зверь: у Ворона — клюв, у Осьминога — кончик щупальца, у
+   Скорпиона — жало. Над ссылками — своё: перо, щупальце, хвост с жалом. */
+#define ST_CROW 0
+#define ST_OCTO 1
+#define ST_SCORP 2
+
+/* ломаная из n точек с толщиной от w0 (начало) до w1 (конец): попала ли точка;
+   *along — сколько пройдено вдоль от начала, *rel — расстояние от оси / полутолщина */
+static BOOL st_chain(float x, float y, const float *p, int n, float w0, float w1, float *along, float *rel) {
+  float total = 0, best = 1e9f, run = 0;
+  for (int i = 0; i + 1 < n; i++) total += hypotf(p[i * 2 + 2] - p[i * 2], p[i * 2 + 3] - p[i * 2 + 1]);
+  BOOL hit = FALSE;
+  for (int i = 0; i + 1 < n; i++) {
+    float x0 = p[i * 2], y0 = p[i * 2 + 1], vx = p[i * 2 + 2] - x0, vy = p[i * 2 + 3] - y0;
+    float l = hypotf(vx, vy), t = l > 0 ? ((x - x0) * vx + (y - y0) * vy) / (l * l) : 0;
+    t = t < 0 ? 0 : (t > 1 ? 1 : t);
+    float d = hypotf(x - x0 - vx * t, y - y0 - vy * t), s = run + l * t;
+    float hw = 0.5f * st_mix(w0, w1, total > 0 ? s / total : 0);
+    if (d <= hw && d / hw < best) best = d / hw, *along = s, *rel = best, hit = TRUE;
+    run += l;
+  }
+  return hit;
+}
+
+/* повёрнутый на 45° эллипс: ось u — от левого верхнего угла к правому нижнему */
+static BOOL st_ell45(float x, float y, float cx, float cy, float ru, float rv) {
+  float u = ((x - cx) + (y - cy)) * 0.70710678f, v = ((y - cy) - (x - cx)) * 0.70710678f;
+  return st_ell(u, v, 0, 0, ru, rv);
+}
+
+static int st_crow(float x, float y, float *c) {
+  static const float kBeak[] = {2, 1, 10.2f, 5, 5.2f, 10};
+  static const float kTail[] = {24, 22.5f, 31.5f, 26.5f, 30.5f, 30, 26.8f, 31.5f};
+  if (st_poly(kBeak, 3, x, y)) return (x - 2) - (y - 1) > 0 ? ST_C(245, 200, 80) : ST_C(195, 140, 45);
+  if (st_disc(x, y, 10.6f, 8.8f, 1.5f)) /* жёлтый глаз с чёрным зрачком */
+    return st_disc(x, y, 10.9f, 9, 0.65f) ? ST_C(10, 10, 15) : ST_C(255, 210, 40);
+  if (st_seg(x, y, 18, 25.5f, 17, 30, 0.9f) || st_seg(x, y, 21.5f, 25.5f, 21.5f, 30, 0.9f) ||
+      st_seg(x, y, 15.6f, 30.4f, 18.6f, 30.4f, 0.8f) || st_seg(x, y, 20, 30.4f, 23, 30.4f, 0.8f))
+    return ST_C(130, 120, 100); /* лапы */
+  BOOL wing = st_ell45(x, y, 20.5f, 17.5f, 8, 4.2f);
+  if (wing || st_poly(kTail, 4, x, y)) { /* крыло и хвост: перья со светлой кромкой */
+    float u = ((x - 20) + (y - 18)) * 0.70710678f;
+    if (fabsf(fmodf(u + 40, 2.6f)) < 0.45f) return ST_C(125, 120, 185);
+    return ST_C(42, 44, 72);
+  }
+  if (st_disc(x, y, 11.3f, 11.3f, 5.3f) || st_ell45(x, y, 18.5f, 18.5f, 9.5f, 6.2f)) {
+    if (st_disc(x, y, 9.6f, 9.4f, 2.6f) && !st_disc(x, y, 10.6f, 8.8f, 2.2f)) return ST_C(105, 110, 165); /* отлив */
+    float t = fx_clamp01((x + y - 12) / 36);
+    return ST_C(st_mix(70, 34, t), st_mix(74, 36, t), st_mix(110, 58, t));
+  }
+  return 0;
+}
+
+static int st_octo(float x, float y, float *c) {
+  static const float kArm[] = {16, 21, 10, 18.8f, 6, 13.5f, 3.6f, 7.5f, 2.4f, 3.2f, 2, 1};
+  float s, r;
+  if (st_ell(x, y, 18.6f, 15.8f, 1.8f, 2.1f) || st_ell(x, y, 24.6f, 15.8f, 1.8f, 2.1f)) { /* глаза */
+    float ex = x < 21.6f ? 18.6f : 24.6f;
+    if (st_ell(x, y, ex + 0.2f, 16.3f, 1.2f, 0.6f)) return ST_C(15, 10, 20);
+    return ST_C(255, 252, 240);
+  }
+  if (st_ell(x, y, 21.6f, 13, 7.2f, 8.2f) && y < 20.5f) {
+    if (st_ell(x, y, 19, 8.5f, 2.4f, 1.8f)) return ST_C(255, 175, 220); /* блик */
+    float t = fx_clamp01((y - 5) / 16);
+    if (st_disc(x, y, 26, 11, 1) || st_disc(x, y, 17.5f, 12.5f, 0.8f) || st_disc(x, y, 24, 7.5f, 0.7f)) return ST_C(180, 45, 130);
+    return ST_C(st_mix(245, 195, t), st_mix(120, 55, t), st_mix(190, 150, t));
+  }
+  BOOL arm = st_chain(x, y, kArm, 6, 4.2f, 1.0f, &s, &r);
+  for (int i = 0; i < 4 && !arm; i++) {
+    float bx = 16.5f + i * 3.4f;
+    float leg[] = {bx, 19.5f, bx - 1.4f + (i & 1) * 2.4f, 24, bx + 0.8f - (i & 1) * 2.2f, 27.6f, bx - 0.6f + (i & 1) * 1.6f, 31};
+    arm = st_chain(x, y, leg, 4, 3.2f, 1.0f, &s, &r);
+  }
+  if (arm) {
+    if (r < 0.45f && fmodf(s, 2.4f) < 0.95f) return ST_C(255, 200, 225); /* присоски */
+    return ST_C(st_mix(225, 175, r), st_mix(85, 45, r), st_mix(165, 130, r));
+  }
+  return 0;
+}
+
+static int st_scorp(float x, float y, float *c) {
+  static const float kSting[] = {2, 1, 9.2f, 2.6f, 8, 6};
+  static const float kSeg[6][3] = {{13.6f, 4.6f, 2}, {17.3f, 5.5f, 2.2f}, {20.6f, 7.6f, 2.4f},
+                                   {22.9f, 11, 2.6f}, {24, 14.8f, 2.8f}, {23.6f, 18.6f, 3}};
+  if (st_poly(kSting, 3, x, y)) return ST_C(115, 25, 25);
+  if (st_ell(x, y, 10, 4.3f, 2.5f, 2.1f)) return st_disc(x, y, 9.4f, 3.6f, 0.8f) ? ST_C(255, 210, 120) : ST_C(215, 110, 30);
+  for (int i = 5; i >= 0; i--) /* хвост из звеньев, у каждого тёмный край */
+    if (st_disc(x, y, kSeg[i][0], kSeg[i][1], kSeg[i][2]))
+      return hypotf(x - kSeg[i][0], y - kSeg[i][1]) > kSeg[i][2] - 0.6f ? ST_C(140, 60, 15) : ST_C(245, 165, 50);
+  if (st_seg(x, y, 16, 26, 14.4f, 30.2f, 0.9f) || st_seg(x, y, 19.5f, 26.5f, 19, 30.6f, 0.9f) ||
+      st_seg(x, y, 23, 26, 24.6f, 29.8f, 0.9f) || st_seg(x, y, 11.5f, 22.4f, 6.6f, 18.6f, 1.6f) ||
+      st_seg(x, y, 11.5f, 25.8f, 6.4f, 28.4f, 1.6f))
+    return ST_C(175, 85, 20); /* ноги и руки клешней */
+  if ((st_ell(x, y, 5, 17.2f, 2.5f, 1.6f) || st_ell(x, y, 4.6f, 28.8f, 2.5f, 1.6f)) && fabsf(y - (y < 23 ? 16.9f : 29.1f)) > 0.3f)
+    return ST_C(230, 130, 35); /* клешни с прорезью */
+  if (st_ell(x, y, 12.8f, 24, 3.2f, 3)) {
+    if (st_disc(x, y, 11.6f, 23, 0.55f) || st_disc(x, y, 13, 22.6f, 0.55f)) return ST_C(15, 10, 10);
+    return ST_C(235, 150, 45);
+  }
+  if (st_ell(x, y, 19.5f, 22.8f, 6.8f, 4.4f)) {
+    if (fabsf(fmodf(x, 2.6f)) < 0.45f) return ST_C(150, 65, 15);
+    float t = fx_clamp01((y - 18.5f) / 8);
+    return ST_C(st_mix(250, 205, t), st_mix(180, 100, t), st_mix(60, 25, t));
+  }
+  return 0;
+}
+
+/* над ссылками: перо, щупальце или хвост с жалом; острие — 16,1 */
+static int st_beast_hand(int st, float x, float y, float *c) {
+  float dx = x - 16, adx = fabsf(dx), s, r;
+  if (st == ST_CROW) {
+    if (adx <= 0.45f && y >= 1 && y <= 31) return ST_C(205, 195, 165); /* очин */
+    if (y < 1 || y > 27) return 0;
+    float hw = 4.4f * sinf(3.14159265f * (y - 0.6f) / 26.4f);
+    if (adx > hw) return 0;
+    if (adx > hw - 0.9f) return ST_C(130, 122, 190);
+    if (fabsf(fmodf(y + adx * 0.8f, 2.6f)) < 0.45f) return ST_C(28, 28, 48);
+    return ST_C(48, 50, 82);
+  }
+  if (st == ST_OCTO) {
+    static const float kUp[] = {16, 31.5f, 18.6f, 24.5f, 13.8f, 17.5f, 17.6f, 9.5f, 16.2f, 3.8f, 16, 1};
+    if (!st_chain(x, y, kUp, 6, 6, 1.1f, &s, &r)) return 0;
+    if (r < 0.5f && fmodf(s, 2.6f) < 1.0f) return ST_C(255, 200, 225);
+    return ST_C(st_mix(230, 175, r), st_mix(90, 45, r), st_mix(170, 130, r));
+  }
+  static const float kSting[] = {14.4f, 5.6f, 16, 0.6f, 17.6f, 5.6f};
+  static const float kSeg[5][3] = {{16, 27.6f, 3.5f}, {16, 22.7f, 3.1f}, {16, 18.3f, 2.8f}, {16, 14.2f, 2.5f}, {16, 10.4f, 2.2f}};
+  if (st_poly(kSting, 3, x, y)) return ST_C(115, 25, 25);
+  if (st_ell(x, y, 16, 7, 2.3f, 2.4f)) return st_disc(x, y, 15.3f, 6.3f, 0.8f) ? ST_C(255, 210, 120) : ST_C(215, 110, 30);
+  for (int i = 4; i >= 0; i--)
+    if (st_disc(x, y, kSeg[i][0], kSeg[i][1], kSeg[i][2]))
+      return hypotf(x - kSeg[i][0], y - kSeg[i][1]) > kSeg[i][2] - 0.6f ? ST_C(140, 60, 15) : ST_C(245, 165, 50);
+  return 0;
+}
+
+static int st_beast_slot_px(int st, int slot, float x, float y, float *c) {
+  if (slot == 2) return st_beast_hand(st, x, y, c);
+  if (slot == 14) x += 2, y += 1;
+  return st == ST_CROW ? st_crow(x, y, c) : st == ST_OCTO ? st_octo(x, y, c) : st_scorp(x, y, c);
+}
 #undef ST_C
 
 /* цвет вида slot стиля st в точке сетки 32: значок поверх острия, острие поверх персонажа */
@@ -393,6 +481,7 @@ static int st_char_slot_px(int st, int slot, float x, float y, float *c) {
     }
   }
   if (st == ST_SUKUNA || st == ST_GOJO) return st_jjk_slot_px(st, slot, x, y, c);
+  if (st <= ST_SCORP) return st_beast_slot_px(st, slot, x, y, c);
   if (st == ST_RAZREZ) { /* «Разрез»: сам курсор — алый клинок */
     if (slot == 2) return st_blade_px(st, x, y, 16, 1, 0, 1, 15, c);
     return st_blade_px(st, x, y, 2, 1, 0.70710678f, 0.70710678f, 19, c);
@@ -956,7 +1045,7 @@ static void st_gallery(const wchar_t *path) {
   fx_init_sprites();
   int S = (int)(200 * g_fxScale), N = 48, cell = 56;
   int W = S * 4 > cell * ST_SLOTS ? S * 4 : cell * ST_SLOTS;
-  int rowsCur = ST_DRAW * 2, H = rowsCur * cell + 10 * (S / 2);
+  int rowsCur = ST_DRAW * 2, H = rowsCur * cell + 13 * (S / 2);
   BYTE *img = (BYTE *)malloc((size_t)W * H * 4);
   BYTE *cur = (BYTE *)malloc((size_t)N * N * 4);
   FxWin fw;
@@ -979,8 +1068,8 @@ static void st_gallery(const wchar_t *path) {
             for (int c = 0; c < 3; c++) d[c] = (BYTE)((s[c] * s[3] + back * (255 - s[3])) / 255);
           }
       }
-  /* эффекты 1…10: по четыре кадра, половина облачка */
-  for (int kind = 1; kind <= 10; kind++) {
+  /* эффекты 1…13: по четыре кадра, половина облачка */
+  for (int kind = 1; kind <= 13; kind++) {
     g_fxSeed = 777u + kind;
     fx_seed(&fw, kind, S);
     int at[4] = {2, fw.frames / 4, fw.frames / 2, fw.frames * 3 / 4};
