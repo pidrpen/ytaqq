@@ -1,0 +1,37 @@
+# Релиз на GitHub: после каждого слияния в main, где поменялась готовая
+# программа, появляется (или обновляется) релиз с номером версии и двумя
+# файлами — CursorPad.zip и CursorPad.exe. Собирать ничего не нужно:
+# берутся файлы из public/, их кладёт туда native/build.sh.
+name: Релиз
+
+on:
+  push:
+    branches: [main]
+    paths: [public/CursorPad.bin, public/CursorPad.zip, public/version.txt, .github/workflows/release.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Выложить релиз
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          ver=$(sed -n '2p' public/version.txt)
+          tag="v$ver"
+          # «что нового» — первый абзац native/whatsnew.txt
+          awk 'NF==0{exit} {print}' native/whatsnew.txt > notes.md
+          printf '\nСкачайте CursorPad.zip (программа и инструкция) или только CursorPad.exe.\nУстанавливать не нужно: распакуйте и запустите CursorPad.exe.\n' >> notes.md
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" public/CursorPad.zip public/CursorPad.exe --clobber
+            gh release edit "$tag" --notes-file notes.md --latest
+          else
+            gh release create "$tag" public/CursorPad.zip public/CursorPad.exe \
+              --title "CursorPad $ver" --notes-file notes.md --target "$GITHUB_SHA" --latest
+          fi
