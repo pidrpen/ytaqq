@@ -72,7 +72,7 @@ with zipfile.ZipFile(pub / "CursorPad.zip", "w", zipfile.ZIP_DEFLATED) as z:
 PY
 
 # jsDelivr не отдаёт .exe, поэтому зеркала получают те же байты как .bin.
-# Сам .exe в public не публикуется (он в .gitignore): это копия .bin.
+# Сам public/CursorPad.exe тоже лежит в репозитории — его скачивают руками.
 cp -f "$PUB/CursorPad.exe" "$PUB/CursorPad.bin"
 # version.txt для обновления: номер, версия, отпечаток sha256 программы (по нему
 # CursorPad проверяет скачанное) и «что нового» из whatsnew.txt (его же видно
