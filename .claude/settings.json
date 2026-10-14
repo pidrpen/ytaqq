@@ -1,0 +1,13 @@
+{
+  "extraKnownMarketplaces": {
+    "universal-modder": {
+      "source": {
+        "source": "github",
+        "repo": "rehan-remade/universal-modder"
+      }
+    }
+  },
+  "enabledPlugins": {
+    "universal-modder@universal-modder": true
+  }
+}
