@@ -52,11 +52,11 @@
 #define ID_CHK_TESS 176   /* точное распознавание (Tesseract) */
 #define ID_SEC_BASE 440   /* 440..444: вкладки Настроек */
 #define SEC_COUNT 5
-#define ID_CUR_ST_BASE 460 /* 460..467: персонажи «Робот»…«Годжо» (styles.c) */
-#define ST_COUNT 8
-#define ST_RAZREZ 5         /* «Разрез» — клинок вместо стрелки */
+#define ID_CUR_ST_BASE 460 /* 460..465: персонажи «Ворон»…«Годжо» (styles.c) */
+#define ST_COUNT 6
+#define ST_RAZREZ 3         /* «Разрез» — клинок вместо стрелки */
 #define ST_KNIGHT ST_COUNT  /* рыцарь (Мечник) рисуется кодом, но кнопки стиля у него нет */
-#define ST_SKIN0 7          /* g_skin первого из них; 7…14 */
+#define ST_SKIN0 7          /* g_skin первого из них; 7…12 */
 #define ID_PREVIEW 470      /* окошко просмотра курсора и эффекта */
 #define ID_MIN 106
 #define ID_OCR 107
@@ -1164,7 +1164,10 @@ static void load_cursor_pref(void) {
   if (cw >= 320 && cw <= 4000) g_cardW = cw;
   if (ch >= 200 && ch <= 3000) g_cardH = ch;
   if (pt >= 7 && pt <= 22) g_ansPt = pt;
-  if (skin[0] == 't' && skin[1] >= '1' && skin[1] < '1' + ST_COUNT) g_skin = ST_SKIN0 + (skin[1] - '1');
+  /* t1…t8 — как до 2026.10.14.13: t4 и t5 (Огонёк, Череп) убраны и становятся Вороном,
+     t1…t3 — Ворон, Осьминог, Скорпион на местах Робота, Призрака и Слайма */
+  static const signed char kTSkin[8] = {0, 1, 2, 0, 0, 3, 4, 5};
+  if (skin[0] == 't' && skin[1] >= '1' && skin[1] <= '8') g_skin = ST_SKIN0 + kTSkin[skin[1] - '1'];
   else if (skin[0] == 'k' && skin[1] == '7') g_skin = 6;
   else if (skin[0] == 'k' && skin[1] == '6') g_skin = 5;
   else if (skin[0] == 'k' && skin[1] == '5') g_skin = 4;
@@ -1183,7 +1186,7 @@ static void load_cursor_pref(void) {
 }
 
 static void save_cursor_pref(void) {
-  static const char *const kSt[ST_COUNT] = {"t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8"};
+  static const char *const kSt[ST_COUNT] = {"t1", "t2", "t3", "t6", "t7", "t8"};
   const char *v = g_skin >= ST_SKIN0 && g_skin < ST_SKIN0 + ST_COUNT ? kSt[g_skin - ST_SKIN0]
                   : g_skin == 6 ? "k7"
                   : g_skin == 5 ? "k6"
@@ -1211,7 +1214,7 @@ static const wchar_t *const kFxNames[FX_OPTIONS] = {L"Как у курсора",
                                                     L"Царапины",      L"Разрез", L"Кольца",    L"Конфетти",
                                                     L"Молния",        L"Сердечки"};
 static const int kFxPick[FX_OPTIONS] = {-1, 0, 1, 2, 3, 4, 5, 6, 7, 8};
-static const wchar_t *const kStyleNames[ST_COUNT] = {L"Робот", L"Призрак", L"Слайм", L"Огонёк", L"Череп", L"Разрез", L"Сукуна", L"Годжо"};
+static const wchar_t *const kStyleNames[ST_COUNT] = {L"Ворон", L"Осьминог", L"Скорпион", L"Разрез", L"Сукуна", L"Годжо"};
 
 static void update_fx_buttons(void) {
   for (int i = 0; i < FX_OPTIONS; i++) {
@@ -1274,6 +1277,9 @@ static const wchar_t *fx_pick_name(int pick) {
 static const wchar_t *fx_pick_label(int kind) {
   if (kind == 9) return L"Рассечение"; /* свои эффекты Сукуны и Годжо — только «Как у курсора» */
   if (kind == 10) return L"Пурпур";
+  if (kind == 11) return L"Перья";
+  if (kind == 12) return L"Чернила";
+  if (kind == 13) return L"Яд";
   return kind > 0 && kind < FX_OPTIONS - 1 ? kFxNames[kind + 1] : L"без эффекта";
 }
 
