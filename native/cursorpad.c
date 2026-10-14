@@ -49,9 +49,7 @@
 #define ID_CUR_K7 136 /* «Риас» */
 #define ID_FX_BASE 400    /* 400..409: эффект при нажатии в Настройках (до 2026.10.14 — 160…) */
 #define FX_OPTIONS 10    /* сколько вариантов в «Эффект при нажатии» */
-#define ID_SETUP_BASE 420 /* 420..429: сетапы в Настройках */
 #define ID_CHK_TESS 176   /* точное распознавание (Tesseract) */
-#define SETUP_COUNT 10
 #define ID_SEC_BASE 440   /* 440..445: заголовки разделов Настроек — щелчок сворачивает */
 #define SEC_COUNT 6
 #define ID_CUR_ST_BASE 460 /* 460..464: стили «Неон»…«Космос» (styles.c) */
@@ -260,7 +258,6 @@ static HWND g_btnK5;
 static HWND g_btnK6;
 static HWND g_btnK7;
 static HWND g_btnFx[FX_OPTIONS]; /* эффект при нажатии: как у курсора, нет, звёздочки, пламя, царапины, разрез */
-static HWND g_btnSetup[SETUP_COUNT]; /* сетапы: курсор и эффект разом */
 static HWND g_btnSt[ST_COUNT];       /* стили, нарисованные кодом */
 static HWND g_btnSec[SEC_COUNT];     /* заголовки разделов Настроек */
 static HWND g_preview;               /* просмотр курсора и эффекта (styles.c) */
@@ -1263,32 +1260,6 @@ static void set_fx_pick(int pick) {
   update_fx_buttons();
   wchar_t msg[160];
   _snwprintf(msg, 160, L"Эффект при нажатии: %s", fx_pick_name(pick));
-  show_status(msg);
-}
-
-/* сетапы: курсор и эффект при нажатии одним пунктом меню */
-static const struct {
-  const wchar_t *name;
-  int skin, fx;
-} g_setups[] = {
-    {L"Фея + пламя", 3, 2},
-    {L"Дракон + звёздочки", 4, 1},
-    {L"Кот + пламя", 5, 2},
-    {L"Риас + царапины", 6, 3},
-    {L"Рукавица + царапины", 2, 3},
-    {L"Мечник без эффектов", 1, 0},
-    {L"Неон + молния", ST_SKIN0 + 0, 7},
-    {L"Лёд + кольца", ST_SKIN0 + 1, 5},
-    {L"Золото + конфетти", ST_SKIN0 + 2, 6},
-    {L"Космос + сердечки", ST_SKIN0 + 4, 8},
-};
-_Static_assert(sizeof(g_setups) / sizeof(g_setups[0]) == SETUP_COUNT, "сетапов должно быть SETUP_COUNT");
-
-static void apply_setup(int i) {
-  g_fxPick = g_setups[i].fx;
-  set_skin(g_setups[i].skin); /* сохраняет настройки и ставит хук эффекта */
-  wchar_t msg[160];
-  _snwprintf(msg, 160, L"Сетап: %s", g_setups[i].name);
   show_status(msg);
 }
 
@@ -3170,15 +3141,14 @@ static void layout_settings(void) {
     g_layOpen = (g_secOpen >> sec) & 1;
     int y0 = y;
     switch (sec) {
-    case 0: { /* просмотр, курсоры, эффекты, сетапы */
+    case 0: { /* просмотр, курсоры, эффекты */
       set_place(g_preview, pad, y, fullW, 150);
       y += 150 + gap + lab;
       HWND sk[7 + ST_COUNT] = {g_btnK2, g_btnK3, g_btnK4, g_btnK5, g_btnK6, g_btnK7};
       for (int i = 0; i < ST_COUNT; i++) sk[6 + i] = g_btnSt[i];
       sk[6 + ST_COUNT] = g_btnSys;
       y += set_grid(sk, 7 + ST_COUNT, 3, pad, y, fullW, btnH, gap) + lab;
-      y += set_grid(g_btnFx, FX_OPTIONS, 3, pad, y, fullW, btnH, gap) + lab;
-      y += set_grid(g_btnSetup, SETUP_COUNT, 2, pad, y, fullW, btnH, gap);
+      y += set_grid(g_btnFx, FX_OPTIONS, 3, pad, y, fullW, btnH, gap);
       break;
     }
     case 1: /* тема и прозрачность */
@@ -3334,13 +3304,6 @@ static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
       RECT a = {14, wr.top - 18, rc.right - 14, wr.top - 2};
       draw_set_label(hdc, L"эффект при нажатии", a, rc.bottom);
     }
-    if (g_btnSetup[0]) {
-      RECT wr;
-      GetWindowRect(g_btnSetup[0], &wr);
-      MapWindowPoints(HWND_DESKTOP, hwnd, (POINT *)&wr, 2);
-      RECT a = {14, wr.top - 18, rc.right - 14, wr.top - 2};
-      draw_set_label(hdc, L"сетапы: курсор и эффект", a, rc.bottom);
-    }
     if (g_tbBg) {
       RECT wr;
       GetWindowRect(g_tbBg, &wr);
@@ -3437,8 +3400,6 @@ static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
     if (settings_skin_of_id(LOWORD(wParam)) >= 0) set_skin(settings_skin_of_id(LOWORD(wParam)));
     if (LOWORD(wParam) >= ID_FX_BASE && LOWORD(wParam) < ID_FX_BASE + FX_OPTIONS)
       set_fx_pick(kFxPick[LOWORD(wParam) - ID_FX_BASE]);
-    if (LOWORD(wParam) >= ID_SETUP_BASE && LOWORD(wParam) < ID_SETUP_BASE + SETUP_COUNT)
-      apply_setup(LOWORD(wParam) - ID_SETUP_BASE);
     if (LOWORD(wParam) == ID_CHK_TESS && g_chkTess) {
       g_ocrWinOnly = SendMessageW(g_chkTess, BM_GETCHECK, 0, 0) != BST_CHECKED;
       ocr_engine_save();
@@ -3849,7 +3810,6 @@ static void create_settings(HWND owner) {
   for (int i = 0; i < ST_COUNT; i++) g_btnSt[i] = mk_btn(g_setHwnd, kStyleNames[i], ID_CUR_ST_BASE + i);
   g_btnSys = mk_btn(g_setHwnd, L"Курсор Windows", ID_SYS_CUR);
   for (int i = 0; i < FX_OPTIONS; i++) g_btnFx[i] = mk_btn(g_setHwnd, kFxNames[i], ID_FX_BASE + i);
-  for (int i = 0; i < SETUP_COUNT; i++) g_btnSetup[i] = mk_btn(g_setHwnd, g_setups[i].name, ID_SETUP_BASE + i);
   g_chkTess = CreateWindowExW(0, L"BUTTON", L"точное распознавание (Tesseract)",
                               WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 0, 0, 240, 26,
                               g_setHwnd, (HMENU)(INT_PTR)ID_CHK_TESS, NULL, NULL);
