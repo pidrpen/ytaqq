@@ -825,6 +825,7 @@ static void preview_wake(void) {
 #ifdef SET_TEST
 /* только проверочная сборка: --gallery файл.bmp — все виды пяти стилей и кадры
    всех эффектов на одном листе, чтобы посмотреть их без мыши */
+static void st_write_bmp(const wchar_t *path, const BYTE *img, int W, int H);
 static void st_gallery(const wchar_t *path) {
   fx_init_sprites();
   int S = (int)(200 * g_fxScale), N = 48, cell = 56;
@@ -872,6 +873,13 @@ static void st_gallery(const wchar_t *path) {
         }
     }
   }
+  st_write_bmp(path, img, W, H);
+  free(img);
+  free(cur);
+  free(fw.bits);
+}
+
+static void st_write_bmp(const wchar_t *path, const BYTE *img, int W, int H) {
   BITMAPFILEHEADER fh;
   BITMAPINFOHEADER ih;
   memset(&fh, 0, sizeof(fh));
@@ -892,8 +900,85 @@ static void st_gallery(const wchar_t *path) {
     WriteFile(h, img, (DWORD)W * H * 4, &w, NULL);
     CloseHandle(h);
   }
+}
+
+/* только проверочная сборка: --slash файл.bmp — кадры «Разреза»: обычный на
+   белом и на тёмном, большой разрез и раскол поверх выдуманного экрана 1280×720
+   (уменьшены вдвое) */
+static void st_fake_screen(BYTE *b, int W, int H) {
+  for (int y = 0; y < H; y++)
+    for (int x = 0; x < W; x++) {
+      BYTE *d = b + ((size_t)y * W + x) * 4;
+      BOOL win = (x > W / 8 && x < W / 2 && y > H / 6 && y < H * 3 / 4) || (x > W * 5 / 9 && x < W * 7 / 8 && y > H / 3 && y < H * 5 / 6);
+      BOOL bar = win && ((y > H / 6 && y < H / 6 + 18) || (y > H / 3 && y < H / 3 + 18 && x > W * 5 / 9));
+      d[0] = (BYTE)(bar ? 200 : win ? 245 : 120 + 100 * y / H);
+      d[1] = (BYTE)(bar ? 120 : win ? 245 : 80 + 60 * y / H);
+      d[2] = (BYTE)(bar ? 40 : win ? 245 : 40 + 30 * x / W);
+      d[3] = 255;
+    }
+}
+static void st_slash_strip(const wchar_t *path) {
+  fx_init_sprites();
+  int S = (int)(200 * g_fxScale), BW = 1280, BH = 720, W = 1920, H = S * 2 + BH;
+  BYTE *img = (BYTE *)calloc((size_t)W * H, 4), *scr = (BYTE *)malloc((size_t)BW * BH * 4);
+  FxWin fw;
+  memset(&fw, 0, sizeof(fw));
+  fw.bits = (BYTE *)malloc((size_t)BW * BH * 4);
+  if (!img || !scr || !fw.bits) return;
+  for (int i = 0; i < W * H; i++) ((DWORD *)img)[i] = 0xFFFFFFFFu;
+  st_fake_screen(scr, BW, BH);
+  /* обычный: 8 кадров, на белом и на тёмном */
+  int at[8] = {0, 1, 2, 4, 7, 11, 16, 21};
+  for (int bg = 0; bg < 2; bg++) {
+    g_fxSeed = 4242u;
+    fw.W = fw.H = S;
+    fx_seed(&fw, 4, S);
+    for (int k = 0; k < 8; k++) {
+      fw.frame = at[k];
+      fx_paint(&fw);
+      BYTE back = bg ? 34 : 255;
+      for (int y = 0; y < S; y++)
+        for (int x = 0; x < S; x++) {
+          const BYTE *s = fw.bits + ((size_t)y * S + x) * 4;
+          BYTE *d = img + ((size_t)(bg * S + y) * W + k * (W / 8) + x) * 4;
+          for (int c = 0; c < 3; c++) d[c] = (BYTE)(s[c] + back * (255 - s[3]) / 255);
+        }
+    }
+  }
+  /* большой разрез (кадры 3, 8, 20) и раскол (кадры 6, 10, 46): по 640×360 */
+  int fr[2][3] = {{3, 8, 20}, {6, 10, 46}};
+  for (int kind = 0; kind < 2; kind++)
+    for (int k = 0; k < 3; k++) {
+      g_fxSeed = 99u + kind;
+      fw.W = BW, fw.H = BH;
+      if (kind == 0) {
+        fx_big_seed(&fw, BW, BH);
+      } else {
+        memcpy(fw.bits, scr, (size_t)BW * BH * 4);
+        fx_shatter_setup(&fw);
+        fw.shatter = TRUE, fw.slash = TRUE, fw.frames = FX_SHATTER_FRAMES;
+      }
+      fw.frame = fr[kind][k];
+      fx_paint(&fw);
+      fw.shatter = FALSE;
+      for (int y = 0; y < BH / 2; y++)
+        for (int x = 0; x < BW / 2; x++) {
+          BYTE *d = img + ((size_t)(2 * S + kind * (BH / 2) + y) * W + k * (W / 3) + x) * 4;
+          for (int c = 0; c < 3; c++) {
+            int sum = 0;
+            for (int q = 0; q < 4; q++) {
+              size_t i = ((size_t)(2 * y + q / 2) * BW + 2 * x + q % 2) * 4;
+              const BYTE *sb = fw.bits + i, *bb = scr + i;
+              sum += kind ? sb[c] : sb[c] + bb[c] * (255 - sb[3]) / 255;
+            }
+            d[c] = (BYTE)(sum / 4);
+          }
+        }
+    }
+  fx_shatter_free();
+  st_write_bmp(path, img, W, H);
   free(img);
-  free(cur);
+  free(scr);
   free(fw.bits);
 }
 #endif
