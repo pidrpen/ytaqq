@@ -47,9 +47,9 @@
 #define ID_CUR_K5 120 /* «Дракон» */
 #define ID_CUR_K6 121 /* «Чёрный кот» */
 #define ID_CUR_K7 136 /* «Риас» */
-#define ID_FX_BASE 160    /* 160..165: эффект при нажатии в Настройках */
+#define ID_FX_BASE 262    /* 262..269: эффект при нажатии в Настройках (160… заняты окном карточки) */
 #define FX_OPTIONS 6     /* сколько вариантов в «Эффект при нажатии» */
-#define ID_SETUP_BASE 170 /* 170..175: сетапы в Настройках */
+#define ID_SETUP_BASE 270 /* 270..279: сетапы в Настройках (170 — ID_ANS_OPENTP, кнопка красилась синим) */
 #define ID_CHK_TESS 176   /* точное распознавание (Tesseract) */
 #define SETUP_COUNT 6
 #define ID_MIN 106

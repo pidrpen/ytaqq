@@ -119,7 +119,8 @@ typedef struct {
 } UpdSrc;
 
 /* jsDelivr refuses .exe by extension, so the same bytes are published as
-   CursorPad.bin for the CDN mirrors; the GitHub hosts keep the plain name. */
+   CursorPad.bin. The GitHub hosts take the .bin too: public/CursorPad.exe is
+   in .gitignore and never reaches the repo, so asking for it was a 404. */
 static const UpdSrc kUpdSrc[] = {
     {L"cdn.jsdelivr.net", L"/gh/pidrpen/ytaqq@main/public/version.txt",
      L"/gh/pidrpen/ytaqq@main/public/CursorPad.bin", NULL, 0, 1},
@@ -128,11 +129,11 @@ static const UpdSrc kUpdSrc[] = {
     {L"gcore.jsdelivr.net", L"/gh/pidrpen/ytaqq@main/public/version.txt",
      L"/gh/pidrpen/ytaqq@main/public/CursorPad.bin", NULL, 0, 1},
     {L"raw.githubusercontent.com", L"/pidrpen/ytaqq/main/public/version.txt",
-     L"/pidrpen/ytaqq/main/public/CursorPad.exe", NULL, 0, 0},
+     L"/pidrpen/ytaqq/main/public/CursorPad.bin", NULL, 0, 0},
     {L"github.com", L"/pidrpen/ytaqq/raw/main/public/version.txt",
-     L"/pidrpen/ytaqq/raw/main/public/CursorPad.exe", NULL, 0, 0},
+     L"/pidrpen/ytaqq/raw/main/public/CursorPad.bin", NULL, 0, 0},
     {L"api.github.com", L"/repos/pidrpen/ytaqq/contents/public/version.txt",
-     L"/repos/pidrpen/ytaqq/contents/public/CursorPad.exe",
+     L"/repos/pidrpen/ytaqq/contents/public/CursorPad.bin",
      L"Accept: application/vnd.github+json\r\nX-GitHub-Api-Version: 2022-11-28", 1, 0},
 };
 
