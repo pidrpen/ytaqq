@@ -375,31 +375,25 @@ static void fx_shatter_render(FxWin *f) {
       oy[s] = (int)floorf(g_shat.outy[s] * k + 0.5f);
     }
     for (size_t i = 0; i < n; i++) dst[i] = 0xFF1A0004u; /* между кусками — тёмно-бордовая пустота */
+    int sp = f->frame - FX_SHATTER_CUT_FRAMES;
+    int fl = sp >= 0 && sp < 5 ? (int)(140 * (1.0f - sp / 5.0f)) : 0;
     /* каждый пиксель снимка уходит со своим куском; что вышло за край — пропадает */
     for (int y = 0; y < H; y++) {
       for (int x = 0; x < W; x++) {
         size_t i = (size_t)y * W + x;
-        int s = g_shat.shard[i];
+        int s = g_shat.shard[i] & 0x7F;
         int nx = x + ox[s], ny = y + oy[s];
         if (nx < 0 || nx >= W || ny < 0 || ny >= H) continue;
         DWORD c = src[i];
-        /* край куска раскалён: алая кромка с обеих сторон разлома */
-        if ((x > 1 && (g_shat.shard[i - 1] != s || g_shat.shard[i - 2] != s)) ||
-            (x + 2 < W && (g_shat.shard[i + 1] != s || g_shat.shard[i + 2] != s)) ||
-            (y > 1 && (g_shat.shard[i - W] != s || g_shat.shard[i - 2 * W] != s)) ||
-            (y + 2 < H && (g_shat.shard[i + W] != s || g_shat.shard[i + 2 * W] != s)))
+        if (g_shat.shard[i] & 0x80) /* край куска раскалён: алая кромка с обеих сторон разлома */
           c = 0xFF000000u | (DWORD)(255 - ((255 - ((c >> 16) & 255)) >> 3)) << 16 |
               (DWORD)(60 + (((c >> 8) & 255) >> 3)) << 8 | (DWORD)(40 + ((c & 255) >> 3));
+        if (fl) /* в миг раскола — белая вспышка */
+          c = 0xFF000000u | (DWORD)(((c >> 16) & 255) + ((255 - ((c >> 16) & 255)) * fl >> 8)) << 16 |
+              (DWORD)(((c >> 8) & 255) + ((255 - ((c >> 8) & 255)) * fl >> 8)) << 8 |
+              (DWORD)((c & 255) + ((255 - (c & 255)) * fl >> 8));
         dst[(size_t)ny * W + nx] = c;
       }
-    }
-    /* в миг раскола — белая вспышка */
-    int sp = f->frame - FX_SHATTER_CUT_FRAMES;
-    if (sp >= 0 && sp < 5) {
-      int fl = (int)(140 * (1.0f - sp / 5.0f));
-      BYTE *b = f->bits;
-      for (size_t i = 0; i < n * 4; i++)
-        if ((i & 3) != 3) b[i] = (BYTE)(b[i] + ((255 - b[i]) * fl >> 8));
     }
   }
   /* разрезы поверх экрана; через 12 кадров гаснут окончательно */
@@ -457,8 +451,15 @@ static void fx_slash_spark(FxWin *f, const FxPart *p, int age) {
    раскалён добела по оси, потом тонеет до волоска и гаснет. Вокруг — алое
    свечение. Края сглажены. p->spr = 1 — это не разрез, а искра */
 #define FX_SLASH_SEG 12
+#define FX_SLASH_LUT 256 /* толщина вдоль разреза — таблицей, а не powf на каждый пиксель */
+static float g_slashProf[FX_SLASH_LUT + 1], g_slashGlow[FX_SLASH_LUT + 1];
 static void fx_slash_part(FxWin *f, const FxPart *p, int age) {
   if (age < 0 || age >= p->life) return;
+  if (g_slashProf[FX_SLASH_LUT / 2] == 0.0f)
+    for (int i = 0; i <= FX_SLASH_LUT; i++) {
+      g_slashProf[i] = powf(sinf(3.14159265f * i / FX_SLASH_LUT), 0.85f);
+      g_slashGlow[i] = sqrtf(g_slashProf[i]);
+    }
   if (p->spr) {
     fx_slash_spark(f, p, age);
     return;
@@ -488,8 +489,10 @@ static void fx_slash_part(FxWin *f, const FxPart *p, int age) {
   for (int y = y0; y <= y1; y++) {
     /* в строке — только то, что рядом с отрезками: у большого разреза это узкая полоса */
     float ra = 1e9f, rb = -1e9f;
+    int act[FX_SLASH_SEG], na = 0; /* и проверять только эти отрезки */
     for (int k = 0; k < nseg; k++)
       if (y + pad >= fminf(sy[k], sy[k + 1]) && y - pad <= fmaxf(sy[k], sy[k + 1])) {
+        act[na++] = k;
         float ka = sy[k + 1] != sy[k] ? (y + 0.5f - sy[k]) / (sy[k + 1] - sy[k]) : 0.0f;
         float kb = sy[k + 1] != sy[k] ? pad / fabsf(sy[k + 1] - sy[k]) : 1.0f;
         float u0 = fx_clamp01(ka - kb), u1 = fx_clamp01(ka + kb);
@@ -498,20 +501,23 @@ static void fx_slash_part(FxWin *f, const FxPart *p, int age) {
       }
     int xa0 = ra > x0 ? (int)ra : x0, xb1 = rb < x1 ? (int)rb : x1;
     for (int x = xa0; x <= xb1; x++) {
-      float d = 1e9f, s = 0.0f;
-      for (int k = 0; k < nseg; k++) { /* ближайший отрезок ломаной */
+      float d2 = pad * pad, s = 0.0f;
+      for (int j = 0; j < na; j++) { /* ближайший отрезок ломаной */
+        int k = act[j];
         float vx = sx[k + 1] - sx[k], vy = sy[k + 1] - sy[k], l2 = vx * vx + vy * vy;
         float qx = x + 0.5f - sx[k], qy = y + 0.5f - sy[k];
         float u = l2 > 0.0f ? fx_clamp01((qx * vx + qy * vy) / l2) : 0.0f;
-        float dd = hypotf(qx - vx * u, qy - vy * u);
-        if (dd < d) d = dd, s = reveal * (k + u) / nseg;
+        float ex = qx - vx * u, ey = qy - vy * u, dd = ex * ex + ey * ey;
+        if (dd < d2) d2 = dd, s = reveal * (k + u) / nseg;
       }
-      if (d >= pad) continue;
-      float prof = powf(sinf(3.14159265f * s), 0.85f);
+      if (d2 >= pad * pad) continue;
+      float d = sqrtf(d2);
+      int li = (int)(s * FX_SLASH_LUT + 0.5f);
+      float prof = g_slashProf[li < 0 ? 0 : li > FX_SLASH_LUT ? FX_SLASH_LUT : li];
       float head = reveal < 1.0f ? fx_clamp01((reveal - s) / 0.18f) : 1.0f; /* бегущий острый кончик */
       float hw = maxw * prof * sqrtf(head);
       float g = 1.0f - fmaxf(d - hw, 0.0f) / gr;
-      if (g > 0.0f) fx_put(f, x, y, 255, 24, 40, a * ga * g * g * sqrtf(prof));
+      if (g > 0.0f) fx_put(f, x, y, 255, 24, 40, a * ga * g * g * g_slashGlow[li < 0 ? 0 : li > FX_SLASH_LUT ? FX_SLASH_LUT : li]);
       float body = fx_clamp01(hw + 0.5f - d);
       if (body <= 0.0f || hw < 0.3f) continue;
       float m = fx_clamp01(d / hw); /* 0 по оси, 1 на краю */
@@ -1168,6 +1174,18 @@ static BOOL fx_shatter_setup(FxWin *f) {
       cnt[m]++;
     }
   }
+  /* края кусков (по два пикселя с каждой стороны разлома) — старший бит: так
+     при каждом кадре не надо сравнивать соседей */
+  for (int y = 0; y < H; y++)
+    for (int x = 0; x < W; x++) {
+      size_t i = (size_t)y * W + x;
+      BYTE m = g_shat.shard[i] & 0x7F;
+      if ((x > 1 && ((g_shat.shard[i - 1] & 0x7F) != m || (g_shat.shard[i - 2] & 0x7F) != m)) ||
+          (x + 2 < W && ((g_shat.shard[i + 1] & 0x7F) != m || (g_shat.shard[i + 2] & 0x7F) != m)) ||
+          (y > 1 && ((g_shat.shard[i - W] & 0x7F) != m || (g_shat.shard[i - 2 * W] & 0x7F) != m)) ||
+          (y + 2 < H && ((g_shat.shard[i + W] & 0x7F) != m || (g_shat.shard[i + 2 * W] & 0x7F) != m)))
+        g_shat.shard[i] |= 0x80;
+    }
   /* куда уезжает кусок: от середины экрана в сторону его центра, с разбросом,
      и чуть вниз: экран расходится трещинами, а не улетает */
   for (int m = 0; m < FX_SHATTER_PIECES; m++) {
