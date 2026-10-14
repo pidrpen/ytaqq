@@ -47,8 +47,8 @@
 #define ID_CUR_K5 120 /* «Дракон» */
 #define ID_CUR_K6 121 /* «Чёрный кот» */
 #define ID_CUR_K7 136 /* «Риас» */
-#define ID_FX_BASE 400    /* 400..409: эффект при нажатии в Настройках (до 2026.10.14 — 160…) */
-#define FX_OPTIONS 10    /* сколько вариантов в «Эффект при нажатии» */
+#define ID_FX_BASE 400    /* 400..414: эффект при нажатии в Настройках (до 2026.10.14 — 160…) */
+#define FX_OPTIONS 15    /* сколько вариантов в «Эффект при нажатии» */
 #define ID_CHK_TESS 176   /* точное распознавание (Tesseract) */
 #define ID_SEC_BASE 440   /* 440..444: вкладки Настроек */
 #define SEC_COUNT 5
@@ -1146,7 +1146,7 @@ static void load_cursor_pref(void) {
   g_sparkle = sparkle != 0;
   g_flame = flame != 0;
   g_catFx = catFx == 0 ? 0 : (catFx == 2 ? 2 : 1);
-  g_fxPick = fxPick >= 0 && fxPick <= 8 ? fxPick : -1;
+  g_fxPick = fxPick >= 0 && fxPick <= 13 ? fxPick : -1;
   g_padMode = padMode == 1 ? 1 : 0;
   g_cardX = cx;
   g_cardY = cy;
@@ -1212,8 +1212,9 @@ static void save_cursor_pref(void) {
 /* кнопки эффекта в Настройках: порядок совпадает с ID_FX_BASE */
 static const wchar_t *const kFxNames[FX_OPTIONS] = {L"Как у курсора", L"Нет",    L"Звёздочки", L"Пламя",
                                                     L"Царапины",      L"Разрез", L"Кольца",    L"Конфетти",
-                                                    L"Молния",        L"Сердечки"};
-static const int kFxPick[FX_OPTIONS] = {-1, 0, 1, 2, 3, 4, 5, 6, 7, 8};
+                                                    L"Молния",        L"Сердечки", L"Рассечение", L"Пурпур",
+                                                    L"Перья",         L"Чернила",  L"Яд"};
+static const int kFxPick[FX_OPTIONS] = {-1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13};
 static const wchar_t *const kStyleNames[ST_COUNT] = {L"Ворон", L"Осьминог", L"Скорпион", L"Разрез", L"Сукуна", L"Годжо"};
 
 static void update_fx_buttons(void) {
@@ -1268,18 +1269,14 @@ static void set_skin(int skin) {
 
 /* эффект при нажатии отдельно от курсора: имена для строки состояния */
 static const wchar_t *fx_pick_name(int pick) {
-  static const wchar_t *const kNames[9] = {L"нет",   L"звёздочки", L"пламя",  L"царапины", L"разрез",
-                                           L"кольца", L"конфетти", L"молния", L"сердечки"};
-  return pick >= 0 && pick < 9 ? kNames[pick] : L"как у курсора";
+  static const wchar_t *const kNames[14] = {L"нет",   L"звёздочки", L"пламя",  L"царапины", L"разрез",
+                                           L"кольца", L"конфетти", L"молния", L"сердечки", L"рассечение",
+                                           L"пурпур", L"перья",    L"чернила", L"яд"};
+  return pick >= 0 && pick < 14 ? kNames[pick] : L"как у курсора";
 }
 
 /* то же с большой буквы — для окошка просмотра (там всегда сам эффект) */
 static const wchar_t *fx_pick_label(int kind) {
-  if (kind == 9) return L"Рассечение"; /* свои эффекты Сукуны и Годжо — только «Как у курсора» */
-  if (kind == 10) return L"Пурпур";
-  if (kind == 11) return L"Перья";
-  if (kind == 12) return L"Чернила";
-  if (kind == 13) return L"Яд";
   return kind > 0 && kind < FX_OPTIONS - 1 ? kFxNames[kind + 1] : L"без эффекта";
 }
 
