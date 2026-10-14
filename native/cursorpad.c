@@ -50,8 +50,8 @@
 #define ID_FX_BASE 400    /* 400..409: эффект при нажатии в Настройках (до 2026.10.14 — 160…) */
 #define FX_OPTIONS 10    /* сколько вариантов в «Эффект при нажатии» */
 #define ID_CHK_TESS 176   /* точное распознавание (Tesseract) */
-#define ID_SEC_BASE 440   /* 440..445: заголовки разделов Настроек — щелчок сворачивает */
-#define SEC_COUNT 6
+#define ID_SEC_BASE 440   /* 440..444: вкладки Настроек */
+#define SEC_COUNT 5
 #define ID_CUR_ST_BASE 460 /* 460..464: стили «Неон»…«Космос» (styles.c) */
 #define ST_COUNT 5
 #define ST_SKIN0 7          /* g_skin первого из них; 7…11 */
@@ -259,9 +259,10 @@ static HWND g_btnK6;
 static HWND g_btnK7;
 static HWND g_btnFx[FX_OPTIONS]; /* эффект при нажатии: как у курсора, нет, звёздочки, пламя, царапины, разрез */
 static HWND g_btnSt[ST_COUNT];       /* стили, нарисованные кодом */
-static HWND g_btnSec[SEC_COUNT];     /* заголовки разделов Настроек */
+static HWND g_btnSec[SEC_COUNT];     /* вкладки Настроек; индекс — что на вкладке, не место */
 static HWND g_preview;               /* просмотр курсора и эффекта (styles.c) */
-static int g_secOpen = 1;            /* какие разделы раскрыты: бит на раздел; сначала — только первый */
+static int g_tab;                    /* открытая вкладка Настроек (что на ней, 0…SEC_COUNT-1) */
+static int g_tabOrder[SEC_COUNT] = {0, 1, 2, 3, 4}; /* слева направо: какая вкладка на каком месте */
 static HWND g_chkTess;
 static HWND g_min;
 static HWND g_ocr;
@@ -1118,11 +1119,22 @@ static void load_cursor_pref(void) {
   int flame = -1; /* нет в файле — пламя включено */
   int catFx = -1; /* нет в файле — царапины */
   int fxPick = -1; /* нет в файле — эффект как у курсора */
-  int secOpen = -1; /* нет в файле — раскрыт только первый раздел Настроек */
-  sscanf(buf, "%15s %d %d %15s %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d", skin,
+  int tab = -1, order = -1; /* нет в файле — первая вкладка, порядок как задуман */
+  sscanf(buf, "%15s %d %d %15s %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d", skin,
          &bg, &fg, eng, &autoOn, &theme, &aw, &ah, &cw, &ch, &pt, &keep, &ax, &ay, &cx, &cy, &cpt,
-         &ox, &oy, &ow, &oh, &opt, &sparkle, &padMode, &flame, &catFx, &fxPick, &secOpen);
-  if (secOpen >= 0 && secOpen < (1 << SEC_COUNT)) g_secOpen = secOpen;
+         &ox, &oy, &ow, &oh, &opt, &sparkle, &padMode, &flame, &catFx, &fxPick, &tab, &order);
+  /* до 2026.10.14.4 на месте вкладки было, какие разделы раскрыты: там вкладка
+     окажется случайной, но допустимой */
+  if (tab >= 0 && tab < SEC_COUNT) g_tab = tab;
+  if (order >= 0) { /* порядок — цифрами: 21034 — вторая, первая, нулевая… */
+    int o[SEC_COUNT], seen = 0, ok = 1;
+    for (int i = SEC_COUNT - 1; i >= 0; i--, order /= 10) {
+      o[i] = order % 10;
+      if (o[i] >= SEC_COUNT || (seen >> o[i]) & 1) ok = 0;
+      else seen |= 1 << o[i];
+    }
+    if (ok) memcpy(g_tabOrder, o, sizeof(o));
+  }
   g_sparkle = sparkle != 0;
   g_flame = flame != 0;
   g_catFx = catFx == 0 ? 0 : (catFx == 2 ? 2 : 1);
@@ -1171,11 +1183,13 @@ static void save_cursor_pref(void) {
                   : g_skin == 3 ? "k4" : (g_skin == 2 ? "k3" : (g_skin == 0 ? "system" : "k2"));
   const char *e = g_engine == 4 ? "plm" : (g_engine == 5 ? "files" : "ai");
   char buf[280];
-  snprintf(buf, sizeof(buf), "%s %d %d %s %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d\n",
+  int order = 0;
+  for (int i = 0; i < SEC_COUNT; i++) order = order * 10 + g_tabOrder[i];
+  snprintf(buf, sizeof(buf), "%s %d %d %s %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d\n",
            v, g_alphaFollow, g_alphaPinned, e, g_autostart ? 1 : 0, g_theme, g_ansW, g_ansH,
            g_cardW, g_cardH, g_ansPt, g_ansKeepPos ? 1 : 0, g_ansX, g_ansY, g_cardX, g_cardY,
            g_cardPt, g_ocrX, g_ocrY, g_ocrW, g_ocrH, g_ocrPt, g_sparkle ? 1 : 0, g_padMode,
-           g_flame ? 1 : 0, g_catFx, g_fxPick, g_secOpen);
+           g_flame ? 1 : 0, g_catFx, g_fxPick, g_tab, order);
   HANDLE h = CreateFileW(g_prefPath, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
                          FILE_ATTRIBUTE_NORMAL, NULL);
   if (h == INVALID_HANDLE_VALUE) return;
@@ -2358,40 +2372,22 @@ static int ui_glyph_of(int id) {
   return id == ID_PIN ? GL_PIN : id == ID_MORE_BTN ? GL_DOTS : id == ID_SETTINGS ? GL_GEAR : -1;
 }
 
-/* заголовок раздела Настроек: строка во всю ширину, слева треугольник —
-   вниз у раскрытого раздела, вправо у свёрнутого */
-static void draw_section_header(const DRAWITEMSTRUCT *dis, int sec) {
+/* вкладка Настроек: открытая — залита цветом темы, прочие — только надпись */
+static void draw_settings_tab(const DRAWITEMSTRUCT *dis, int sec) {
   HDC dc = dis->hDC;
   RECT rc = dis->rcItem;
-  BOOL open = (g_secOpen >> sec) & 1, press = (dis->itemState & ODS_SELECTED) != 0;
+  BOOL open = sec == g_tab, press = (dis->itemState & ODS_SELECTED) != 0;
   int tr = kThemes[g_theme].radius, h = rc.bottom - rc.top;
   int rad = tr < 0 ? h / 2 : tr;
-  COLORREF fill = open ? COL_PAPER : blend_rgb(COL_PAPER, COL_PAPER_DARK, 128);
-  if (press) fill = blend_rgb(fill, COL_INK, 24);
+  COLORREF fill = open ? COL_SAGE : blend_rgb(COL_PAPER, COL_PAPER_DARK, 128);
+  if (press) fill = blend_rgb(fill, COL_INK, 30);
   fill_round_rect(dc, rc, fill, open ? COL_SAGE : COL_LINE, rad);
-  int cx = rc.left + 15, cy = (rc.top + rc.bottom) / 2;
-  POINT tri[3];
-  if (open) {
-    tri[0].x = cx - 5, tri[0].y = cy - 3, tri[1].x = cx + 5, tri[1].y = cy - 3, tri[2].x = cx, tri[2].y = cy + 3;
-  } else {
-    tri[0].x = cx - 2, tri[0].y = cy - 5, tri[1].x = cx - 2, tri[1].y = cy + 5, tri[2].x = cx + 4, tri[2].y = cy;
-  }
-  COLORREF tc = open ? COL_SAGE : COL_MUTED;
-  HBRUSH br = CreateSolidBrush(tc);
-  HPEN pn = CreatePen(PS_SOLID, 1, tc);
-  HGDIOBJ ob = SelectObject(dc, br), op = SelectObject(dc, pn);
-  Polygon(dc, tri, 3);
-  SelectObject(dc, ob);
-  SelectObject(dc, op);
-  DeleteObject(br);
-  DeleteObject(pn);
-  wchar_t t[64] = {0};
-  GetWindowTextW(dis->hwndItem, t, 64);
-  RECT tx = {rc.left + 28, rc.top, rc.right - 8, rc.bottom};
+  wchar_t t[32] = {0};
+  GetWindowTextW(dis->hwndItem, t, 32);
   SetBkMode(dc, TRANSPARENT);
-  SetTextColor(dc, COL_INK);
+  SetTextColor(dc, open ? COL_PAPER : COL_INK);
   if (g_fontUi) SelectObject(dc, g_fontUi);
-  DrawTextW(dc, t, -1, &tx, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+  DrawTextW(dc, t, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 }
 
 static void draw_pad_button(const DRAWITEMSTRUCT *dis) {
@@ -2401,7 +2397,7 @@ static void draw_pad_button(const DRAWITEMSTRUCT *dis) {
   BOOL disab = (dis->itemState & ODS_DISABLED) != 0;
   int id = (int)dis->CtlID;
   if (id >= ID_SEC_BASE && id < ID_SEC_BASE + SEC_COUNT) {
-    draw_section_header(dis, id - ID_SEC_BASE);
+    draw_settings_tab(dis, id - ID_SEC_BASE);
     return;
   }
   wchar_t t[96] = {0};
@@ -3088,17 +3084,15 @@ static void draw_set_label(HDC hdc, const wchar_t *text, RECT r, int clientBotto
   DrawTextW(hdc, text, -1, &r, DT_LEFT | DT_SINGLELINE);
 }
 
-/* Настройки разбиты на разделы, раскрываются щелчком по заголовку (с
-   2026.10.14.2): раньше всё вываливалось одной простынёй в 1259 точек. Какие
-   разделы раскрыты, запоминается (g_secOpen). Элементы свёрнутого раздела
-   уезжают далеко за край — их прячет clip_settings_children, как и всё, что
-   ушло под шапку при прокрутке. */
-static const wchar_t *const kSecNames[SEC_COUNT] = {
-    L"Курсор и эффекты", L"Вид окна", L"Поиск: PLM и файлы", L"Общая папка, нарды и шашки",
-    L"Распознавание и клавиши", L"Программа"};
-#define SET_SEC_H 30
-static int g_setContentH = 600; /* высота содержимого при нынешних раскрытых разделах */
-static BOOL g_layOpen;          /* раскладывается раскрытый раздел */
+/* Настройки — вкладками (с 2026.10.14.4): видна одна страница, окно
+   небольшое и почти не прокручивается. Порядок вкладок можно менять правым
+   щелчком по вкладке, он запоминается (g_tabOrder), как и открытая вкладка.
+   Элементы других вкладок уезжают далеко за край — их прячет
+   clip_settings_children, как и всё, что ушло под шапку при прокрутке. */
+static const wchar_t *const kSecNames[SEC_COUNT] = {L"Курсор", L"Эффект", L"Вид", L"Поиск", L"Ещё"};
+#define SET_SEC_H 28
+static int g_setContentH = 480; /* высота содержимого: по самой длинной вкладке */
+static BOOL g_layOpen;          /* раскладывается открытая вкладка */
 
 static void set_place(HWND h, int x, int y, int w, int hh) {
   if (!h) return;
@@ -3133,25 +3127,36 @@ static void layout_settings(void) {
   int cw = rc.right - pad;
   int fullW = cw - pad;
   int half = (fullW - gap) / 2;
-  int y = PANEL_TITLE_H + 8;
+  int y0 = PANEL_TITLE_H + 8, yEnd = 0;
   place_panel_close(g_setHwnd);
+  { /* ряд вкладок в выбранном порядке */
+    int tg = 4, tw = (fullW - tg * (SEC_COUNT - 1)) / SEC_COUNT;
+    for (int pos = 0; pos < SEC_COUNT; pos++) {
+      HWND b = g_btnSec[g_tabOrder[pos]];
+      int x = pad + pos * (tw + tg);
+      if (b) MOVE_SET(b, x, y0, pos == SEC_COUNT - 1 ? cw - x : tw, SET_SEC_H, TRUE);
+    }
+  }
+  y0 += SET_SEC_H + 12;
   for (int sec = 0; sec < SEC_COUNT; sec++) {
-    if (g_btnSec[sec]) MOVE_SET(g_btnSec[sec], pad, y, fullW, SET_SEC_H, TRUE);
-    y += SET_SEC_H + gap;
-    g_layOpen = (g_secOpen >> sec) & 1;
-    int y0 = y;
+    g_layOpen = sec == g_tab;
+    int y = y0;
     switch (sec) {
-    case 0: { /* просмотр, курсоры, эффекты */
-      set_place(g_preview, pad, y, fullW, 150);
+    case 0: /* курсоры с просмотром */
+    case 1: { /* эффекты с тем же просмотром */
+      if (g_layOpen) set_place(g_preview, pad, y, fullW, 150);
       y += 150 + gap + lab;
-      HWND sk[7 + ST_COUNT] = {g_btnK2, g_btnK3, g_btnK4, g_btnK5, g_btnK6, g_btnK7};
-      for (int i = 0; i < ST_COUNT; i++) sk[6 + i] = g_btnSt[i];
-      sk[6 + ST_COUNT] = g_btnSys;
-      y += set_grid(sk, 7 + ST_COUNT, 3, pad, y, fullW, btnH, gap) + lab;
-      y += set_grid(g_btnFx, FX_OPTIONS, 3, pad, y, fullW, btnH, gap);
+      if (sec == 0) {
+        HWND sk[7 + ST_COUNT] = {g_btnK2, g_btnK3, g_btnK4, g_btnK5, g_btnK6, g_btnK7};
+        for (int i = 0; i < ST_COUNT; i++) sk[6 + i] = g_btnSt[i];
+        sk[6 + ST_COUNT] = g_btnSys;
+        y += set_grid(sk, 7 + ST_COUNT, 3, pad, y, fullW, btnH, gap);
+      } else {
+        y += set_grid(g_btnFx, FX_OPTIONS, 3, pad, y, fullW, btnH, gap);
+      }
       break;
     }
-    case 1: /* тема и прозрачность */
+    case 2: /* тема и прозрачность */
       y += lab;
       y += set_grid(g_btnTheme, THEME_COUNT, 4, pad, y, fullW, btnH, gap) + lab;
       set_place(g_tbBg, pad, y, fullW, btnH);
@@ -3159,7 +3164,7 @@ static void layout_settings(void) {
       set_place(g_tbFg, pad, y, fullW, btnH);
       y += btnH + gap;
       break;
-    case 2: /* где искать файлы и вход в PLM */
+    case 3: /* где искать файлы и вход в PLM */
       set_place(g_filesRootEdit, pad, y, fullW - browseW - gap, btnH);
       set_place(GetDlgItem(g_setHwnd, ID_FILES_BROWSE), cw - browseW, y, browseW, btnH);
       y += btnH + gap;
@@ -3180,7 +3185,7 @@ static void layout_settings(void) {
       set_place(g_plmPass, pad + half + gap, y, fullW - half - gap, btnH);
       y += btnH + gap;
       break;
-    case 3: /* общая папка; нарды и шашки идут через неё же — поэтому здесь */
+    default: /* общая папка (нарды и шашки идут через неё), распознавание, программа */
       y += lab;
       set_place(g_shareEdit, pad, y, fullW - browseW - gap, btnH);
       set_place(GetDlgItem(g_setHwnd, ID_SHARE_BROWSE), cw - browseW, y, browseW, btnH);
@@ -3190,16 +3195,12 @@ static void layout_settings(void) {
       set_place(g_btnNd, pad, y, half, btnH);
       set_place(g_btnSh, pad + half + gap, y, fullW - half - gap, btnH);
       y += btnH + gap;
-      break;
-    case 4:
       set_place(g_chkTess, pad, y, fullW, btnH);
       y += btnH + gap;
       set_place(g_ocr, pad, y, fullW, btnH);
       y += btnH + gap;
       set_place(g_btnHk, pad, y, fullW, btnH);
       y += btnH + gap;
-      break;
-    default:
       set_place(g_chkAuto, pad, y, fullW, btnH);
       y += btnH + gap;
       set_place(g_chkAnsPin, pad, y, fullW, btnH);
@@ -3208,16 +3209,16 @@ static void layout_settings(void) {
       y += btnH + gap;
       break;
     }
-    if (!g_layOpen) y = y0;
-    else y += 6; /* раскрытый раздел чуть отступает от следующего заголовка */
+    if (y > yEnd) yEnd = y;
   }
   g_layOpen = TRUE;
-  int contentH = y + 4 + SET_FOOT_H;
+  if (g_tab > 1 && g_preview) MoveWindow(g_preview, pad, -4000, fullW, 150, FALSE);
+  int contentH = yEnd + 4 + SET_FOOT_H;
   if (contentH != g_setContentH) {
     g_setContentH = contentH;
     int newMax = contentH - rc.bottom;
     if (newMax < 0) newMax = 0;
-    if (g_setScroll > newMax) { /* раздел свернули внизу — прокрутка сжимается, разложить заново */
+    if (g_setScroll > newMax) { /* окно стало ниже — прокрутка сжимается, разложить заново */
       g_setScroll = newMax;
       layout_settings();
       return;
@@ -3261,14 +3262,49 @@ static void settings_fit_height(void) {
   SetWindowPos(g_setHwnd, NULL, wr.left, y, wr.right - wr.left, h, SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
-static void toggle_section(int sec) {
-  g_secOpen ^= 1 << sec;
-  save_cursor_pref();
-  if (g_btnSec[sec]) InvalidateRect(g_btnSec[sec], NULL, FALSE);
+static void settings_relayout(void) {
+  for (int i = 0; i < SEC_COUNT; i++)
+    if (g_btnSec[i]) InvalidateRect(g_btnSec[i], NULL, FALSE);
   layout_settings();
   settings_fit_height();
   layout_settings(); /* высота окна могла смениться — прокрутка вместе с ней */
   RedrawWindow(g_setHwnd, NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+}
+
+static void select_tab(int sec) {
+  g_tab = sec;
+  g_setScroll = 0;
+  save_cursor_pref();
+  settings_relayout();
+}
+
+/* правый щелчок по вкладке: сдвинуть её левее или правее */
+static void tab_menu(int sec, int x, int y) {
+  int pos = 0;
+  while (pos < SEC_COUNT && g_tabOrder[pos] != sec) pos++;
+  if (pos >= SEC_COUNT) return;
+  HMENU m = CreatePopupMenu();
+  AppendMenuW(m, MF_STRING | (pos == 0 ? MF_GRAYED : 0), 1, L"← Сдвинуть влево");
+  AppendMenuW(m, MF_STRING | (pos == SEC_COUNT - 1 ? MF_GRAYED : 0), 2, L"Сдвинуть вправо →");
+  AppendMenuW(m, MF_STRING | (pos == 0 ? MF_GRAYED : 0), 3, L"Сделать первой");
+  AppendMenuW(m, MF_SEPARATOR, 0, NULL);
+  AppendMenuW(m, MF_STRING, 4, L"Порядок как был");
+  int cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, x, y, 0, g_setHwnd, NULL);
+  DestroyMenu(m);
+  if (cmd == 1 || cmd == 2) {
+    int to = cmd == 1 ? pos - 1 : pos + 1;
+    g_tabOrder[pos] = g_tabOrder[to];
+    g_tabOrder[to] = sec;
+  } else if (cmd == 3) {
+    memmove(g_tabOrder + 1, g_tabOrder, sizeof(int) * pos);
+    g_tabOrder[0] = sec;
+  } else if (cmd == 4) {
+    for (int i = 0; i < SEC_COUNT; i++) g_tabOrder[i] = i;
+  } else {
+    return;
+  }
+  save_cursor_pref();
+  settings_relayout();
 }
 
 static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -3328,8 +3364,9 @@ static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
     {
       RECT ver = {14, rc.bottom - 28, rc.right - 14, rc.bottom - 10};
       wchar_t vs[64];
-      _snwprintf(vs, 64, L"CursorPad  %s", APP_VERSION_STR);
+      _snwprintf(vs, 64, L"%s", APP_VERSION_STR); /* «CursorPad» не влезал рядом с подсказкой */
       DrawTextW(hdc, vs, -1, &ver, DT_LEFT | DT_SINGLELINE);
+      DrawTextW(hdc, L"правый щелчок — порядок вкладок", -1, &ver, DT_RIGHT | DT_SINGLELINE);
     }
     {
       /* полоска прокрутки справа: видно, что окно выше экрана */
@@ -3377,6 +3414,16 @@ static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
   }
   case WM_NCHITTEST:
     return panel_hittest(hwnd, lParam);
+  case WM_CONTEXTMENU: {
+    int id = GetDlgCtrlID((HWND)wParam);
+    if (id >= ID_SEC_BASE && id < ID_SEC_BASE + SEC_COUNT) {
+      POINT pt = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+      if (pt.x == -1 && pt.y == -1) GetCursorPos(&pt);
+      tab_menu(id - ID_SEC_BASE, pt.x, pt.y);
+      return 0;
+    }
+    break;
+  }
   case WM_MOUSEWHEEL:
     scroll_settings(g_setScroll - GET_WHEEL_DELTA_WPARAM(wParam) * 48 / WHEEL_DELTA);
     return 0;
@@ -3394,7 +3441,7 @@ static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
       return 0;
     }
     if (LOWORD(wParam) >= ID_SEC_BASE && LOWORD(wParam) < ID_SEC_BASE + SEC_COUNT) {
-      toggle_section(LOWORD(wParam) - ID_SEC_BASE);
+      select_tab(LOWORD(wParam) - ID_SEC_BASE);
       return 0;
     }
     if (settings_skin_of_id(LOWORD(wParam)) >= 0) set_skin(settings_skin_of_id(LOWORD(wParam)));
@@ -4667,7 +4714,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
     LPWSTR *argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     if (argv && argc >= 3 && !wcscmp(argv[1], L"--gallery")) st_gallery(argv[2]);
     if (argv && argc >= 3 && !wcscmp(argv[1], L"--settings")) {
-      g_secOpen = (int)wcstol(argv[2], NULL, 10);
+      g_tab = (int)wcstol(argv[2], NULL, 10) % SEC_COUNT;
       if (g_follow) toggle_follow(); /* как «Настройки» в меню значка */
       toggle_settings();
       if (argc >= 5) scroll_settings((int)wcstol(argv[4], NULL, 10));
