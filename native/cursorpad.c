@@ -52,7 +52,7 @@
 #define ID_CHK_TESS 176   /* точное распознавание (Tesseract) */
 #define ID_SEC_BASE 440   /* 440..444: вкладки Настроек */
 #define SEC_COUNT 5
-#define ID_CUR_ST_BASE 460 /* 460..464: стили «Неон»…«Космос» (styles.c) */
+#define ID_CUR_ST_BASE 460 /* 460..464: персонажи «Робот»…«Череп» (styles.c) */
 #define ST_COUNT 5
 #define ST_SKIN0 7          /* g_skin первого из них; 7…11 */
 #define ID_PREVIEW 470      /* окошко просмотра курсора и эффекта */
@@ -1203,7 +1203,7 @@ static const wchar_t *const kFxNames[FX_OPTIONS] = {L"Как у курсора",
                                                     L"Царапины",      L"Разрез", L"Кольца",    L"Конфетти",
                                                     L"Молния",        L"Сердечки"};
 static const int kFxPick[FX_OPTIONS] = {-1, 0, 1, 2, 3, 4, 5, 6, 7, 8};
-static const wchar_t *const kStyleNames[ST_COUNT] = {L"Неон", L"Лёд", L"Золото", L"Лава", L"Космос"};
+static const wchar_t *const kStyleNames[ST_COUNT] = {L"Робот", L"Призрак", L"Слайм", L"Огонёк", L"Череп"};
 
 static void update_fx_buttons(void) {
   for (int i = 0; i < FX_OPTIONS; i++) {

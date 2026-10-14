@@ -1,15 +1,10 @@
 /* ---- Стили курсоров, нарисованные кодом (с 2026.10.14.2) ------------------
 
-   «Неон», «Лёд», «Золото», «Лава» и «Космос» — пять наборов курсоров без
-   картинок: все шестнадцать видов (стрелка, текст, рука, ожидание, размеры…)
-   рисуются при первом выборе под размер указателя (32 / 48 / 64 точки) и
-   ставятся так же, как наборы из .cur. Форма у всех одна, отличается отделка:
-
-     Неон   — тёмная трубка с бирюзовой каймой и малиновым свечением;
-     Лёд    — светло-голубой кристалл с гранями и тёмно-синим контуром;
-     Золото — золотой слиток с бликом;
-     Лава   — от жёлтого к тёмно-красному, с прожилками и оранжевым жаром;
-     Космос — фиолетовая ночь со звёздами и сиреневой каймой.
+   «Робот», «Призрак», «Слайм», «Огонёк» и «Череп» — пять наборов курсоров
+   без картинок: все шестнадцать видов рисуются при первом выборе под размер
+   указателя (32 / 48 / 64 точки) и ставятся так же, как наборы из .cur.
+   С 2026.10.14.5 это персонажи с маленьким острием указателя, а не
+   перекрашенная стрелка (до того были «Неон», «Лёд», «Золото», «Лава», «Космос»).
 
    У каждого свой эффект при нажатии, если в Настройках выбрано «Как у
    курсора» (fx_kind_for). Здесь же — окошко просмотра в Настройках: в нём
@@ -93,8 +88,8 @@ static BOOL st_inside(int slot, float x, float y) {
 }
 
 static void st_hotspot(int slot, int *hx, int *hy) {
-  static const BYTE hs[ST_SLOTS][2] = {{3, 2},   {16, 16}, {13, 2},  {3, 2},  {16, 16}, {16, 16}, {16, 16}, {16, 16},
-                                        {16, 16}, {16, 16}, {16, 16}, {16, 2}, {3, 2},   {3, 2},   {16, 16}, {3, 2}};
+  static const BYTE hs[ST_SLOTS][2] = {{2, 1},   {16, 16}, {16, 1},  {2, 1},  {16, 16}, {16, 16}, {16, 16}, {16, 16},
+                                        {16, 16}, {16, 16}, {16, 16}, {16, 2}, {2, 1},   {2, 1},   {16, 16}, {2, 1}};
   *hx = hs[slot][0];
   *hy = hs[slot][1];
 }
@@ -109,12 +104,13 @@ typedef struct {
   int decor;                   /* 0 нет, 1 грани льда, 2 блик золота, 3 прожилки лавы, 4 звёзды */
 } StLook;
 
+/* прочие виды — прежние формы в цветах персонажа */
 static const StLook kLooks[ST_COUNT] = {
-    {{14, 16, 40}, {22, 14, 52}, {36, 10, 60}, {0, 240, 255}, {255, 40, 200}, 1.7f, 0.80f, 0},
-    {{244, 252, 255}, {200, 232, 250}, {140, 200, 240}, {30, 80, 135}, {170, 230, 255}, 1.2f, 0.45f, 1},
-    {{255, 242, 170}, {236, 186, 48}, {168, 108, 10}, {84, 52, 0}, {255, 210, 90}, 1.2f, 0.25f, 2},
-    {{255, 236, 120}, {255, 120, 10}, {160, 18, 0}, {40, 6, 0}, {255, 96, 0}, 1.2f, 0.55f, 3},
-    {{86, 36, 160}, {48, 20, 110}, {18, 10, 56}, {226, 206, 255}, {150, 90, 255}, 1.1f, 0.45f, 4},
+    {{220, 226, 236}, {170, 178, 195}, {120, 128, 145}, {20, 30, 45}, {40, 210, 255}, 1.2f, 0.35f, 0},
+    {{252, 252, 255}, {225, 226, 250}, {196, 200, 240}, {40, 40, 80}, {200, 200, 255}, 1.2f, 0.35f, 0},
+    {{160, 245, 130}, {100, 200, 90}, {40, 150, 60}, {20, 60, 20}, {0, 0, 0}, 1.2f, 0.0f, 0},
+    {{255, 236, 120}, {255, 140, 20}, {200, 50, 10}, {50, 10, 0}, {255, 110, 0}, 1.2f, 0.45f, 0},
+    {{252, 248, 235}, {230, 222, 200}, {205, 195, 170}, {40, 30, 30}, {0, 0, 0}, 1.2f, 0.0f, 0},
 };
 
 static float st_mix(float a, float b, float t) { return a + (b - a) * t; }
@@ -125,8 +121,169 @@ static unsigned st_hash(int x, int y) {
   return h ^ (h >> 16);
 }
 
+/* ---- персонажи (с 2026.10.14.5) ----
+   Стрелка, рука, справка, место, человек, ожидание и фоновая работа — это
+   персонаж с маленьким острием указателя; остальные виды (текст, размеры,
+   крест…) — прежние формы в цветах персонажа. Персонаж задан в единицах
+   своего размера: u вправо, v вниз, середина — 0,0 */
+static BOOL st_char_slot(int slot) {
+  return slot == 0 || slot == 2 || slot == 3 || slot == 12 || slot == 13 || slot == 14 || slot == 15;
+}
+
+static BOOL st_ell(float u, float v, float cu, float cv, float ru, float rv) {
+  float a = (u - cu) / ru, b = (v - cv) / rv;
+  return a * a + b * b <= 1.0f;
+}
+
+#define ST_SET(R, G, B) (c[0] = (R), c[1] = (G), c[2] = (B), 1)
+/* цвет персонажа st в точке (u, v); 0 — мимо */
+static int st_char_px(int st, float u, float v, float *c) {
+  float au = fabsf(u);
+  switch (st) {
+  case 0: /* Робот */
+    if (st_ell(au, v, 0.33f, -0.08f, 0.09f, 0.09f)) return ST_SET(235, 255, 255);
+    if (st_ell(au, v, 0.33f, -0.08f, 0.18f, 0.18f)) return ST_SET(30, 220, 255);
+    if (au <= 0.38f && v >= 0.3f && v <= 0.48f)
+      return fmodf(u + 0.38f, 0.19f) < 0.05f ? ST_SET(210, 214, 224) : ST_SET(40, 45, 60);
+    if (st_ell(u, v, 0, -0.95f, 0.16f, 0.16f)) return ST_SET(255, 70, 70);
+    if (au <= 0.07f && v >= -0.95f && v <= -0.5f) return ST_SET(120, 125, 140);
+    if (au <= 0.78f && v >= -0.55f && v <= 0.75f) {
+      float cu = au - 0.58f, cv = v < 0 ? v + 0.35f : v - 0.55f; /* скруглённые углы */
+      if (cu > 0 && fabsf(cv) > 0 && (v < -0.35f || v > 0.55f) && cu * cu + cv * cv > 0.04f) return 0;
+      float t = (v + 0.55f) / 1.3f;
+      return ST_SET(st_mix(215, 140, t), st_mix(222, 148, t), st_mix(235, 168, t));
+    }
+    if (au > 0.78f && au <= 0.94f && fabsf(v - 0.1f) <= 0.2f) return ST_SET(120, 125, 140);
+    return 0;
+  case 1: /* Призрак */
+    if (st_ell(au, v, 0.3f, -0.25f, 0.13f, 0.2f) || st_ell(u, v, 0, 0.17f, 0.11f, 0.11f)) return ST_SET(35, 35, 60);
+    if (st_ell(au, v, 0.52f, 0.0f, 0.1f, 0.07f)) return ST_SET(255, 170, 200);
+    if (st_ell(u, v, 0, -0.2f, 0.8f, 0.8f) ||
+        (au <= 0.8f && v >= -0.2f && v <= 0.66f + 0.14f * cosf(u * 3.14159265f * 2.5f))) {
+      float t = (v + 1.0f) / 1.8f;
+      return ST_SET(st_mix(252, 196, t), st_mix(252, 200, t), 255);
+    }
+    return 0;
+  case 2: /* Слайм */
+    if (st_ell(au, v, 0.23f, 0.01f, 0.05f, 0.05f)) return ST_SET(255, 255, 255);
+    if (st_ell(au, v, 0.27f, 0.05f, 0.13f, 0.14f)) return ST_SET(20, 35, 20);
+    if (st_ell(u, v, -0.35f, -0.3f, 0.16f, 0.1f)) return ST_SET(235, 255, 230);
+    if (st_ell(u, v, 0, 0.22f, 0.9f, 0.6f) || st_ell(u, v, 0, -0.22f, 0.52f, 0.52f)) {
+      float t = (v + 0.75f) / 1.6f;
+      return ST_SET(st_mix(160, 40, t), st_mix(245, 150, t), st_mix(130, 60, t));
+    }
+    return 0;
+  case 3: { /* Огонёк */
+    if (st_ell(au, v, 0.2f, 0.32f, 0.09f, 0.12f)) return ST_SET(70, 20, 10);
+    float dx = u / 0.62f, dy = (v - 0.32f) / 0.62f;
+    if (dy < 0) {
+      float w = 1.0f + dy / 2.1f * 0.95f;
+      dx /= w > 0.06f ? w : 0.06f;
+      dy /= 2.1f;
+    }
+    float d = sqrtf(dx * dx + dy * dy);
+    if (d > 1.0f) return 0;
+    if (d < 0.5f) return ST_SET(255, 232, 120);
+    float t = (d - 0.5f) / 0.5f;
+    return ST_SET(255, st_mix(170, 70, t), st_mix(40, 10, t));
+  }
+  default: /* Череп */
+    if (st_ell(au, v, 0.3f, -0.05f, 0.21f, 0.23f)) return ST_SET(45, 35, 40);
+    if (v >= 0.16f && v <= 0.36f && au <= (v - 0.16f) * 0.6f) return ST_SET(45, 35, 40);
+    if (v >= 0.5f && v <= 0.78f && au <= 0.45f && (au < 0.03f || fabsf(au - 0.2f) < 0.03f)) return ST_SET(90, 80, 75);
+    if (st_ell(u, v, 0, -0.15f, 0.75f, 0.75f) || (au <= 0.45f && v >= 0.3f && v <= 0.78f)) {
+      float t = (v + 0.9f) / 1.7f;
+      return ST_SET(st_mix(252, 205, t), st_mix(248, 195, t), st_mix(235, 170, t));
+    }
+    return 0;
+  }
+}
+#undef ST_SET
+
+static const BYTE kCharTip[ST_COUNT][3] = {{40, 210, 255}, {225, 228, 255}, {90, 200, 90}, {255, 150, 30}, {240, 235, 220}};
+static const float kTip[] = {2, 1, 2, 15, 5.8f, 11.6f, 11, 11.2f};   /* острие стрелки */
+static const float kTipUp[] = {16, 1, 21, 8, 11, 8};                 /* острие руки — вверх */
+
+/* цвет вида slot стиля st в точке сетки 32: значок поверх острия, острие поверх персонажа */
+static int st_char_slot_px(int st, int slot, float x, float y, float *c) {
+  float bx = 26, by = 6;
+  if (slot == 3 || slot == 12 || slot == 13 || slot == 15) {
+    float d2 = (x - bx) * (x - bx) + (y - by) * (y - by);
+    if (slot == 15) {
+      if (d2 <= 4.6f * 4.6f && d2 >= 2.6f * 2.6f) return c[0] = kCharTip[st][0], c[1] = kCharTip[st][1], c[2] = kCharTip[st][2], 1;
+    } else if (d2 <= 4.5f * 4.5f) {
+      if (slot == 3) return c[0] = 60, c[1] = 140, c[2] = 255, 1;
+      if (slot == 12) return c[0] = 240, c[1] = 70, c[2] = 70, 1;
+      return c[0] = 70, c[1] = 190, c[2] = 110, 1;
+    }
+  }
+  if (slot == 2) {
+    if (st_poly(kTipUp, 3, x, y)) return c[0] = kCharTip[st][0], c[1] = kCharTip[st][1], c[2] = kCharTip[st][2], 1;
+    return st_char_px(st, (x - 16) / 11.0f, (y - 20) / 11.0f, c);
+  }
+  if (slot == 14) return st_char_px(st, (x - 16) / 13.0f, (y - 17) / 13.0f, c);
+  if (st_poly(kTip, 4, x, y)) return c[0] = kCharTip[st][0], c[1] = kCharTip[st][1], c[2] = kCharTip[st][2], 1;
+  return st_char_px(st, (x - 20) / 10.5f, (y - 20) / 10.5f, c);
+}
+
+static void st_draw_char(int st, int slot, int N, BYTE *out) {
+  float k = N / 32.0f;
+  size_t n = (size_t)N * N;
+  float *P = (float *)calloc(n * 5, sizeof(float)); /* r g b (домноженные), альфа, кайма */
+  if (!P) {
+    memset(out, 0, n * 4);
+    return;
+  }
+  for (int y = 0; y < N; y++)
+    for (int x = 0; x < N; x++) {
+      float acc[4] = {0, 0, 0, 0}, c[3];
+      for (int sy = 0; sy < 4; sy++)
+        for (int sx = 0; sx < 4; sx++)
+          if (st_char_slot_px(st, slot, (x + (sx + 0.5f) / 4.0f) / k, (y + (sy + 0.5f) / 4.0f) / k, c)) {
+            acc[0] += c[0], acc[1] += c[1], acc[2] += c[2], acc[3] += 1.0f;
+          }
+      float *p = P + ((size_t)y * N + x) * 5;
+      p[0] = acc[0] / 16, p[1] = acc[1] / 16, p[2] = acc[2] / 16, p[3] = acc[3] / 16;
+    }
+  /* тёмный контур вокруг: видно и на белом, и на тёмном */
+  float ro = 1.2f * k;
+  int ri = (int)ceilf(ro);
+  for (int y = 0; y < N; y++)
+    for (int x = 0; x < N; x++) {
+      float best = 0;
+      for (int dy = -ri; dy <= ri; dy++)
+        for (int dx = -ri; dx <= ri; dx++) {
+          int xx = x + dx, yy = y + dy;
+          if (xx < 0 || yy < 0 || xx >= N || yy >= N) continue;
+          float w = fx_clamp01(ro + 0.5f - sqrtf((float)(dx * dx + dy * dy)));
+          float v = P[((size_t)yy * N + xx) * 5 + 3] * w;
+          if (v > best) best = v;
+        }
+      P[((size_t)y * N + x) * 5 + 4] = best;
+    }
+  for (size_t i = 0; i < n; i++) {
+    float *p = P + i * 5;
+    float a = p[3], inv = 1.0f - a, ol = p[4];
+    float r = p[0] + 25 * ol * inv, g = p[1] + 22 * ol * inv, b = p[2] + 35 * ol * inv, aa = a + ol * inv;
+    BYTE *o = out + i * 4;
+    if (aa <= 0.004f) {
+      o[0] = o[1] = o[2] = o[3] = 0;
+      continue;
+    }
+    o[0] = (BYTE)fminf(255.0f, b / aa);
+    o[1] = (BYTE)fminf(255.0f, g / aa);
+    o[2] = (BYTE)fminf(255.0f, r / aa);
+    o[3] = (BYTE)(aa * 255.0f + 0.5f);
+  }
+  free(P);
+}
+
 /* картинка вида slot стиля st в N×N, BGRA без домножения альфы */
 static void st_draw(int st, int slot, int N, BYTE *out) {
+  if (st_char_slot(slot)) {
+    st_draw_char(st, slot, N, out);
+    return;
+  }
   const StLook *L = &kLooks[st];
   float k = N / 32.0f;
   size_t n = (size_t)N * N;
