@@ -827,8 +827,67 @@ static void upd_parse_extra(const char *t) {
   }
 }
 
-/* «что нового» из version.txt: всё после строки sha256, в UTF-16 */
-static void upd_notes_from_text(const char *t, wchar_t *out, int cap) {
+/* «2026.10.14.8» -> 2026101408, как APP_VERSION; 0 — не номер версии */
+static long upd_ver_num(const wchar_t *s) {
+  int y = 0, m = 0, d = 0, n = 0;
+  if (swscanf(s, L"%d.%d.%d.%d", &y, &m, &d, &n) != 4 || y < 2000 || m < 1 || m > 12 || d < 1 || d > 31 || n < 0 ||
+      n > 99)
+    return 0;
+  return (long)y * 1000000L + m * 10000L + d * 100L + n;
+}
+
+/* В whatsnew.txt у каждой версии свой кусок, он начинается строкой
+   «== 2026.10.14.8», самые новые сверху. В out — только версии новее from
+   и не новее to (0 — без верхней границы): у человека накопленная история
+   уже была, ему нужно лишь то, чего в его версии ещё нет. heads — с
+   заголовком «Версия …» над каждой (для всплывашки без них). Текст без
+   заголовков вовсе (старый whatsnew) — целиком. */
+static void upd_notes_filter(const wchar_t *notes, long from, long to, BOOL heads, wchar_t *out, int cap) {
+  int k = 0, blockAt = 0;
+  BOOL tagged = FALSE, keep = FALSE, blockText = FALSE;
+  out[0] = 0;
+  for (const wchar_t *p = notes; *p;) {
+    const wchar_t *line = p;
+    while (*p && *p != L'\n') p++;
+    int len = (int)(p - line);
+    if (*p) p++;
+    if (len && line[len - 1] == L'\r') len--;
+    if (len >= 3 && !wcsncmp(line, L"== ", 3)) {
+      tagged = TRUE;
+      long v = upd_ver_num(line + 3);
+      keep = v > from && (to <= 0 || v <= to);
+      if (!keep) continue;
+      blockAt = k;
+      blockText = FALSE;
+      while (k >= 2 && out[k - 1] == L'\n') k -= 2; /* между версиями — ровно одна пустая строка */
+      if (k + 4 < cap && k) k += _snwprintf(out + k, cap - k, L"\r\n\r\n");
+      if (heads && len < 40 && k + len + 12 < cap)
+        k += _snwprintf(out + k, cap - k, L"Версия %.*s:\r\n", len - 3, line + 3);
+      out[k] = 0;
+      continue;
+    }
+    if (!keep && tagged) continue;
+    if (!len && !k) continue;
+    if (k + len + 2 >= cap) { /* не влезло — дальше только старее; заголовок без текста не нужен */
+      if (tagged && !blockText) k = blockAt;
+      break;
+    }
+    if (len) blockText = TRUE;
+    memcpy(out + k, line, len * sizeof(wchar_t));
+    k += len;
+    out[k++] = L'\r';
+    out[k++] = L'\n';
+    out[k] = 0;
+  }
+  while (k >= 2 && out[k - 1] == L'\n') k -= 2;
+  out[k] = 0;
+}
+
+static wchar_t g_updAllNotes[16384]; /* вся история — до фильтра по версиям */
+
+/* «что нового» из version.txt: всё после строки sha256, в UTF-16 — только
+   версии новее установленной */
+static void upd_notes_from_text(const char *t, wchar_t *out, int cap, BOOL heads) {
   out[0] = 0;
   const char *p = t;
   for (int line = 0; line < 3 && p; line++) {
@@ -836,9 +895,11 @@ static void upd_notes_from_text(const char *t, wchar_t *out, int cap) {
     if (p) p++;
   }
   if (!p || !*p) return;
-  int n = MultiByteToWideChar(CP_UTF8, 0, p, -1, out, cap);
-  if (n <= 0) out[0] = 0;
-  out[cap - 1] = 0;
+  int cnt = (int)(sizeof(g_updAllNotes) / sizeof(g_updAllNotes[0]));
+  int n = MultiByteToWideChar(CP_UTF8, 0, p, -1, g_updAllNotes, cnt);
+  if (n <= 0) return;
+  g_updAllNotes[cnt - 1] = 0;
+  upd_notes_filter(g_updAllNotes, APP_VERSION, 0, heads, out, cap);
 }
 
 /* sha256 файла — строкой из 64 шестнадцатеричных знаков */
@@ -1024,6 +1085,8 @@ static BOOL upd_trial_on_start(void) {
 
 /* Проработала 45 секунд — выпуск годный. TRUE — это было первое подтверждение
    (значит, только что обновились: пора сказать «что нового»). */
+static long g_updFromVer; /* с какой версии только что обновились; 0 — не знаем */
+
 static BOOL upd_trial_confirm(void) {
   HANDLE e = OpenEventW(EVENT_MODIFY_STATE, FALSE, UPD_OK_EVENT);
   if (e) { /* прежняя ещё сторожит — пусть уходит спокойно */
@@ -1032,6 +1095,7 @@ static BOOL upd_trial_confirm(void) {
   }
   UpdTrial t;
   if (!upd_trial_read(&t) || t.ver != APP_VERSION) return FALSE;
+  if (t.prev > 0 && t.prev < APP_VERSION) g_updFromVer = t.prev;
   upd_trial_clear();
   return TRUE;
 }
@@ -1355,7 +1419,7 @@ static void on_update_done(int code) {
     g_updAuto = FALSE;
     if (code == 2 && g_updPath[0]) {
       g_updReady = TRUE;
-      upd_notes_from_text(g_updVerText, g_updNotes, 3000);
+      upd_notes_from_text(g_updVerText, g_updNotes, 3000, FALSE);
       wchar_t head[160], title[64], t[256];
       upd_notes_head(g_updNotes, head, 160, 2);
       _snwprintf(title, 64, L"Вышла новая версия CursorPad %s", g_updRemote);
@@ -1388,7 +1452,7 @@ static void on_update_done(int code) {
     show_status(g_updErr[0] ? g_updErr : L"GitHub недоступен");
     return;
   }
-  upd_notes_from_text(g_updVerText, g_updNotes, 3000);
+  upd_notes_from_text(g_updVerText, g_updNotes, 3000, TRUE);
   wchar_t msg[3600];
   _snwprintf(msg, 3600,
              L"На GitHub версия %s (сейчас %s).%s%s\r\n\r\n"
@@ -1442,8 +1506,9 @@ static void start_update_auto(void) {
   }
 }
 
-/* «что нового» этой версии — вшито в exe (RCDATA 330, native/whatsnew.txt) */
-static void upd_own_notes(wchar_t *out, int cap) {
+/* «что нового» этой версии — вшито в exe (RCDATA 330, native/whatsnew.txt):
+   всё, что новее версии, с которой обновились, а если не знаем — только эта */
+static void upd_own_notes(wchar_t *out, int cap, BOOL heads) {
   out[0] = 0;
   HRSRC r = FindResourceW(NULL, MAKEINTRESOURCEW(330), (LPCWSTR)RT_RCDATA);
   HGLOBAL g = r ? LoadResource(NULL, r) : NULL;
@@ -1454,6 +1519,8 @@ static void upd_own_notes(wchar_t *out, int cap) {
     p += 3;
     n -= 3;
   }
-  int k = MultiByteToWideChar(CP_UTF8, 0, p, (int)n, out, cap - 1);
-  out[k > 0 ? k : 0] = 0;
+  int cnt = (int)(sizeof(g_updAllNotes) / sizeof(g_updAllNotes[0]));
+  int k = MultiByteToWideChar(CP_UTF8, 0, p, (int)n, g_updAllNotes, cnt - 1);
+  g_updAllNotes[k > 0 ? k : 0] = 0;
+  upd_notes_filter(g_updAllNotes, g_updFromVer > 0 ? g_updFromVer : APP_VERSION - 1, APP_VERSION, heads, out, cap);
 }

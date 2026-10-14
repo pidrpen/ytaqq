@@ -25,8 +25,8 @@ jobs:
           set -eu
           ver=$(sed -n '2p' public/version.txt)
           tag="v$ver"
-          # «что нового» — первый абзац native/whatsnew.txt
-          awk 'NF==0{exit} {print}' native/whatsnew.txt > notes.md
+          # «что нового» — первый абзац native/whatsnew.txt, без строки «== версия»
+          awk 'NF==0{exit} /^== /{next} {print}' native/whatsnew.txt > notes.md
           printf '\nСкачайте CursorPad.zip (программа и инструкция) или только CursorPad.exe.\nУстанавливать не нужно: распакуйте и запустите CursorPad.exe.\n' >> notes.md
           if gh release view "$tag" >/dev/null 2>&1; then
             gh release upload "$tag" public/CursorPad.zip public/CursorPad.exe --clobber

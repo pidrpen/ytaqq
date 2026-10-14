@@ -4281,7 +4281,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
       KillTimer(hwnd, TIMER_UPD_CONFIRM);
       if (upd_trial_confirm()) { /* только что обновились — сказать, что нового */
         wchar_t notes[3000], head[200], title[64];
-        upd_own_notes(notes, 3000);
+        upd_own_notes(notes, 3000, FALSE);
         upd_notes_head(notes, head, 200, 3);
         _snwprintf(title, 64, L"CursorPad обновлён до %s", APP_VERSION_STR);
         title[63] = 0;
@@ -4481,7 +4481,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         }
       } else if (g_balloonKind == 3) { /* «обновлён» — показать, что нового */
         static wchar_t notes[3000];
-        upd_own_notes(notes, 3000);
+        upd_own_notes(notes, 3000, TRUE);
         g_resultFiles = FALSE;
         g_plmCount = 0;
         g_ansTitle = L"Что нового";
