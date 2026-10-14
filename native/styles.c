@@ -981,4 +981,50 @@ static void st_slash_strip(const wchar_t *path) {
   free(scr);
   free(fw.bits);
 }
+
+/* только проверочная сборка: --slashbench файл.txt — сколько миллисекунд
+   рисуется кадр большого разреза и раскола на экране 1920×1080 */
+static void st_slash_bench(const wchar_t *path) {
+  fx_init_sprites();
+  int BW = 1920, BH = 1080;
+  FxWin fw;
+  memset(&fw, 0, sizeof(fw));
+  fw.bits = (BYTE *)malloc((size_t)BW * BH * 4);
+  if (!fw.bits) return;
+  LARGE_INTEGER fq, t0, t1;
+  QueryPerformanceFrequency(&fq);
+  char out[512];
+  int len = 0;
+  for (int kind = 0; kind < 2; kind++) {
+    g_fxSeed = 99u + kind;
+    fw.W = BW, fw.H = BH;
+    if (kind == 0) {
+      fx_big_seed(&fw, BW, BH);
+    } else {
+      st_fake_screen(fw.bits, BW, BH);
+      fx_shatter_setup(&fw);
+      fw.shatter = TRUE, fw.slash = TRUE, fw.frames = FX_SHATTER_FRAMES;
+    }
+    double worst = 0, sum = 0;
+    for (fw.frame = 0; fw.frame < fw.frames; fw.frame++) {
+      QueryPerformanceCounter(&t0);
+      fx_paint(&fw);
+      QueryPerformanceCounter(&t1);
+      double ms = (t1.QuadPart - t0.QuadPart) * 1000.0 / fq.QuadPart;
+      sum += ms;
+      if (ms > worst) worst = ms;
+    }
+    fw.shatter = FALSE;
+    len += snprintf(out + len, sizeof(out) - len, "%s: avg %.1f ms, worst %.1f ms, frames %d\n",
+                    kind ? "shatter" : "big", sum / fw.frames, worst, fw.frames);
+  }
+  fx_shatter_free();
+  HANDLE h = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+  if (h != INVALID_HANDLE_VALUE) {
+    DWORD w;
+    WriteFile(h, out, (DWORD)len, &w, NULL);
+    CloseHandle(h);
+  }
+  free(fw.bits);
+}
 #endif

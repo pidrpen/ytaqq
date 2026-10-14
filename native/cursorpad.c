@@ -4722,6 +4722,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
     LPWSTR *argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     if (argv && argc >= 3 && !wcscmp(argv[1], L"--gallery")) st_gallery(argv[2]);
     if (argv && argc >= 3 && !wcscmp(argv[1], L"--slash")) st_slash_strip(argv[2]);
+    if (argv && argc >= 3 && !wcscmp(argv[1], L"--slashbench")) st_slash_bench(argv[2]);
     if (argv && argc >= 3 && !wcscmp(argv[1], L"--settings")) {
       g_tab = (int)wcstol(argv[2], NULL, 10) % SEC_COUNT;
       if (g_follow) toggle_follow(); /* как «Настройки» в меню значка */
