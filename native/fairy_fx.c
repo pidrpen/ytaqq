@@ -886,11 +886,11 @@ static int fx_kind_for(int skin, int pick) {
   if (skin == 3) return g_sparkle ? 1 : 0;
   if (skin == 4) return g_flame ? 2 : 0;
   if (skin == 5) return g_catFx == 1 ? 3 : (g_catFx == 2 ? 1 : 0);
-  if (skin == 7) return 7;  /* Неон — молния */
-  if (skin == 8) return 5;  /* Лёд — кольца */
-  if (skin == 9) return 6;  /* Золото — конфетти */
-  if (skin == 10) return 2; /* Лава — пламя */
-  if (skin == 11) return 1; /* Космос — звёздочки */
+  if (skin == 7) return 7;  /* Робот — молния */
+  if (skin == 8) return 5;  /* Призрак — кольца */
+  if (skin == 9) return 6;  /* Слайм — конфетти */
+  if (skin == 10) return 2; /* Огонёк — пламя */
+  if (skin == 11) return 4; /* Череп — разрез */
   return 0;
 }
 
