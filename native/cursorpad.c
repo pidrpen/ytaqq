@@ -1272,6 +1272,8 @@ static const wchar_t *fx_pick_name(int pick) {
 
 /* то же с большой буквы — для окошка просмотра (там всегда сам эффект) */
 static const wchar_t *fx_pick_label(int kind) {
+  if (kind == 9) return L"Рассечение"; /* свои эффекты Сукуны и Годжо — только «Как у курсора» */
+  if (kind == 10) return L"Пурпур";
   return kind > 0 && kind < FX_OPTIONS - 1 ? kFxNames[kind + 1] : L"без эффекта";
 }
 
