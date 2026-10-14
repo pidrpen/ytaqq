@@ -305,7 +305,7 @@ static void styles_free(void) {
 
    Окошко в разделе «Курсор и эффекты». Курсор сам ходит по нему и раз в
    секунду щёлкает — видно и стиль, и эффект при нажатии. Пока мышь над
-   кнопкой курсора, эффекта или сетапа, показано то, что она выберет, а не то,
+   кнопкой курсора или эффекта, показано то, что она выберет, а не то,
    что выбрано сейчас. Щелчок по окошку — эффект прямо там. */
 
 #define PV_FRAMES_PER_CLICK 62
@@ -391,10 +391,6 @@ static void pv_target(int *skin, int *pick) {
     g_pvHover = TRUE;
   } else if (id >= ID_FX_BASE && id < ID_FX_BASE + FX_OPTIONS) {
     *pick = kFxPick[id - ID_FX_BASE];
-    g_pvHover = TRUE;
-  } else if (id >= ID_SETUP_BASE && id < ID_SETUP_BASE + SETUP_COUNT) {
-    *skin = g_setups[id - ID_SETUP_BASE].skin;
-    *pick = g_setups[id - ID_SETUP_BASE].fx;
     g_pvHover = TRUE;
   }
 }
