@@ -890,7 +890,8 @@ static int fx_kind_for(int skin, int pick) {
   if (skin == 8) return 5;  /* Призрак — кольца */
   if (skin == 9) return 6;  /* Слайм — конфетти */
   if (skin == 10) return 2; /* Огонёк — пламя */
-  if (skin == 11) return 4; /* Череп — разрез */
+  if (skin == 11) return 3; /* Череп — царапины */
+  if (skin == 12) return 4; /* Разрез — разрез */
   return 0;
 }
 

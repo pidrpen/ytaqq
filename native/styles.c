@@ -10,12 +10,15 @@
    курсора» (fx_kind_for). Здесь же — окошко просмотра в Настройках: в нём
    курсор водит сам и щёлкает, показывая стиль и эффект до выбора. */
 
-/* ST_COUNT и ST_SKIN0 (g_skin первого стиля) — в cursorpad.c */
+/* ST_COUNT, ST_SKIN0 (g_skin первого стиля) и ST_KNIGHT — в cursorpad.c. Рыцарь
+   (Мечник, g_skin 1) с 2026.10.14.6 тоже рисуется здесь, но своей кнопки
+   стиля у него нет — он на месте прежнего Мечника */
+#define ST_DRAW (ST_COUNT + 1)
 #define ST_SLOTS RIAS_SLOTS /* виды — в том же порядке, что у «Риас» (kRias) */
 
 
-static HCURSOR g_stCur[ST_COUNT][ST_SLOTS];
-static int g_stSize[ST_COUNT]; /* под какой размер указателя нарисованы */
+static HCURSOR g_stCur[ST_DRAW][ST_SLOTS];
+static int g_stSize[ST_DRAW]; /* под какой размер указателя нарисованы */
 
 /* ---- формы в сетке 32×32 ---- */
 
@@ -105,12 +108,14 @@ typedef struct {
 } StLook;
 
 /* прочие виды — прежние формы в цветах персонажа */
-static const StLook kLooks[ST_COUNT] = {
+static const StLook kLooks[ST_DRAW] = {
     {{220, 226, 236}, {170, 178, 195}, {120, 128, 145}, {20, 30, 45}, {40, 210, 255}, 1.2f, 0.35f, 0},
     {{252, 252, 255}, {225, 226, 250}, {196, 200, 240}, {40, 40, 80}, {200, 200, 255}, 1.2f, 0.35f, 0},
     {{160, 245, 130}, {100, 200, 90}, {40, 150, 60}, {20, 60, 20}, {0, 0, 0}, 1.2f, 0.0f, 0},
     {{255, 236, 120}, {255, 140, 20}, {200, 50, 10}, {50, 10, 0}, {255, 110, 0}, 1.2f, 0.45f, 0},
     {{252, 248, 235}, {230, 222, 200}, {205, 195, 170}, {40, 30, 30}, {0, 0, 0}, 1.2f, 0.0f, 0},
+    {{255, 90, 90}, {200, 20, 30}, {110, 0, 10}, {20, 0, 5}, {255, 30, 40}, 1.2f, 0.40f, 0},     /* Разрез */
+    {{235, 238, 245}, {185, 190, 202}, {130, 135, 148}, {30, 30, 40}, {0, 0, 0}, 1.2f, 0.0f, 2}, /* Рыцарь */
 };
 
 static float st_mix(float a, float b, float t) { return a + (b - a) * t; }
@@ -196,11 +201,56 @@ static int st_char_px(int st, float u, float v, float *c) {
       return ST_SET(st_mix(252, 205, t), st_mix(248, 195, t), st_mix(235, 170, t));
     }
     return 0;
+  case ST_KNIGHT: /* Рыцарь: топфхельм с Т-образной прорезью, золотой обод и алый плюмаж */
+    if (st_ell(u, v, 0.22f, -0.9f, 0.5f, 0.17f)) return ST_SET(st_mix(235, 150, (v + 1.07f) / 0.34f), 30, 40);
+    if ((v >= -0.14f && v <= 0.0f && au <= 0.56f) || (au <= 0.07f && v >= 0.0f && v <= 0.5f)) return ST_SET(25, 25, 35);
+    if (v >= 0.5f && v <= 0.68f && (st_ell(au, v, 0.28f, 0.58f, 0.05f, 0.05f) || st_ell(au, v, 0.44f, 0.58f, 0.05f, 0.05f)))
+      return ST_SET(25, 25, 35);
+    if (st_ell(au, v, 0.6f, 0.72f, 0.06f, 0.06f)) return ST_SET(90, 90, 100);
+    if (v >= -0.34f && v <= -0.24f && au <= 0.72f) return ST_SET(215, 172, 50);
+    if ((v < -0.1f && st_ell(u, v, 0, -0.1f, 0.72f, 0.72f)) || (au <= 0.72f && v >= -0.1f && v <= 0.86f)) {
+      float t = (v + 0.82f) / 1.7f, hl = au < 0.2f && v < -0.36f ? 0.35f : 0.0f; /* блик по гребню */
+      return ST_SET(st_mix(st_mix(228, 125, t), 255, hl), st_mix(st_mix(232, 130, t), 255, hl),
+                    st_mix(st_mix(240, 145, t), 255, hl));
+    }
+    return 0;
   }
 }
 #undef ST_SET
 
-static const BYTE kCharTip[ST_COUNT][3] = {{40, 210, 255}, {225, 228, 255}, {90, 200, 90}, {255, 150, 30}, {240, 235, 220}};
+/* клинок вдоль оси от острия (tx, ty) в направлении (dx, dy): s — вдоль, w — поперёк.
+   len — длина лезвия; за ним гарда, рукоять и навершие. 0 — мимо */
+static int st_blade_px(int st, float x, float y, float tx, float ty, float dx, float dy, float len, float *c) {
+  float s = (x - tx) * dx + (y - ty) * dy, w = (x - tx) * dy - (y - ty) * dx, aw = fabsf(w);
+  float sc = len / 22.0f; /* гарда и рукоять — в долях длины разрезного клинка */
+  BOOL red = st != ST_KNIGHT;
+  if (s < 0) return 0;
+  if (s <= len) {
+    float hw = fminf(s * 0.35f, red ? 2.3f : 1.8f);
+    if (aw > hw) return 0;
+    float m = aw / hw;
+    if (red) {
+      if (m < 0.3f) return c[0] = 255, c[1] = 120, c[2] = 110, 1;
+      return c[0] = st_mix(215, 105, m), c[1] = st_mix(25, 0, m), c[2] = st_mix(35, 10, m), 1;
+    }
+    if (m < 0.3f) return c[0] = 255, c[1] = 255, c[2] = 255, 1;
+    return c[0] = st_mix(225, 140, m), c[1] = st_mix(230, 145, m), c[2] = st_mix(240, 160, m), 1;
+  }
+  s -= len;
+  if (s <= 2.0f * sc) return aw <= 4.2f * sc ? (red ? (c[0] = 30, c[1] = 22, c[2] = 24, 1) : (c[0] = 215, c[1] = 172, c[2] = 50, 1)) : 0;
+  s -= 2.0f * sc;
+  if (s <= 9.0f * sc) {
+    if (aw > 1.7f * sc) return 0;
+    if (red) return fmodf(s, 3.0f * sc) < 1.3f * sc && aw < 1.0f * sc ? (c[0] = 200, c[1] = 30, c[2] = 40, 1) : (c[0] = 25, c[1] = 20, c[2] = 20, 1);
+    return c[0] = 120, c[1] = 75, c[2] = 40, 1;
+  }
+  s -= 9.0f * sc;
+  if (s <= 1.6f * sc && aw <= 2.1f * sc) return c[0] = 215, c[1] = 172, c[2] = 50, 1;
+  return 0;
+}
+
+static const BYTE kCharTip[ST_DRAW][3] = {{40, 210, 255}, {225, 228, 255}, {90, 200, 90}, {255, 150, 30},
+                                          {240, 235, 220}, {255, 60, 60},   {225, 230, 240}};
 static const float kTip[] = {2, 1, 2, 15, 5.8f, 11.6f, 11, 11.2f};   /* острие стрелки */
 static const float kTipUp[] = {16, 1, 21, 8, 11, 8};                 /* острие руки — вверх */
 
@@ -216,6 +266,14 @@ static int st_char_slot_px(int st, int slot, float x, float y, float *c) {
       if (slot == 12) return c[0] = 240, c[1] = 70, c[2] = 70, 1;
       return c[0] = 70, c[1] = 190, c[2] = 110, 1;
     }
+  }
+  if (st == ST_RAZREZ) { /* «Разрез»: сам курсор — алый клинок */
+    if (slot == 2) return st_blade_px(st, x, y, 16, 1, 0, 1, 15, c);
+    return st_blade_px(st, x, y, 2, 1, 0.70710678f, 0.70710678f, 19, c);
+  }
+  if (st == ST_KNIGHT && slot != 2 && slot != 14) { /* у рыцаря вместо острия — меч */
+    if (st_blade_px(st, x, y, 2, 1, 0.70710678f, 0.70710678f, 11, c)) return 1;
+    return st_char_px(st, (x - 21) / 9.5f, (y - 21) / 9.5f, c);
   }
   if (slot == 2) {
     if (st_poly(kTipUp, 3, x, y)) return c[0] = kCharTip[st][0], c[1] = kCharTip[st][1], c[2] = kCharTip[st][2], 1;
@@ -432,7 +490,7 @@ static int st_cursor_size(void) {
 
 /* курсоры стиля под нынешний размер указателя; рисуются один раз */
 static void st_ensure(int st) {
-  if (st < 0 || st >= ST_COUNT) return;
+  if (st < 0 || st >= ST_DRAW) return;
   int N = st_cursor_size();
   if (g_stSize[st] == N && g_stCur[st][0]) return;
   for (int i = 0; i < ST_SLOTS; i++) {
@@ -450,7 +508,7 @@ static void style_apply(int st) {
 }
 
 static void styles_free(void) {
-  for (int s = 0; s < ST_COUNT; s++)
+  for (int s = 0; s < ST_DRAW; s++)
     for (int i = 0; i < ST_SLOTS; i++)
       if (g_stCur[s][i]) {
         DestroyCursor(g_stCur[s][i]);
@@ -482,6 +540,10 @@ static HCURSOR pv_cursor(int skin, int which) {
   if (skin >= ST_SKIN0 && skin < ST_SKIN0 + ST_COUNT) {
     st_ensure(skin - ST_SKIN0);
     return g_stCur[skin - ST_SKIN0][slotOf[which]];
+  }
+  if (skin == 1) {
+    st_ensure(ST_KNIGHT);
+    return g_stCur[ST_KNIGHT][slotOf[which]];
   }
   if (skin >= 1 && skin <= 5) {
     int s = skin - 1;
@@ -767,7 +829,7 @@ static void st_gallery(const wchar_t *path) {
   fx_init_sprites();
   int S = (int)(200 * g_fxScale), N = 48, cell = 56;
   int W = S * 4 > cell * ST_SLOTS ? S * 4 : cell * ST_SLOTS;
-  int rowsCur = ST_COUNT * 2, H = rowsCur * cell + 8 * (S / 2);
+  int rowsCur = ST_DRAW * 2, H = rowsCur * cell + 8 * (S / 2);
   BYTE *img = (BYTE *)malloc((size_t)W * H * 4);
   BYTE *cur = (BYTE *)malloc((size_t)N * N * 4);
   FxWin fw;
@@ -777,7 +839,7 @@ static void st_gallery(const wchar_t *path) {
   if (!img || !cur || !fw.bits) return;
   for (int i = 0; i < W * H; i++) ((DWORD *)img)[i] = 0xFFFFFFFFu;
   /* курсоры: каждый стиль — на белом и на тёмном */
-  for (int st = 0; st < ST_COUNT; st++)
+  for (int st = 0; st < ST_DRAW; st++)
     for (int bg = 0; bg < 2; bg++)
       for (int sl = 0; sl < ST_SLOTS; sl++) {
         st_draw(st, sl, N, cur);
