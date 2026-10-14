@@ -2145,9 +2145,11 @@ static void card_operations(SQLHDBC dbc, long tpId, long verId, CardOut *c, Card
              verId);
   int k = card_query(dbc, sql, rows, CARD_ROWS, err, 280);
   long parent = (k > 0 && rows[0].n1) ? rows[0].n1 : verId;
-  card_add(c, L"СОСТАВ  (версия %ld", verId);
-  if (parent != verId) card_add(c, L", вариант %ld", parent);
-  card_add(c, L")\r\n");
+  if (g_cardVerbose) {
+    card_add(c, L"СОСТАВ  (версия %ld", verId);
+    if (parent != verId) card_add(c, L", вариант %ld", parent);
+    card_add(c, L")\r\n");
+  }
 
   _snwprintf(sql, 3000,
              L"SELECT TOP 300 ch.InfoObjectId, ch.Name, "
@@ -2173,7 +2175,7 @@ static void card_operations(SQLHDBC dbc, long tpId, long verId, CardOut *c, Card
     card_add(c, L"Состав пуст: у объекта %ld нет детей.\r\n", parent);
     return;
   }
-  card_add(c, L"  операций: %d\r\n\r\n", n);
+  if (g_cardVerbose) card_add(c, L"  операций: %d\r\n\r\n", n);
   /* Нормы времени лежат атрибутами на самой операции либо на объекте по
      ссылке TSOperation — как называются, в разных базах по-разному, поэтому
      показываем всё, что есть со значением, а не угаданный список имён. */
@@ -2187,7 +2189,7 @@ static void card_operations(SQLHDBC dbc, long tpId, long verId, CardOut *c, Card
   CardRow *ops = (CardRow *)malloc(sizeof(CardRow) * (size_t)(n > 0 ? n : 1));
   if (ops) memcpy(ops, rows, sizeof(CardRow) * (size_t)n);
 
-  double totalMins = 0.0;
+  double totalMins = 0.0, opShort = 0.0;
   int counted = 0;
   /* нормы держим отдельно: они приходят из коллекций, а не из атрибутов */
   CardRow *nr = (CardRow *)malloc(sizeof(CardRow) * CARD_ROWS);
@@ -2253,6 +2255,27 @@ static void card_operations(SQLHDBC dbc, long tpId, long verId, CardOut *c, Card
       if (!ops_1c_add(d ? d->s1 : NULL, d ? d->s2 : NULL, o->n3 ? o->s2 : NULL, o->s1) && at < OPS_1C)
         miss1c[at] = 1;
     }
+    if (!g_cardVerbose) {
+      /* по делу: операция одной строкой — номер, название, Тпз и Тшт */
+      card_add(c, L"  %-4s %-26s", num, nm);
+      int got = 0;
+      for (int k = 0; k < nn; k++) {
+        if (nr[k].n1 != o->n1 && nr[k].n1 != o->n3) continue;
+        if (!nr[k].s2[0]) continue;
+        BOOL seen = FALSE;
+        for (int q = 0; q < k && !seen; q++) seen = nr[q].n1 == nr[k].n1 && !wcscmp(nr[q].s1, nr[k].s1) && nr[q].s2[0];
+        if (seen) continue;
+        wchar_t t[64];
+        double m = 0.0;
+        if (!card_time_text(nr[k].s2, t, 64, &m)) continue;
+        const wchar_t *ru = card_label(nr[k].s1);
+        card_add(c, L"%s%s %g", got ? L" · " : L" ", ru ? ru : nr[k].s1, m);
+        opShort += m;
+        got++;
+      }
+      card_add(c, L"\r\n");
+      continue;
+    }
     card_add(c, L"  %-4s %-40s %ld\r\n", num, nm, o->n1);
     if (o->s2[0] && o->s1[0] && _wcsicmp(o->s2, o->s1) != 0)
       card_add(c, L"       %s\r\n", o->s2);
@@ -2290,7 +2313,11 @@ static void card_operations(SQLHDBC dbc, long tpId, long verId, CardOut *c, Card
     }
     card_add(c, L"\r\n");
   }
-  if (counted) {
+  if (!g_cardVerbose) {
+    if (opShort > 0.0) card_add(c, L"  %-31s %g мин\r\n", L"Итого на деталь", opShort);
+    else if (n > 0) card_add(c, L"  Нормы времени не подхватились.\r\n");
+    card_add(c, L"\r\n");
+  } else if (counted) {
     card_add(c, L"  ────────────────────────────────────────\r\n");
     card_total(c, L"  ", L"ИТОГО НА ДЕТАЛЬ", totalMins);
     if (counted < n)
@@ -2302,9 +2329,11 @@ static void card_operations(SQLHDBC dbc, long tpId, long verId, CardOut *c, Card
       card_add(c, L"     %ld · %s · %s\r\n", nr[k].n1, nr[k].s1, nr[k].s2);
     if (g_cardVerbose) card_probe_time(dbc, list, c, rows, err);
   }
-  if (n > shown)
+  if (n > shown && g_cardVerbose)
     card_add(c, L"  показано подробно первых %d операций из %d\r\n", shown, n);
-  /* что уйдёт по кнопке «В 1С» — ровно так, как ляжет в буфер */
+  /* что уйдёт по кнопке «В 1С» — ровно так, как ляжет в буфер; в карточке
+     по делу этот список не нужен, кнопка «В 1С» берёт его и так */
+  if (!g_cardVerbose) goto ops_done;
   card_add(c, L"\r\n  ── В 1С: операций со временем %d из %d ──\r\n", g_opsPendN, n);
   int miss = 0;
   for (int i = 0; i < g_opsPendN; i++) {
@@ -2315,6 +2344,7 @@ static void card_operations(SQLHDBC dbc, long tpId, long verId, CardOut *c, Card
     card_add(c, L"  Не нашлось в справочнике 1С: %d — вставятся как есть, проверьте в 1С.\r\n", miss);
   else if (!g_opsPendN)
     card_add(c, L"  Ни у одной операции нет Тпз или Тшт — переносить в 1С нечего.\r\n");
+ops_done:
   free(ops);
   free(nr);
   free(dr);
@@ -2326,6 +2356,7 @@ static void card_operations(SQLHDBC dbc, long tpId, long verId, CardOut *c, Card
    TechComposition, которые ссылаются на нас, и поднимаемся к их владельцу.
    Удалённые строки (IsRemoved) не в счёт — так же, как в сервисе. */
 static void card_where_used(SQLHDBC dbc, long id, CardOut *c, CardRow *rows, wchar_t *err) {
+  if (!g_cardVerbose) return; /* по делу входимость не нужна — она по Shift */
   wchar_t *sql = (wchar_t *)malloc(4000 * sizeof(wchar_t));
   if (!sql) return;
   _snwprintf(
@@ -2547,7 +2578,7 @@ static void ans_sync_buttons(void) {
   const wchar_t *file = ans_draw_file();
   BOOL haveFile = file && file[0];
   if (open) {
-    SetWindowTextW(open, g_resultFiles ? L"Открыть файл" : L"Открыть ЭСИ в СОЮЗ");
+    SetWindowTextW(open, g_resultFiles ? L"Открыть файл" : L"В СОЮЗ");
     EnableWindow(open, row || (!g_resultFiles && g_ansObj[0] != 0));
   }
   /* у найденных файлов ТП нет — кнопку прячет раскладка */
@@ -2701,7 +2732,7 @@ static long card_tp_by_designation(SQLHDBC dbc, const wchar_t *des, CardOut *c, 
 }
 
 static void card_drawings(const wchar_t *designation, CardOut *c) {
-  card_add(c, L"\r\nЧЕРТЁЖ И ФАЙЛЫ");
+  card_add(c, g_cardVerbose ? L"\r\nЧЕРТЁЖ И ФАЙЛЫ" : L"ЧЕРТЁЖ");
   if (!designation || !designation[0]) {
     card_add(c, L": у объекта нет обозначения, искать нечего.\r\n");
     return;
@@ -2728,6 +2759,18 @@ static void card_drawings(const wchar_t *designation, CardOut *c) {
   }
   if (!f.total) {
     card_add(c, L": по «%s» в индексе ничего нет.\r\n", designation);
+    return;
+  }
+  if (!g_cardVerbose) {
+    /* по делу — один чертёж; остальные файлы по Shift */
+    card_add(c, L"\r\n");
+    if (f.nd) {
+      card_show_file(c, f.draw[0]);
+      lstrcpynW(g_cardDraw, f.draw[0], PLM_LINK);
+    } else {
+      card_add(c, L"  чертежа не нашлось\r\n");
+    }
+    if (f.total > 1) card_add(c, L"  ещё файлов: %d\r\n", f.total - (f.nd ? 1 : 0));
     return;
   }
   card_add(c, L" (по «%s», найдено %d)\r\n", key, f.total);
@@ -3454,9 +3497,11 @@ static void card_preforms(SQLHDBC dbc, long pfCard, CardOut *c, CardRow *rows, w
     if (!sm) break;
     ULONGLONG one = GetTickCount64() + 8000;
     sm->deadline = one < cardEnd ? one : cardEnd;
-    card_add(c, L"  %s", names[p]);
-    if (g_cardVerbose) card_add(c, L"   ID %ld", ids[p]);
-    card_add(c, L"\r\n");
+    if (g_cardVerbose || pn > 1) {
+      card_add(c, L"  %s", names[p]);
+      if (g_cardVerbose) card_add(c, L"   ID %ld", ids[p]);
+      card_add(c, L"\r\n");
+    }
     /* сначала тихо собрать сводку, потом (в «Атрибутах») показать весь обход;
        поля заготовки — как читает выгрузка: PreformSize → ZDiametr → Value и т. д.
        (с .84; прежде один уровень — «круг 20» без размеров) */
@@ -3464,13 +3509,20 @@ static void card_preforms(SQLHDBC dbc, long pfCard, CardOut *c, CardRow *rows, w
     wchar_t mt[480], ms[80];
     pf_material_text(sm, mt, 480);
     pf_mass_text(sm->mass, ms, 80);
-    card_add(c, L"      %-14s%s\r\n", L"Материал", mt[0] ? mt : L"—");
     wchar_t dt[240];
     pf_dims_text(sm, dt, 240);
     const wchar_t *dv = dt;
     if (!wcsncmp(dv, L"Габариты ", 9)) dv += 9; /* из PreformSize — подпись уже в строке слева */
-    card_add(c, L"      %-14s%s\r\n", L"Габариты", dv[0] ? dv : L"—");
-    card_add(c, L"      %-14s%s\r\n", L"Масса", ms[0] ? ms : L"—");
+    if (!g_cardVerbose) {
+      /* по делу: материал строкой, под ним размеры и масса */
+      card_add(c, L"  %s\r\n", mt[0] ? mt : L"материал не указан");
+      if (dv[0] || ms[0])
+        card_add(c, L"  %s%s%s\r\n", dv, dv[0] && ms[0] ? L" · " : L"", ms);
+    } else {
+      card_add(c, L"      %-14s%s\r\n", L"Материал", mt[0] ? mt : L"—");
+      card_add(c, L"      %-14s%s\r\n", L"Габариты", dv[0] ? dv : L"—");
+      card_add(c, L"      %-14s%s\r\n", L"Масса", ms[0] ? ms : L"—");
+    }
     if (!mt[0] && !dv[0] && !sm->mass[0])
       card_add(c, L"      (в заготовке не нашлось ни материала, ни размеров, ни массы —\r\n"
                   L"       Shift + «Все данные» покажет, что в ней лежит)\r\n");
@@ -3543,6 +3595,18 @@ static int card_tc_rows(SQLHDBC dbc, long ver, long prodConf, wchar_t *sql, Card
              L"ORDER BY ce.CollectionElementId",
              ver, prodConf, prodConf);
   return card_query(dbc, sql, rows, CARD_ROWS, err, 280);
+}
+
+/* поля строки техсостава, которые остаются в карточке по делу: количество
+   и его единица; их названия в базах разные, поэтому по куску названия */
+static BOOL card_tc_qty(const wchar_t *key) {
+  static const wchar_t *part[] = {L"quant", L"quaint", L"count", L"amount", L"measureunit"};
+  wchar_t low[80];
+  lstrcpynW(low, key, 80);
+  _wcslwr(low);
+  for (int i = 0; i < (int)(sizeof(part) / sizeof(part[0])); i++)
+    if (wcsstr(low, part[i])) return TRUE;
+  return FALSE;
 }
 
 static void card_techcomp(SQLHDBC dbc, long tcCard, long prodConf, CardOut *c, CardRow *rows,
@@ -3624,8 +3688,25 @@ static void card_techcomp(SQLHDBC dbc, long tcCard, long prodConf, CardOut *c, C
              L"ORDER BY a.CollectionElementId, a.DataType DESC, nk.Value",
              CARD_ROWS, ids);
   n = card_query(dbc, sql, rows, CARD_ROWS, err, 280);
-  card_add(c, L"ТЕХСОСТАВ (%d)%s\r\n", used, verNote);
+  if (g_cardVerbose) card_add(c, L"ТЕХСОСТАВ (%d)%s\r\n", used, verNote);
+  else card_add(c, L"ТЕХСОСТАВ%s\r\n", verNote);
   for (int e = 0; e < used; e++) {
+    if (!g_cardVerbose) {
+      /* «Круг 45 ГОСТ 2590-2006 — 1,49 кг»: на что ссылается, потом количество */
+      card_add(c, L"  ");
+      int nl = 0, nq = 0;
+      for (int pass = 0; pass < 2; pass++)
+        for (int i = 0; i < n; i++) {
+          if (rows[i].n1 != els[e] || !rows[i].s2[0] || card_hidden(rows[i].s1)) continue;
+          BOOL link = rows[i].n3 == 6;
+          if (pass == 0 && !link) continue;
+          if (pass == 1 && (link || !card_tc_qty(rows[i].s1))) continue;
+          if (pass == 0) card_add(c, L"%s%s", nl++ ? L" · " : L"", rows[i].s2);
+          else card_add(c, L"%s%s", nq++ ? L" " : (nl ? L" — " : L""), rows[i].s2);
+        }
+      card_add(c, nl + nq ? L"\r\n" : L"(пустая строка)\r\n");
+      continue;
+    }
     card_add(c, L"  %2d. ", e + 1);
     int shown = 0;
     /* сначала то, на что строка ссылается (материал, деталь), потом прочее */
@@ -3705,6 +3786,11 @@ static void plm_card(long id, wchar_t *out, int cap) {
     wchar_t des0[200] = {0}, title0[200] = {0};
     card_des_from_name(objName, des0, 200);
     card_title_from_name(objName, title0, 200);
+    if (!g_cardVerbose) {
+      /* по делу: обозначение и наименование одной строкой, без номера объекта */
+      card_add(&c, L"%s%s%s\r\n\r\n", des0[0] ? des0 : objName, title0[0] ? L"  " : L"", title0);
+      goto head_done;
+    }
     card_add(&c, L"┌──────────────────────────────────────────────────────────┐\r\n");
     card_add(&c, L"  %-14s%s\r\n", L"Обозначение", des0[0] ? des0 : objName);
     if (title0[0]) card_add(&c, L"  %-14s%s\r\n", L"Наименование", title0);
@@ -3712,6 +3798,7 @@ static void plm_card(long id, wchar_t *out, int cap) {
     if (g_cardVerbose) card_add(&c, L" · %s", rows[0].s2[0] ? rows[0].s2 : L"?");
     card_add(&c, L"\r\n└──────────────────────────────────────────────────────────┘\r\n\r\n");
   }
+head_done:
 
   /* 2. его атрибуты */
   _snwprintf(sql, 3600,
@@ -3776,6 +3863,14 @@ static void plm_card(long id, wchar_t *out, int cap) {
 
   g_cardTAttrs = card_lap();
   if (!designation[0] && objName[0]) card_des_from_name(objName, designation, 200);
+
+  /* по делу заготовка идёт сразу под обозначением — с ней работают чаще всего */
+  if (!g_cardVerbose) {
+    g_qTimeout = 15;
+    if (pfCard) card_preforms(dbc, pfCard, &c, rows, err);
+    else if (!actualVer) card_add(&c, L"ЗАГОТОВКА: карточки заготовок у изделия не нашлось.\r\n\r\n");
+    g_qTimeout = 0;
+  }
 
   /* 3. дальше зависит от того, что это за объект.
         Сам техпроцесс несёт ActualVersion — тогда идём прямо в его состав.
@@ -3863,18 +3958,23 @@ static void plm_card(long id, wchar_t *out, int cap) {
     goto freed;
   }
 
-  card_add(&c, L"ТЕХПРОЦЕССЫ (%d)\r\n", n);
+  if (g_cardVerbose) card_add(&c, L"ТЕХПРОЦЕССЫ (%d)\r\n", n);
   long chosen = 0, chosenVer = 0;
   for (int i = 0; i < n; i++) {
     BOOL act = _wcsicmp(rows[i].s2, L"да") == 0;
     if (act && !chosen) {
       chosen = rows[i].n1;
       chosenVer = rows[i].n2;
+      /* по делу — только основной ТП, одной строкой */
+      if (!g_cardVerbose)
+        card_add(&c, L"ТП %s%s\r\n", rows[i].s1[0] ? rows[i].s1 : L"(без имени)",
+                 n > 1 ? L"  (основной)" : L"");
     }
-    card_add(&c, L"  %s %-40s %ld\r\n", act ? L"●" : L"○",
-             rows[i].s1[0] ? rows[i].s1 : L"(без имени)", rows[i].n1);
+    if (g_cardVerbose)
+      card_add(&c, L"  %s %-40s %ld\r\n", act ? L"●" : L"○",
+               rows[i].s1[0] ? rows[i].s1 : L"(без имени)", rows[i].n1);
   }
-  card_add(&c, L"\r\n");
+  if (g_cardVerbose) card_add(&c, L"\r\n");
   if (!chosen) {
     card_add(&c, L"Основного среди них нет: ни у одного не стоит MainTP/IsActual.\r\n\r\n");
     long ver3 = 0;
@@ -3891,7 +3991,9 @@ static void plm_card(long id, wchar_t *out, int cap) {
 freed:
   /* не нашлось — пишем прямо, иначе не отличить «нет заготовки» от «не нашли» */
   g_qTimeout = 15;
-  if (pfCard) card_preforms(dbc, pfCard, &c, rows, err);
+  if (!g_cardVerbose) {
+    /* заготовка уже показана наверху */
+  } else if (pfCard) card_preforms(dbc, pfCard, &c, rows, err);
   else if (!actualVer) card_add(&c, L"ЗАГОТОВКА: карточки заготовок у изделия не нашлось.\r\n\r\n");
   if (tcCard) card_techcomp(dbc, tcCard, prodConf, &c, rows, err);
   else if (!actualVer) card_add(&c, L"ТЕХСОСТАВ: карточки техсостава у изделия не нашлось.\r\n\r\n");
@@ -3906,8 +4008,7 @@ freed:
              L"  входимость %llu мс · файлы %llu мс\r\n",
              g_cardTAttrs, g_cardTTp, g_cardTOps, g_cardTUsed, g_cardTFiles);
   else
-    card_add(&c, L"\r\n  собрано за %llu мс\r\n",
-             g_cardTAttrs + g_cardTTp + g_cardTOps + g_cardTUsed + g_cardTFiles);
+    card_add(&c, L"\r\nВходимость, все поля, ID и время сбора — Shift + «Все данные».\r\n");
   free(rows);
 done:
   SQLDisconnect(dbc);
@@ -4051,7 +4152,7 @@ static int btn_row_width(HWND parent, const int *ids, int n) {
   int total = 0, vis = 0;
   for (int k = 0; k < n; k++) {
     HWND b = GetDlgItem(parent, ids[k]);
-    if (!b) continue;
+    if (!b || !(GetWindowLongW(b, GWL_STYLE) & WS_VISIBLE)) continue;
     wchar_t t[96];
     t[0] = 0;
     GetWindowTextW(b, t, 96);
@@ -4130,10 +4231,16 @@ static void layout_answer(void) {
      обрезалось многоточием. Мерим надписи и раздаём место по ним. */
   HWND btns[6];
   for (int k = 0; k < 6; k++) btns[k] = GetDlgItem(g_answer, kAnsBtns[k]);
-  /* у найденных файлов ТП нет — кнопка не нужна вовсе */
-  HWND tpBtn = btns[1];
-  if (tpBtn) ShowWindow(tpBtn, g_resultFiles ? SW_HIDE : SW_SHOW);
-  if (g_resultFiles) btns[1] = NULL;
+  /* у найденных файлов ТП, карточки и чертежа нет — там «Открыть файл»
+     и «В проводнике»; у PLM «В проводнике» — правым щелчком. «Закрыть» —
+     крестик в шапке */
+  static const BOOL inFiles[6] = {TRUE, FALSE, FALSE, FALSE, TRUE, FALSE};
+  static const BOOL inPlm[6] = {TRUE, TRUE, TRUE, TRUE, FALSE, FALSE};
+  for (int k = 0; k < 6; k++) {
+    BOOL on = g_resultFiles ? inFiles[k] : inPlm[k];
+    if (btns[k]) ShowWindow(btns[k], on ? SW_SHOW : SW_HIDE);
+    if (!on) btns[k] = NULL;
+  }
   int bwid[6] = {0, 0, 0, 0, 0, 0};
   int total = 0, vis = 0;
   HDC dc = GetDC(g_answer);
@@ -4269,6 +4376,20 @@ static LRESULT CALLBACK AnswerProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
         request_row_draw();
       break;
     }
+    /* правый щелчок по строке — то, что ушло из нижнего ряда */
+    if (nm && nm->idFrom == ID_ANS_LIST && nm->code == NM_RCLICK && !g_resultFiles) {
+      /* чертёж для только что выбранной строки ещё может искаться — пункт не
+         гасим, а «файла нет» скажет сама команда */
+      HMENU m = CreatePopupMenu();
+      if (m) {
+        AppendMenuW(m, MF_STRING, ID_ANS_SHOW, L"Показать чертёж в проводнике");
+        POINT pt;
+        GetCursorPos(&pt);
+        TrackPopupMenu(m, TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, NULL);
+        DestroyMenu(m);
+      }
+      return 0;
+    }
     if (nm && nm->idFrom == ID_ANS_LIST && nm->code == NM_CUSTOMDRAW)
       return ans_list_customdraw((NMLVCUSTOMDRAW *)lParam);
     /* наведёшь на строку — заготовка целиком: в столбце она сокращена */
@@ -4382,12 +4503,16 @@ static void create_answer(HWND owner) {
     col.pszText = L"3 Заготовка";
     SendMessageW(g_answerList, LVM_INSERTCOLUMNW, 2, (LPARAM)&col);
   }
-  HWND open = mk_btn(g_answer, L"Открыть ЭСИ в СОЮЗ", ID_ANS_OPEN);
-  HWND openTp = mk_btn(g_answer, L"Открыть ТП в СОЮЗ", ID_ANS_OPENTP);
+  /* по делу четыре кнопки; «В проводнике» — правым щелчком по строке
+     (у найденных файлов — кнопкой), «Закрыть» — крестик в шапке */
+  HWND open = mk_btn(g_answer, L"В СОЮЗ", ID_ANS_OPEN);
+  HWND openTp = mk_btn(g_answer, L"ТП в СОЮЗ", ID_ANS_OPENTP);
   HWND card = mk_btn(g_answer, L"Все данные", ID_ANS_CARD);
-  HWND draw = mk_btn(g_answer, L"Открыть чертёж", ID_ANS_DRAW);
-  HWND show = mk_btn(g_answer, L"Открыть файл в проводнике", ID_ANS_SHOW);
+  HWND draw = mk_btn(g_answer, L"Чертёж", ID_ANS_DRAW);
+  HWND show = mk_btn(g_answer, L"В проводнике", ID_ANS_SHOW);
   HWND cls = mk_btn(g_answer, L"Закрыть", ID_ANS_CLOSE);
+  ShowWindow(show, SW_HIDE);
+  ShowWindow(cls, SW_HIDE);
   if (g_fontBody) SendMessageW(g_answerEdit, WM_SETFONT, (WPARAM)g_fontBody, TRUE);
   if (g_answerList) {
     SendMessageW(g_answerList, WM_SETFONT, (WPARAM)(ans_font() ? ans_font() : g_fontBody), TRUE);
