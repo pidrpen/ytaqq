@@ -119,8 +119,8 @@ typedef struct {
 } UpdSrc;
 
 /* jsDelivr refuses .exe by extension, so the same bytes are published as
-   CursorPad.bin. The GitHub hosts take the .bin too: public/CursorPad.exe is
-   in .gitignore and never reaches the repo, so asking for it was a 404. */
+   CursorPad.bin. The GitHub hosts take the .bin too: it is the same file, and
+   older builds of the repo had no public/CursorPad.exe at all. */
 static const UpdSrc kUpdSrc[] = {
     {L"cdn.jsdelivr.net", L"/gh/pidrpen/ytaqq@main/public/version.txt",
      L"/gh/pidrpen/ytaqq@main/public/CursorPad.bin", NULL, 0, 1},

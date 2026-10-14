@@ -1,20 +1,6 @@
-node_modules/
-.project_id
-.github_repo
-.env
-.env.*
-
-# generation leftovers — never ship these
-assets/sprites/
-artifacts/imagine_images/
-artifacts/imagine_videos/
-.vercel/
-.tanstack/
-screenshots/
+# временные файлы сборки
 *.pdb
 *.log
-.grok/preview.log
 *.res
 __pycache__/
 native/CursorPadOcr.exe
-public/CursorPad.exe
