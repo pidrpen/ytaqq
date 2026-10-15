@@ -87,6 +87,8 @@
 #define FX_INK_FRAMES 42
 #define FX_VENOM_DROPS 12 /* «Яд» Скорпиона: капли и ещё 4 пузыря */
 #define FX_VENOM_FRAMES 42
+#define FX_INF_DUST 16   /* «Бесконечность» Годжо: пылинки, застывающие у барьера */
+#define FX_INF_FRAMES 52
 #define FX_MAXP 16      /* больше всех частиц у конфетти */
 
 typedef struct {
@@ -111,7 +113,7 @@ typedef struct {
   BOOL scratch;  /* царапины «Чёрного кота» */
   BOOL slash;    /* красный «Разрез» — и обычный, и большой */
   BOOL shatter;  /* раскол экрана на куски (каждое двадцатое нажатие) */
-  int kind;      /* какой эффект: как у fx_kind; 5…8 рисует fx_paint_new */
+  int kind;      /* какой эффект: как у fx_kind; 5…14 рисует fx_paint_new */
   POINT org;
   FxPart p[FX_MAXP];
 } FxWin;
@@ -786,6 +788,64 @@ static void fx_purple_paint(FxWin *f) {
   }
 }
 
+/* «Бесконечность» Годжо: вокруг точки нажатия вспыхивает шестигранный барьер,
+   три волны бегут к нему снаружи и чем ближе, тем медленнее — никогда не
+   доходят, а пылинки застывают в воздухе, не долетев. Потом всё гаснет */
+static void fx_inf_paint(FxWin *f) {
+  float c = f->W / 2.0f, sc = g_fxScale, R = 30.0f * sc;
+  int fr = f->frame, S = f->W;
+  float t = (float)fr / FX_INF_FRAMES, life = powf(1.0f - t, 1.15f);
+  float grow = fr < 6 ? 0.55f + 0.45f * (1.0f - (1.0f - fr / 6.0f) * (1.0f - fr / 6.0f)) : 1.0f;
+  float rh = R * grow, apo = rh * 0.8660254f, a0 = 0.18f * t;
+  float rings[3], ringA[3];
+  for (int k = 0; k < 3; k++) {
+    int age = fr - k * 6;
+    rings[k] = age < 0 ? -1.0f : R * 1.07f + R * 2.4f * expf(-0.14f * age);
+    ringA[k] = age < 0 ? 0.0f : life * (0.75f - 0.15f * k) * fx_clamp01(age / 3.0f);
+  }
+  for (int y = 0; y < S; y++)
+    for (int x = 0; x < S; x++) {
+      float qx = x + 0.5f - c, qy = y + 0.5f - c, d = hypotf(qx, qy);
+      if (d > 2.6f * R + 6.0f * sc) continue;
+      float hd = 0;
+      for (int k = 0; k < 3; k++) { /* расстояние до шестиугольника: наибольшая проекция на три оси */
+        float n = a0 + 0.5236f + k * 1.0472f, pr = fabsf(qx * cosf(n) + qy * sinf(n));
+        if (pr > hd) hd = pr;
+      }
+      float edge = fabsf(hd - apo), w = 1.7f * sc;
+      if (hd < apo) /* внутри — еле заметная голубая дымка, гуще к краю */
+        fx_put(f, x, y, 120, 200, 255, 0.16f * life * (hd / apo) * (hd / apo));
+      if (edge < w + 2.0f * sc) {
+        fx_put(f, x, y, 90, 190, 255, 0.45f * life * fx_clamp01(1.0f - (edge - w) / (2.0f * sc)));
+        if (edge < w) fx_put(f, x, y, 235, 248, 255, life * 0.95f * fx_clamp01(1.0f - edge / w));
+      }
+      for (int k = 0; k < 3; k++) {
+        if (rings[k] < 0) continue;
+        float e = fabsf(d - rings[k]), th = (2.0f + 1.6f * (rings[k] - R) / R) * sc; /* ближе к барьеру — тоньше */
+        if (e < th * 3.0f) fx_put(f, x, y, 150, 215, 255, ringA[k] * 0.12f * fx_clamp01(1.0f - e / (th * 3.0f))); /* «линза» */
+        if (e < th) fx_put(f, x, y, 215, 240, 255, ringA[k] * fx_clamp01(1.0f - e / th));
+      }
+    }
+  for (int k = 0; k < 6; k++) { /* блеск в углах барьера */
+    float a = a0 + k * 1.0472f;
+    fx_glow_dot(f, c + cosf(a) * rh, c + sinf(a) * rh, (6.0f + 3.0f * sinf(fr * 0.5f + k)) * sc, 190, 230, 255, 0.8f * life);
+  }
+  if (fr < 7) fx_glow_dot(f, c, c, 20.0f * sc, 200, 235, 255, 0.85f * (1.0f - fr / 7.0f));
+  for (int i = 0; i < f->n; i++) { /* пылинки: летят к барьеру и застывают */
+    const FxPart *p = &f->p[i];
+    int age = fr - p->delay;
+    if (age < 0 || age >= p->life) continue;
+    float q = 1.0f - (float)age / p->life, r = p->rev * sc + (p->sz - p->rev) * sc * expf(-0.12f * age);
+    float r2 = p->rev * sc + (p->sz - p->rev) * sc * expf(-0.12f * (age - 2));
+    float x = c + cosf(p->tw) * r, y = c + sinf(p->tw) * r;
+    for (int s = 1; s <= 4; s++) { /* короткий след: чем медленнее, тем он короче */
+      float rs = r + (r2 - r) * s / 4.0f;
+      fx_glow_dot(f, c + cosf(p->tw) * rs, c + sinf(p->tw) * rs, 2.2f * sc, 150, 215, 255, 0.3f * q * (1.0f - s / 5.0f));
+    }
+    fx_glow_dot(f, x, y, 4.0f * sc, 200, 235, 255, 0.9f * q);
+  }
+}
+
 /* ---- свои эффекты Ворона, Осьминога и Скорпиона (с 2026.10.14.13) ------ */
 
 /* чёрное перо с сиреневой кромкой: кувыркается (p->tw — поворот) и тает */
@@ -946,6 +1006,18 @@ static void fx_seed_new(FxWin *f, int kind, int S) {
       p->delay = FX_PURPLE_MERGE + (int)(fx_rand() * 3);
       p->life = FX_PURPLE_FRAMES - p->delay;
     }
+  } else if (kind == 14) { /* «Бесконечность»: пылинки со всех сторон, барьер и волны рисуются в fx_inf_paint */
+    f->n = FX_INF_DUST;
+    f->frames = FX_INF_FRAMES;
+    for (int i = 0; i < FX_INF_DUST; i++) {
+      FxPart *p = &f->p[i];
+      memset(p, 0, sizeof(*p));
+      p->tw = i * (6.2832f / FX_INF_DUST) + (fx_rand() - 0.5f) * 0.35f;
+      p->sz = 78.0f + fx_rand() * 14.0f; /* откуда летит */
+      p->rev = 36.0f + fx_rand() * 18.0f; /* где застынет: не долетев до барьера */
+      p->delay = (int)(fx_rand() * 5);
+      p->life = FX_INF_FRAMES - p->delay;
+    }
   } else if (kind == 11) { /* перья разлетаются и плывут вниз, покачиваясь */
     f->n = FX_FEATHERS;
     f->frames = FX_FEATHER_FRAMES;
@@ -1028,6 +1100,10 @@ static void fx_paint_new(FxWin *f) {
   float c = f->W / 2.0f;
   if (f->kind == 10) {
     fx_purple_paint(f);
+    return;
+  }
+  if (f->kind == 14) {
+    fx_inf_paint(f);
     return;
   }
   if (f->kind == 12) {
@@ -1319,7 +1395,7 @@ static int fx_kind_for(int skin, int pick) {
   if (skin == 9) return 13;  /* Скорпион — свой «Яд» */
   if (skin == 10) return 4;  /* Разрез — разрез */
   if (skin == 11) return 9;  /* Сукуна — своё «Рассечение» */
-  if (skin == 12) return 10; /* Годжо — свой «Пурпур» */
+  if (skin == 12) return 14; /* Годжо — своя «Бесконечность» */
   return 0;
 }
 
