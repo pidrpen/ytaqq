@@ -196,7 +196,7 @@ static const FMove kMoves[MV_COUNT] = {
     {AN_G_RED, 67, 0, 0, 0, 0, MVF_TECH, 0, 220, 540, 99, 0, 0, 0, 0, L"Красный"},
     {AN_G_PURPLE, 140, 0, 0, 0, 0, MVF_TECH, 0, 550, 1500, 99, 0, 0, 0, 0, L"Мнимая техника: Фиолетовый"},
     {AN_G_TELE, 20, 0, 0, 0, 0, 0, 0, 120, 360, 99, 0, 0, 0, 0, NULL},
-    {AN_G_SEAL, 100, 0, 0, 0, 0, MVF_TECH, 0, 900, 30000, 99, 0, 0, 0, 0, L"Безграничная пустота"},
+    {AN_G_SEAL, 100, 0, 0, 0, 0, MVF_TECH, 0, 700, 30000, 99, 0, 0, 0, 0, L"Безграничная пустота"},
     {AN_G_TAUNT, 74, 0, 0, 0, 0, 0, 0, 0, 900, 99, 0, 0, 0, 0, NULL},
     /* Сукуна */
     {AN_S_CLAW, 25, 7, 10, FJ_HAND0, HK_LIGHT, MVF_MELEE, 35, 0, 0, 11, 8, 1.5f, 0, 1.8f, NULL},
@@ -209,7 +209,7 @@ static const FMove kMoves[MV_COUNT] = {
     {AN_S_DISM, 62, 0, 0, 0, 0, MVF_TECH, 0, 150, 420, 99, 0, 0, 0, 0, L"Рассечение"},
     {AN_S_CLEAVE, 37, 8, 12, FJ_HAND1, HK_KNOCK, MVF_TECH, 100, 180, 480, 99, 12, 5.5f, 4.5f, 2.4f, L"Разруб"},
     {AN_S_FUGA, 131, 0, 0, 0, 0, MVF_TECH, 0, 500, 1500, 99, 0, 0, 0, 0, L"Разверзнись!"},
-    {AN_S_SEAL, 82, 0, 0, 0, 0, MVF_TECH, 0, 900, 30000, 99, 0, 0, 0, 0, L"Святилище злобы"},
+    {AN_S_SEAL, 82, 0, 0, 0, 0, MVF_TECH, 0, 700, 30000, 99, 0, 0, 0, 0, L"Святилище злобы"},
     {AN_S_TAUNT, 60, 0, 0, 0, 0, 0, 0, 0, 900, 99, 0, 0, 0, 0, NULL},
 };
 
@@ -934,7 +934,7 @@ static void if_ai(IfScene *s, IfFighter *F) {
     if (d > 80) if_opt(s, F, o, &n, ACT_NEAR, 6);
     if (d < 34) if_opt(s, F, o, &n, ACT_BACK, 6);
   } else {
-    int domReady = F->who == s->domCaster && !s->domDone && F->ce >= 900 && s->roundT > 900 && F->burn <= 0 &&
+    int domReady = F->who == s->domCaster && !s->domDone && F->ce >= 700 && s->roundT > 900 && F->burn <= 0 &&
                    (F->hp < 750 || O->hp < 650 || s->roundT > 1800) && O->st != FS_FLY;
     int ult = F->who ? MV_S_FUGA : MV_G_PURPLE;
     int late = s->roundT > 600 && if_can(F, ult); /* самое сильное — не с первых секунд */
@@ -1483,7 +1483,7 @@ static void if_dom_step(IfScene *s, float dt) {
     break;
   case DP_ON:
     if (s->dom == DOM_SHRINE && V->hp > 0 && V->st != FS_FLY && V->st != FS_DOWN && V->st != FS_GETUP) {
-      if ((int)(t / 6) != (int)(t0 / 6)) if_dom_cut(s, V, 4, 0);
+      if ((int)(t / 6) != (int)(t0 / 6)) if_dom_cut(s, V, 5, 0);
       if ((int)(t / 50) != (int)(t0 / 50)) if_dom_cut(s, V, 16, 1);
     }
     if (t >= 330 || V->hp <= 0 || C->hp <= 0 || s->phase != RP_FIGHT) s->domPhase = DP_CLOSE, s->domT = 0;
@@ -1542,7 +1542,10 @@ static void if_round_step(IfScene *s, float dt) {
     if (AT(118)) if_banner(s, NULL, L"БОЙ!", 3, 44);
     if (t >= 150) {
       s->phase = RP_FIGHT, s->phT = 0, s->roundT = 0;
-      s->domCaster = (int)(if_rnd(&s->seed) & 1), s->domDone = 0;
+      /* территория — по очереди: кто в прошлом раунде не успел, пробует снова */
+      if (s->round <= 1) s->domCaster = (int)(if_rnd(&s->seed) & 1);
+      else if (s->domDone) s->domCaster = !s->domCaster;
+      s->domDone = 0;
       G->think = if_rr(&s->seed, 4, 20), K->think = if_rr(&s->seed, 4, 20);
     }
     break;
