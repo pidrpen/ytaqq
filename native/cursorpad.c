@@ -4791,6 +4791,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
     if (argv && argc >= 3 && !wcscmp(argv[1], L"--slash")) st_slash_strip(argv[2]);
     if (argv && argc >= 3 && !wcscmp(argv[1], L"--slashbench")) st_slash_bench(argv[2]);
     if (argv && argc >= 3 && !wcscmp(argv[1], L"--idlefight")) if_test_shots(argv[2]);
+    if (argv && argc >= 3 && !wcscmp(argv[1], L"--xptest")) export_test(argv[2]);
     if (argv && argc >= 3 && !wcscmp(argv[1], L"--idlebench")) if_test_bench(argv[2]);
     if (argv && argc >= 3 && !wcscmp(argv[1], L"--idlestage")) if_test_stage(argv[2]);
     if (argv && argc >= 3 && !wcscmp(argv[1], L"--figsheet")) if_test_figs(argv[2]);
