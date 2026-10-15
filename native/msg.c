@@ -1075,6 +1075,10 @@ static LRESULT CALLBACK MsgOutProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
   }
   case WM_COMMAND: {
     int id = LOWORD(wParam);
+    if (id == ID_PANEL_MIN) {
+      ShowWindow(hwnd, SW_MINIMIZE);
+      return 0;
+    }
     if (id == ID_PANEL_CLOSE) {
       ShowWindow(hwnd, SW_HIDE);
       g_msgFast = 0;
@@ -1133,6 +1137,7 @@ static void msg_open_chat(const wchar_t *id) {
     if (!g_msgOut) return;
     round_corners(g_msgOut);
     mk_btn(g_msgOut, L"×", ID_PANEL_CLOSE);
+    mk_btn(g_msgOut, L"–", ID_PANEL_MIN);
     g_msgList = CreateWindowExW(0, L"LISTBOX", L"",
                                 WS_CHILD | WS_VISIBLE | WS_BORDER | WS_VSCROLL | WS_TABSTOP | LBS_NOTIFY |
                                     LBS_NOINTEGRALHEIGHT,

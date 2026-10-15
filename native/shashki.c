@@ -1610,6 +1610,10 @@ static LRESULT CALLBACK ShashkiProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
     /* от списка — только двойной щелчок; фокус у него не отнимаем: иначе
        Windows не давала выбрать в нём другого игрока */
     if (id == ID_SH_LIST && HIWORD(wParam) != LBN_DBLCLK) return 0;
+    if (id == ID_PANEL_MIN) {
+      ShowWindow(hwnd, SW_MINIMIZE);
+      return 0;
+    }
     if (id == ID_PANEL_CLOSE) ShowWindow(hwnd, SW_HIDE);
     if (id == ID_SH_LIST) id = ID_SH_INVITE;
     if (id == ID_SH_INVITE) {
@@ -1668,6 +1672,7 @@ static void shashki_show(void) {
     if (!g_shWnd) return;
     round_corners(g_shWnd);
     mk_btn(g_shWnd, L"×", ID_PANEL_CLOSE);
+    mk_btn(g_shWnd, L"–", ID_PANEL_MIN);
     g_shList = CreateWindowExW(0, L"LISTBOX", L"", WS_CHILD | WS_VSCROLL | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT, 0, 0,
                                100, 100, g_shWnd, (HMENU)(INT_PTR)ID_SH_LIST, g_inst, NULL);
     const struct {

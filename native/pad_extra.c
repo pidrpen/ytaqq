@@ -4958,6 +4958,7 @@ static void layout_card(void) {
   int pad = 12, btnH = 28, gap = 7;
   int top = PANEL_TITLE_H + 6;
   int by = rc.bottom - pad - btnH;
+  place_panel_close(g_card);
   BOOL withPane = g_drawPane && g_drawImg;
   int textLeft = pad, textRight = rc.right - pad;
   if (withPane) {
@@ -5071,7 +5072,7 @@ static LRESULT CALLBACK CardProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
     draw_pad_button((const DRAWITEMSTRUCT *)lParam);
     return TRUE;
   case WM_COMMAND:
-    if (LOWORD(wParam) == ID_CARD_CLOSE) ShowWindow(hwnd, SW_HIDE);
+    if (LOWORD(wParam) == ID_CARD_CLOSE || LOWORD(wParam) == ID_PANEL_CLOSE) ShowWindow(hwnd, SW_HIDE);
     if (LOWORD(wParam) == ID_CARD_OPEN && g_ansObj[0]) {
       lstrcpynW(g_plmLastLink, g_ansObj, PLM_LINK);
       open_plm_link(g_ansObj);
@@ -5156,6 +5157,7 @@ static void create_card(HWND owner) {
   /* перенос операций в 1С: после каждой вставки в буфере следующая */
   HWND onec = mk_btn(g_card, L"В 1С", ID_CARD_1C);
   HWND cls = mk_btn(g_card, L"Закрыть", ID_CARD_CLOSE);
+  mk_btn(g_card, L"×", ID_PANEL_CLOSE);
   SendMessageW(g_cardEdit, WM_SETFONT, (WPARAM)card_font(), TRUE);
   if (g_fontUi) {
     SendMessageW(open, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
@@ -5278,6 +5280,7 @@ static void layout_ocr(void) {
   int pad = 12, btnH = 28, gap = 7;
   int top = PANEL_TITLE_H + 6;
   int by = rc.bottom - pad - btnH;
+  place_panel_close(g_ocrWnd);
   if (g_ocrEdit) MoveWindow(g_ocrEdit, pad, top, rc.right - pad * 2, by - top - 6, TRUE);
   HWND btns[5];
   for (int k = 0; k < 5; k++) btns[k] = GetDlgItem(g_ocrWnd, kOcrBtns[k]);
@@ -5497,7 +5500,7 @@ static LRESULT CALLBACK OcrProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     draw_pad_button((const DRAWITEMSTRUCT *)lParam);
     return TRUE;
   case WM_COMMAND:
-    if (LOWORD(wParam) == ID_OCR_CLOSE) ShowWindow(hwnd, SW_HIDE);
+    if (LOWORD(wParam) == ID_OCR_CLOSE || LOWORD(wParam) == ID_PANEL_CLOSE) ShowWindow(hwnd, SW_HIDE);
     if (LOWORD(wParam) == ID_OCR_COPY && g_ocrEdit) {
       int len = GetWindowTextLengthW(g_ocrEdit);
       wchar_t *w = (wchar_t *)malloc((size_t)(len + 1) * sizeof(wchar_t));
@@ -5580,6 +5583,7 @@ static void create_ocr(HWND owner) {
   HWND find = mk_btn(g_ocrWnd, L"Найти это", ID_OCR_FIND);
   HWND again = mk_btn(g_ocrWnd, L"Распознать ещё", ID_OCR_AGAIN);
   HWND cls = mk_btn(g_ocrWnd, L"Закрыть", ID_OCR_CLOSE);
+  mk_btn(g_ocrWnd, L"×", ID_PANEL_CLOSE);
   SendMessageW(g_ocrEdit, WM_SETFONT, (WPARAM)ocr_font(), TRUE);
   if (g_fontUi) {
     SendMessageW(copy, WM_SETFONT, (WPARAM)g_fontUi, TRUE);

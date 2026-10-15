@@ -2135,6 +2135,7 @@ static HWND mk_btn(HWND parent, const wchar_t *text, int id);
 /* panels draw their own title bar instead of wearing the system one */
 #define PANEL_TITLE_H 36
 #define ID_PANEL_CLOSE 150 /* keep clear of ID_THEME_BASE..+THEME_COUNT */
+#define ID_PANEL_MIN 195   /* «–» в шапке окон с кнопкой на панели задач */
 static void draw_panel_header(HWND hwnd, HDC hdc, const wchar_t *title);
 static LRESULT panel_hittest(HWND hwnd, LPARAM lParam);
 static void place_panel_close(HWND hwnd);
@@ -2187,6 +2188,7 @@ static void draw_panel_header(HWND hwnd, HDC hdc, const wchar_t *title) {
        знамя кончается до него */
     draw_knight_frame(hdc, rc);
     int right = GetDlgItem(hwnd, ID_PANEL_CLOSE) ? rc.right - 46 : rc.right - 14;
+    if (GetDlgItem(hwnd, ID_PANEL_MIN)) right -= 30;
     RECT bn = {14, 7, right, PANEL_TITLE_H - 3};
     draw_banner(hdc, bn, knight_title(title));
     return;
@@ -2251,6 +2253,8 @@ static void place_panel_close(HWND hwnd) {
   RECT rc;
   GetClientRect(hwnd, &rc);
   MoveWindow(b, rc.right - 14 - 26, (PANEL_TITLE_H - 24) / 2, 26, 24, TRUE);
+  HWND m = GetDlgItem(hwnd, ID_PANEL_MIN);
+  if (m) MoveWindow(m, rc.right - 14 - 26 - 4 - 26, (PANEL_TITLE_H - 24) / 2, 26, 24, TRUE);
 }
 
 /* Кнопка рыцарской темы. Обычная — стальная пластина с заклёпками по
@@ -2458,7 +2462,7 @@ static void draw_pad_button(const DRAWITEMSTRUCT *dis) {
                  id == ID_SH_INVITE || id == ID_SH_ACCEPT || id == ID_SH_DRAWOK ||
                  id == ID_ANS_DRAW || id == ID_ANS_SHOW || /* чертёж нашёлся — кнопки синие */
                  id == ID_MSG_SEND || id == ID_MSG_REPLY || id == ID_RT_BUILD || id == ID_RT_SAVE;
-  BOOL quiet = id == ID_CLOSE || id == ID_MIN || id == ID_PANEL_CLOSE;
+  BOOL quiet = id == ID_CLOSE || id == ID_MIN || id == ID_PANEL_CLOSE || id == ID_PANEL_MIN;
   COLORREF fill, fg, bd;
   /* рыцарская тема рисует кнопки целиком по-своему; кнопка выбора
      этой темы в Настройках — тоже, чтобы было видно, что получится */
@@ -4792,6 +4796,16 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
     if (argv && argc >= 3 && !wcscmp(argv[1], L"--figsheet")) if_test_figs(argv[2]);
     if (argv && argc >= 3 && !wcscmp(argv[1], L"--figbench")) if_test_figbench(argv[2]);
     if (argv && argc >= 2 && !wcscmp(argv[1], L"--idledemo")) if_launch(2); /* бой без остановки по вводу */
+    if (argv && argc >= 3 && !wcscmp(argv[1], L"--panel")) { /* проверка шапок окон: 1 карточка, 2 текст, 3 выгрузка, 4 маршрут, 5 нарды, 6 шашки, 7 пакет */
+      int n = (int)wcstol(argv[2], NULL, 10);
+      if (n == 1) { create_card(NULL); show_card_text(L"проверка"); }
+      if (n == 2) { create_ocr(NULL); show_ocr_text(L"проверка"); }
+      if (n == 3) export_show();
+      if (n == 4) route_show();
+      if (n == 5) nardy_show();
+      if (n == 6) shashki_show();
+      if (n == 7) package_show(FALSE);
+    }
     if (argv && argc >= 3 && !wcscmp(argv[1], L"--settings")) {
       g_tab = (int)wcstol(argv[2], NULL, 10) % SEC_COUNT;
       if (g_follow) toggle_follow(); /* как «Настройки» в меню значка */
@@ -4810,6 +4824,14 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
 
   MSG msg;
   while (GetMessageW(&msg, NULL, 0, 0) > 0) {
+    /* Esc закрывает Настройки, «Карточку» и «Распознанный текст», где бы ни стоял фокус */
+    if (msg.message == WM_KEYDOWN && msg.wParam == VK_ESCAPE) {
+      HWND root = GetAncestor(msg.hwnd, GA_ROOT);
+      if (root && (root == g_setHwnd || root == g_card || root == g_ocrWnd) && IsWindowVisible(root)) {
+        ShowWindow(root, SW_HIDE);
+        continue;
+      }
+    }
     TranslateMessage(&msg);
     DispatchMessageW(&msg);
   }
