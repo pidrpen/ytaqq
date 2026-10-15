@@ -2012,7 +2012,7 @@ static void if_scene_init(IfScene *s, int W, int H, unsigned seed, int *wins, co
   RECT pm = {0, 0, W, H}; /* главный монитор: по нему рост бойцов, там шкалы */
   if (st && st->nMon > 0) pm = st->mon[st->prim >= 0 && st->prim < st->nMon ? st->prim : 0];
   int pw = pm.right - pm.left, ph = pm.bottom - pm.top;
-  float figH = fa_clampf(fminf(ph * 0.26f, pw * 0.17f), 120.0f, 420.0f);
+  float figH = fa_clampf(fminf(ph * 0.31f, pw * 0.2f), 120.0f, 420.0f);
   s->W = W, s->H = H;
   s->U = figH / 100.0f;
   s->gy = (float)H - 1.0f;
@@ -4037,5 +4037,41 @@ static void if_test_stage(const wchar_t *dir) {
   if_scene_free(s);
   free(px), free(scr), free(img);
 }
+/* --figsheet файл.bmp — бойцы крупно: Годжо и Сукуна в восьми позах (рост около
+   500 px) и они же внизу в настоящем размере, на светлом и тёмном */
+static void if_test_figs(const wchar_t *path) {
+  static const int kP[8] = {FP_G_IDLE, FP_G_JAB, FP_G_RED, FP_G_PUR_C, FP_S_IDLE, FP_S_PUNCH, FP_S_DISM, FP_S_FUGA_C};
+  int W = 2400, H = 1720;
+  BYTE *px = (BYTE *)calloc((size_t)W * H, 4), *img = (BYTE *)malloc((size_t)W * H * 4);
+  if (!px || !img) return;
+  FCv cv;
+  memset(&cv, 0, sizeof(cv));
+  cv.px = px, cv.w = W, cv.h = H, cv.x1 = W, cv.y1 = H;
+  for (int i = 0; i < 8; i++) {
+    for (int big = 0; big < 2; big++) {
+      FFig g;
+      memset(&g, 0, sizeof(g));
+      g.who = i >= 4, g.f = 1, g.p = kPoses[kP[i]], g.alpha = 1, g.blind = i < 3, g.power = i == 7;
+      g.U = big ? 5.0f : 2.7f;
+      g.x = big ? 160.0f + (i % 4) * 600.0f : 150.0f + i * 290.0f + (i >= 4) * 40.0f;
+      g.y = big ? 600.0f + (i / 4) * 600.0f : 1690.0f;
+      ff_draw(&cv, &g);
+    }
+  }
+  for (int y = 0; y < H; y++)
+    for (int x = 0; x < W; x++) {
+      size_t k = ((size_t)y * W + x) * 4;
+      int dark = y > 1250 && x > W / 2;
+      int bg = dark ? 40 : 236 - y / 40;
+      for (int q = 0; q < 3; q++) {
+        int v = px[k + q] + (bg * (255 - px[k + 3]) + 127) / 255;
+        img[k + q] = (BYTE)(v > 255 ? 255 : v);
+      }
+      img[k + 3] = 255;
+    }
+  st_write_bmp(path, img, W, H);
+  free(px), free(img);
+}
 #endif
+
 
