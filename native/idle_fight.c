@@ -3640,7 +3640,7 @@ static void if_upscale(IfScene *s, RECT r) {
     unsigned char *dst = s->big.px + ((size_t)by * Wb + (size_t)r.left * k) * 4;
     int bx = r.left * k, n = 0;
     for (int x = r.left; x < r.right; x++, src += 4) {
-      unsigned a = src[3], q = a < 24 ? 0 : (a >= 216 ? 255 : (a >= 150 ? 184 : (a >= 84 ? 116 : 56)));
+      unsigned a = src[3], q = a < 10 ? 0 : (a >= 216 ? 255 : (a >= 150 ? 184 : (a >= 84 ? 116 : (a >= 40 ? 56 : 24))));
       unsigned char p[4];
       if (q == a) {
         memcpy(p, src, 4);
@@ -3896,7 +3896,8 @@ static DWORD WINAPI if_thread(LPVOID arg) {
   while (!g_ifQuit) {
     MSG msg;
     while (PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE)) DispatchMessageW(&msg);
-    /* мышь или клавиша — бой исчезает сразу (demo 2 — проверочная сборка в Wine:
+    /* мышь или клавиша — бой исчезает сразу (demo 3 — режим просмотра: смотрят, работая;
+       demo 2 — проверочная сборка в Wine:
        там ввод «случается» сам, без мыши) */
     GetLastInputInfo(&li);
     if (li.dwTime != in0 && demo < 2) {
@@ -3924,7 +3925,7 @@ static DWORD WINAPI if_thread(LPVOID arg) {
       if_scene_windows(s, &st);
     }
     if (frames % 60 == 30) {
-      if (if_blocked(!demo)) {
+      if (if_blocked(!demo || demo == 3)) { /* в режиме просмотра — не поверх игры или видео на весь экран */
         why = 2;
         break;
       }
@@ -4005,6 +4006,10 @@ static void idle_fight_tick(void) {
     g_ifThread = NULL;
     return;
   }
+  if (g_idleWatch) { /* режим просмотра: бой идёт всегда, ввод его не прячет */
+    if (!if_blocked(1)) if_launch(3);
+    return;
+  }
   if (g_idleSec <= 0) return;
   LASTINPUTINFO li;
   li.cbSize = sizeof(li);
@@ -4029,7 +4034,14 @@ static void idle_fight_stop(BOOL wait) {
 
 /* «Показать бой сейчас» в Настройках */
 static void idle_fight_demo(void) {
-  if (!g_ifThread) if_launch(1);
+  if (!g_ifThread) if_launch(g_idleWatch ? 3 : 1);
+}
+
+/* режим просмотра: включить — бой сразу и уже не прячется от мыши; выключить — убрать */
+static void idle_fight_watch(int on) {
+  g_idleWatch = on;
+  idle_fight_stop(TRUE);
+  if (on && !if_blocked(1)) if_launch(3);
 }
 
 #ifdef SET_TEST
