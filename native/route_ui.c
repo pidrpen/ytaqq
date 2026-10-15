@@ -496,6 +496,10 @@ static LRESULT CALLBACK RtProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
       rt_prefs_save(); /* ушли из поля — запомнить */
       return 0;
     }
+    if (id == ID_PANEL_MIN) {
+      ShowWindow(hwnd, SW_MINIMIZE);
+      return 0;
+    }
     if (id == ID_PANEL_CLOSE) ShowWindow(hwnd, SW_HIDE);
     if (id == ID_RT_BUILD) rt_start();
     if (id == ID_RT_SAVE) rt_save();
@@ -541,6 +545,7 @@ static void route_show(void) {
     if (!g_rtWnd) return;
     round_corners(g_rtWnd);
     mk_btn(g_rtWnd, L"×", ID_PANEL_CLOSE);
+    mk_btn(g_rtWnd, L"–", ID_PANEL_MIN);
     g_rtDes = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL, 0, 0,
                               10, 10, g_rtWnd, NULL, g_inst, NULL);
     g_rtOrder = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL, 0,

@@ -797,6 +797,10 @@ static LRESULT CALLBACK XpProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
   }
   case WM_COMMAND: {
     int id = LOWORD(wParam);
+    if (id == ID_PANEL_MIN) {
+      ShowWindow(hwnd, SW_MINIMIZE);
+      return 0;
+    }
     if (id == ID_PANEL_CLOSE) ShowWindow(hwnd, SW_HIDE);
     if (id == ID_XP_BUILD) xp_start();
     if (id == ID_XP_SAVE) xp_save();
@@ -852,6 +856,7 @@ static void export_show(void) {
     if (!g_xpWnd) return;
     round_corners(g_xpWnd);
     mk_btn(g_xpWnd, L"×", ID_PANEL_CLOSE);
+    mk_btn(g_xpWnd, L"–", ID_PANEL_MIN);
     g_xpDes = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL, 0, 0,
                               10, 10, g_xpWnd, NULL, g_inst, NULL);
     if (g_fontBody) SendMessageW(g_xpDes, WM_SETFONT, (WPARAM)g_fontBody, FALSE);

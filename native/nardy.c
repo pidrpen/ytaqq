@@ -1550,6 +1550,10 @@ static LRESULT CALLBACK NardyProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
     /* от списка — только двойной щелчок; фокус у него не отнимаем: иначе
        Windows не давала выбрать в нём другого игрока */
     if (id == ID_ND_LIST && HIWORD(wParam) != LBN_DBLCLK) return 0;
+    if (id == ID_PANEL_MIN) {
+      ShowWindow(hwnd, SW_MINIMIZE);
+      return 0;
+    }
     if (id == ID_PANEL_CLOSE) ShowWindow(hwnd, SW_HIDE);
     if (id == ID_ND_LIST) id = ID_ND_INVITE;
     if (id == ID_ND_INVITE) {
@@ -1609,6 +1613,7 @@ static void nardy_show(void) {
     if (!g_ndWnd) return;
     round_corners(g_ndWnd);
     mk_btn(g_ndWnd, L"×", ID_PANEL_CLOSE);
+    mk_btn(g_ndWnd, L"–", ID_PANEL_MIN);
     g_ndList = CreateWindowExW(0, L"LISTBOX", L"", WS_CHILD | WS_VSCROLL | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT,
                                0, 0, 100, 100, g_ndWnd, (HMENU)(INT_PTR)ID_ND_LIST, g_inst, NULL);
     const struct { const wchar_t *t; int id; } btns[] = {
