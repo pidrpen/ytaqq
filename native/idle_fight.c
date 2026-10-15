@@ -17,7 +17,8 @@
 
    Свой поток и своё окно: главный поток программы держит перехват мыши, и
    рисование боя ему мешать не должно. Окно прозрачно для мыши, поверх всех,
-   только на главном мониторе, в рабочей области: панель задач им как земля. */
+   на все мониторы сразу, по рабочим областям: панель задач им как земля, низ
+   каждого монитора — свой пол, верх открытого окна — площадка. */
 
 #include "fight_art.c"
 
@@ -239,6 +240,8 @@ typedef struct {
   int blind, power, juggle, tellInf, ultUsed;
   int mvId, seenId;      /* номер начатого приёма; на какой удар противника уже реагировал */
   float stuck, inv, wind, burn, infT, home;
+  float fl, dropT, homeFl; /* пол под ногами (верх площадки); спрыгивает с окна; пол дома */
+  float wallT;             /* сколько упирается в стену по пути */
   float trail[IF_TRAIL][2]; /* след удара: точки сустава, единицы мира */
   int trailN;
 } IfFighter;
@@ -279,11 +282,31 @@ enum { DP_CAST, DP_OPEN, DP_ON, DP_CLOSE };
 
 typedef struct IfText IfText;
 
+/* площадка: низ монитора (solid — сквозь не провалиться, сбоку — стена) или верх окна
+   (только сверху: под ним проходят, с него спрыгивают). Единицы над низом холста */
+typedef struct {
+  float x0, x1, top, bot;
+  int solid, wl, wr; /* wl, wr — у окна тут настоящий край: о него бьются */
+} IfPlat;
+#define IF_MAXPL 48
+
+/* что на экране: мониторы и окна, px холста (холст — все мониторы вместе) */
+#define IF_MAXMON 8
+#define IF_MAXWIN 40
+typedef struct {
+  int nMon, prim, nWin;
+  RECT mon[IF_MAXMON];
+  RECT win[IF_MAXWIN]; /* сверху вниз по Z: первое — самое верхнее */
+} IfStage;
+
 typedef struct {
   FCv cv;
   int W, H;      /* холст, px */
   float U, gy;   /* px на единицу; экранный y земли */
   float xMin, xMax;
+  float homeX, hudX, hudY; /* середина главного монитора: туда возвращаются, там шкалы */
+  int nPl, nFix;           /* сначала полы мониторов (nFix), потом окна */
+  IfPlat pl[IF_MAXPL];
   unsigned seed;
   long frame;
   float dt, slowT, hitstop, shake, shx, shy;
@@ -299,6 +322,7 @@ typedef struct {
   int dom, domOwner, domPhase;
   int domCaster, domDone;                  /* кто в этом раунде расширяет территорию; уже было */
   float domT, domX, domRx, domRy, domOpen; /* domOpen — сколько раскрыто, 0…1 */
+  float domFl;                             /* на каком полу купол */
   unsigned char *bd;                      /* фон территории, BGRA с альфой */
   int bdX, bdY, bdW, bdH, bdRows, bdKind;
   /* надпись посреди экрана */
@@ -388,6 +412,29 @@ static void if_joint(const IfFighter *F, int j, float *x, float *y) {
   fa_joint(&F->sk, L->S, j, &jx, &jy);
   *x = F->x + jx, *y = F->y + jy;
 }
+
+/* земля: самый высокий из полов мониторов над x */
+static float if_ground(const IfScene *s, float x) {
+  float g = 0;
+  for (int i = 0; i < s->nFix; i++)
+    if (s->pl[i].solid && x >= s->pl[i].x0 && x <= s->pl[i].x1 && s->pl[i].top > g) g = s->pl[i].top;
+  return g;
+}
+
+/* пол под точкой (x, y): верх самой высокой площадки не выше y; drop — сквозь окна */
+static float if_floor(const IfScene *s, float x, float y, int drop) {
+  float g = 0;
+  for (int i = 0; i < s->nPl; i++) {
+    const IfPlat *p = &s->pl[i];
+    if (x < p->x0 || x > p->x1 || p->top > y + 0.5f || p->top <= g) continue;
+    if (drop && !p->solid) continue;
+    g = p->top;
+  }
+  return g;
+}
+
+/* высота над своим полом */
+static float if_up(const IfFighter *F) { return F->y - F->fl; }
 
 static int if_neutral(const IfFighter *F) {
   return F->st == FS_IDLE || F->st == FS_WALK || F->st == FS_RUN;
@@ -480,7 +527,7 @@ static void if_damage(IfScene *s, IfFighter *A, IfFighter *D, float dmg, int kin
     if_call(s, A, L"Чёрная вспышка!", FC(255, 40, 60), 80);
     s->statBF++;
   }
-  if (D->st == FS_FLY || D->y > 1) { /* добивание в воздухе: каждый раз подбрасывает слабее */
+  if (D->st == FS_FLY || if_up(D) > 1) { /* добивание в воздухе: каждый раз подбрасывает слабее */
     D->juggle++;
     float k = D->juggle > 3 ? 0.35f : 1.0f - D->juggle * 0.15f;
     if (kind < HK_LAUNCH) kind = HK_KNOCK, kx = 2.5f, ky = 4.5f;
@@ -506,7 +553,7 @@ static void if_damage(IfScene *s, IfFighter *A, IfFighter *D, float dmg, int kin
     if (kx < 6) kx = 6;
     if (ky < 7) ky = 7;
   }
-  if (kind <= HK_HEAVY && D->y <= 0.5f && D->st != FS_FLY) {
+  if (kind <= HK_HEAVY && if_up(D) <= 0.5f && D->st != FS_FLY) {
     if_set_state(D, FS_HIT);
     D->stun = kind == HK_LIGHT ? 14 : 20;
     if_set_anim(D, (D->hp > 0 && (s->frame & 1)) ? AN_HURT_M : AN_HURT_H, 1);
@@ -696,7 +743,8 @@ static void if_move_events(IfScene *s, IfFighter *F, float t0, float t) {
     if (AT(10)) {
       float d = fabsf(O->x - F->x), off = d * 0.55f > 75 ? 75 : d * 0.55f;
       if (off < 36) off = 36;
-      if_proj(s, PJ_BLUE, F->who, F->x + F->f * off, 44, 0, 8, 62);
+      float bx = F->x + F->f * off;
+      if_proj(s, PJ_BLUE, F->who, bx, fmaxf(F->fl, O->fl) + 44, 0, 8, 62);
     }
     break;
   case MV_G_RED:
@@ -719,7 +767,7 @@ static void if_move_events(IfScene *s, IfFighter *F, float t0, float t) {
     if (AT(90)) {
       if_face(F, O);
       if_joint(F, FJ_HAND1, &hx, &hy);
-      if_proj(s, PJ_PURPLE, F->who, hx + F->f * 10, 46, F->f * 5.2f, 21, 400);
+      if_proj(s, PJ_PURPLE, F->who, hx + F->f * 10, F->fl + 46, F->f * 5.2f, 21, 400);
       if_shake(s, 14);
     }
     break;
@@ -727,14 +775,17 @@ static void if_move_events(IfScene *s, IfFighter *F, float t0, float t) {
     if (AT(1)) if_teleport_out(s, F), F->inv = 16;
     if (AT(8)) {
       float bx = O->x - O->f * 24;
-      if (bx < s->xMin + 4 || bx > s->xMax - 4) bx = O->x + O->f * 24; /* за спиной стена — тогда спереди */
+      if (bx < s->xMin + 4 || bx > s->xMax - 4 || fabsf(if_floor(s, bx, O->y + 1, 0) - O->fl) > 2)
+        bx = O->x + O->f * 24; /* за спиной стена или край окна — тогда спереди */
       F->x = bx;
+      F->y = F->fl = if_floor(s, bx, O->fl + 1, 0); /* к нему на площадку */
+      F->vy = 0;
       F->f = O->x >= F->x ? 1 : -1;
       if_eff(s, EF_TELE, F->x, F->y, 16, 1);
     }
     break;
   case MV_G_VOID:
-    if (AT(1)) s->domX = (F->x + O->x) * 0.5f; /* где будет купол — сразу: фон начинает строиться с жеста */
+    if (AT(1)) s->domX = (F->x + O->x) * 0.5f, s->domFl = F->fl; /* где будет купол — сразу: фон строится с жеста */
     if (AT(12)) F->blind = 0;
     if (AT(26) && !s->dom) {
       s->dom = DOM_VOID, s->domOwner = F->who, s->domPhase = DP_CAST, s->domT = 0, s->domDone = 1;
@@ -745,7 +796,8 @@ static void if_move_events(IfScene *s, IfFighter *F, float t0, float t) {
     if (AT(19) || AT(40)) {
       int second = t >= 40;
       for (int i = 0; i < 3; i++) {
-        IfProj *p = if_proj(s, PJ_SLASH, F->who, F->x + F->f * 14, 34.0f + i * 24 + second * 10, F->f * (10.5f + i * 0.6f), 9, 90);
+        IfProj *p = if_proj(s, PJ_SLASH, F->who, F->x + F->f * 14, F->fl + 34.0f + i * 24 + second * 10,
+                            F->f * (10.5f + i * 0.6f), 9, 90);
         if (p) p->vy = if_rr(&s->seed, -0.5f, 0.5f), p->a = if_rr(&s->seed, -0.6f, 0.6f), p->hit = 0, p->r = 10 + i;
       }
     }
@@ -767,7 +819,7 @@ static void if_move_events(IfScene *s, IfFighter *F, float t0, float t) {
     }
     break;
   case MV_S_SHRINE:
-    if (AT(1)) s->domX = F->x * 0.6f + O->x * 0.4f;
+    if (AT(1)) s->domX = F->x * 0.6f + O->x * 0.4f, s->domFl = F->fl;
     if (AT(14) && !s->dom) {
       s->dom = DOM_SHRINE, s->domOwner = F->who, s->domPhase = DP_CAST, s->domT = 0, s->domDone = 1;
       if_banner(s, L"РАСШИРЕНИЕ ТЕРРИТОРИИ", L"СВЯТИЛИЩЕ ЗЛОБЫ", 2, 170);
@@ -817,13 +869,13 @@ static void if_move_step(IfScene *s, IfFighter *F, float dt) {
     }
   }
   if (m->flags & MVF_AIR) {
-    if (F->y <= 0 && F->vy <= 0) {
-      F->y = 0;
+    if (F->y <= F->fl && F->vy <= 0) {
+      F->y = F->fl;
       F->vy = 0;
       if_set_state(F, FS_LAND);
       if_set_anim(F, AN_LAND, 1);
       for (int i = 0; i < 8; i++)
-        if_part(s, PT_DUST, F->x + if_rr(&s->seed, -8, 8), 1, if_rr(&s->seed, -1.6f, 1.6f), if_rr(&s->seed, 0.2f, 1.0f),
+        if_part(s, PT_DUST, F->x + if_rr(&s->seed, -8, 8), F->fl + 1, if_rr(&s->seed, -1.6f, 1.6f), if_rr(&s->seed, 0.2f, 1.0f),
                 if_rr(&s->seed, 18, 30), if_rr(&s->seed, 2, 4), FC(200, 196, 190));
       if_shake(s, 4);
     }
@@ -846,7 +898,7 @@ static void if_move_step(IfScene *s, IfFighter *F, float dt) {
 
 /* ===================== ИИ ===================== */
 
-enum { ACT_NEAR = 100, ACT_BACK, ACT_WAIT, ACT_JUMP };
+enum { ACT_NEAR = 100, ACT_BACK, ACT_WAIT, ACT_JUMP, ACT_LEAP, ACT_DROP, ACT_PERCH };
 typedef struct {
   int act;
   float w;
@@ -874,9 +926,40 @@ static void if_opt(IfScene *s, const IfFighter *F, IfOpt *o, int *n, int act, fl
   o[*n].act = act, o[*n].w = w, (*n)++;
 }
 
+/* прыжок, чтобы оказаться на dx вбок и dy выше (dy < 0 — ниже) */
+static void if_leap(IfFighter *F, float dx, float dy) {
+  const float g = 0.36f;
+  float h = fmaxf(dy, 0) + 18, vy = sqrtf(2 * g * h), T = vy / g + sqrtf(2 * (h - dy) / g);
+  if_set_state(F, FS_JUMP);
+  if_set_anim(F, AN_JUMP, 1);
+  F->vy = vy;
+  F->vx = fa_clampf(dx / T, -6.0f, 6.0f);
+  if (fabsf(dx) > 2) F->f = dx > 0 ? 1 : -1;
+  F->intent = IN_NONE;
+  F->wallT = 0;
+}
+
+/* стоит на окне (не на полу монитора) */
+static int if_on_window(const IfScene *s, const IfFighter *F) { return F->fl > if_ground(s, F->x) + 0.5f; }
+
+/* окно рядом, на которое можно запрыгнуть: занять высоту. Куда — в *tx, *ty */
+static int if_perch(const IfScene *s, const IfFighter *F, float *tx, float *ty) {
+  float best = 1e9f;
+  for (int i = s->nFix; i < s->nPl; i++) {
+    const IfPlat *p = &s->pl[i];
+    float dy = p->top - F->fl;
+    if (dy < 30 || dy > 330 || p->x1 - p->x0 < 40) continue;
+    float cx = fa_clampf(F->x, p->x0 + 18, p->x1 - 18), dx = fabsf(cx - F->x);
+    if (dx > 160 || dx + dy * 0.3f >= best) continue;
+    best = dx + dy * 0.3f, *tx = cx, *ty = p->top;
+  }
+  return best < 1e8f;
+}
+
 static void if_do(IfScene *s, IfFighter *F, int act) {
   IfFighter *O = if_foe(s, F);
   float d = fabsf(O->x - F->x);
+  F->wallT = 0;
   if (act < MV_COUNT) {
     if ((kMoves[act].flags & MVF_MELEE) && d > 46) { /* далеко для удара: сначала подойти */
       F->intent = IN_NEAR, F->intentD = if_rr(&s->seed, 28, 36);
@@ -900,6 +983,31 @@ static void if_do(IfScene *s, IfFighter *F, int act) {
     if_set_anim(F, AN_JUMP, 1);
     F->vy = 6.6f;
     F->vx = F->f * (d > 60 ? 3.0f : 2.2f);
+    break;
+  case ACT_LEAP: { /* к нему наверх: прыжок не дальше, чем долетит, иначе сперва подойти */
+    float dy = O->fl - F->y, dx = O->x - F->x, h = fmaxf(dy, 0) + 18;
+    float T = sqrtf(2 * h / 0.36f) + sqrtf(2 * (h - dy) / 0.36f), reach = 6.0f * T * 0.9f;
+    dx -= (dx > 0 ? 1.0f : -1.0f) * 26; /* не на голову, а рядом */
+    if (fabsf(dx) > reach) {
+      F->intent = IN_NEAR, F->intentD = d - reach * 0.8f;
+      break;
+    }
+    if_leap(F, dx, dy);
+    break;
+  }
+  case ACT_PERCH: { /* на окно: оттуда — техниками */
+    float tx, ty;
+    if (if_perch(s, F, &tx, &ty)) if_leap(F, tx - F->x, ty - F->y);
+    break;
+  }
+  case ACT_DROP: /* к нему вниз: с окна — спрыгнуть, с высокого монитора — сойти с края */
+    if (if_on_window(s, F)) {
+      if_set_state(F, FS_JUMP);
+      if_set_anim(F, AN_JUMP, 1);
+      F->dropT = 12, F->vy = 2.4f, F->vx = F->f * 2.0f;
+    } else {
+      F->intent = IN_NEAR, F->intentD = 20;
+    }
     break;
   default:
     F->intent = IN_WAIT;
@@ -933,11 +1041,27 @@ static void if_ai(IfScene *s, IfFighter *F) {
     if_opt(s, F, o, &n, F->who ? MV_S_TAUNT : MV_G_TAUNT, 2);
     if (d > 80) if_opt(s, F, o, &n, ACT_NEAR, 6);
     if (d < 34) if_opt(s, F, o, &n, ACT_BACK, 6);
+  } else if (fabsf(O->fl - F->fl) > 12 && if_up(O) < 4) { /* он на другой высоте: окно, другой монитор */
+    float dy = O->fl - F->fl;
+    int mv = dy > 0 ? ACT_LEAP : ACT_DROP;
+    if (F->who == 0) { /* сверху Годжо не спешит вниз: бьёт Красным */
+      if_opt(s, F, o, &n, mv, dy > 0 ? 26 : 14), if_opt(s, F, o, &n, MV_G_TELE, 16);
+      if_opt(s, F, o, &n, MV_G_RED, dy > 0 ? 14 : 24);
+      if (d > 40) if_opt(s, F, o, &n, MV_G_BLUE, 5);
+    } else {
+      if_opt(s, F, o, &n, mv, 34), if_opt(s, F, o, &n, MV_S_FUGA, s->roundT > 600 ? 10 : 0);
+      if (dy > 0 && dy < 70) if_opt(s, F, o, &n, MV_S_DISM, 12);
+      if (dy < 0) if_opt(s, F, o, &n, MV_S_TAUNT, 4);
+    }
+    if_opt(s, F, o, &n, ACT_WAIT, 4);
   } else {
     int domReady = F->who == s->domCaster && !s->domDone && F->ce >= 700 && s->roundT > 900 && F->burn <= 0 &&
-                   (F->hp < 750 || O->hp < 650 || s->roundT > 1800) && O->st != FS_FLY;
+                   (F->hp < 750 || O->hp < 650 || s->roundT > 1800) && O->st != FS_FLY && fabsf(O->fl - F->fl) < 4;
     int ult = F->who ? MV_S_FUGA : MV_G_PURPLE;
     int late = s->roundT > 600 && if_can(F, ult); /* самое сильное — не с первых секунд */
+    float px, py;
+    if (d > 46 && if_perch(s, F, &px, &py)) if_opt(s, F, o, &n, ACT_PERCH, 3);
+    if (d > 46 && if_on_window(s, F)) if_opt(s, F, o, &n, ACT_DROP, 10); /* бой — больше на земле */
     if (late && d < 46) if_opt(s, F, o, &n, ACT_BACK, 14); /* для него нужен простор */
     if (F->who == 0) {
       if (domReady) if_opt(s, F, o, &n, MV_G_VOID, 80);
@@ -1043,9 +1167,9 @@ static void if_react(IfScene *s, IfFighter *F) {
 
 /* ===================== бойцы: шаг ===================== */
 
-static void if_land_dust(IfScene *s, float x, int n) {
+static void if_land_dust(IfScene *s, float x, float y, int n) {
   for (int i = 0; i < n; i++)
-    if_part(s, PT_DUST, x + if_rr(&s->seed, -9, 9), 1, if_rr(&s->seed, -1.8f, 1.8f), if_rr(&s->seed, 0.2f, 1.1f),
+    if_part(s, PT_DUST, x + if_rr(&s->seed, -9, 9), y + 1, if_rr(&s->seed, -1.8f, 1.8f), if_rr(&s->seed, 0.2f, 1.1f),
             if_rr(&s->seed, 18, 34), if_rr(&s->seed, 2, 4.5f), FC(205, 200, 194));
 }
 
@@ -1067,12 +1191,21 @@ static void if_fighter_step(IfScene *s, IfFighter *F, float dt) {
   if (F->ghostT > 0) F->ghostT -= dt;
   else if (F->ghost > F->hp) F->ghost -= 7 * dt;
   if (F->ghost < F->hp) F->ghost = F->hp;
+  if (F->dropT > 0) F->dropT -= dt;
+  F->fl = if_floor(s, F->x, F->y, F->dropT > 0);
   if (F->stuck > 0) { /* кулак застрял в Бесконечности: время у него стоит */
     F->stuck -= dt;
     return;
   }
   F->at += dt;
   int air = 0;
+  if ((F->st == FS_IDLE || F->st == FS_WALK || F->st == FS_RUN) && if_up(F) > 6) { /* сошёл с края окна */
+    if_set_state(F, FS_JUMP);
+    if_set_anim(F, AN_JUMP, 1);
+    F->intent = IN_NONE;
+  } else if (if_up(F) > 0 && if_up(F) <= 6 && F->vy <= 0 && F->st != FS_FLY && F->st != FS_JUMP && F->st != FS_MOVE) {
+    F->y = F->fl; /* ступенька вниз — просто шагнул */
+  }
   switch (F->st) {
   case FS_IDLE:
   case FS_WALK:
@@ -1119,14 +1252,33 @@ static void if_fighter_step(IfScene *s, IfFighter *F, float dt) {
       F->intentT -= dt;
       if (F->intentT <= 0) F->intent = IN_NONE;
     } else if (F->intent == IN_HOME) {
-      float dx = F->home - F->x;
+      float dx = F->home - F->x, dy = F->homeFl - F->fl;
+      if (F->wallT > 10 || (dy > 12 && fabsf(dx) < 150)) { /* дом выше или стена: запрыгнуть */
+        if (F->wallT > 10) dy = fmaxf(dy, if_ground(s, F->x + (dx > 0 ? 14.0f : -14.0f)) - F->y);
+        if_leap(F, dx, dy);
+        F->intent = IN_HOME;
+        break;
+      }
+      if (fabsf(dx) <= 3 && dy < -12 && if_on_window(s, F)) { /* дом под окном: спрыгнуть */
+        if_set_state(F, FS_JUMP);
+        if_set_anim(F, AN_JUMP, 1);
+        F->dropT = 12, F->vy = 2.4f;
+        break;
+      }
       if (fabsf(dx) > 3) {
-        mvx = (dx > 0 ? 1.0f : -1.0f) * 1.4f;
-        st = FS_WALK;
-        anim = (dx > 0) == (F->f > 0) ? (F->who ? AN_S_WALK : AN_G_WALK) : (F->who ? AN_S_BACK : AN_G_BACK);
+        int run = fabsf(dx) > 200; /* далеко, с другого монитора — бегом */
+        mvx = (dx > 0 ? 1.0f : -1.0f) * (run ? 3.4f : 1.4f);
+        st = run ? FS_RUN : FS_WALK;
+        if (run) F->f = dx > 0 ? 1 : -1;
+        anim = run ? (F->who ? AN_S_RUN : AN_G_DASH)
+                   : (dx > 0) == (F->f > 0) ? (F->who ? AN_S_WALK : AN_G_WALK) : (F->who ? AN_S_BACK : AN_G_BACK);
       } else {
         F->intent = IN_NONE;
       }
+    }
+    if (F->intent == IN_NEAR && F->wallT > 12 && fabsf(O->fl - F->fl) <= 12) { /* между ними монитор выше — перепрыгнуть */
+      if_leap(F, F->f * 70.0f, if_ground(s, F->x + F->f * 14) - F->y);
+      break;
     }
     F->vx = mvx;
     F->st = st;
@@ -1135,7 +1287,7 @@ static void if_fighter_step(IfScene *s, IfFighter *F, float dt) {
   }
   case FS_JUMP:
     air = 1;
-    if (F->vy < 0 && s->phase == RP_FIGHT && F->y > 14 && fabsf(O->x - F->x) < 46 && O->st != FS_DOWN && O->st != FS_KO &&
+    if (F->vy < 0 && s->phase == RP_FIGHT && if_up(F) > 14 && fabsf(O->x - F->x) < 46 && O->st != FS_DOWN && O->st != FS_KO &&
         F->stT > 10) {
       int mv = F->who ? MV_S_SLAM : MV_G_DIVE;
       if (if_can(F, mv) && if_rf(&s->seed) < 0.25f) {
@@ -1193,22 +1345,22 @@ static void if_fighter_step(IfScene *s, IfFighter *F, float dt) {
     break;
   }
   /* полёт и земля */
-  if (air || F->y > 0 || F->vy > 0) {
+  if (air || F->y > F->fl || F->vy > 0) {
     F->vy -= 0.36f * dt;
     F->y += F->vy * dt;
-    if (F->y <= 0) {
-      F->y = 0;
+    if (F->y <= F->fl && F->vy <= 0) {
+      F->y = F->fl;
       if (F->st == FS_JUMP) {
         F->vy = 0;
         if_set_state(F, FS_LAND);
         if_set_anim(F, AN_LAND, 1);
-        if_land_dust(s, F->x, 5);
+        if_land_dust(s, F->x, F->fl, 5);
       } else if (F->st == FS_FLY) {
         if (F->vy < -6.5f) { /* о землю — и ещё раз подлетел */
           F->vy = -F->vy * 0.36f;
           F->vx *= 0.6f;
-          if_land_dust(s, F->x, 10);
-          if_eff(s, EF_CRACK, F->x, 0, 70, 1);
+          if_land_dust(s, F->x, F->fl, 10);
+          if_eff(s, EF_CRACK, F->x, F->fl, 70, 1);
           if_shake(s, 6);
         } else {
           F->vy = 0;
@@ -1220,14 +1372,46 @@ static void if_fighter_step(IfScene *s, IfFighter *F, float dt) {
           F->from.v[PV_ROLL] = r;
           F->roll = 0;
           F->juggle = 0;
-          if_land_dust(s, F->x, 8);
+          if_land_dust(s, F->x, F->fl, 8);
         }
       } else if (F->st != FS_MOVE) {
         F->vy = 0;
       }
     }
   }
-  F->x += F->vx * dt;
+  float nx = F->x + F->vx * dt, gn = if_ground(s, nx);
+  if (gn > F->y + 0.5f) { /* монитор с полом выше: ступенька или стена */
+    if (F->y <= F->fl + 0.5f && gn <= F->y + 12 && F->st != FS_FLY) {
+      F->y = F->fl = gn;
+    } else {
+      if (F->st == FS_FLY && fabsf(F->vx) > 3.5f) {
+        IfEff *e = if_eff(s, EF_WALL, F->x, F->y + 40, 26, 1);
+        if (e) e->a = F->vx > 0 ? 1.0f : -1.0f;
+        F->vx = -F->vx * 0.35f;
+        if_shake(s, 8);
+      } else {
+        F->vx = 0;
+        F->wallT += dt;
+      }
+      nx = F->x;
+    }
+  } else if (F->st == FS_FLY && fabsf(F->vx) > 3.5f) { /* отлетел в окно — ударился о его край */
+    float cy = F->y + 40;
+    for (int i = s->nFix; i < s->nPl; i++) {
+      const IfPlat *p = &s->pl[i];
+      if (cy < p->bot || cy > p->top) continue;
+      float ex = p->wl && F->x <= p->x0 && nx > p->x0 ? p->x0 : (p->wr && F->x >= p->x1 && nx < p->x1 ? p->x1 : -1e9f);
+      if (ex < -1e8f) continue;
+      IfEff *e = if_eff(s, EF_WALL, ex, cy, 26, 1);
+      if (e) e->a = F->vx > 0 ? 1.0f : -1.0f;
+      F->vx = -F->vx * 0.35f;
+      if_shake(s, 8);
+      nx = ex - (F->vx > 0 ? -0.5f : 0.5f);
+      break;
+    }
+  }
+  if (fabsf(F->vx) > 0.3f && nx != F->x) F->wallT = 0;
+  F->x = nx;
   if (F->x < s->xMin || F->x > s->xMax) { /* край экрана — стена */
     float wx = F->x < s->xMin ? s->xMin : s->xMax;
     if (F->st == FS_FLY && fabsf(F->vx) > 3.5f) {
@@ -1249,7 +1433,7 @@ static void if_fighter_step(IfScene *s, IfFighter *F, float dt) {
 
 static void if_push(IfScene *s) {
   IfFighter *a = &s->F[0], *b = &s->F[1];
-  if (a->alpha < 0.5f || b->alpha < 0.5f || a->y > 20 || b->y > 20) return;
+  if (a->alpha < 0.5f || b->alpha < 0.5f || if_up(a) > 20 || if_up(b) > 20 || fabsf(a->y - b->y) > 20) return;
   if (a->st == FS_DOWN || b->st == FS_DOWN || a->st == FS_KO || b->st == FS_KO || a->st == FS_FLY || b->st == FS_FLY)
     return;
   float dx = b->x - a->x, ad = fabsf(dx), need = 21;
@@ -1299,8 +1483,22 @@ static void if_boom(IfScene *s, IfProj *p, float big) { /* огненный вз
     if_part(s, PT_SMOKE, p->x + if_rr(&s->seed, -20, 20) * big, p->y + if_rr(&s->seed, -10, 20) * big,
             if_rr(&s->seed, -0.6f, 0.6f), if_rr(&s->seed, 0.3f, 1.0f), if_rr(&s->seed, 70, 110), if_rr(&s->seed, 12, 22) * big,
             FC(70, 60, 64));
-  if_eff(s, EF_CRACK, p->x, 0, 90, 1.3f * big);
+  if_eff(s, EF_CRACK, p->x, if_floor(s, p->x, p->y, 0), 90, 1.3f * big);
   if_shake(s, 15 * big);
+}
+
+/* снаряд пролетел мимо противника и врезался в окно: в край или сверху */
+static int if_pj_win(const IfScene *s, const IfProj *p, float ox, float oy, const IfFighter *D) {
+  if ((D->x - p->x) * p->vx > 0) return 0; /* противник ещё впереди — окна не помеха */
+  for (int i = s->nFix; i < s->nPl; i++) {
+    const IfPlat *q = &s->pl[i];
+    if (p->y >= q->bot && p->y <= q->top) {
+      if (q->wl && ox < q->x0 && p->x >= q->x0) return 1;
+      if (q->wr && ox > q->x1 && p->x <= q->x1) return 1;
+    }
+    if (p->x >= q->x0 && p->x <= q->x1 && oy > q->top && p->y <= q->top) return 1;
+  }
+  return 0;
 }
 
 static void if_pj_step(IfScene *s, float dt) {
@@ -1309,10 +1507,10 @@ static void if_pj_step(IfScene *s, float dt) {
     if (p->kind == PJ_NONE) continue;
     IfFighter *A = &s->F[p->owner], *D = &s->F[!p->owner];
     p->t += dt;
-    float cx, cy;
-    int out = p->x < s->xMin - 30 || p->x > s->xMax + 30 || p->y < -6 || p->y > 400;
-    /* Красный и стрела взрываются о край экрана и о землю — так взрыв видно */
-    int wall = p->x < s->xMin - 4 || p->x > s->xMax + 4 || p->y < 0 || p->y > 400;
+    float cx, cy, ox = p->x, oy = p->y, g = if_ground(s, p->x), sky = s->gy / s->U + 20;
+    int out = p->x < s->xMin - 30 || p->x > s->xMax + 30 || p->y < g - 6 || p->y > sky;
+    /* Красный и стрела взрываются о край экрана, о землю и об окно позади противника — так взрыв видно */
+    int wall = p->x < s->xMin - 4 || p->x > s->xMax + 4 || p->y < g || p->y > sky;
     switch (p->kind) {
     case PJ_BLUE: {
       if (D->hp > 0 && D->st != FS_KO && D->st != FS_DOWN && D->st != FS_GETUP && D->inv <= 0 && p->t > 4 &&
@@ -1329,7 +1527,7 @@ static void if_pj_step(IfScene *s, float dt) {
           else D->vx *= 0.5f;
           if (D->vx > 4.5f) D->vx = 4.5f;
           if (D->vx < -4.5f) D->vx = -4.5f;
-          if (D->y < 10 && ad < 40) D->vy = 0.9f;
+          if (if_up(D) < 10 && ad < 40) D->vy = 0.9f;
           D->hp -= 1.3f * dt;
           if (D->hp < 1) D->hp = 1;
           D->ghostT = 30;
@@ -1353,6 +1551,7 @@ static void if_pj_step(IfScene *s, float dt) {
     }
     case PJ_RED:
       p->x += p->vx * dt, p->y += p->vy * dt;
+      wall = wall || if_pj_win(s, p, ox, oy, D);
       if (if_rf(&s->seed) < 0.9f) {
         IfPart *q = if_part(s, PT_SPARK, p->x - p->vx, p->y + if_rr(&s->seed, -3, 3), -p->vx * 0.2f, if_rr(&s->seed, -1, 1),
                             if_rr(&s->seed, 8, 14), if_rr(&s->seed, 0.7f, 1.4f), FC(255, 120, 80));
@@ -1368,7 +1567,8 @@ static void if_pj_step(IfScene *s, float dt) {
       break;
     case PJ_PURPLE:
       p->x += p->vx * dt;
-      if (((int)p->t % 3) == 0) if_eff(s, EF_SCORCH, p->x - p->vx * 4, 0, 110, 1);
+      float pfl = if_floor(s, p->x, p->y, 0);
+      if (((int)p->t % 3) == 0 && p->y - pfl < 70) if_eff(s, EF_SCORCH, p->x - p->vx * 4, pfl, 110, 1);
       for (int k = 0; k < 3; k++) {
         float a = if_rr(&s->seed, 0, 2 * FA_PI);
         IfPart *q = if_part(s, PT_SPARK, p->x + cosf(a) * p->r, p->y + sinf(a) * p->r, -p->vx * 0.3f + cosf(a) * 1.5f,
@@ -1377,7 +1577,7 @@ static void if_pj_step(IfScene *s, float dt) {
         q->light = 1;
       }
       if (if_rf(&s->seed) < 0.5f) {
-        IfPart *q = if_part(s, PT_SHARD, p->x - p->vx * 3, if_rr(&s->seed, 0, 6), if_rr(&s->seed, -2, 2) - p->vx * 0.3f,
+        IfPart *q = if_part(s, PT_SHARD, p->x - p->vx * 3, pfl + if_rr(&s->seed, 0, 6), if_rr(&s->seed, -2, 2) - p->vx * 0.3f,
                             if_rr(&s->seed, 2, 6), if_rr(&s->seed, 30, 50), if_rr(&s->seed, 1, 2.5f), FC(90, 80, 100));
         q->g = 0.3f, q->rot = if_rr(&s->seed, 0, 6);
       }
@@ -1406,6 +1606,7 @@ static void if_pj_step(IfScene *s, float dt) {
       break;
     case PJ_ARROW:
       p->x += p->vx * dt, p->y += p->vy * dt;
+      wall = wall || if_pj_win(s, p, ox, oy, D);
       for (int k = 0; k < 3; k++) {
         IfPart *q = if_part(s, PT_FIRE, p->x - p->vx * if_rr(&s->seed, 0.2f, 1.4f), p->y + if_rr(&s->seed, -2, 2),
                             -p->vx * 0.15f, if_rr(&s->seed, 0.1f, 0.8f), if_rr(&s->seed, 10, 20), if_rr(&s->seed, 2.5f, 5),
@@ -1470,9 +1671,9 @@ static void if_dom_step(IfScene *s, float dt) {
       s->domPhase = DP_OPEN, s->domT = 0;
       if (V->st != FS_FLY && V->st != FS_DOWN && V->st != FS_GETUP && V->st != FS_KO && V->hp > 0) {
         V->mv = -1, V->intent = IN_NONE, V->vx = 0;
-        if (V->y <= 0.5f) if_set_state(V, FS_IDLE); /* неизбежное попадание: что начал — бросил */
+        if (if_up(V) <= 0.5f) if_set_state(V, FS_IDLE); /* неизбежное попадание: что начал — бросил */
       }
-      IfEff *e = if_eff(s, EF_FLASH, s->domX, 40, 20, 3.0f);
+      IfEff *e = if_eff(s, EF_FLASH, s->domX, s->domFl + 40, 20, 3.0f);
       if (e) e->c = s->dom == DOM_VOID ? FC(160, 210, 255) : FC(255, 60, 70);
       if_shake(s, 10);
     }
@@ -1521,15 +1722,15 @@ static void if_round_step(IfScene *s, float dt) {
     if (s->round == 1) { /* первый выход: Годжо — из телепорта, Сукуна — из тьмы */
       if (AT(16)) {
         G->alpha = 1;
-        if_eff(s, EF_TELE, G->x, 0, 24, 1.4f);
+        if_eff(s, EF_TELE, G->x, G->fl, 24, 1.4f);
       }
       if (AT(36)) {
         K->alpha = 1;
-        IfEff *e = if_eff(s, EF_RING, K->x, 46, 30, 1.5f);
+        IfEff *e = if_eff(s, EF_RING, K->x, K->fl + 46, 30, 1.5f);
         if (e) e->c = FC(230, 30, 50);
         for (int i = 0; i < 26; i++) {
           float a = if_rr(&s->seed, 0, 2 * FA_PI), v = if_rr(&s->seed, 0.5f, 2.6f);
-          if_part(s, PT_SMOKE, K->x + cosf(a) * 8, 40 + sinf(a) * 30, cosf(a) * v, sinf(a) * v * 0.5f + 0.4f,
+          if_part(s, PT_SMOKE, K->x + cosf(a) * 8, K->fl + 40 + sinf(a) * 30, cosf(a) * v, sinf(a) * v * 0.5f + 0.4f,
                   if_rr(&s->seed, 40, 70), if_rr(&s->seed, 8, 16), FC(40, 14, 24));
         }
         if_shake(s, 5);
@@ -1573,7 +1774,7 @@ static void if_round_step(IfScene *s, float dt) {
         IfFighter *W = &s->F[s->winner];
         if (s->wins) s->wins[s->winner]++;
         W->mv = -1, W->vx = 0, W->intent = IN_NONE;
-        if (W->y <= 0.5f) {
+        if (if_up(W) <= 0.5f) {
           if_set_state(W, FS_WIN);
           if_set_anim(W, W->who ? AN_S_WIN : AN_G_WIN, 1);
         }
@@ -1591,11 +1792,11 @@ static void if_round_step(IfScene *s, float dt) {
     break;
   case RP_RESET: /* обратная проклятая техника: оба лечатся и возвращаются */
     if (AT(1)) {
-      float mid = (s->xMin + s->xMax) * 0.5f;
+      float mid = s->homeX;
       for (int i = 0; i < 2; i++) {
         IfFighter *F = &s->F[i];
         if (F->st == FS_KO) {
-          F->vx = 0, F->vy = 0, F->y = 0;
+          F->vx = 0, F->vy = 0, F->y = F->fl;
           if_set_state(F, FS_GETUP);
           if_set_anim(F, AN_GETUP, 1);
           F->inv = 60;
@@ -1603,9 +1804,10 @@ static void if_round_step(IfScene *s, float dt) {
           if_set_state(F, FS_IDLE);
         }
         F->home = mid + (i ? 85.0f : -85.0f);
+        F->homeFl = if_ground(s, F->home);
         F->intent = IN_HOME;
         if_call(s, F, L"Обратная техника", FC(150, 255, 190), 90);
-        IfEff *e = if_eff(s, EF_HEAL, F->x, 0, 110, 1);
+        IfEff *e = if_eff(s, EF_HEAL, F->x, F->fl, 110, 1);
         if (e) e->owner = F->who;
       }
     }
@@ -1614,7 +1816,8 @@ static void if_round_step(IfScene *s, float dt) {
       F->hp += IF_HP / 80.0f * dt;
       if (F->hp > IF_HP) F->hp = IF_HP;
       F->ghost = F->hp;
-      if (F->st == FS_IDLE && F->intent == IN_NONE && fabsf(F->x - F->home) > 4) F->intent = IN_HOME;
+      if (F->st == FS_IDLE && F->intent == IN_NONE && (fabsf(F->x - F->home) > 4 || fabsf(F->fl - F->homeFl) > 12))
+        F->intent = IN_HOME;
     }
     if (AT(70)) {
       G->blind = 1;
@@ -1655,8 +1858,9 @@ static void if_age(IfScene *s, float dt) {
     case PT_SHARD:
     case PT_EMBER:
     case PT_DOT:
-      if (p->y < 0) {
-        p->y = 0, p->vy = -p->vy * 0.3f, p->vx *= 0.6f;
+      float g = if_ground(s, p->x);
+      if (p->y < g) {
+        p->y = g, p->vy = -p->vy * 0.3f, p->vx *= 0.6f;
         if (p->kind == PT_DOT) p->t = p->life; /* капля о землю — исчезла */
       }
       p->rot += 0.2f * dt;
@@ -1713,23 +1917,124 @@ static void if_step(IfScene *s) {
   if_age(s, dt);
 }
 
-/* сцена на холсте W×H (рабочая область главного монитора); земля — нижний край */
-static void if_scene_init(IfScene *s, int W, int H, unsigned seed, int *wins) {
-  float figH = fa_clampf(fminf(H * 0.26f, W * 0.17f), 120.0f, 420.0f);
+/* площадка в список; px холста → единицы */
+static void if_plat_add(IfScene *s, float x0, float x1, float topPx, float botPx, int solid, int wl, int wr) {
+  if (s->nPl >= IF_MAXPL || x1 - x0 < 1) return;
+  IfPlat *p = &s->pl[s->nPl++];
+  p->x0 = x0 / s->U, p->x1 = x1 / s->U;
+  p->top = (s->gy - topPx) / s->U, p->bot = (s->gy - botPx) / s->U;
+  p->solid = solid, p->wl = wl, p->wr = wr;
+}
+
+static int if_cmp_px(const void *a, const void *b) {
+  float x = *(const float *)a, y = *(const float *)b;
+  return x < y ? -1 : x > y;
+}
+
+/* полы мониторов: под каждым x — низ самого нижнего монитора над ним (дыры между
+   мониторами — пол соседа); монитор над другим — площадка, с неё спрыгивают */
+static void if_stage_floors(IfScene *s, const IfStage *st) {
+  s->nPl = 0;
+  if (!st || st->nMon <= 0) {
+    if_plat_add(s, -1e6f, 1e6f, s->gy, s->gy, 1, 0, 0);
+    s->nFix = s->nPl;
+    return;
+  }
+  float xs[IF_MAXMON * 2];
+  int nx = 0;
+  for (int i = 0; i < st->nMon; i++) xs[nx++] = (float)st->mon[i].left, xs[nx++] = (float)st->mon[i].right;
+  qsort(xs, nx, sizeof(float), if_cmp_px);
+  float runX = -1e6f, runB = -1;
+  for (int i = 0; i + 1 < nx; i++) {
+    float a = xs[i], b = xs[i + 1], m = (a + b) * 0.5f, best = -1;
+    if (b - a < 1) continue;
+    for (int k = 0; k < st->nMon; k++)
+      if (m >= st->mon[k].left && m < st->mon[k].right && st->mon[k].bottom - 1 > best) best = (float)(st->mon[k].bottom - 1);
+    if (best < 0) best = runB >= 0 ? runB : s->gy; /* дыра: пол соседа слева */
+    if (runB >= 0 && best != runB) if_plat_add(s, runX, a, runB, runB, 1, 0, 0), runX = a;
+    runB = best;
+  }
+  if (runB >= 0) if_plat_add(s, runX, 1e6f, runB, runB, 1, 0, 0);
+  else if_plat_add(s, -1e6f, 1e6f, s->gy, s->gy, 1, 0, 0);
+  s->nFix = s->nPl; /* if_ground смотрит только на них */
+  for (int k = 0; k < st->nMon; k++) {
+    float b = (float)(st->mon[k].bottom - 1), top = (s->gy - b) / s->U, cx = (st->mon[k].left + st->mon[k].right) * 0.5f / s->U;
+    if (top > if_ground(s, cx) + 1) if_plat_add(s, (float)st->mon[k].left, (float)st->mon[k].right, b, b, 0, 0, 0);
+  }
+  s->nFix = s->nPl;
+}
+
+/* окна: видимая часть верхнего края — площадка. Окно, чей верх у самого верха
+   монитора (развёрнутое) или у самого низа, — нет: там не встать */
+static void if_stage_windows(IfScene *s, const IfStage *st) {
+  s->nPl = s->nFix;
+  if (!st) return;
+  float figH = s->U * 100;
+  for (int i = 0; i < st->nWin && s->nPl < IF_MAXPL; i++) {
+    const RECT *r = &st->win[i];
+    float seg[16][2];
+    int ns = 1;
+    seg[0][0] = (float)r->left, seg[0][1] = (float)r->right;
+    for (int j = 0; j < i && ns > 0; j++) { /* что выше по Z и закрывает край — вычесть */
+      const RECT *q = &st->win[j];
+      if (q->top > r->top || q->bottom <= r->top) continue;
+      int nn = 0;
+      float out[16][2];
+      for (int k = 0; k < ns; k++) {
+        float a = seg[k][0], b = seg[k][1];
+        if (q->right <= a || q->left >= b) {
+          if (nn < 16) out[nn][0] = a, out[nn][1] = b, nn++;
+          continue;
+        }
+        if (q->left > a && nn < 16) out[nn][0] = a, out[nn][1] = (float)q->left, nn++;
+        if (q->right < b && nn < 16) out[nn][0] = (float)q->right, out[nn][1] = b, nn++;
+      }
+      memcpy(seg, out, sizeof(out[0]) * nn);
+      ns = nn;
+    }
+    for (int k = 0; k < ns; k++)
+      for (int m = 0; m < st->nMon; m++) { /* по мониторам: свой верх и низ у каждого */
+        const RECT *M = &st->mon[m];
+        if (r->top < M->top + figH * 1.15f || r->top >= M->bottom) continue;
+        float a = fmaxf(seg[k][0], (float)M->left), b = fminf(seg[k][1], (float)M->right);
+        if (b - a < 40 * s->U) continue;
+        float top = (s->gy - r->top) / s->U;
+        if (top - if_ground(s, (a + b) * 0.5f / s->U) < 30) continue; /* у самой земли — просто ступенька */
+        if_plat_add(s, a, b, (float)r->top, fminf((float)r->bottom, (float)M->bottom - 1), 0, a == (float)r->left,
+                    b == (float)r->right);
+      }
+  }
+}
+
+/* сцена на холсте W×H; st — мониторы и окна в px холста (NULL — холст и есть
+   экран, земля — нижний край) */
+static void if_scene_init(IfScene *s, int W, int H, unsigned seed, int *wins, const IfStage *st) {
+  RECT pm = {0, 0, W, H}; /* главный монитор: по нему рост бойцов, там шкалы */
+  if (st && st->nMon > 0) pm = st->mon[st->prim >= 0 && st->prim < st->nMon ? st->prim : 0];
+  int pw = pm.right - pm.left, ph = pm.bottom - pm.top;
+  float figH = fa_clampf(fminf(ph * 0.26f, pw * 0.17f), 120.0f, 420.0f);
   s->W = W, s->H = H;
   s->U = figH / 100.0f;
   s->gy = (float)H - 1.0f;
+  if (st)
+    for (int i = 0; i < st->nMon; i++)
+      if (st->mon[i].bottom - 1 > s->gy) s->gy = (float)(st->mon[i].bottom - 1);
   s->xMin = 16.0f, s->xMax = W / s->U - 16.0f;
+  s->hudX = (pm.left + pm.right) * 0.5f, s->hudY = (float)(pm.bottom - 1);
+  s->homeX = s->hudX / s->U;
+  if_stage_floors(s, st);
+  if_stage_windows(s, st);
   s->seed = seed ? seed : 0x5EED1234u;
   s->wins = wins;
   s->round = 1, s->phase = RP_INTRO, s->phT = 0;
   s->dom = DOM_NONE, s->winner = -1;
-  float mid = (s->xMin + s->xMax) * 0.5f;
+  float mid = s->homeX;
   for (int i = 0; i < 2; i++) {
     IfFighter *F = &s->F[i];
     memset(F, 0, sizeof(*F));
     F->who = i, F->f = i ? -1 : 1;
     F->x = F->home = mid + (i ? 85.0f : -85.0f);
+    F->y = F->fl = F->homeFl = if_ground(s, F->x);
     if_fighter_reset(F);
     F->alpha = 0;
     F->seenId = -1;
@@ -2032,7 +2337,7 @@ static void if_draw_eff(IfScene *s, IfEff *e, int front) {
       }
     }
     if (e->t < 10) if_glow(c, X, Y, R * 1.1f, FC(255, 255, 235), 1 - e->t / 10, 1);
-    float gy = if_Y(s, 0);
+    float gy = if_Y(s, if_floor(s, e->x, e->y, 0));
     if_ground_ring(c, X, gy, R * (1.0f + 1.6f * k), R * 0.16f * (1.0f + 1.6f * k), fmaxf(1.2f, U * 1.6f * (1 - k)),
                    FC(255, 190, 120), 0.8f * (1 - k));
     break;
@@ -2051,7 +2356,7 @@ static void if_draw_eff(IfScene *s, IfEff *e, int front) {
     break;
   }
   case EF_CRACK: { /* земля треснула: камни торчат и уходят обратно */
-    float a = 1 - fa_sat((k - 0.6f) / 0.4f), sink = fa_sat((k - 0.45f) / 0.55f), gy = if_Y(s, 0);
+    float a = 1 - fa_sat((k - 0.6f) / 0.4f), sink = fa_sat((k - 0.45f) / 0.55f), gy = if_Y(s, e->y);
     int n = 4 + (int)(e->sz * 3);
     for (int i = 0; i < n; i++) {
       float ox = if_rr(&sd, -1, 1) * U * 15 * e->sz, h = U * if_rr(&sd, 3, 10) * e->sz * (1 - sink) * fa_smooth(e->t / 4);
@@ -2098,11 +2403,11 @@ static void if_draw_eff(IfScene *s, IfEff *e, int front) {
       float xx = fx + if_rr(&sd, -1, 1) * U * 20, yy = fy - U * (ph * 115);
       fv_disc(c, xx, yy, fmaxf(0.8f, U * 0.6f), FC(210, 255, 225), a * sinf(ph * FA_PI));
     }
-    if_ground_ring(c, fx, if_Y(s, 0), U * 22, U * 3.6f, fmaxf(1, U * 0.7f), FC(170, 255, 200), 0.6f * a);
+    if_ground_ring(c, fx, if_Y(s, F->fl), U * 22, U * 3.6f, fmaxf(1, U * 0.7f), FC(170, 255, 200), 0.6f * a);
     break;
   }
   case EF_SCORCH: { /* след Фиолетового: выжженная полоса */
-    float gy = if_Y(s, 0);
+    float gy = if_Y(s, e->y);
     if_soft_ell(c, X, gy, U * 16, U * 2.6f, FC(40, 18, 52), 0.6f * (1 - k));
     if (k < 0.3f) if_glow(c, X, gy - U * 2, U * 15, FC(200, 120, 255), 0.5f * (0.3f - k) / 0.3f, 1);
     break;
@@ -2398,8 +2703,8 @@ static void if_draw_fighter(IfScene *s, IfFighter *F) {
 
 static void if_draw_shadow(IfScene *s, IfFighter *F) {
   if (F->alpha <= 0.01f) return;
-  float U = s->U, k = fa_sat(1 - F->y / 150), lie = fabsf(sinf(F->pose.v[PV_ROLL] * FA_RAD));
-  if_soft_ell(&s->cv, if_X(s, F->x), if_Y(s, 0) - 1, U * (20 + 22 * lie) * (0.6f + 0.4f * k), U * 3.2f * (0.6f + 0.4f * k),
+  float U = s->U, k = fa_sat(1 - if_up(F) / 150), lie = fabsf(sinf(F->pose.v[PV_ROLL] * FA_RAD));
+  if_soft_ell(&s->cv, if_X(s, F->x), if_Y(s, F->fl) - 1, U * (20 + 22 * lie) * (0.6f + 0.4f * k), U * 3.2f * (0.6f + 0.4f * k),
               FC(16, 12, 24), 0.34f * k * F->alpha);
 }
 
@@ -2573,12 +2878,13 @@ static void if_shrine_shapes(IfScene *s) {
 
 /* размер и место купола, память под фон */
 static void if_dom_prepare(IfScene *s, int kind) {
-  float U = s->U, rxU = fminf((s->xMax - s->xMin) * 0.5f + 16.0f, 330.0f), ryU = fminf(s->gy / U * 0.96f, 270.0f);
+  float U = s->U, fy = s->gy - s->domFl * U; /* экранный y пола под куполом */
+  float rxU = fminf((s->xMax - s->xMin) * 0.5f + 16.0f, 330.0f), ryU = fminf(fy / U * 0.96f, 270.0f);
   float lo = s->xMin - 16 + rxU * 0.7f, hi = s->xMax + 16 - rxU * 0.7f;
   s->domX = lo < hi ? fa_clampf(s->domX, lo, hi) : (s->xMin + s->xMax) * 0.5f;
   s->domRx = rxU, s->domRy = ryU;
   s->bdW = (int)(rxU * U) * 2, s->bdH = (int)(ryU * U);
-  s->bdX = (int)lroundf(s->domX * U) - s->bdW / 2, s->bdY = (int)lroundf(s->gy) - s->bdH;
+  s->bdX = (int)lroundf(s->domX * U) - s->bdW / 2, s->bdY = (int)lroundf(fy) - s->bdH;
   free(s->bd);
   s->bd = (unsigned char *)malloc((size_t)s->bdW * s->bdH * 4);
   s->bdRows = 0;
@@ -2653,7 +2959,7 @@ static void if_dom_fx(IfScene *s, int front) {
   if (!s->bd || s->domOpen < 0.3f) return;
   FCv *c = &s->cv;
   float U = s->U, a = fa_sat((s->domOpen - 0.3f) / 0.7f), T = s->dom == DOM_VOID ? s->domT : s->domT;
-  float cx = s->bdX + s->bdW * 0.5f + s->shx, gy = s->gy + s->shy, rx = s->bdW * 0.5f * s->domOpen, ry = s->bdH * s->domOpen;
+  float cx = s->bdX + s->bdW * 0.5f + s->shx, gy = s->bdY + s->bdH + s->shy, rx = s->bdW * 0.5f * s->domOpen, ry = s->bdH * s->domOpen;
   IfFighter *V = &s->F[!s->domOwner];
   unsigned sd = 99u;
   if (s->dom == DOM_VOID && !front) {
@@ -2901,7 +3207,7 @@ static void if_draw_banner(IfScene *s) {
   if ((!s->ban1 && !s->ban2) || !s->tx) return;
   float t = s->banT, figH = s->U * 100, a = fa_sat(t / 5) * fa_sat((s->banLife - t) / 14);
   float pop = 1 + (s->banStyle == 3 ? 0.7f : 0.4f) * (1 - fa_smooth(t / 8));
-  float cx = s->W * 0.5f, cy = s->gy - figH * 1.62f;
+  float cx = s->hudX, cy = s->hudY - figH * 1.62f;
   if (cy < figH * 0.3f) cy = figH * 0.3f;
   FCv *c = &s->cv;
   IfTxE *E2 = NULL, *E1 = NULL;
@@ -2960,8 +3266,8 @@ static void if_draw_hud(IfScene *s) {
   if (a <= 0.01f) return;
   FCv *c = &s->cv;
   float figH = s->U * 100, barW = fminf(s->W * 0.3f, figH * 1.75f), barH = floorf(fmaxf(8, figH * 0.045f));
-  float ceH = floorf(fmaxf(4, figH * 0.02f)), gap = figH * 0.46f, cx = floorf(s->W * 0.5f);
-  float top = floorf(s->gy - figH * 2.2f);
+  float ceH = floorf(fmaxf(4, figH * 0.02f)), gap = figH * 0.46f, cx = floorf(s->hudX);
+  float top = floorf(s->hudY - figH * 2.2f);
   if (top < 30) top = 30;
   for (int i = 0; i < 2; i++) {
     IfFighter *F = &s->F[i];
@@ -3057,7 +3363,7 @@ static void if_clear(IfScene *s, const RECT *r) {
   for (int y = r->top; y < r->bottom; y++) memset(s->cv.px + ((size_t)y * s->W + r->left) * 4, 0, (size_t)(r->right - r->left) * 4);
 }
 
-static IfScene *if_scene_new(int W, int H, unsigned char *px, unsigned seed, int *wins) {
+static IfScene *if_scene_new(int W, int H, unsigned char *px, unsigned seed, int *wins, const IfStage *st) {
   IfScene *s = (IfScene *)calloc(1, sizeof(IfScene));
   IfText *tx = (IfText *)calloc(1, sizeof(IfText));
   if (!s || !tx) {
@@ -3066,7 +3372,7 @@ static IfScene *if_scene_new(int W, int H, unsigned char *px, unsigned seed, int
   }
   if_fall_init();
   s->cv.px = px, s->cv.w = W, s->cv.h = H;
-  if_scene_init(s, W, H, seed, wins);
+  if_scene_init(s, W, H, seed, wins, st);
   if_text_init(tx, s->U * 100);
   s->tx = tx;
   return s;
@@ -3101,7 +3407,7 @@ static LRESULT CALLBACK if_wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
   return DefWindowProcW(h, m, w, l);
 }
 
-/* нельзя: заставка, блокировка, игра или видео на весь экран, кто-то держит
+/* нельзя: заставка, блокировка, игра или видео на весь экран (на любом мониторе), кто-то держит
    экран включённым (так видео и звонки не дают включиться и заставке),
    экономия заряда. strict 0 — только заставка и блокировка */
 static int if_blocked(int strict) {
@@ -3128,7 +3434,7 @@ static int if_blocked(int strict) {
       MONITORINFO mi;
       mi.cbSize = sizeof(mi);
       HMONITOR mon = MonitorFromWindow(fg, MONITOR_DEFAULTTONULL);
-      if (mon && GetMonitorInfoW(mon, &mi) && (mi.dwFlags & MONITORINFOF_PRIMARY) && GetWindowRect(fg, &r) &&
+      if (mon && GetMonitorInfoW(mon, &mi) && GetWindowRect(fg, &r) &&
           r.left <= mi.rcMonitor.left && r.top <= mi.rcMonitor.top && r.right >= mi.rcMonitor.right &&
           r.bottom >= mi.rcMonitor.bottom)
         return 1;
@@ -3149,6 +3455,80 @@ static int if_blocked(int strict) {
   return 0;
 }
 
+/* мониторы: рабочие области (без панели задач) */
+static BOOL CALLBACK if_mon_cb(HMONITOR m, HDC dc, LPRECT rc, LPARAM l) {
+  (void)dc, (void)rc;
+  IfStage *st = (IfStage *)l;
+  MONITORINFO mi;
+  mi.cbSize = sizeof(mi);
+  if (st->nMon < IF_MAXMON && GetMonitorInfoW(m, &mi)) {
+    if (mi.dwFlags & MONITORINFOF_PRIMARY) st->prim = st->nMon;
+    st->mon[st->nMon++] = mi.rcWork;
+  }
+  return TRUE;
+}
+
+typedef HRESULT(WINAPI *IfDwmGetFn)(HWND, DWORD, PVOID, DWORD);
+typedef struct {
+  IfStage *st;
+  POINT o;          /* начало холста на экране */
+  IfDwmGetFn dwm;
+} IfWinCtx;
+
+/* окна сверху вниз по Z: видимые, не свёрнутые, не на другом рабочем столе */
+static BOOL CALLBACK if_win_cb(HWND h, LPARAM l) {
+  IfWinCtx *c = (IfWinCtx *)l;
+  if (c->st->nWin >= IF_MAXWIN) return FALSE;
+  if (!IsWindowVisible(h) || IsIconic(h)) return TRUE;
+  LONG ex = GetWindowLongW(h, GWL_EXSTYLE);
+  if (ex & (WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT)) return TRUE; /* свои и чужие прозрачные слои, всплывашки */
+  wchar_t cls[40] = L"";
+  GetClassNameW(h, cls, 40);
+  if (!wcscmp(cls, L"Progman") || !wcscmp(cls, L"WorkerW") || !wcscmp(cls, L"Shell_TrayWnd") ||
+      !wcscmp(cls, L"Shell_SecondaryTrayWnd") || !wcscmp(cls, L"CursorPadIdleFight"))
+    return TRUE;
+  RECT r;
+  DWORD cloaked = 0;
+  if (c->dwm && c->dwm(h, 14 /* DWMWA_CLOAKED */, &cloaked, sizeof(cloaked)) == S_OK && cloaked) return TRUE;
+  if (!c->dwm || c->dwm(h, 9 /* DWMWA_EXTENDED_FRAME_BOUNDS: без невидимой рамки */, &r, sizeof(r)) != S_OK)
+    if (!GetWindowRect(h, &r)) return TRUE;
+  if (r.right - r.left < 60 || r.bottom - r.top < 40) return TRUE;
+  OffsetRect(&r, -c->o.x, -c->o.y);
+  c->st->win[c->st->nWin++] = r;
+  return TRUE;
+}
+
+static void if_get_windows(IfStage *st, POINT o) {
+  static IfDwmGetFn dwm;
+  static int tried;
+  if (!tried) {
+    tried = 1;
+    HMODULE m = LoadLibraryExW(L"dwmapi.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    if (m) dwm = (IfDwmGetFn)(void *)GetProcAddress(m, "DwmGetWindowAttribute");
+  }
+  IfWinCtx c = {st, o, dwm};
+  st->nWin = 0;
+  EnumWindows(if_win_cb, (LPARAM)&c);
+}
+
+/* холст на все мониторы; слишком большой (стена из 4K) — только главный */
+static int if_get_stage(IfStage *st, RECT *canvas) {
+  memset(st, 0, sizeof(*st));
+  st->prim = 0;
+  EnumDisplayMonitors(NULL, NULL, if_mon_cb, (LPARAM)st);
+  if (st->nMon <= 0) return 0;
+  RECT u = st->mon[st->prim];
+  for (int i = 0; i < st->nMon; i++) UnionRect(&u, &u, &st->mon[i]);
+  if ((double)(u.right - u.left) * (u.bottom - u.top) > 40e6 || u.right - u.left > 16384 || u.bottom - u.top > 16384) {
+    st->mon[0] = st->mon[st->prim];
+    st->nMon = 1, st->prim = 0;
+    u = st->mon[0];
+  }
+  for (int i = 0; i < st->nMon; i++) OffsetRect(&st->mon[i], -u.left, -u.top);
+  *canvas = u;
+  return 1;
+}
+
 static DWORD WINAPI if_thread(LPVOID arg) {
   int demo = (int)(INT_PTR)arg;
   HINSTANCE hi = GetModuleHandleW(NULL);
@@ -3159,13 +3539,13 @@ static DWORD WINAPI if_thread(LPVOID arg) {
   wc.hInstance = hi;
   wc.lpszClassName = L"CursorPadIdleFight";
   RegisterClassExW(&wc); /* второй раз — просто откажет, класс уже есть */
-  MONITORINFO mi;
-  mi.cbSize = sizeof(mi);
-  POINT o0 = {0, 0};
-  if (!GetMonitorInfoW(MonitorFromPoint(o0, MONITOR_DEFAULTTOPRIMARY), &mi)) return 0;
-  RECT wa = mi.rcWork;
+  static IfStage st; /* один поток боя за раз */
+  RECT wa;
+  if (!if_get_stage(&st, &wa)) return 0;
   int W = wa.right - wa.left, H = wa.bottom - wa.top;
   if (W < 320 || H < 240) return 0;
+  POINT org = {wa.left, wa.top};
+  if_get_windows(&st, org);
   HWND w = CreateWindowExW(WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
                            wc.lpszClassName, L"", WS_POPUP, wa.left, wa.top, W, H, NULL, NULL, hi, NULL);
   if (!w) return 0;
@@ -3177,7 +3557,7 @@ static DWORD WINAPI if_thread(LPVOID arg) {
   bi.bmiHeader.biPlanes = 1, bi.bmiHeader.biBitCount = 32;
   void *bits = NULL;
   HBITMAP bm = dc ? CreateDIBSection(dc, &bi, DIB_RGB_COLORS, &bits, NULL, 0) : NULL;
-  IfScene *s = bm ? if_scene_new(W, H, (unsigned char *)bits, GetTickCount() * 2654435761u + 17u, g_ifWins) : NULL;
+  IfScene *s = bm ? if_scene_new(W, H, (unsigned char *)bits, GetTickCount() * 2654435761u + 17u, g_ifWins, &st) : NULL;
   if (!s) {
     if (bm) DeleteObject(bm);
     if (dc) DeleteDC(dc);
@@ -3228,6 +3608,10 @@ static DWORD WINAPI if_thread(LPVOID arg) {
     if (g_ifScreenOff) {
       why = 2;
       break;
+    }
+    if (frames % 120 == 90) { /* окна могли сдвинуть, закрыть, открыть */
+      if_get_windows(&st, org);
+      if_stage_windows(s, &st);
     }
     if (frames % 60 == 30) {
       if (if_blocked(!demo)) {
@@ -3350,7 +3734,7 @@ static void idle_fight_demo(void) {
    том же экране: среднее и худшее, отдельно в территории; заодно проверка, что
    всё нарисованное попало в «грязный» прямоугольник. --idledemo (в cursorpad.c) —
    настоящее окно боя, как по кнопке, но ввод его не останавливает: снимать экран
-   в Wine */
+   в Wine. --idlestage папка — два монитора и окна (ниже) */
 enum { SH_MV, SH_EF, SH_DOM, SH_RP };
 typedef struct {
   int kind, a, b;
@@ -3439,7 +3823,7 @@ static void if_shot_write(const IfScene *s, const BYTE *scr, BYTE *img, int CW, 
 static void if_test_shots(const wchar_t *dir) {
   int W = 1920, H = 1040, CW = 1280, CH = 720, wins[2] = {0, 0};
   BYTE *px = (BYTE *)calloc((size_t)W * H, 4), *scr = (BYTE *)malloc((size_t)W * H * 4), *img = (BYTE *)malloc((size_t)CW * CH * 4);
-  IfScene *s = px && scr && img ? if_scene_new(W, H, px, 20261014u, wins) : NULL;
+  IfScene *s = px && scr && img ? if_scene_new(W, H, px, 20261014u, wins, NULL) : NULL;
   if (!s) return;
   st_fake_screen(scr, W, H);
   int was[IF_SHOTS], got[IF_SHOTS], left = IF_SHOTS;
@@ -3495,7 +3879,7 @@ static void if_test_bench(const wchar_t *path) {
   long N = 60L * 60 * 12;
   BYTE *px = (BYTE *)calloc((size_t)W * H, 4);
   float *ms = (float *)malloc(sizeof(float) * N), *md = (float *)malloc(sizeof(float) * N);
-  IfScene *s = px && ms && md ? if_scene_new(W, H, px, 777u, wins) : NULL;
+  IfScene *s = px && ms && md ? if_scene_new(W, H, px, 777u, wins, NULL) : NULL;
   if (!s) return;
   LARGE_INTEGER fq, t0, t1, t2;
   QueryPerformanceFrequency(&fq);
@@ -3556,4 +3940,102 @@ static void if_test_bench(const wchar_t *path) {
   if_scene_free(s);
   free(px), free(ms), free(md);
 }
+/* --idlestage папка — бой на выдуманных двух мониторах с окнами: левый 1920×1040
+   (главный), правый 1280×840 выше и короче; три окна. Кадр всего холста каждые
+   полторы секунды и счёт: сколько бойцы были на окнах, на втором мониторе, сколько
+   раз прыгали наверх и сколько снарядов разбилось об окна */
+static void if_test_stage(const wchar_t *dir) {
+  static IfStage st;
+  memset(&st, 0, sizeof(st));
+  int W = 3200, H = 1040, wins[2] = {0, 0};
+  SetRect(&st.mon[0], 0, 0, 1920, 1040), SetRect(&st.mon[1], 1920, 60, 3200, 900);
+  st.nMon = 2, st.prim = 0;
+  SetRect(&st.win[0], 1060, 420, 1700, 900); /* сверху по Z: закрывает край нижнего */
+  SetRect(&st.win[1], 300, 330, 1200, 800);
+  SetRect(&st.win[2], 2250, 470, 2950, 880);
+  st.nWin = 3;
+  BYTE *px = (BYTE *)calloc((size_t)W * H, 4), *scr = (BYTE *)malloc((size_t)W * H * 4), *img = (BYTE *)malloc((size_t)W * H * 4);
+  IfScene *s = px && scr && img ? if_scene_new(W, H, px, 4242u, wins, &st) : NULL;
+  if (!s) return;
+  for (int y = 0; y < H; y++)
+    for (int x = 0; x < W; x++) {
+      BYTE *d = scr + ((size_t)y * W + x) * 4;
+      int on = 0, win = -1;
+      for (int m = 0; m < st.nMon; m++) on |= PtInRect(&st.mon[m], (POINT){x, y});
+      for (int k = st.nWin - 1; k >= 0; k--)
+        if (PtInRect(&st.win[k], (POINT){x, y})) win = k;
+      int bar = win >= 0 && y < st.win[win].top + 30;
+      d[0] = (BYTE)(!on ? 20 : bar ? 200 : win >= 0 ? 245 - win * 12 : 120 + 100 * y / H);
+      d[1] = (BYTE)(!on ? 20 : bar ? 120 : win >= 0 ? 245 - win * 12 : 80 + 60 * y / H);
+      d[2] = (BYTE)(!on ? 20 : bar ? 40 : win >= 0 ? 245 - win * 12 : 40 + 30 * x / 1920);
+      d[3] = 255;
+    }
+  wchar_t lp[MAX_PATH];
+  swprintf(lp, MAX_PATH, L"%ls\\stage.txt", dir);
+  FILE *log = _wfopen(lp, L"w");
+  if (log) {
+    for (int i = 0; i < s->nPl; i++)
+      fprintf(log, "plat %d: x %.0f..%.0f top %.1f bot %.1f solid %d wl %d wr %d\n", i, s->pl[i].x0, s->pl[i].x1, s->pl[i].top,
+              s->pl[i].bot, s->pl[i].solid, s->pl[i].wl, s->pl[i].wr);
+  }
+  long onWin[2] = {0, 0}, onM2[2] = {0, 0}, leaps[2] = {0, 0}, winBoom = 0, N = 60L * 60 * 8, shots = 0;
+  float m2 = 1920 / s->U;
+  int wasJump[2] = {0, 0};
+  for (long f = 0; f < N; f++) {
+    int pj[IF_MAXJ];
+    for (int j = 0; j < IF_MAXJ; j++) pj[j] = s->pj[j].kind;
+    if_step(s);
+    if_dom_build(s);
+    for (int j = 0; j < IF_MAXJ; j++) /* снаряд пропал не у края экрана и не у земли — разбился об окно или попал */
+      if ((pj[j] == PJ_RED || pj[j] == PJ_ARROW) && s->pj[j].kind == PJ_NONE) {
+        const IfProj *p = &s->pj[j];
+        for (int i = s->nFix; i < s->nPl; i++) {
+          const IfPlat *q = &s->pl[i];
+          if (p->x > q->x0 - 12 && p->x < q->x1 + 12 && p->y > q->bot - 12 && p->y < q->top + 12 &&
+              (fabsf(p->x - q->x0) < 12 || fabsf(p->x - q->x1) < 12 || fabsf(p->y - q->top) < 12)) {
+            winBoom++;
+            break;
+          }
+        }
+      }
+    for (int i = 0; i < 2; i++) {
+      IfFighter *F = &s->F[i];
+      if (F->fl > if_ground(s, F->x) + 0.5f && F->y - F->fl < 1) onWin[i]++;
+      if (F->x > m2) onM2[i]++;
+      int jmp = F->st == FS_JUMP && F->vy > 9;
+      if (jmp && !wasJump[i]) leaps[i]++;
+      wasJump[i] = jmp;
+    }
+    if (f % 90 == 0 && shots < 60) {
+      memset(px, 0, (size_t)W * H * 4);
+      if_render(s);
+      for (size_t k = 0; k < (size_t)W * H; k++) {
+        const BYTE *p = px + k * 4, *b = scr + k * 4;
+        BYTE *d = img + k * 4;
+        int a = 255 - p[3];
+        for (int q = 0; q < 3; q++) {
+          int v = p[q] + (b[q] * a + 127) / 255;
+          d[q] = (BYTE)(v > 255 ? 255 : v);
+        }
+        d[3] = 255;
+      }
+      wchar_t path[MAX_PATH];
+      swprintf(path, MAX_PATH, L"%ls\\stage_%02ld.bmp", dir, shots);
+      st_write_bmp(path, img, W, H);
+      if (log)
+        fprintf(log, "shot %02ld frame %ld: G x %.0f y %.1f fl %.1f st %d | S x %.0f y %.1f fl %.1f st %d | dom %d\n", shots, f,
+                s->F[0].x, s->F[0].y, s->F[0].fl, s->F[0].st, s->F[1].x, s->F[1].y, s->F[1].fl, s->F[1].st, s->dom);
+      shots++;
+    }
+  }
+  if (log) {
+    fprintf(log, "frames %ld, rounds %d, score %d:%d\n", N, s->round, wins[0], wins[1]);
+    fprintf(log, "on window: G %.1f%% S %.1f%%; on monitor 2: G %.1f%% S %.1f%%; high leaps G %ld S %ld; window booms %ld\n",
+            onWin[0] * 100.0 / N, onWin[1] * 100.0 / N, onM2[0] * 100.0 / N, onM2[1] * 100.0 / N, leaps[0], leaps[1], winBoom);
+    fclose(log);
+  }
+  if_scene_free(s);
+  free(px), free(scr), free(img);
+}
 #endif
+
