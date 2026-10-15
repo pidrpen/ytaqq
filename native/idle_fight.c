@@ -637,6 +637,10 @@ static void if_start(IfScene *s, IfFighter *F, int mv) {
   s->stat[mv]++;
   if_set_anim(F, m->anim, 1);
   if (m->name && mv != MV_G_VOID && mv != MV_S_SHRINE) if_call(s, F, m->name, if_tech_col(mv), 90);
+  if (mv == MV_G_VOID || mv == MV_S_SHRINE) { /* купол — там, где бой: фон начинают строить в этом же кадре */
+    const IfFighter *O = if_foe(s, F);
+    s->domX = mv == MV_G_VOID ? (F->x + O->x) * 0.5f : F->x * 0.6f + O->x * 0.4f, s->domFl = F->fl;
+  }
   if (mv == MV_G_PURPLE || mv == MV_G_VOID) F->inv = mv == MV_G_VOID ? 112 : 0;
   if (mv == MV_S_SHRINE) F->inv = 94, F->power = 1;
   if (mv == MV_S_FUGA) F->power = 1;
@@ -844,7 +848,6 @@ static void if_move_events(IfScene *s, IfFighter *F, float t0, float t) {
     }
     break;
   case MV_G_VOID:
-    if (AT(1)) s->domX = (F->x + O->x) * 0.5f, s->domFl = F->fl; /* где будет купол — сразу: фон строится с жеста */
     if (AT(12)) F->blind = 0;
     if (AT(26) && !s->dom) {
       s->dom = DOM_VOID, s->domOwner = F->who, s->domPhase = DP_CAST, s->domT = 0, s->domDone = 1;
@@ -903,7 +906,6 @@ static void if_move_events(IfScene *s, IfFighter *F, float t0, float t) {
     }
     break;
   case MV_S_SHRINE:
-    if (AT(1)) s->domX = F->x * 0.6f + O->x * 0.4f, s->domFl = F->fl;
     if (AT(14) && !s->dom) {
       s->dom = DOM_SHRINE, s->domOwner = F->who, s->domPhase = DP_CAST, s->domT = 0, s->domDone = 1;
       if_banner(s, L"РАСШИРЕНИЕ ТЕРРИТОРИИ", L"СВЯТИЛИЩЕ ЗЛОБЫ", 2, 170);
@@ -1033,9 +1035,9 @@ static int if_perch(const IfScene *s, const IfFighter *F, float *tx, float *ty) 
   for (int i = s->nFix; i < s->nPl; i++) {
     const IfPlat *p = &s->pl[i];
     float dy = p->top - F->fl;
-    if (dy < 30 || dy > 650 || p->x1 - p->x0 < 40) continue;
+    if (dy < 30 || p->x1 - p->x0 < 40) continue; /* высота любая: Годжо — телепортом, Сукуна — прыжком */
     float cx = fa_clampf(F->x, p->x0 + 18, p->x1 - 18), dx = fabsf(cx - F->x);
-    if (dx > 300 || dx + dy * 0.3f >= best) continue;
+    if (dx > 420 || dx + dy * 0.3f >= best) continue;
     best = dx + dy * 0.3f, *tx = cx, *ty = p->top;
   }
   return best < 1e8f;
@@ -1082,7 +1084,19 @@ static void if_do(IfScene *s, IfFighter *F, int act) {
   }
   case ACT_PERCH: { /* на окно: оттуда — техниками */
     float tx, ty;
-    if (if_perch(s, F, &tx, &ty)) if_leap(F, tx - F->x, ty - F->y);
+    if (!if_perch(s, F, &tx, &ty)) break;
+    if (F->who == 0 && ty - F->y > 180) { /* высоко: Годжо просто оказывается наверху */
+      if_teleport_out(s, F);
+      F->x = tx, F->y = F->fl = ty, F->vx = F->vy = 0;
+      if_set_state(F, FS_IDLE);
+      if_eff(s, EF_TELE, F->x, F->y, 16, 1);
+      break;
+    }
+    if_leap(F, tx - F->x, ty - F->y);
+    if (ty - F->y > 180) /* высоко: Сукуна отталкивается со всей силы — пыль и трещина */
+      for (int i = 0; i < 10; i++)
+        if_part(s, PT_DUST, F->x + if_rr(&s->seed, -10, 10), F->fl + 1, if_rr(&s->seed, -2.2f, 2.2f), if_rr(&s->seed, 0.3f, 1.4f),
+                if_rr(&s->seed, 18, 30), if_rr(&s->seed, 2, 4), FC(200, 196, 190));
     break;
   }
   case ACT_ROAM: { /* увести бой на соседний монитор: Годжо — телепортом, Сукуна — бегом */
@@ -1163,8 +1177,8 @@ static void if_ai(IfScene *s, IfFighter *F) {
     int ult = F->who ? MV_S_FUGA : MV_G_PURPLE;
     int late = s->roundT > 600 && if_can(F, ult); /* самое сильное — не с первых секунд */
     float px, py;
-    if (d > 46 && if_perch(s, F, &px, &py)) if_opt(s, F, o, &n, ACT_PERCH, 3);
-    if (d > 46 && if_on_window(s, F)) if_opt(s, F, o, &n, ACT_DROP, 10); /* бой — больше на земле */
+    if (d > 46 && if_perch(s, F, &px, &py)) if_opt(s, F, o, &n, ACT_PERCH, 7);
+    if (d > 46 && if_on_window(s, F)) if_opt(s, F, o, &n, ACT_DROP, 6); /* бой — больше на земле */
     if (late && d < 46) if_opt(s, F, o, &n, ACT_BACK, 8); /* для него нужен простор */
     if (s->nMon > 1 && s->roamT <= 0 && d < 160 && F->hp > 250) if_opt(s, F, o, &n, ACT_ROAM, 9); /* бой — на другой монитор */
     if (F->who == 0) {
@@ -4266,9 +4280,9 @@ static void if_test_stage(const wchar_t *dir, int three) {
     W = 5120, H = 1120;
     SetRect(&st.mon[0], 0, 80, 1920, 1120), SetRect(&st.mon[1], 1920, 0, 3840, 1040), SetRect(&st.mon[2], 3840, 200, 5120, 1000);
     st.nMon = 3, st.prim = 1;
-    SetRect(&st.win[0], 2400, 400, 3300, 900);
-    SetRect(&st.win[1], 300, 500, 1300, 1000);
-    SetRect(&st.win[2], 4100, 520, 4900, 900);
+    SetRect(&st.win[0], 2400, 140, 3300, 900); /* высокие окна: верх почти у края экрана */
+    SetRect(&st.win[1], 300, 260, 1300, 1000);
+    SetRect(&st.win[2], 4100, 330, 4900, 900);
   } else {
     SetRect(&st.mon[0], 0, 0, 1920, 1040), SetRect(&st.mon[1], 1920, 60, 3200, 900);
     st.nMon = 2, st.prim = 0;
