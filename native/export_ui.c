@@ -160,6 +160,281 @@ static void xp_start(void) {
   }
 }
 
+/* ---- выбор по ячейкам в таблице -------------------------------------------
+   Клик — ячейка, Shift+клик/стрелки — диапазон, мышью с зажатой кнопкой —
+   тоже; Ctrl+A — всё, Ctrl+C / двойной клик — в буфер (ячейки через табы,
+   строки через перевод строки — в Excel ложится по ячейкам). Правый клик —
+   меню; клик по заголовку — весь столбец. */
+#define XP_CM_CELL 1
+#define XP_CM_ROW 2
+#define XP_CM_COL 3
+#define XP_CM_SEL 4
+#define XP_CM_ALL 5
+static WNDPROC g_xpListOld;
+static int g_xpAr = -1, g_xpAc, g_xpCr = -1, g_xpCc; /* якорь и текущая ячейка */
+static BOOL g_xpDrag;
+
+static int xp_ncols(void) { return Header_GetItemCount(ListView_GetHeader(g_xpList)); }
+
+static void xp_sel_rect(int *r0, int *r1, int *c0, int *c1) {
+  *r0 = g_xpAr < g_xpCr ? g_xpAr : g_xpCr;
+  *r1 = g_xpAr < g_xpCr ? g_xpCr : g_xpAr;
+  *c0 = g_xpAc < g_xpCc ? g_xpAc : g_xpCc;
+  *c1 = g_xpAc < g_xpCc ? g_xpCc : g_xpAc;
+}
+
+static void xp_sel_set(int r, int c, BOOL extend) {
+  int nr = ListView_GetItemCount(g_xpList), nc = xp_ncols();
+  if (nr <= 0 || nc <= 0) return;
+  r = r < 0 ? 0 : r >= nr ? nr - 1 : r;
+  c = c < 0 ? 0 : c >= nc ? nc - 1 : c;
+  g_xpCr = r;
+  g_xpCc = c;
+  if (!extend || g_xpAr < 0) {
+    g_xpAr = r;
+    g_xpAc = c;
+  }
+  ListView_EnsureVisible(g_xpList, r, FALSE);
+  RECT cr, lr;
+  GetClientRect(g_xpList, &lr);
+  if (ListView_GetSubItemRect(g_xpList, r, c, LVIR_BOUNDS, &cr) && c > 0) {
+    if (cr.left < 0) SendMessageW(g_xpList, LVM_SCROLL, cr.left, 0);
+    else if (cr.right > lr.right) SendMessageW(g_xpList, LVM_SCROLL, cr.right - lr.right < cr.left ? cr.right - lr.right : cr.left, 0);
+  }
+  InvalidateRect(g_xpList, NULL, FALSE);
+}
+
+static void xp_sel_clear(void) {
+  g_xpAr = g_xpCr = -1;
+  g_xpDrag = FALSE;
+}
+
+/* текст ячейки; в кавычки — если внутри таб, перевод строки или кавычка */
+static void xp_copy_range(int r0, int r1, int c0, int c1) {
+  if (r0 < 0 || r1 < r0 || c1 < c0) return;
+  size_t cap = 1024, len = 0;
+  wchar_t *buf = (wchar_t *)malloc(cap * sizeof(wchar_t));
+  if (!buf) return;
+  wchar_t cell[2048];
+  for (int r = r0; r <= r1; r++) {
+    for (int c = c0; c <= c1; c++) {
+      LVITEMW it;
+      memset(&it, 0, sizeof(it));
+      it.iSubItem = c;
+      it.pszText = cell;
+      it.cchTextMax = 2048;
+      cell[0] = 0;
+      SendMessageW(g_xpList, LVM_GETITEMTEXTW, (WPARAM)r, (LPARAM)&it);
+      BOOL q = wcspbrk(cell, L"\t\r\n\"") != NULL;
+      size_t need = len + wcslen(cell) * 2 + 8;
+      if (need > cap) {
+        while (need > cap) cap *= 2;
+        wchar_t *nb = (wchar_t *)realloc(buf, cap * sizeof(wchar_t));
+        if (!nb) {
+          free(buf);
+          return;
+        }
+        buf = nb;
+      }
+      if (q) buf[len++] = L'"';
+      for (const wchar_t *p = cell; *p; p++) {
+        if (*p == L'"' && q) buf[len++] = L'"';
+        buf[len++] = *p;
+      }
+      if (q) buf[len++] = L'"';
+      if (c < c1) buf[len++] = L'\t';
+    }
+    if (r < r1) {
+      buf[len++] = L'\r';
+      buf[len++] = L'\n';
+    }
+  }
+  buf[len] = 0;
+  HGLOBAL mem = GlobalAlloc(GMEM_MOVEABLE, (len + 1) * sizeof(wchar_t));
+  if (mem) {
+    memcpy(GlobalLock(mem), buf, (len + 1) * sizeof(wchar_t));
+    GlobalUnlock(mem);
+    if (OpenClipboard(g_xpWnd)) {
+      EmptyClipboard();
+      if (!SetClipboardData(CF_UNICODETEXT, mem)) GlobalFree(mem);
+      CloseClipboard();
+      int cells = (r1 - r0 + 1) * (c1 - c0 + 1);
+      xp_status(cells == 1 ? L"Ячейка скопирована" : L"Скопировано ячеек: %d — вставьте в Excel", cells);
+    } else {
+      GlobalFree(mem);
+    }
+  }
+  free(buf);
+}
+
+static void xp_copy_cmd(int what) {
+  int nr = ListView_GetItemCount(g_xpList), nc = xp_ncols();
+  if (nr <= 0 || nc <= 0) return;
+  int r0, r1, c0, c1;
+  if (what == XP_CM_ALL) {
+    r0 = 0, r1 = nr - 1, c0 = 0, c1 = nc - 1;
+  } else if (g_xpCr < 0) {
+    return;
+  } else if (what == XP_CM_SEL) {
+    xp_sel_rect(&r0, &r1, &c0, &c1);
+  } else if (what == XP_CM_ROW) {
+    r0 = r1 = g_xpCr, c0 = 0, c1 = nc - 1;
+  } else if (what == XP_CM_COL) {
+    r0 = 0, r1 = nr - 1, c0 = c1 = g_xpCc;
+  } else {
+    r0 = r1 = g_xpCr, c0 = c1 = g_xpCc;
+  }
+  xp_copy_range(r0, r1, c0, c1);
+}
+
+static BOOL xp_hit(LPARAM lp, int *r, int *c) {
+  LVHITTESTINFO h;
+  memset(&h, 0, sizeof(h));
+  h.pt.x = (short)LOWORD(lp);
+  h.pt.y = (short)HIWORD(lp);
+  if (SendMessageW(g_xpList, LVM_SUBITEMHITTEST, 0, (LPARAM)&h) < 0 || h.iItem < 0 || h.iSubItem < 0) return FALSE;
+  *r = h.iItem;
+  *c = h.iSubItem;
+  return TRUE;
+}
+
+static LRESULT CALLBACK XpListProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+  int r, c;
+  switch (msg) {
+  case WM_GETDLGCODE:
+    return DLGC_WANTARROWS | DLGC_WANTCHARS;
+  case WM_LBUTTONDOWN:
+  case WM_LBUTTONDBLCLK:
+    SetFocus(hwnd);
+    if (xp_hit(lParam, &r, &c)) {
+      xp_sel_set(r, c, (wParam & MK_SHIFT) != 0);
+      if (msg == WM_LBUTTONDBLCLK) xp_copy_cmd(XP_CM_CELL);
+      else {
+        g_xpDrag = TRUE;
+        SetCapture(hwnd);
+      }
+    }
+    return 0;
+  case WM_MOUSEMOVE:
+    if (g_xpDrag && (wParam & MK_LBUTTON)) {
+      POINT pt = {(short)LOWORD(lParam), (short)HIWORD(lParam)};
+      RECT lr;
+      GetClientRect(hwnd, &lr);
+      if (pt.y < lr.top + XS(24)) { /* у верхнего/нижнего края — прокрутка */
+        SendMessageW(hwnd, WM_VSCROLL, SB_LINEUP, 0);
+      } else if (pt.y > lr.bottom - XS(4)) {
+        SendMessageW(hwnd, WM_VSCROLL, SB_LINEDOWN, 0);
+      }
+      if (xp_hit(lParam, &r, &c) && (r != g_xpCr || c != g_xpCc)) xp_sel_set(r, c, TRUE);
+      return 0;
+    }
+    break;
+  case WM_LBUTTONUP:
+    if (g_xpDrag) {
+      g_xpDrag = FALSE;
+      ReleaseCapture();
+    }
+    return 0;
+  case WM_CAPTURECHANGED:
+    g_xpDrag = FALSE;
+    break;
+  case WM_RBUTTONDOWN:
+    SetFocus(hwnd);
+    if (xp_hit(lParam, &r, &c)) {
+      int r0, r1, c0, c1;
+      BOOL inside = FALSE;
+      if (g_xpCr >= 0) {
+        xp_sel_rect(&r0, &r1, &c0, &c1);
+        inside = r >= r0 && r <= r1 && c >= c0 && c <= c1;
+      }
+      if (!inside) xp_sel_set(r, c, FALSE);
+    }
+    return 0;
+  case WM_CONTEXTMENU: {
+    if (g_xpCr < 0) return 0;
+    POINT pt = {(short)LOWORD(lParam), (short)HIWORD(lParam)};
+    if (pt.x == -1 && pt.y == -1) {
+      pt.x = pt.y = 0;
+      ClientToScreen(hwnd, &pt);
+    }
+    int r0, r1, c0, c1;
+    xp_sel_rect(&r0, &r1, &c0, &c1);
+    HMENU m = CreatePopupMenu();
+    AppendMenuW(m, MF_STRING, XP_CM_CELL, L"Копировать ячейку");
+    AppendMenuW(m, MF_STRING, XP_CM_ROW, L"Копировать строку");
+    AppendMenuW(m, MF_STRING, XP_CM_COL, L"Копировать столбец");
+    if (r1 > r0 || c1 > c0) AppendMenuW(m, MF_STRING, XP_CM_SEL, L"Копировать выделенное\tCtrl+C");
+    AppendMenuW(m, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(m, MF_STRING, XP_CM_ALL, L"Копировать всё\tCtrl+A, Ctrl+C");
+    int cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, NULL);
+    DestroyMenu(m);
+    if (cmd) xp_copy_cmd(cmd);
+    return 0;
+  }
+  case WM_KEYDOWN: {
+    BOOL sh = GetKeyState(VK_SHIFT) < 0, ct = GetKeyState(VK_CONTROL) < 0;
+    int nr = ListView_GetItemCount(hwnd), nc = xp_ncols();
+    if (ct && (wParam == 'C' || wParam == VK_INSERT)) {
+      xp_copy_cmd(XP_CM_SEL);
+      return 0;
+    }
+    if (ct && wParam == 'A') {
+      if (nr > 0 && nc > 0) {
+        g_xpAr = 0;
+        g_xpAc = 0;
+        g_xpCr = nr - 1;
+        g_xpCc = nc - 1;
+        InvalidateRect(hwnd, NULL, FALSE);
+      }
+      return 0;
+    }
+    if (g_xpCr < 0 && nr > 0 && wParam >= VK_PRIOR && wParam <= VK_DOWN) {
+      xp_sel_set(0, 0, FALSE);
+      return 0;
+    }
+    int page = ListView_GetCountPerPage(hwnd);
+    switch (wParam) {
+    case VK_UP: xp_sel_set(g_xpCr - 1, g_xpCc, sh); return 0;
+    case VK_DOWN: xp_sel_set(g_xpCr + 1, g_xpCc, sh); return 0;
+    case VK_LEFT: xp_sel_set(g_xpCr, g_xpCc - 1, sh); return 0;
+    case VK_RIGHT: xp_sel_set(g_xpCr, g_xpCc + 1, sh); return 0;
+    case VK_PRIOR: xp_sel_set(g_xpCr - page, g_xpCc, sh); return 0;
+    case VK_NEXT: xp_sel_set(g_xpCr + page, g_xpCc, sh); return 0;
+    case VK_HOME: xp_sel_set(ct ? 0 : g_xpCr, 0, sh); return 0;
+    case VK_END: xp_sel_set(ct ? nr - 1 : g_xpCr, nc - 1, sh); return 0;
+    }
+    break;
+  }
+  case WM_CHAR:
+    return 0;
+  }
+  return CallWindowProcW(g_xpListOld, hwnd, msg, wParam, lParam);
+}
+
+/* подсветка ячеек диапазона; остальное рисует сам список */
+static LRESULT xp_list_draw(NMLVCUSTOMDRAW *cd) {
+  switch (cd->nmcd.dwDrawStage) {
+  case CDDS_PREPAINT:
+    return CDRF_NOTIFYITEMDRAW;
+  case CDDS_ITEMPREPAINT:
+    return CDRF_NOTIFYSUBITEMDRAW;
+  case CDDS_ITEMPREPAINT | CDDS_SUBITEM:
+    cd->clrTextBk = ListView_GetBkColor(g_xpList); /* цвета переходят на следующую ячейку — сброс */
+    cd->clrText = GetSysColor(COLOR_WINDOWTEXT);
+    if (g_xpCr >= 0) {
+      int r0, r1, c0, c1, r = (int)cd->nmcd.dwItemSpec, c = cd->iSubItem;
+      xp_sel_rect(&r0, &r1, &c0, &c1);
+      if (r >= r0 && r <= r1 && c >= c0 && c <= c1) {
+        BOOL cur = r == g_xpCr && c == g_xpCc;
+        cd->clrTextBk = cur ? RGB(0x1F, 0x5F, 0xA8) : RGB(0xCF, 0xE3, 0xF8);
+        cd->clrText = cur ? RGB(255, 255, 255) : RGB(0, 0, 0);
+      }
+    }
+    return CDRF_NEWFONT;
+  }
+  return CDRF_DODEFAULT;
+}
+
 /* таблица окна — выбранный лист; больше 3000 строк не показываем (в Excel — все) */
 #define XP_VIEW_MAX 3000
 static void xp_fill_list(void) {
@@ -168,6 +443,7 @@ static void xp_fill_list(void) {
   int k = kXpOrder[sel]; /* в списке листы — в порядке книги */
   SendMessageW(g_xpList, WM_SETREDRAW, FALSE, 0);
   ListView_DeleteAllItems(g_xpList);
+  xp_sel_clear();
   if (k != g_xpShown) {
     while (SendMessageW(g_xpList, LVM_DELETECOLUMN, 0, 0)) {
     }
@@ -455,6 +731,21 @@ static LRESULT CALLBACK XpProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
   case WM_DRAWITEM:
     draw_pad_button((const DRAWITEMSTRUCT *)lParam);
     return TRUE;
+  case WM_NOTIFY: {
+    NMHDR *nh = (NMHDR *)lParam;
+    if (nh->hwndFrom == g_xpList && nh->code == NM_CUSTOMDRAW) return xp_list_draw((NMLVCUSTOMDRAW *)lParam);
+    if (nh->hwndFrom == ListView_GetHeader(g_xpList) && (nh->code == HDN_ITEMCLICKW || nh->code == HDN_ITEMCLICKA)) {
+      int nr = ListView_GetItemCount(g_xpList);
+      if (nr > 0) { /* клик по заголовку — весь столбец */
+        g_xpAr = 0;
+        g_xpAc = g_xpCc = ((NMHEADERW *)lParam)->iItem;
+        g_xpCr = nr - 1;
+        InvalidateRect(g_xpList, NULL, FALSE);
+        SetFocus(g_xpList);
+      }
+    }
+    break;
+  }
   case WM_CTLCOLOREDIT: {
     HDC hdc = (HDC)wParam;
     SetBkColor(hdc, COL_PAPER);
@@ -506,6 +797,10 @@ static LRESULT CALLBACK XpProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
   }
   case WM_COMMAND: {
     int id = LOWORD(wParam);
+    if (id == ID_PANEL_MIN) {
+      ShowWindow(hwnd, SW_MINIMIZE);
+      return 0;
+    }
     if (id == ID_PANEL_CLOSE) ShowWindow(hwnd, SW_HIDE);
     if (id == ID_XP_BUILD) xp_start();
     if (id == ID_XP_SAVE) xp_save();
@@ -561,6 +856,7 @@ static void export_show(void) {
     if (!g_xpWnd) return;
     round_corners(g_xpWnd);
     mk_btn(g_xpWnd, L"×", ID_PANEL_CLOSE);
+    mk_btn(g_xpWnd, L"–", ID_PANEL_MIN);
     g_xpDes = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL, 0, 0,
                               10, 10, g_xpWnd, NULL, g_inst, NULL);
     if (g_fontBody) SendMessageW(g_xpDes, WM_SETFONT, (WPARAM)g_fontBody, FALSE);
@@ -589,7 +885,8 @@ static void export_show(void) {
     mk_btn(g_xpWnd, L"В пакет для загрузки…", ID_XP_PKG);
     g_xpList = CreateWindowExW(0, WC_LISTVIEWW, L"", WS_CHILD | WS_VISIBLE | WS_BORDER | LVS_REPORT | LVS_SHOWSELALWAYS,
                                0, 0, 10, 10, g_xpWnd, NULL, g_inst, NULL);
-    SendMessageW(g_xpList, LVM_SETEXTENDEDLISTVIEWSTYLE, 0, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
+    SendMessageW(g_xpList, LVM_SETEXTENDEDLISTVIEWSTYLE, 0, LVS_EX_GRIDLINES | LVS_EX_DOUBLEBUFFER);
+    g_xpListOld = (WNDPROC)SetWindowLongPtrW(g_xpList, GWLP_WNDPROC, (LONG_PTR)XpListProc);
     if (g_fontBody) SendMessageW(g_xpList, WM_SETFONT, (WPARAM)g_fontBody, FALSE);
     xp_prefs_load();
     xp_fill_view();
@@ -612,3 +909,30 @@ static void export_show(void) {
   SetFocus(g_xpDes);
   SendMessageW(g_xpDes, EM_SETSEL, 0, -1);
 }
+
+#ifdef SET_TEST /* только проверочная сборка: --xptest файл.txt — окно с тестовой таблицей, выбор ячеек, буфер — в файл */
+static void export_test(const wchar_t *out) {
+  export_show();
+  XpJob *x = xp_job_new();
+  if (!x) return;
+  XpTable *t = &x->t[XP_COMP];
+  for (int r = 0; r < 14; r++) {
+    wchar_t **row = xp_row(t);
+    for (int c = 0; c < t->ncols; c++) xp_setf(row, c, c == 1 ? L"АДЕ.%03d.%02d" : L"ячейка %d-%d", c == 1 ? 100 + r : r, c == 1 ? r : c);
+  }
+  xp_set(t->cell + 3 * t->ncols, 2, L"с\"кавычкой\tи табом");
+  g_xpJob = x;
+  g_xpShown = -1;
+  xp_fill_list();
+  xp_sel_set(2, 1, FALSE);
+  xp_sel_set(5, 3, TRUE);
+  xp_copy_cmd(XP_CM_SEL);
+  if (OpenClipboard(NULL)) {
+    HANDLE h = GetClipboardData(CF_UNICODETEXT);
+    FILE *f = _wfopen(out, L"wb");
+    if (h && f) fwrite(GlobalLock(h), 2, wcslen((wchar_t *)GlobalLock(h)), f);
+    if (f) fclose(f);
+    CloseClipboard();
+  }
+}
+#endif
