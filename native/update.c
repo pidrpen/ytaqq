@@ -278,6 +278,9 @@ static BOOL looks_like_html(const char *s) {
   return s[0] == '<' || (s[0] == '{' && strstr(s, "\"message\"") && strstr(s, "\"Not Found\""));
 }
 
+/* пока качается сама программа — проверка «это тот файл», чтобы негодный
+   ответ одного зеркала (старый файл из кэша) не обрывал перебор остальных */
+static BOOL (*g_updAccept)(const wchar_t *path);
 static int g_updSlowCut;   /* какое-то зеркало бросили за медленность */
 static int g_updCutSlow;  /* только пока качается сама программа */
 static BOOL http_get_to_file(const wchar_t *host, const wchar_t *path, const wchar_t *dest,
@@ -604,7 +607,10 @@ static BOOL http_get_any(const wchar_t *kind, const wchar_t *dest, DWORD maxn) {
     if (i < 0 || i >= n) continue;
     if (k >= 0 && i == g_updPrefer) continue;
     upd_log(L"  пробую %s", kUpdSrc[i].host);
-    if (fetch_from(i, kind, dest, maxn)) return TRUE;
+    if (fetch_from(i, kind, dest, maxn)) {
+      if (!g_updAccept || g_updAccept(dest)) return TRUE;
+      DeleteFileW(dest);
+    }
   }
   return FALSE;
 }
@@ -701,6 +707,15 @@ static void upd_resolve_pin(const wchar_t *tmp) {
     upd_log(L"  метку получить не удалось");
 }
 
+static BOOL looks_like_html_file(const wchar_t *path) {
+  char *peek = NULL;
+  DWORD pn = 0;
+  if (!read_file_bytes(path, &peek, &pn, 4096)) return FALSE;
+  BOOL bad = pn > 0 && looks_like_html(peek);
+  free(peek);
+  return bad;
+}
+
 static BOOL fetch_pinned(const wchar_t *file, const wchar_t *dest, DWORD maxn) {
   if (!g_updPin[0]) return FALSE;
   wchar_t path[320];
@@ -709,7 +724,28 @@ static BOOL fetch_pinned(const wchar_t *file, const wchar_t *dest, DWORD maxn) {
   for (int i = 0; i < (int)(sizeof(kUpdCdn) / sizeof(kUpdCdn[0])); i++) {
     upd_log(L"  пробую %s по метке", kUpdCdn[i]);
     if (http_get_to_file(kUpdCdn[i], path, dest, maxn, NULL)) {
+      if (g_updAccept && !g_updAccept(dest)) {
+        DeleteFileW(dest);
+        continue;
+      }
       lstrcpynW(g_updHostUsed, kUpdCdn[i], 80);
+      return TRUE;
+    }
+  }
+  /* jsDelivr только что слитый коммит ещё не забрал и отвечает 404 (и
+     помнит этот 404 какое-то время) — тот же коммит берём у самого GitHub */
+  static const wchar_t *kGh[2] = {L"raw.githubusercontent.com", L"github.com"};
+  for (int i = 0; i < 2; i++) {
+    _snwprintf(path, 320, i ? L"/pidrpen/ytaqq/raw/%s/public/%s" : L"/pidrpen/ytaqq/%s/public/%s",
+               g_updPin, file);
+    path[319] = 0;
+    upd_log(L"  пробую %s по метке", kGh[i]);
+    if (http_get_to_file(kGh[i], path, dest, maxn, NULL)) {
+      if (looks_like_html_file(dest) || (g_updAccept && !g_updAccept(dest))) {
+        DeleteFileW(dest);
+        continue;
+      }
+      lstrcpynW(g_updHostUsed, kGh[i], 80);
       return TRUE;
     }
   }
@@ -952,6 +988,10 @@ static BOOL upd_file_sha256(const wchar_t *path, char out[65]) {
 }
 
 /* скачанное — ровно тот выпуск, что объявлен (если отпечаток указан) */
+static BOOL file_is_pe(const wchar_t *path);
+static BOOL upd_sha_ok(const wchar_t *path);
+static BOOL upd_exe_ok(const wchar_t *path) { return file_is_pe(path) && upd_sha_ok(path); }
+
 static BOOL upd_sha_ok(const wchar_t *path) {
   if (!g_updSha[0]) return TRUE;
   char got[65];
@@ -1371,15 +1411,25 @@ static DWORD WINAPI update_thread(LPVOID param) {
   BOOL got_exe = FALSE;
   g_updSlowCut = 0;
   g_updCutSlow = 1;
-  if (g_updPinned) got_exe = fetch_pinned(L"CursorPad.bin", tmpe, 16 * 1024 * 1024) &&
-                             file_is_pe(tmpe) && upd_sha_ok(tmpe);
-  if (!got_exe) got_exe = http_get_any(L"e", tmpe, 16 * 1024 * 1024) && file_is_pe(tmpe) && upd_sha_ok(tmpe);
+  g_updAccept = upd_exe_ok;
+  if (g_updPinned) got_exe = fetch_pinned(L"CursorPad.bin", tmpe, 16 * 1024 * 1024);
+  if (!got_exe) got_exe = http_get_any(L"e", tmpe, 16 * 1024 * 1024);
+  if (!got_exe && g_updRemote[0]) {
+    /* последний запасной путь — файл со страницы выпуска на GitHub */
+    wchar_t rel[160];
+    _snwprintf(rel, 160, L"/pidrpen/ytaqq/releases/download/v%s/CursorPad.exe", g_updRemote);
+    rel[159] = 0;
+    upd_log(L"  пробую выпуск на github.com (v%s)", g_updRemote);
+    got_exe = http_get_to_file(L"github.com", rel, tmpe, 16 * 1024 * 1024, NULL) && upd_exe_ok(tmpe);
+  }
   if (!got_exe && g_updSlowCut) {
     upd_log(L"  быстрых зеркал нет — качаю с любого, без ограничения по скорости");
     g_updCutSlow = 0;
-    got_exe = http_get_any(L"e", tmpe, 16 * 1024 * 1024) && file_is_pe(tmpe) && upd_sha_ok(tmpe);
+    if (g_updPinned) got_exe = fetch_pinned(L"CursorPad.bin", tmpe, 16 * 1024 * 1024);
+    if (!got_exe) got_exe = http_get_any(L"e", tmpe, 16 * 1024 * 1024);
   }
   g_updCutSlow = 0;
+  g_updAccept = NULL;
   if (!got_exe) {
     upd_log(L"Итог: файл не скачался, повреждён или это не программа для Windows.");
     DeleteFileW(tmpe);
@@ -1473,6 +1523,7 @@ static void on_update_done(int code) {
     g_resultFiles = FALSE;
     g_plmCount = 0;
     g_ansTitle = L"Отчёт об обновлении";
+    g_ansPlain = TRUE;
     show_answer_text(g_updLog);
     show_status(g_updErr[0] ? g_updErr : L"GitHub недоступен");
     return;

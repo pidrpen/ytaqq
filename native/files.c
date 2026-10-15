@@ -1641,6 +1641,7 @@ static void files_show_changes(void) {
   text[cap - 1] = 0;
   g_plmCount = n;
   g_ansTitle = L"Изменения в папке";
+  g_ansPlain = FALSE;
   show_answer_text(text);
   free(text);
 }
