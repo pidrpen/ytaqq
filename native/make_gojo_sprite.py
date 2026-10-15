@@ -6,10 +6,16 @@ from PIL import Image
 here = os.path.dirname(os.path.abspath(__file__))
 im = Image.open(os.path.join(here, "gojo_sprite.png")).convert("RGBA")
 assert im.size == (32, 32)
+# сдвиг вправо: у кончика пальца должно хватать места под кольцо-метку (правая колонка отрезается)
+SHIFT = 2
+sh = Image.new("RGBA", (32, 32), (0, 0, 0, 0))
+sh.paste(im, (SHIFT, 0))
+im = sh
 a = im.split()[3]
-# кончик пальца — самая верхняя непрозрачная точка руки (левее и ниже волос)
-tip = min(((y, x) for y in range(32) for x in range(7) if y >= 6 and a.getpixel((x, y)) > 128))
-ty, tx = tip
+# кончик пальца — самая левая непрозрачная точка (рука вытянута влево); при равенстве — верхняя
+tip = min(((x, y) for y in range(32) for x in range(32) if a.getpixel((x, y)) > 128))
+tx, ty = tip
+
 px = list(im.tobytes())
 lines = []
 for i in range(0, len(px), 16):
