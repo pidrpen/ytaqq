@@ -239,6 +239,8 @@ static void fp_init(FPart *p, FCol lit, FCol dark, FCol line, float ow, float sh
 
 static FShape *fp_add(FPart *p) { return p->n < FP_MAX ? &p->s[p->n++] : NULL; }
 
+static int g_faHard; /* пиксель-арт: край формы жёсткий, без сглаживания */
+
 static void fp_draw(FCv *c, const FPart *p) {
   if (p->n <= 0 || p->alpha <= 0.004f) return;
   float m = p->ow + 1.0f;
@@ -283,34 +285,41 @@ static void fp_draw(FCv *c, const FPart *p) {
         }
       if (d >= edge) continue;
       float aF = fa_sat(0.5f - d), aO = fa_sat(edge - d);
+      if (g_faHard) {
+        aF = aF >= 0.5f ? 1.0f : 0.0f, aO = aO >= 0.5f ? 1.0f : 0.0f;
+        if (aO <= 0.0f) continue;
+      }
       FCol col = p->line;
       if (aF > 0.0f) {
         FCol fill = lit;
-        if (p->sh > 0.0f) {
+        /* расстояние до края меняется не быстрее сдвига: глубоко внутри формы точка,
+           сдвинутая на ширину тени или блика, всё равно внутри — там не считать */
+        if (p->sh > 0.0f && d > -p->sh - 0.5f) {
           float qx = fx + shx, qy = fy + shy, dq = 1e9f;
           for (int k = 0; k < na; k++) {
             float v = fs_sdf(&p->s[act[k]], qx, qy);
             if (v < dq) dq = v;
           }
           float ks = fa_sat(0.5f - dq); /* 1 — на свету */
+          FCol dd = dk;
           if (ks < 1.0f && p->core > 0.0f) { /* в самой глубине тени — ещё темнее */
             float d2 = 1e9f;
             for (int k = 0; k < na; k++) {
               float v = fs_sdf(&p->s[act[k]], fx + shx * 2.4f, fy + shy * 2.4f);
               if (v < d2) d2 = v;
             }
-            dk = fa_mix(fa_dim(dk, 1.0f - p->core), dk, fa_sat(0.5f - d2));
+            dd = fa_mix(fa_dim(dk, 1.0f - p->core), dk, fa_sat(0.5f - d2));
           }
-          fill = fa_mix(dk, lit, ks);
-          if (p->rim > 0.0f && ks > 0.0f) {
-            float dr = 1e9f;
-            for (int k = 0; k < na; k++) {
-              float v = fs_sdf(&p->s[act[k]], fx + rmx, fy + rmy);
-              if (v < dr) dr = v;
-            }
-            fill = fa_mix(fill, fa_mix(lit, FC(255, 255, 255), 0.32f), fa_sat(dr + 0.5f) * ks);
+          fill = fa_mix(dd, lit, ks);
+        }
+        if (p->rim > 0.0f && d > -p->rim - 0.5f) { /* блик по краю к свету */
+          float dr = 1e9f;
+          for (int k = 0; k < na; k++) {
+            float v = fs_sdf(&p->s[act[k]], fx + rmx, fy + rmy);
+            if (v < dr) dr = v;
           }
-          dk = p->grad ? fa_mix(p->dark, p->dark2, t) : p->dark;
+          float kr = fa_sat(dr + 0.5f);
+          if (kr > 0.0f) fill = fa_mix(fill, fa_mix(lit, FC(255, 255, 255), 0.32f), kr);
         }
         col = p->ow > 0.0f ? fa_mix(p->line, fill, aF / aO) : fill;
       }

@@ -300,8 +300,11 @@ typedef struct {
 } IfStage;
 
 typedef struct {
-  FCv cv;
-  int W, H;      /* холст, px */
+  FCv cv;        /* мир: маленький холст, пиксель-арт (k px экрана на точку) */
+  FCv big;       /* окно: мир крупными пикселями, поверх — чёткие надписи и шкалы */
+  int k;
+  RECT prevS, prevO; /* что задели в прошлом кадре: мир (маленький) и надписи (большой) */
+  int W, H;      /* холст мира, px */
   float U, gy;   /* px на единицу; экранный y земли */
   float xMin, xMax;
   float homeX, hudX, hudY; /* середина главного монитора: туда возвращаются, там шкалы */
@@ -2008,11 +2011,20 @@ static void if_stage_windows(IfScene *s, const IfStage *st) {
 
 /* сцена на холсте W×H; st — мониторы и окна в px холста (NULL — холст и есть
    экран, земля — нижний край) */
+/* рост бойцов на экране, px: по главному монитору (его ширина и высота в px экрана) */
+static float if_fig_h(int pw, int ph) { return fa_clampf(fminf(ph * 0.31f, pw * 0.2f), 120.0f, 420.0f); }
+
+/* размер пикселя пиксель-арта: боец — около 110 точек ростом */
+static int if_pick_k(int pw, int ph) {
+  int k = (int)lroundf(if_fig_h(pw, ph) / 110.0f);
+  return k < 1 ? 1 : (k > 6 ? 6 : k);
+}
+
 static void if_scene_init(IfScene *s, int W, int H, unsigned seed, int *wins, const IfStage *st) {
   RECT pm = {0, 0, W, H}; /* главный монитор: по нему рост бойцов, там шкалы */
   if (st && st->nMon > 0) pm = st->mon[st->prim >= 0 && st->prim < st->nMon ? st->prim : 0];
-  int pw = pm.right - pm.left, ph = pm.bottom - pm.top;
-  float figH = fa_clampf(fminf(ph * 0.31f, pw * 0.2f), 120.0f, 420.0f);
+  int pw = pm.right - pm.left, ph = pm.bottom - pm.top, k = s->k > 0 ? s->k : 1;
+  float figH = if_fig_h(pw * k, ph * k) / k;
   s->W = W, s->H = H;
   s->U = figH / 100.0f;
   s->gy = (float)H - 1.0f;
@@ -3317,7 +3329,7 @@ static int if_back_one(const IfScene *s) {
   return s->F[0].st == FS_MOVE && s->F[1].st != FS_MOVE ? 1 : 0;
 }
 
-static void if_render(IfScene *s) {
+static void if_render_world(IfScene *s) {
   FCv *c = &s->cv;
   c->x0 = 0, c->y0 = 0, c->x1 = s->W, c->y1 = s->H;
   fv_reset_touch(c);
@@ -3341,10 +3353,26 @@ static void if_render(IfScene *s) {
     if (s->ef[i].kind != EF_NONE) if_draw_eff(s, &s->ef[i], 1);
   if_draw_parts(s);
   if (s->dom) if_dom_fx(s, 1);
+}
+
+/* надписи и шкалы — на большом холсте, чётко: мир на время пересчитан в его px */
+static void if_render_over(IfScene *s) {
+  FCv cv0 = s->cv;
+  float U0 = s->U, gy0 = s->gy, sx0 = s->shx, sy0 = s->shy, hx0 = s->hudX, hy0 = s->hudY;
+  int W0 = s->W, H0 = s->H, k = s->k;
+  s->cv = s->big;
+  s->U *= k, s->gy = (s->gy + 0.5f) * k - 0.5f, s->shx *= k, s->shy *= k, s->hudX *= k, s->hudY *= k;
+  s->W = s->big.w, s->H = s->big.h;
+  FCv *c = &s->cv;
+  c->x0 = 0, c->y0 = 0, c->x1 = s->W, c->y1 = s->H;
+  fv_reset_touch(c);
   for (int i = 0; i < IF_MAXE; i++)
     if (s->ef[i].kind == EF_CALL) if_draw_call(s, &s->ef[i]);
   if_draw_banner(s);
   if_draw_hud(s);
+  s->big = s->cv;
+  s->cv = cv0;
+  s->U = U0, s->gy = gy0, s->shx = sx0, s->shy = sy0, s->hudX = hx0, s->hudY = hy0, s->W = W0, s->H = H0;
 }
 
 /* что задето кадром — прямоугольник в пределах холста */
@@ -3363,26 +3391,122 @@ static void if_clear(IfScene *s, const RECT *r) {
   for (int y = r->top; y < r->bottom; y++) memset(s->cv.px + ((size_t)y * s->W + r->left) * 4, 0, (size_t)(r->right - r->left) * 4);
 }
 
-static IfScene *if_scene_new(int W, int H, unsigned char *px, unsigned seed, int *wins, const IfStage *st) {
+/* мониторы и окна — в px маленького холста */
+static void if_stage_div(IfStage *d, const IfStage *st, int k) {
+  *d = *st;
+  for (int i = 0; i < d->nMon; i++) {
+    RECT *r = &d->mon[i];
+    r->left /= k, r->top /= k, r->right = (r->right + k - 1) / k, r->bottom = (r->bottom + k - 1) / k;
+  }
+  for (int i = 0; i < d->nWin; i++) {
+    RECT *r = &d->win[i];
+    r->left = (r->left + k - 1) / k, r->top = (r->top + k - 1) / k, r->right /= k, r->bottom /= k;
+  }
+}
+
+/* W×H, px — окно (большой холст); k — размер пикселя пиксель-арта; st — в px окна */
+static IfScene *if_scene_new(int W, int H, unsigned char *px, unsigned seed, int *wins, const IfStage *st, int k) {
+  if (k < 1) k = 1;
+  int Ws = (W + k - 1) / k, Hs = (H + k - 1) / k;
   IfScene *s = (IfScene *)calloc(1, sizeof(IfScene));
   IfText *tx = (IfText *)calloc(1, sizeof(IfText));
-  if (!s || !tx) {
-    free(s), free(tx);
+  unsigned char *sm = (unsigned char *)calloc((size_t)Ws * Hs, 4);
+  static IfStage ss;
+  if (!s || !tx || !sm) {
+    free(s), free(tx), free(sm);
     return NULL;
   }
   if_fall_init();
-  s->cv.px = px, s->cv.w = W, s->cv.h = H;
-  if_scene_init(s, W, H, seed, wins, st);
-  if_text_init(tx, s->U * 100);
+  s->k = k;
+  s->big.px = px, s->big.w = W, s->big.h = H;
+  s->cv.px = sm, s->cv.w = Ws, s->cv.h = Hs;
+  SetRectEmpty(&s->prevS), SetRectEmpty(&s->prevO);
+  if (st) if_stage_div(&ss, st, k);
+  if_scene_init(s, Ws, Hs, seed, wins, st ? &ss : NULL);
+  if_text_init(tx, s->U * 100 * k);
   s->tx = tx;
   return s;
+}
+
+/* окна сдвинули: заново площадки (st — в px окна) */
+static void if_scene_windows(IfScene *s, const IfStage *st) {
+  static IfStage ss;
+  if_stage_div(&ss, st, s->k);
+  if_stage_windows(s, &ss);
 }
 
 static void if_scene_free(IfScene *s) {
   if (!s) return;
   if (s->tx) if_text_free(s->tx), free(s->tx);
+  free(s->cv.px);
   free(s->bd);
   free(s);
+}
+
+/* маленький холст → большой, каждая точка — квадрат k×k. Прозрачность ступенями:
+   края и свечения не размываются, а идут крупными уровнями, как в пиксель-арте */
+static void if_upscale(IfScene *s, RECT r) {
+  int k = s->k, Wb = s->big.w, Hb = s->big.h;
+  for (int y = r.top; y < r.bottom; y++) {
+    const unsigned char *src = s->cv.px + ((size_t)y * s->W + r.left) * 4;
+    int by = y * k;
+    if (by >= Hb) break;
+    unsigned char *dst = s->big.px + ((size_t)by * Wb + (size_t)r.left * k) * 4;
+    int bx = r.left * k, n = 0;
+    for (int x = r.left; x < r.right; x++, src += 4) {
+      unsigned a = src[3], q = a < 24 ? 0 : (a >= 216 ? 255 : (a >= 150 ? 184 : (a >= 84 ? 116 : 56)));
+      unsigned char p[4];
+      if (q == a) {
+        memcpy(p, src, 4);
+      } else if (!q) {
+        memset(p, 0, 4);
+      } else {
+        for (int c = 0; c < 3; c++) {
+          unsigned v = src[c] * q / a;
+          p[c] = (unsigned char)(v > q ? q : v);
+        }
+        p[3] = (unsigned char)q;
+      }
+      for (int i = 0; i < k && bx < Wb; i++, bx++, n++) memcpy(dst + (size_t)n * 4, p, 4);
+    }
+    for (int j = 1; j < k && by + j < Hb; j++) memcpy(dst + (size_t)j * Wb * 4, dst, (size_t)n * 4);
+  }
+}
+
+/* кадр: мир на маленьком холсте, на большой — крупными пикселями, сверху чёткие
+   надписи. Возвращает, что на большом поменялось (для UpdateLayeredWindow) */
+static RECT if_frame(IfScene *s) {
+  int k = s->k;
+  if_clear(s, &s->prevS);
+  g_faHard = k > 1; /* бойцы — с жёстким краем, без сглаживания: пиксель-арт */
+  if_render_world(s);
+  g_faHard = 0;
+  RECT curS = if_touched(s), up, o = s->prevO;
+  UnionRect(&up, &s->prevS, &curS);
+  if (!IsRectEmpty(&o)) { /* под старыми надписями — снова мир */
+    for (int y = o.top; y < o.bottom; y++)
+      memset(s->big.px + ((size_t)y * s->big.w + o.left) * 4, 0, (size_t)(o.right - o.left) * 4);
+    RECT os = {o.left / k, o.top / k, (o.right + k - 1) / k, (o.bottom + k - 1) / k};
+    if (os.right > s->W) os.right = s->W;
+    if (os.bottom > s->H) os.bottom = s->H;
+    UnionRect(&up, &up, &os);
+  }
+  if (!IsRectEmpty(&up)) if_upscale(s, up);
+  if_render_over(s);
+  RECT curO = {s->big.tx0, s->big.ty0, s->big.tx1, s->big.ty1};
+  if (curO.left < 0) curO.left = 0;
+  if (curO.top < 0) curO.top = 0;
+  if (curO.right > s->big.w) curO.right = s->big.w;
+  if (curO.bottom > s->big.h) curO.bottom = s->big.h;
+  if (curO.left >= curO.right || curO.top >= curO.bottom) SetRectEmpty(&curO);
+  RECT dirty = {up.left * k, up.top * k, up.right * k, up.bottom * k};
+  if (dirty.right > s->big.w) dirty.right = s->big.w;
+  if (dirty.bottom > s->big.h) dirty.bottom = s->big.h;
+  if (IsRectEmpty(&up)) SetRectEmpty(&dirty);
+  UnionRect(&dirty, &dirty, &curO);
+  UnionRect(&dirty, &dirty, &s->prevO);
+  s->prevS = curS, s->prevO = curO;
+  return dirty;
 }
 
 /* ===================== окно, поток, когда начинать ===================== */
@@ -3557,7 +3681,9 @@ static DWORD WINAPI if_thread(LPVOID arg) {
   bi.bmiHeader.biPlanes = 1, bi.bmiHeader.biBitCount = 32;
   void *bits = NULL;
   HBITMAP bm = dc ? CreateDIBSection(dc, &bi, DIB_RGB_COLORS, &bits, NULL, 0) : NULL;
-  IfScene *s = bm ? if_scene_new(W, H, (unsigned char *)bits, GetTickCount() * 2654435761u + 17u, g_ifWins, &st) : NULL;
+  RECT pm = st.mon[st.prim];
+  int k = if_pick_k(pm.right - pm.left, pm.bottom - pm.top);
+  IfScene *s = bm ? if_scene_new(W, H, (unsigned char *)bits, GetTickCount() * 2654435761u + 17u, g_ifWins, &st, k) : NULL;
   if (!s) {
     if (bm) DeleteObject(bm);
     if (dc) DeleteDC(dc);
@@ -3579,8 +3705,6 @@ static DWORD WINAPI if_thread(LPVOID arg) {
   POINT cur0;
   GetCursorPos(&cur0);
   BLENDFUNCTION bf = {AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
-  RECT prev;
-  SetRectEmpty(&prev);
   double acc = 0, step = 1.0 / 60, cost = 0; /* cost — сколько стоит кадр, мс, в среднем */
   int shown = 0, frames = 0, battery = 0, why = 0;
   while (!g_ifQuit) {
@@ -3611,7 +3735,7 @@ static DWORD WINAPI if_thread(LPVOID arg) {
     }
     if (frames % 120 == 90) { /* окна могли сдвинуть, закрыть, открыть */
       if_get_windows(&st, org);
-      if_stage_windows(s, &st);
+      if_scene_windows(s, &st);
     }
     if (frames % 60 == 30) {
       if (if_blocked(!demo)) {
@@ -3631,10 +3755,7 @@ static DWORD WINAPI if_thread(LPVOID arg) {
     if (n > 0 || !shown) {
       LARGE_INTEGER r0, r1;
       QueryPerformanceCounter(&r0);
-      if_clear(s, &prev);
-      if_render(s);
-      RECT cur = if_touched(s), dirty;
-      UnionRect(&dirty, &prev, &cur);
+      RECT dirty = if_frame(s);
       POINT pd = {wa.left, wa.top}, ps0 = {0, 0};
       SIZE sz = {W, H};
       UPDATELAYEREDWINDOWINFO ui;
@@ -3647,7 +3768,6 @@ static DWORD WINAPI if_thread(LPVOID arg) {
         UpdateLayeredWindow(w, NULL, &pd, &sz, dc, &ps0, 0, &bf, ULW_ALPHA);
       }
       if (!shown) ShowWindow(w, SW_SHOWNOACTIVATE), shown = 1;
-      prev = cur;
       QueryPerformanceCounter(&r1);
       double ms = (double)(r1.QuadPart - r0.QuadPart) * 1000.0 / fq.QuadPart;
       cost = cost * 0.95 + ms * 0.05; /* с нуля: первый, самый дорогой кадр не пугает */
@@ -3800,15 +3920,15 @@ static int if_shot_on(const IfScene *s, const IfShot *h) {
 
 /* холст поверх экрана; вырезка CW×CH вокруг бойцов (по низу — земля) */
 static void if_shot_write(const IfScene *s, const BYTE *scr, BYTE *img, int CW, int CH, const wchar_t *path) {
-  float mid = (s->F[0].x + s->F[1].x) * 0.5f * s->U;
-  int ox = (int)mid - CW / 2;
+  float mid = (s->F[0].x + s->F[1].x) * 0.5f * s->U * s->k;
+  int Wb = s->big.w, ox = (int)mid - CW / 2;
   if (ox < 0) ox = 0;
-  if (ox > s->W - CW) ox = s->W - CW;
-  int oy = s->H - CH;
+  if (ox > Wb - CW) ox = Wb - CW;
+  int oy = s->big.h - CH;
   for (int y = 0; y < CH; y++)
     for (int x = 0; x < CW; x++) {
-      size_t i = ((size_t)(y + oy) * s->W + x + ox) * 4;
-      const BYTE *p = s->cv.px + i, *b = scr + i;
+      size_t i = ((size_t)(y + oy) * Wb + x + ox) * 4;
+      const BYTE *p = s->big.px + i, *b = scr + i;
       BYTE *d = img + ((size_t)y * CW + x) * 4;
       int k = 255 - p[3];
       for (int q = 0; q < 3; q++) {
@@ -3820,10 +3940,17 @@ static void if_shot_write(const IfScene *s, const BYTE *scr, BYTE *img, int CW, 
   st_write_bmp(path, img, CW, CH);
 }
 
+/* кадр целиком заново (для снимков) */
+static void if_frame_all(IfScene *s) {
+  SetRect(&s->prevS, 0, 0, s->W, s->H);
+  SetRect(&s->prevO, 0, 0, s->big.w, s->big.h);
+  if_frame(s);
+}
+
 static void if_test_shots(const wchar_t *dir) {
   int W = 1920, H = 1040, CW = 1280, CH = 720, wins[2] = {0, 0};
   BYTE *px = (BYTE *)calloc((size_t)W * H, 4), *scr = (BYTE *)malloc((size_t)W * H * 4), *img = (BYTE *)malloc((size_t)CW * CH * 4);
-  IfScene *s = px && scr && img ? if_scene_new(W, H, px, 20261014u, wins, NULL) : NULL;
+  IfScene *s = px && scr && img ? if_scene_new(W, H, px, 20261014u, wins, NULL, if_pick_k(W, H)) : NULL;
   if (!s) return;
   st_fake_screen(scr, W, H);
   int was[IF_SHOTS], got[IF_SHOTS], left = IF_SHOTS;
@@ -3838,8 +3965,7 @@ static void if_test_shots(const wchar_t *dir) {
     for (int k = 0; k < IF_SHOTS; k++) {
       int on = if_shot_on(s, &kIfShots[k]);
       if (on && !was[k] && !got[k]) {
-        memset(px, 0, (size_t)W * H * 4);
-        if_render(s);
+        if_frame_all(s);
         wchar_t path[MAX_PATH];
         swprintf(path, MAX_PATH, L"%ls\\%02d_%hs.bmp", dir, k, kIfShots[k].name);
         if_shot_write(s, scr, img, CW, CH, path);
@@ -3879,24 +4005,20 @@ static void if_test_bench(const wchar_t *path) {
   long N = 60L * 60 * 12;
   BYTE *px = (BYTE *)calloc((size_t)W * H, 4);
   float *ms = (float *)malloc(sizeof(float) * N), *md = (float *)malloc(sizeof(float) * N);
-  IfScene *s = px && ms && md ? if_scene_new(W, H, px, 777u, wins, NULL) : NULL;
+  IfScene *s = px && ms && md ? if_scene_new(W, H, px, 777u, wins, NULL, if_pick_k(W, H)) : NULL;
   if (!s) return;
   LARGE_INTEGER fq, t0, t1, t2;
   QueryPerformanceFrequency(&fq);
-  RECT prev;
-  SetRectEmpty(&prev);
   long nd = 0, bad = 0, checks = 0;
   double sumStep = 0, area = 0, maxStep = 0;
   for (long f = 0; f < N; f++) {
     QueryPerformanceCounter(&t0);
     if_step(s);
     QueryPerformanceCounter(&t1);
-    if_clear(s, &prev);
-    if_render(s);
-    RECT cur = if_touched(s), dirty;
+    RECT dirty = if_frame(s);
     QueryPerformanceCounter(&t2);
-    UnionRect(&dirty, &prev, &cur);
-    prev = cur;
+    RECT cur = {s->prevS.left * s->k, s->prevS.top * s->k, s->prevS.right * s->k, s->prevS.bottom * s->k};
+    UnionRect(&cur, &cur, &s->prevO);
     double st = (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / fq.QuadPart;
     ms[f] = (float)((double)(t2.QuadPart - t0.QuadPart) * 1000.0 / fq.QuadPart);
     if (s->dom) md[nd++] = ms[f];
@@ -3922,7 +4044,7 @@ static void if_test_bench(const wchar_t *path) {
   qsort(md, nd, sizeof(float), if_cmpf);
   FILE *fo = _wfopen(path, L"w");
   if (fo) {
-    fprintf(fo, "screen %dx%d, %ld frames (%.1f min), rounds %d, score %d:%d\n", W, H, N, N / 3600.0, s->round, wins[0],
+    fprintf(fo, "screen %dx%d (pixel %d), %ld frames (%.1f min), rounds %d, score %d:%d\n", W, H, s->k, N, N / 3600.0, s->round, wins[0],
             wins[1]);
     fprintf(fo, "frame ms: avg %.2f  p50 %.2f  p95 %.2f  p99 %.2f  max %.2f\n", sum / N, ms[N / 2], ms[N * 95 / 100],
             ms[N * 99 / 100], ms[N - 1]);
@@ -3955,7 +4077,7 @@ static void if_test_stage(const wchar_t *dir) {
   SetRect(&st.win[2], 2250, 470, 2950, 880);
   st.nWin = 3;
   BYTE *px = (BYTE *)calloc((size_t)W * H, 4), *scr = (BYTE *)malloc((size_t)W * H * 4), *img = (BYTE *)malloc((size_t)W * H * 4);
-  IfScene *s = px && scr && img ? if_scene_new(W, H, px, 4242u, wins, &st) : NULL;
+  IfScene *s = px && scr && img ? if_scene_new(W, H, px, 4242u, wins, &st, if_pick_k(1920, 1040)) : NULL;
   if (!s) return;
   for (int y = 0; y < H; y++)
     for (int x = 0; x < W; x++) {
@@ -3979,7 +4101,7 @@ static void if_test_stage(const wchar_t *dir) {
               s->pl[i].bot, s->pl[i].solid, s->pl[i].wl, s->pl[i].wr);
   }
   long onWin[2] = {0, 0}, onM2[2] = {0, 0}, leaps[2] = {0, 0}, winBoom = 0, N = 60L * 60 * 8, shots = 0;
-  float m2 = 1920 / s->U;
+  float m2 = 1920.0f / s->k / s->U;
   int wasJump[2] = {0, 0};
   for (long f = 0; f < N; f++) {
     int pj[IF_MAXJ];
@@ -4007,8 +4129,7 @@ static void if_test_stage(const wchar_t *dir) {
       wasJump[i] = jmp;
     }
     if (f % 90 == 0 && shots < 60) {
-      memset(px, 0, (size_t)W * H * 4);
-      if_render(s);
+      if_frame_all(s);
       for (size_t k = 0; k < (size_t)W * H; k++) {
         const BYTE *p = px + k * 4, *b = scr + k * 4;
         BYTE *d = img + k * 4;
@@ -4077,6 +4198,37 @@ static void if_test_figs(const wchar_t *path) {
   st_write_bmp(path, img, W, H);
   free(px), free(img);
 }
+/* --figbench файл — сколько стоит нарисовать одного бойца (рост около 320 px) */
+static void if_test_figbench(const wchar_t *path) {
+  static const int kP[8] = {FP_G_IDLE, FP_G_JAB, FP_G_RED, FP_G_PUR_C, FP_S_IDLE, FP_S_PUNCH, FP_S_DISM, FP_S_FUGA_C};
+  int W = 800, H = 600, N = 300;
+  BYTE *px = (BYTE *)calloc((size_t)W * H, 4);
+  if (!px) return;
+  FCv cv;
+  memset(&cv, 0, sizeof(cv));
+  cv.px = px, cv.w = W, cv.h = H, cv.x1 = W, cv.y1 = H;
+  LARGE_INTEGER fq, t0, t1;
+  QueryPerformanceFrequency(&fq);
+  double ms[8];
+  for (int i = 0; i < 8; i++) {
+    FFig g;
+    memset(&g, 0, sizeof(g));
+    g.who = i >= 4, g.f = 1, g.p = kPoses[kP[i]], g.alpha = 1, g.blind = i < 3, g.U = 3.2f, g.x = 300, g.y = 560;
+    QueryPerformanceCounter(&t0);
+    for (int k = 0; k < N; k++) ff_draw(&cv, &g);
+    QueryPerformanceCounter(&t1);
+    ms[i] = (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / fq.QuadPart / N;
+  }
+  FILE *f = _wfopen(path, L"w");
+  if (f) {
+    double sum = 0;
+    for (int i = 0; i < 8; i++) fprintf(f, "%.3f ", ms[i]), sum += ms[i];
+    fprintf(f, "\navg %.3f ms per figure\n", sum / 8);
+    fclose(f);
+  }
+  free(px);
+}
 #endif
+
 
 
