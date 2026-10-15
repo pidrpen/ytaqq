@@ -610,6 +610,10 @@ static LRESULT CALLBACK PkProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
   }
   case WM_COMMAND: {
     int id = LOWORD(wParam);
+    if (id == ID_PANEL_MIN) {
+      ShowWindow(hwnd, SW_MINIMIZE);
+      return 0;
+    }
     if (id == ID_PANEL_CLOSE) {
       if (g_pkEditRow >= 0) pk_edit_end(TRUE);
       ShowWindow(hwnd, SW_HIDE);
@@ -667,6 +671,7 @@ static void package_show(BOOL fill) {
     if (!g_pkWnd) return;
     round_corners(g_pkWnd);
     mk_btn(g_pkWnd, L"×", ID_PANEL_CLOSE);
+    mk_btn(g_pkWnd, L"–", ID_PANEL_MIN);
     for (int k = 0; k < PK_NT; k++) mk_btn(g_pkWnd, kPkSheets[k].name, ID_PK_TAB + k);
     mk_btn(g_pkWnd, L"Из выгрузки…", ID_PK_FROMXP);
     mk_btn(g_pkWnd, L"+ Строка", ID_PK_ADD);
