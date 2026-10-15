@@ -437,7 +437,12 @@ static void ans_zoom(int delta);
 static WNDPROC g_oldAnsEdit;
 
 static void ans_text_line_draw(HWND edit);
+static void place_panel_close(HWND hwnd);
 static LRESULT CALLBACK AnsEditProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+  if (msg == WM_KEYDOWN && wParam == VK_ESCAPE) {
+    ShowWindow(GetParent(hwnd), SW_HIDE);
+    return 0;
+  }
   /* щелчок по строке-пути — это и есть «выбранный чертёж»: для кнопок
      «Открыть чертёж» и «Открыть файл в проводнике» */
   if (msg == WM_LBUTTONUP) {
@@ -472,6 +477,10 @@ static LRESULT CALLBACK AnsEditProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
 /* и над списком находок Ctrl+колесо — масштаб, а не прокрутка */
 static WNDPROC g_oldAnsList;
 static LRESULT CALLBACK AnsListProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+  if (msg == WM_KEYDOWN && wParam == VK_ESCAPE) {
+    ShowWindow(GetParent(hwnd), SW_HIDE);
+    return 0;
+  }
   if (msg == WM_MOUSEWHEEL && (GetKeyState(VK_CONTROL) & 0x8000)) {
     ans_zoom(GET_WHEEL_DELTA_WPARAM(wParam) > 0 ? 1 : -1);
     return 0;
@@ -4236,8 +4245,12 @@ static void layout_answer(void) {
      крестик в шапке */
   static const BOOL inFiles[6] = {TRUE, FALSE, FALSE, FALSE, TRUE, FALSE};
   static const BOOL inPlm[6] = {TRUE, TRUE, TRUE, TRUE, FALSE, FALSE};
+  /* отчёт об обновлении и «что нового» — просто текст: кнопки находок
+     там ни к чему, нужна только «Закрыть» */
+  static const BOOL inText[6] = {FALSE, FALSE, FALSE, FALSE, FALSE, TRUE};
+  place_panel_close(g_answer);
   for (int k = 0; k < 6; k++) {
-    BOOL on = g_resultFiles ? inFiles[k] : inPlm[k];
+    BOOL on = g_ansPlain ? inText[k] : g_resultFiles ? inFiles[k] : inPlm[k];
     if (btns[k]) ShowWindow(btns[k], on ? SW_SHOW : SW_HIDE);
     if (!on) btns[k] = NULL;
   }
@@ -4317,7 +4330,7 @@ static LRESULT CALLBACK AnswerProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
     draw_pad_button((const DRAWITEMSTRUCT *)lParam);
     return TRUE;
   case WM_COMMAND:
-    if (LOWORD(wParam) == ID_ANS_CLOSE) ShowWindow(hwnd, SW_HIDE);
+    if (LOWORD(wParam) == ID_ANS_CLOSE || LOWORD(wParam) == ID_PANEL_CLOSE) ShowWindow(hwnd, SW_HIDE);
     if (LOWORD(wParam) == ID_ANS_OPENTP) open_plm_tp_selected();
     if (LOWORD(wParam) == ID_ANS_OPEN) {
       if (g_plmCount > 0 || !g_ansObj[0]) open_plm_selected();
@@ -4504,7 +4517,8 @@ static void create_answer(HWND owner) {
     SendMessageW(g_answerList, LVM_INSERTCOLUMNW, 2, (LPARAM)&col);
   }
   /* по делу четыре кнопки; «В проводнике» — правым щелчком по строке
-     (у найденных файлов — кнопкой), «Закрыть» — крестик в шапке */
+     (у найденных файлов — кнопкой), «Закрыть» — крестик в шапке и Esc */
+  mk_btn(g_answer, L"×", ID_PANEL_CLOSE);
   HWND open = mk_btn(g_answer, L"В СОЮЗ", ID_ANS_OPEN);
   HWND openTp = mk_btn(g_answer, L"ТП в СОЮЗ", ID_ANS_OPENTP);
   HWND card = mk_btn(g_answer, L"Все данные", ID_ANS_CARD);
@@ -4745,6 +4759,7 @@ static void show_answer_text(const wchar_t *text) {
   SetWindowPos(g_answer, HWND_TOPMOST, x, y, aw, ah, SWP_SHOWWINDOW);
   ans_sync_buttons();
   if (g_plmCount > 0 && g_answerList) SetFocus(g_answerList);
+  else if (g_answerEdit) SetFocus(g_answerEdit); /* чтобы Esc закрывал */
 }
 
 /* ---- режим «Для 1С» ------------------------------------------------ */
@@ -5620,6 +5635,7 @@ static void start_lookup(const wchar_t *q) {
   /* пароль ввели и сразу ищут, не уходя из поля, — берём его и так */
   if (g_engine == 4) save_plm_pref();
   g_ansTitle = NULL;
+  g_ansPlain = FALSE;
   g_selDraw[0] = 0;
   InterlockedIncrement(&g_drawGen);
   /* открытую карточку новый поиск не трогает: на то она и отдельное окно */

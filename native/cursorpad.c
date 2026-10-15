@@ -344,6 +344,7 @@ static int g_ansPt = 10;             /* масштаб текста ответа
 static BOOL g_ansKeepPos;            /* окно ответа: держать на месте, а не у курсора */
 static int g_ansX = 0, g_ansY = 0;   /* где его оставили */
 static const wchar_t *g_ansTitle; /* set when the panel shows something other than hits */
+static BOOL g_ansPlain; /* просто текст (отчёт, «что нового»): внизу только «Закрыть» */
 static BOOL g_trayAdded = FALSE;
 static BOOL g_hidden = FALSE;
 /* Слежение за курсором опрашивалось 100 раз в секунду всегда — даже когда
@@ -4544,6 +4545,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         g_resultFiles = FALSE;
         g_plmCount = 0;
         g_ansTitle = L"Что нового";
+        g_ansPlain = TRUE;
         show_answer_text(notes[0] ? notes : L"Описания нет.");
       } else if (g_balloonKind == 4) {
         /* откат — сказано всё во всплывашке */
