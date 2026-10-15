@@ -601,10 +601,11 @@ static void st_draw_gojo(int slot, int N, BYTE *out) {
         float d = hypotf(ux - 13, uy - 12.2f);
         if (d < 7) st_gojo_over(&a, &r, &g, &b, 110, 200, 255, 0.22f * (1 - d / 7) * (1 - d / 7));
       }
-      if (slot == 2) { /* над ссылкой на кончике пальца голубая точка */
-        float d = hypotf(ux - (GOJO_TIP_X + 0.5f), uy - (GOJO_TIP_Y + 0.5f));
-        if (d < 3.6f) st_gojo_over(&a, &r, &g, &b, 150, 220, 255, 0.85f * (1 - d / 3.6f));
-        if (d < 1.4f) st_gojo_over(&a, &r, &g, &b, 255, 255, 255, 0.9f);
+      { /* метка рабочей точки на кончике пальца: светящаяся точка с тёмным ободком, видна на любом фоне */
+        float d = hypotf(ux - (GOJO_TIP_X + 0.5f), uy - (GOJO_TIP_Y + 0.5f)), big = slot == 2 ? 1.0f : 0.0f;
+        if (d < 3.8f) st_gojo_over(&a, &r, &g, &b, 120, 205, 255, (0.5f + 0.35f * big) * (1 - d / 3.8f));
+        if (d < 1.9f) st_gojo_over(&a, &r, &g, &b, 15, 20, 45, 0.85f);
+        if (d < 1.15f) st_gojo_over(&a, &r, &g, &b, 235, 248, 255, 1.0f);
       }
       if (slot == 3 || slot == 12 || slot == 13 || slot == 15) { /* значок в правом нижнем углу */
         float d = hypotf(ux - 25.5f, uy - 25.5f);
