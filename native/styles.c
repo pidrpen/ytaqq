@@ -18,6 +18,7 @@
    (Мечник, g_skin 1) с 2026.10.14.6 тоже рисуется здесь, но своей кнопки
    стиля у него нет — он на месте прежнего Мечника */
 #define ST_DRAW (ST_COUNT + 1)
+#include "gojo_sprite.h"
 #define ST_SLOTS RIAS_SLOTS /* виды — в том же порядке, что у «Риас» (kRias) */
 
 
@@ -564,8 +565,78 @@ static void st_draw_char(int st, int slot, int N, BYTE *out) {
   free(P);
 }
 
+
+/* ---- «Годжо» — спрайт PixelLab (с 2026.10.15.5) ----
+   Готовая картинка 32×32 из gojo_sprite.h вместо рисования кодом. Годжо смотрит
+   влево и указывает пальцем вверх: рабочая точка — кончик пальца (GOJO_TIP_*).
+   Ожидание — повязка поднята, «Шесть глаз» светятся голубым. Над ссылками на
+   пальце вспыхивает голубая точка, значки справки, места, человека и фоновой
+   работы — в правом нижнем углу. Остальные виды (текст, крест, стрелки) — общие. */
+static BOOL st_gojo_slot(int slot) { return slot == 0 || slot == 2 || slot == 3 || slot == 12 || slot == 13 || slot == 14 || slot == 15; }
+
+static void st_gojo_over(float *a, float *r, float *g, float *b, float cr, float cg, float cb, float ca) {
+  float inv = 1.0f - ca;
+  *r = cr * ca + *r * inv, *g = cg * ca + *g * inv, *b = cb * ca + *b * inv, *a = ca + *a * inv;
+}
+
+static void st_draw_gojo(int slot, int N, BYTE *out) {
+  float k = N / 32.0f;
+  for (int y = 0; y < N; y++)
+    for (int x = 0; x < N; x++) {
+      float ux = (x + 0.5f) / k, uy = (y + 0.5f) / k;
+      int sx = (int)ux, sy = (int)uy;
+      float a = 0, r = 0, g = 0, b = 0;
+      if (sx < 32 && sy < 32) {
+        const unsigned char *px = kGojoPx + ((size_t)sy * 32 + sx) * 4;
+        if (px[3] > 0) {
+          a = px[3] / 255.0f, r = px[0] * a, g = px[1] * a, b = px[2] * a;
+          /* повязка — самые тёмные точки у глаз: в ожидании она поднята, и глаза светятся */
+          if (slot == 14 && sx >= 8 && sx <= 18 && sy >= 10 && sy <= 14 && px[0] + px[1] + px[2] < 150) {
+            float pulse = (sx + sy) % 3 == 0 ? 1.0f : 0.8f;
+            r = 140 * pulse * a, g = 215 * pulse * a, b = 255 * a;
+          }
+        }
+      }
+      if (slot == 14) { /* свечение вокруг глаз */
+        float d = hypotf(ux - 13, uy - 12.2f);
+        if (d < 7) st_gojo_over(&a, &r, &g, &b, 110, 200, 255, 0.22f * (1 - d / 7) * (1 - d / 7));
+      }
+      if (slot == 2) { /* над ссылкой на кончике пальца голубая точка */
+        float d = hypotf(ux - (GOJO_TIP_X + 0.5f), uy - (GOJO_TIP_Y + 0.5f));
+        if (d < 3.6f) st_gojo_over(&a, &r, &g, &b, 150, 220, 255, 0.85f * (1 - d / 3.6f));
+        if (d < 1.4f) st_gojo_over(&a, &r, &g, &b, 255, 255, 255, 0.9f);
+      }
+      if (slot == 3 || slot == 12 || slot == 13 || slot == 15) { /* значок в правом нижнем углу */
+        float d = hypotf(ux - 25.5f, uy - 25.5f);
+        if (slot == 15) {
+          if (d >= 2.6f && d <= 4.9f) st_gojo_over(&a, &r, &g, &b, 90, 190, 255, 1);
+          else if (d > 4.9f && d <= 5.9f) st_gojo_over(&a, &r, &g, &b, 15, 20, 45, 1);
+          else if (d >= 1.6f && d < 2.6f) st_gojo_over(&a, &r, &g, &b, 15, 20, 45, 1);
+        } else if (d <= 4.6f) {
+          st_gojo_over(&a, &r, &g, &b, slot == 3 ? 60 : slot == 12 ? 240 : 70, slot == 3 ? 140 : slot == 12 ? 70 : 190,
+                       slot == 3 ? 255 : slot == 12 ? 70 : 110, 1);
+        } else if (d <= 5.7f) {
+          st_gojo_over(&a, &r, &g, &b, 15, 20, 45, 1);
+        }
+      }
+      BYTE *o = out + ((size_t)y * N + x) * 4;
+      if (a <= 0.004f) {
+        o[0] = o[1] = o[2] = o[3] = 0;
+      } else {
+        o[0] = (BYTE)fminf(255.0f, b / a);
+        o[1] = (BYTE)fminf(255.0f, g / a);
+        o[2] = (BYTE)fminf(255.0f, r / a);
+        o[3] = (BYTE)(a * 255.0f + 0.5f);
+      }
+    }
+}
+
 /* картинка вида slot стиля st в N×N, BGRA без домножения альфы */
 static void st_draw(int st, int slot, int N, BYTE *out) {
+  if (st == ST_GOJO && st_gojo_slot(slot)) {
+    st_draw_gojo(slot, N, out);
+    return;
+  }
   if (st_char_slot(slot)) {
     st_draw_char(st, slot, N, out);
     return;
@@ -698,6 +769,7 @@ static HCURSOR st_make(int st, int slot, int N) {
   }
   int hx, hy;
   st_hotspot(slot, &hx, &hy);
+  if (st == ST_GOJO && st_gojo_slot(slot)) hx = GOJO_TIP_X, hy = GOJO_TIP_Y; /* кончик пальца */
   ICONINFO ii;
   memset(&ii, 0, sizeof(ii));
   ii.fIcon = FALSE;
@@ -1058,7 +1130,7 @@ static void st_gallery(const wchar_t *path) {
   fx_init_sprites();
   int S = (int)(200 * g_fxScale), N = 48, cell = 56;
   int W = S * 4 > cell * ST_SLOTS ? S * 4 : cell * ST_SLOTS;
-  int rowsCur = ST_DRAW * 2, H = rowsCur * cell + 13 * (S / 2);
+  int rowsCur = ST_DRAW * 2, H = rowsCur * cell + 14 * (S / 2);
   BYTE *img = (BYTE *)malloc((size_t)W * H * 4);
   BYTE *cur = (BYTE *)malloc((size_t)N * N * 4);
   FxWin fw;
@@ -1082,7 +1154,7 @@ static void st_gallery(const wchar_t *path) {
           }
       }
   /* эффекты 1…13: по четыре кадра, половина облачка */
-  for (int kind = 1; kind <= 13; kind++) {
+  for (int kind = 1; kind <= 14; kind++) {
     g_fxSeed = 777u + kind;
     fx_seed(&fw, kind, S);
     int at[4] = {2, fw.frames / 4, fw.frames / 2, fw.frames * 3 / 4};
