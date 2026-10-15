@@ -4058,6 +4058,11 @@ static void if_test_figs(const wchar_t *path) {
       ff_draw(&cv, &g);
     }
   }
+  { /* рядом — те же бойцы без фона, с прозрачностью (BGRA, альфа умножена): из них пиксель-арт */
+    wchar_t ap[MAX_PATH];
+    swprintf(ap, MAX_PATH, L"%ls.alpha.bmp", path);
+    st_write_bmp(ap, px, W, H);
+  }
   for (int y = 0; y < H; y++)
     for (int x = 0; x < W; x++) {
       size_t k = ((size_t)y * W + x) * 4;
