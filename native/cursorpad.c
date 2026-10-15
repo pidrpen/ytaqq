@@ -58,6 +58,9 @@
 #define ST_KNIGHT ST_COUNT  /* рыцарь (Мечник) рисуется кодом, но кнопки стиля у него нет */
 #define ST_SKIN0 7          /* g_skin первого из них; 7…12 */
 #define ID_PREVIEW 470      /* окошко просмотра курсора и эффекта */
+#define ID_IDLE_BASE 480    /* 480..484: бой при бездействии — выкл, 30 с, 1, 2, 5 мин */
+#define IDLE_OPTIONS 5
+#define ID_IDLE_SHOW 485    /* «Показать бой сейчас» */
 #define ID_MIN 106
 #define ID_OCR 107
 #define ID_ALPHA_BG 108
@@ -112,6 +115,7 @@
 #define TIMER_PASTE 3
 #define TIMER_STATUS 4
 #define TIMER_FILES_PLAN 10 /* раз в минуту: не пора ли полный обход папки */
+#define TIMER_IDLE_FIGHT 40 /* раз в секунду: не пора ли начать бой при бездействии */
 #define ID_FILES_NOTIFY 157
 #define ID_WATCH_EDIT 158
 #define ID_WATCH_BROWSE 159
@@ -274,6 +278,8 @@ static HWND g_btnTheme[THEME_COUNT];
 static int g_theme = 0;
 static HWND g_tbBg;
 static HWND g_tbFg;
+static HWND g_btnIdle[IDLE_OPTIONS]; /* бой при бездействии: через сколько */
+static HWND g_btnIdleShow;           /* «Показать бой сейчас» */
 static HWND g_btnSet;
 static HWND g_btnAsk;
 static HWND g_btnNd; /* кнопка «Нарды» в Настройках */
@@ -381,6 +387,10 @@ static int g_catFx = 1;       /* у «Чёрного кота» при нажа�
    5 кольца; 6 конфетти; 7 молния; 8 сердечки.
    Так любой курсор можно сочетать с любым эффектом. */
 static int g_fxPick = -1;
+/* бой Годжо и Сукуны (idle_fight.c), если мышь и клавиатуру не трогали
+   столько секунд; 0 — выключен */
+static int g_idleSec = 60;
+static const int kIdleSec[IDLE_OPTIONS] = {0, 30, 60, 120, 300};
 static int g_balloonKind; /* куда ведёт щелчок по всплывашке: 0 — изменения в папке, 1 — нарды */
 static HCURSOR g_staticCur[5];
 static HCURSOR g_ibeamCur[5];
@@ -1128,9 +1138,12 @@ static void load_cursor_pref(void) {
   int catFx = -1; /* нет в файле — царапины */
   int fxPick = -1; /* нет в файле — эффект как у курсора */
   int tab = -1, order = -1; /* нет в файле — первая вкладка, порядок как задуман */
-  sscanf(buf, "%15s %d %d %15s %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d", skin,
+  int idle = -1; /* нет в файле — бой через минуту */
+  sscanf(buf, "%15s %d %d %15s %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d", skin,
          &bg, &fg, eng, &autoOn, &theme, &aw, &ah, &cw, &ch, &pt, &keep, &ax, &ay, &cx, &cy, &cpt,
-         &ox, &oy, &ow, &oh, &opt, &sparkle, &padMode, &flame, &catFx, &fxPick, &tab, &order);
+         &ox, &oy, &ow, &oh, &opt, &sparkle, &padMode, &flame, &catFx, &fxPick, &tab, &order, &idle);
+  for (int i = 0; i < IDLE_OPTIONS; i++)
+    if (idle == kIdleSec[i]) g_idleSec = idle;
   /* до 2026.10.14.4 на месте вкладки было, какие разделы раскрыты: там вкладка
      окажется случайной, но допустимой */
   if (tab >= 0 && tab < SEC_COUNT) g_tab = tab;
@@ -1196,11 +1209,11 @@ static void save_cursor_pref(void) {
   char buf[280];
   int order = 0;
   for (int i = 0; i < SEC_COUNT; i++) order = order * 10 + g_tabOrder[i];
-  snprintf(buf, sizeof(buf), "%s %d %d %s %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d\n",
+  snprintf(buf, sizeof(buf), "%s %d %d %s %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d\n",
            v, g_alphaFollow, g_alphaPinned, e, g_autostart ? 1 : 0, g_theme, g_ansW, g_ansH,
            g_cardW, g_cardH, g_ansPt, g_ansKeepPos ? 1 : 0, g_ansX, g_ansY, g_cardX, g_cardY,
            g_cardPt, g_ocrX, g_ocrY, g_ocrW, g_ocrH, g_ocrPt, g_sparkle ? 1 : 0, g_padMode,
-           g_flame ? 1 : 0, g_catFx, g_fxPick, g_tab, order);
+           g_flame ? 1 : 0, g_catFx, g_fxPick, g_tab, order, g_idleSec);
   HANDLE h = CreateFileW(g_prefPath, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
                          FILE_ATTRIBUTE_NORMAL, NULL);
   if (h == INVALID_HANDLE_VALUE) return;
@@ -2129,6 +2142,26 @@ static void round_corners(HWND hwnd);
 #include "pad_extra.c"
 #include "fairy_fx.c"
 #include "styles.c" /* курсоры, нарисованные кодом, и просмотр в Настройках */
+#include "idle_fight.c" /* бой Годжо и Сукуны, пока мышь не трогают */
+
+/* бой при бездействии в Настройках: через сколько, ● у выбранного */
+static const wchar_t *const kIdleNames[IDLE_OPTIONS] = {L"Выкл", L"30 с", L"1 мин", L"2 мин", L"5 мин"};
+
+static void update_idle_buttons(void) {
+  for (int i = 0; i < IDLE_OPTIONS; i++) set_mark(g_btnIdle[i], g_idleSec == kIdleSec[i], kIdleNames[i]);
+}
+
+static void set_idle_sec(int sec) {
+  g_idleSec = sec;
+  save_cursor_pref();
+  update_idle_buttons();
+  if (sec <= 0) idle_fight_stop(FALSE);
+  wchar_t msg[96];
+  if (sec <= 0) _snwprintf(msg, 96, L"Бой при бездействии выключен");
+  else if (sec < 60) _snwprintf(msg, 96, L"Бой — если мышь не трогать %d с", sec);
+  else _snwprintf(msg, 96, L"Бой — если мышь не трогать %d мин", sec / 60);
+  show_status(msg);
+}
 
 static void fill_round_rect(HDC hdc, RECT rc, COLORREF fill, COLORREF border, int rad) {
   int d = rad * 2;
@@ -3169,12 +3202,15 @@ static void layout_settings(void) {
       }
       break;
     }
-    case 2: /* тема и прозрачность */
+    case 2: /* тема, прозрачность, бой при бездействии */
       y += lab;
       y += set_grid(g_btnTheme, THEME_COUNT, 4, pad, y, fullW, btnH, gap) + lab;
       set_place(g_tbBg, pad, y, fullW, btnH);
       y += btnH + 24;
       set_place(g_tbFg, pad, y, fullW, btnH);
+      y += btnH + gap + lab;
+      y += set_grid(g_btnIdle, IDLE_OPTIONS, IDLE_OPTIONS, pad, y, fullW, btnH, gap);
+      set_place(g_btnIdleShow, pad, y, fullW, btnH);
       y += btnH + gap;
       break;
     case 3: /* где искать файлы и вход в PLM */
@@ -3374,6 +3410,13 @@ static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
       RECT c = {14, wr.top - 18, rc.right - 14, wr.top - 2};
       draw_set_label(hdc, L"тема", c, rc.bottom);
     }
+    if (g_btnIdle[0]) {
+      RECT wr;
+      GetWindowRect(g_btnIdle[0], &wr);
+      MapWindowPoints(HWND_DESKTOP, hwnd, (POINT *)&wr, 2);
+      RECT d = {14, wr.top - 18, rc.right - 14, wr.top - 2};
+      draw_set_label(hdc, L"бой Годжо и Сукуны, если мышь не трогать", d, rc.bottom);
+    }
     {
       RECT ver = {14, rc.bottom - 28, rc.right - 14, rc.bottom - 10};
       wchar_t vs[64];
@@ -3470,6 +3513,12 @@ static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
     if (LOWORD(wParam) == ID_HOTKEYS && HIWORD(wParam) == BN_CLICKED) hk_show();
     if (LOWORD(wParam) >= ID_THEME_BASE && LOWORD(wParam) < ID_THEME_BASE + THEME_COUNT)
       set_theme(LOWORD(wParam) - ID_THEME_BASE);
+    if (LOWORD(wParam) >= ID_IDLE_BASE && LOWORD(wParam) < ID_IDLE_BASE + IDLE_OPTIONS)
+      set_idle_sec(kIdleSec[LOWORD(wParam) - ID_IDLE_BASE]);
+    if (LOWORD(wParam) == ID_IDLE_SHOW) {
+      idle_fight_demo();
+      show_status(L"Бой идёт, пока не тронете мышь");
+    }
     if (LOWORD(wParam) == ID_ENG_PLM) {
       g_engine = 4;
       save_cursor_pref();
@@ -3884,6 +3933,8 @@ static void create_settings(HWND owner) {
   g_btnUp = mk_btn(g_setHwnd, L"Проверить обновления", ID_UPDATE);
   for (int i = 0; i < THEME_COUNT; i++)
     g_btnTheme[i] = mk_btn(g_setHwnd, kThemes[i].name, ID_THEME_BASE + i);
+  for (int i = 0; i < IDLE_OPTIONS; i++) g_btnIdle[i] = mk_btn(g_setHwnd, kIdleNames[i], ID_IDLE_BASE + i);
+  g_btnIdleShow = mk_btn(g_setHwnd, L"Показать бой сейчас", ID_IDLE_SHOW);
   g_tbBg = CreateWindowExW(0, TRACKBAR_CLASSW, L"", WS_CHILD | WS_VISIBLE | TBS_NOTICKS | TBS_TOOLTIPS,
                            0, 0, 120, 28, g_setHwnd, (HMENU)(INT_PTR)ID_ALPHA_BG, NULL, NULL);
   g_tbFg = CreateWindowExW(0, TRACKBAR_CLASSW, L"", WS_CHILD | WS_VISIBLE | TBS_NOTICKS | TBS_TOOLTIPS,
@@ -3951,6 +4002,7 @@ static void create_settings(HWND owner) {
   watch_enable();
   update_engine_buttons();
   update_cursor_buttons(); /* отметка ● у выбранного: в том числе у новых стилей */
+  update_idle_buttons();
   layout_settings();
 }
 
@@ -4058,6 +4110,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
        считается от последнего обхода, а не от запуска программы */
     SetTimer(hwnd, TIMER_FILES, 300000, NULL);
     SetTimer(hwnd, TIMER_FILES_PLAN, 60000, NULL);
+    SetTimer(hwnd, TIMER_IDLE_FIGHT, 1000, NULL);
     if (g_filesRoot[0]) files_start_index(FALSE);
     add_tray(hwnd);
     /* F8, F9, F3, F6, F7, Pause, Ctrl+1…9 — или какие назначены в Настройках */
@@ -4372,6 +4425,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     if (wParam == TIMER_FILES) files_start_index(FALSE);
     if (wParam == TIMER_FILES_TICK) files_refresh_status();
     if (wParam == TIMER_FILES_PLAN) files_plan_tick();
+    if (wParam == TIMER_IDLE_FIGHT) idle_fight_tick();
     return 0;
   case WM_SEARCH_DONE: {
     wchar_t *text = (wchar_t *)lParam;
@@ -4524,6 +4578,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
   case WM_DESTROY:
     InterlockedExchange(&g_quitting, 1);
     close_other_windows(hwnd);
+    KillTimer(hwnd, TIMER_IDLE_FIGHT);
+    idle_fight_stop(TRUE);
     fx_shutdown();
     styles_free();
     share_stop();
@@ -4728,6 +4784,9 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
     if (argv && argc >= 3 && !wcscmp(argv[1], L"--gallery")) st_gallery(argv[2]);
     if (argv && argc >= 3 && !wcscmp(argv[1], L"--slash")) st_slash_strip(argv[2]);
     if (argv && argc >= 3 && !wcscmp(argv[1], L"--slashbench")) st_slash_bench(argv[2]);
+    if (argv && argc >= 3 && !wcscmp(argv[1], L"--idlefight")) if_test_shots(argv[2]);
+    if (argv && argc >= 3 && !wcscmp(argv[1], L"--idlebench")) if_test_bench(argv[2]);
+    if (argv && argc >= 2 && !wcscmp(argv[1], L"--idledemo")) if_launch(2); /* бой без остановки по вводу */
     if (argv && argc >= 3 && !wcscmp(argv[1], L"--settings")) {
       g_tab = (int)wcstol(argv[2], NULL, 10) % SEC_COUNT;
       if (g_follow) toggle_follow(); /* как «Настройки» в меню значка */
