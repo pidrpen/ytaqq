@@ -63,6 +63,7 @@
 #define ID_IDLE_SHOW 485    /* «Показать бой сейчас» */
 #define ID_IDLE_SZ 486      /* 486..488: бойцы мелкие, средние, крупные */
 #define IDLE_SIZES 3
+#define ID_IDLE_WATCH 489   /* «Режим просмотра»: бой идёт и при работе мышью */
 #define ID_MIN 106
 #define ID_OCR 107
 #define ID_ALPHA_BG 108
@@ -283,6 +284,7 @@ static HWND g_tbFg;
 static HWND g_btnIdle[IDLE_OPTIONS]; /* бой при бездействии: через сколько */
 static HWND g_btnIdleShow;           /* «Показать бой сейчас» */
 static HWND g_btnIdleSz[IDLE_SIZES];  /* размер бойцов */
+static HWND g_btnIdleWatch;           /* режим просмотра */
 static HWND g_btnSet;
 static HWND g_btnAsk;
 static HWND g_btnNd; /* кнопка «Нарды» в Настройках */
@@ -397,6 +399,9 @@ static int g_idleSec = 60;
 static const int kIdleSec[IDLE_OPTIONS] = {0, 30, 60, 120, 300};
 /* рост бойцов: 0 — мелкие, 1 — средние (десятая часть высоты монитора), 2 — крупные */
 static int g_idleSize = 1;
+/* режим просмотра: бой идёт поверх экрана всё время и не прячется от мыши и клавиш
+   (окно боя пропускает щелчки — работать он не мешает); 0 — обычный бой при бездействии */
+static int g_idleWatch = 0;
 static int g_balloonKind; /* куда ведёт щелчок по всплывашке: 0 — изменения в папке, 1 — нарды */
 static HCURSOR g_staticCur[5];
 static HCURSOR g_ibeamCur[5];
@@ -1146,9 +1151,11 @@ static void load_cursor_pref(void) {
   int tab = -1, order = -1; /* нет в файле — первая вкладка, порядок как задуман */
   int idle = -1; /* нет в файле — бой через минуту */
   int idleSz = -1; /* нет в файле — средние бойцы */
-  sscanf(buf, "%15s %d %d %15s %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d", skin,
+  int idleWatch = 0; /* нет в файле — режим просмотра выключен */
+  sscanf(buf, "%15s %d %d %15s %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d", skin,
          &bg, &fg, eng, &autoOn, &theme, &aw, &ah, &cw, &ch, &pt, &keep, &ax, &ay, &cx, &cy, &cpt,
-         &ox, &oy, &ow, &oh, &opt, &sparkle, &padMode, &flame, &catFx, &fxPick, &tab, &order, &idle, &idleSz);
+         &ox, &oy, &ow, &oh, &opt, &sparkle, &padMode, &flame, &catFx, &fxPick, &tab, &order, &idle, &idleSz, &idleWatch);
+  g_idleWatch = idleWatch == 1;
   if (idleSz >= 0 && idleSz < IDLE_SIZES) g_idleSize = idleSz;
   for (int i = 0; i < IDLE_OPTIONS; i++)
     if (idle == kIdleSec[i]) g_idleSec = idle;
@@ -1217,11 +1224,11 @@ static void save_cursor_pref(void) {
   char buf[280];
   int order = 0;
   for (int i = 0; i < SEC_COUNT; i++) order = order * 10 + g_tabOrder[i];
-  snprintf(buf, sizeof(buf), "%s %d %d %s %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d\n",
+  snprintf(buf, sizeof(buf), "%s %d %d %s %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d\n",
            v, g_alphaFollow, g_alphaPinned, e, g_autostart ? 1 : 0, g_theme, g_ansW, g_ansH,
            g_cardW, g_cardH, g_ansPt, g_ansKeepPos ? 1 : 0, g_ansX, g_ansY, g_cardX, g_cardY,
            g_cardPt, g_ocrX, g_ocrY, g_ocrW, g_ocrH, g_ocrPt, g_sparkle ? 1 : 0, g_padMode,
-           g_flame ? 1 : 0, g_catFx, g_fxPick, g_tab, order, g_idleSec, g_idleSize);
+           g_flame ? 1 : 0, g_catFx, g_fxPick, g_tab, order, g_idleSec, g_idleSize, g_idleWatch);
   HANDLE h = CreateFileW(g_prefPath, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
                          FILE_ATTRIBUTE_NORMAL, NULL);
   if (h == INVALID_HANDLE_VALUE) return;
@@ -2161,6 +2168,14 @@ static const wchar_t *const kIdleSzNames[IDLE_SIZES] = {L"Мелкие", L"Ср�
 static void update_idle_buttons(void) {
   for (int i = 0; i < IDLE_OPTIONS; i++) set_mark(g_btnIdle[i], g_idleSec == kIdleSec[i], kIdleNames[i]);
   for (int i = 0; i < IDLE_SIZES; i++) set_mark(g_btnIdleSz[i], g_idleSize == i, kIdleSzNames[i]);
+  set_mark(g_btnIdleWatch, g_idleWatch, L"Режим просмотра (бой и при работе)");
+}
+
+static void set_idle_watch(int on) {
+  idle_fight_watch(on);
+  save_cursor_pref();
+  update_idle_buttons();
+  show_status(on ? L"Режим просмотра: бой идёт поверх экрана, мышь его не прячет" : L"Режим просмотра выключен");
 }
 
 static void set_idle_sec(int sec) {
@@ -2716,6 +2731,7 @@ static void tray_menu(HWND hwnd) {
   AppendMenuW(menu, MF_STRING | MF_GRAYED, 23, L"Чат с коллегами — пока не работает");
   AppendMenuW(menu, MF_STRING, 21, L"Нарды");
   AppendMenuW(menu, MF_STRING, 24, L"Шашки");
+  AppendMenuW(menu, MF_STRING | (g_idleWatch ? MF_CHECKED : 0), 25, L"Бой Годжо и Сукуны: смотреть, не пряча");
   AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
   AppendMenuW(menu, MF_STRING, 13, mCur);
   AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
@@ -2746,6 +2762,7 @@ static void tray_menu(HWND hwnd) {
   else if (cmd == 18) files_show_changes();
   else if (cmd == 21) nardy_show();
   else if (cmd == 24) shashki_show();
+  else if (cmd == 25) set_idle_watch(!g_idleWatch);
   else if (cmd == 16) {
     if (g_follow) toggle_follow();
     toggle_settings();
@@ -3228,6 +3245,8 @@ static void layout_settings(void) {
       y += set_grid(g_btnIdleSz, IDLE_SIZES, IDLE_SIZES, pad, y, fullW, btnH, gap);
       set_place(g_btnIdleShow, pad, y, fullW, btnH);
       y += btnH + gap;
+      set_place(g_btnIdleWatch, pad, y, fullW, btnH);
+      y += btnH + gap;
       break;
     case 3: /* где искать файлы и вход в PLM */
       set_place(g_filesRootEdit, pad, y, fullW - browseW - gap, btnH);
@@ -3544,6 +3563,7 @@ static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
       update_idle_buttons();
       show_status(g_idleSize == 0 ? L"Бойцы мелкие" : (g_idleSize == 1 ? L"Бойцы средние" : L"Бойцы крупные"));
     }
+    if (LOWORD(wParam) == ID_IDLE_WATCH) set_idle_watch(!g_idleWatch);
     if (LOWORD(wParam) == ID_IDLE_SHOW) {
       idle_fight_demo();
       /* сколько мониторов видит программа: если бой не уходит на другие, по этой строке понятно почему */
@@ -3969,6 +3989,7 @@ static void create_settings(HWND owner) {
   for (int i = 0; i < IDLE_OPTIONS; i++) g_btnIdle[i] = mk_btn(g_setHwnd, kIdleNames[i], ID_IDLE_BASE + i);
   g_btnIdleShow = mk_btn(g_setHwnd, L"Показать бой сейчас", ID_IDLE_SHOW);
   for (int i = 0; i < IDLE_SIZES; i++) g_btnIdleSz[i] = mk_btn(g_setHwnd, kIdleSzNames[i], ID_IDLE_SZ + i);
+  g_btnIdleWatch = mk_btn(g_setHwnd, L"Режим просмотра", ID_IDLE_WATCH);
   g_tbBg = CreateWindowExW(0, TRACKBAR_CLASSW, L"", WS_CHILD | WS_VISIBLE | TBS_NOTICKS | TBS_TOOLTIPS,
                            0, 0, 120, 28, g_setHwnd, (HMENU)(INT_PTR)ID_ALPHA_BG, NULL, NULL);
   g_tbFg = CreateWindowExW(0, TRACKBAR_CLASSW, L"", WS_CHILD | WS_VISIBLE | TBS_NOTICKS | TBS_TOOLTIPS,
@@ -4827,6 +4848,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
     if (argv && argc >= 3 && !wcscmp(argv[1], L"--figsheet")) if_test_figs(argv[2]);
     if (argv && argc >= 3 && !wcscmp(argv[1], L"--figbench")) if_test_figbench(argv[2]);
     if (argv && argc >= 2 && !wcscmp(argv[1], L"--idledemo")) if_launch(2); /* бой без остановки по вводу */
+    if (argv && argc >= 2 && !wcscmp(argv[1], L"--idlewatch")) set_idle_watch(1); /* режим просмотра, как кнопкой */
     if (argv && argc >= 3 && !wcscmp(argv[1], L"--panel")) { /* проверка шапок окон: 1 карточка, 2 текст, 3 выгрузка, 4 маршрут, 5 нарды, 6 шашки, 7 пакет */
       int n = (int)wcstol(argv[2], NULL, 10);
       if (n == 1) { create_card(NULL); show_card_text(L"проверка"); }
