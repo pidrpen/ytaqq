@@ -3703,6 +3703,8 @@ static volatile LONG g_ifScreenOff; /* экран погас или сменил
 static int g_ifLatched;             /* бой кончился без человека — ждать, пока тронут мышь */
 static DWORD g_ifLatchInput;
 static int g_ifWins[2]; /* счёт живёт, пока работает программа */
+static volatile LONG g_ifWatchOff;  /* в режиме просмотра долго держали Esc: выключить режим */
+static void set_idle_watch(int on); /* cursorpad.c: режим просмотра с сохранением и кнопками */
 static const GUID kIfDisplayState = {0x6fe69556, 0x704a, 0x47a0, {0x8f, 0x24, 0xc2, 0x8d, 0x93, 0x6f, 0xda, 0x47}};
 
 static LRESULT CALLBACK if_wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
@@ -3920,6 +3922,19 @@ static DWORD WINAPI if_thread(LPVOID arg) {
       why = 2;
       break;
     }
+    if (demo == 3) { /* режим просмотра: Esc, зажатый на секунду, выключает его */
+      static DWORD escAt;
+      if (GetAsyncKeyState(VK_ESCAPE) & 0x8000) {
+        if (!escAt) escAt = GetTickCount() | 1;
+        else if (GetTickCount() - escAt > 1000) {
+          escAt = 0;
+          InterlockedExchange(&g_ifWatchOff, 1);
+          break;
+        }
+      } else {
+        escAt = 0;
+      }
+    }
     if (frames % 120 == 90) { /* окна могли сдвинуть, закрыть, открыть */
       if_get_windows(&st, org);
       if_scene_windows(s, &st);
@@ -4000,6 +4015,7 @@ static void if_launch(int demo) {
 
 /* главный поток, раз в секунду: не пора ли начать; не кончился ли бой */
 static void idle_fight_tick(void) {
+  if (InterlockedExchange(&g_ifWatchOff, 0) && g_idleWatch) set_idle_watch(0);
   if (g_ifThread) {
     if (WaitForSingleObject(g_ifThread, 0) != WAIT_OBJECT_0) return;
     CloseHandle(g_ifThread);
@@ -4027,7 +4043,9 @@ static void idle_fight_stop(BOOL wait) {
   if (!g_ifThread) return;
   InterlockedExchange(&g_ifQuit, 1);
   if (!wait) return;
-  WaitForSingleObject(g_ifThread, 3000);
+  /* не дождались — поток оставляем на учёте: его соберёт idle_fight_tick, а новый бой
+     не запустится поверх (иначе старый остался бы на экране без хозяина) */
+  if (WaitForSingleObject(g_ifThread, 5000) != WAIT_OBJECT_0) return;
   CloseHandle(g_ifThread);
   g_ifThread = NULL;
 }

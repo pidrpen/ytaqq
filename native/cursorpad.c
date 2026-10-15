@@ -2168,18 +2168,23 @@ static const wchar_t *const kIdleSzNames[IDLE_SIZES] = {L"Мелкие", L"Ср�
 static void update_idle_buttons(void) {
   for (int i = 0; i < IDLE_OPTIONS; i++) set_mark(g_btnIdle[i], g_idleSec == kIdleSec[i], kIdleNames[i]);
   for (int i = 0; i < IDLE_SIZES; i++) set_mark(g_btnIdleSz[i], g_idleSize == i, kIdleSzNames[i]);
-  set_mark(g_btnIdleWatch, g_idleWatch, L"Режим просмотра (бой и при работе)");
+  /* состояние — словами: включён ли и как выключить */
+  if (g_btnIdleWatch)
+    SetWindowTextW(g_btnIdleWatch, g_idleWatch ? L"● Режим просмотра включён · выключить"
+                                               : L"Режим просмотра: бой и при работе мышью");
 }
 
 static void set_idle_watch(int on) {
   idle_fight_watch(on);
   save_cursor_pref();
   update_idle_buttons();
-  show_status(on ? L"Режим просмотра: бой идёт поверх экрана, мышь его не прячет" : L"Режим просмотра выключен");
+  show_status(on ? L"Режим просмотра включён. Выключить: эта же кнопка, меню значка или зажать Esc на секунду"
+                 : L"Режим просмотра выключен");
 }
 
 static void set_idle_sec(int sec) {
   g_idleSec = sec;
+  if (sec <= 0 && g_idleWatch) idle_fight_watch(0); /* «Выкл» — бой выключен совсем, и режим просмотра тоже */
   save_cursor_pref();
   update_idle_buttons();
   if (sec <= 0) idle_fight_stop(FALSE);
