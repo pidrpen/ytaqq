@@ -278,6 +278,8 @@ static BOOL looks_like_html(const char *s) {
   return s[0] == '<' || (s[0] == '{' && strstr(s, "\"message\"") && strstr(s, "\"Not Found\""));
 }
 
+static int g_updSlowCut;   /* какое-то зеркало бросили за медленность */
+static int g_updCutSlow;  /* только пока качается сама программа */
 static BOOL http_get_to_file(const wchar_t *host, const wchar_t *path, const wchar_t *dest,
                              DWORD maxn, const wchar_t *hdr);
 
@@ -498,7 +500,7 @@ static BOOL http_get_to_file(const wchar_t *host, const wchar_t *path, const wch
     DeleteFileW(dest);
     return FALSE;
   }
-  DWORD total = 0;
+  DWORD total = 0, t0 = GetTickCount();
   ok = TRUE;
   for (;;) {
     DWORD avail = 0, got = 0, w = 0;
@@ -522,6 +524,21 @@ static BOOL http_get_to_file(const wchar_t *host, const wchar_t *path, const wch
       break;
     }
     total += got;
+    /* зеркало, которое отдаёт по капле, не обрывается само (таймаут ждёт
+       только полную тишину) — бросаем его и идём к следующему */
+    DWORD ms = GetTickCount() - t0;
+    if (g_updCutSlow && ms > 20000 && total / (ms / 1000) < 48 * 1024) {
+      upd_log(L"  %s качает слишком медленно (%lu КБ за %lu с) — беру другое зеркало", host,
+              total / 1024, ms / 1000);
+      upd_fail(L"Зеркало качает слишком медленно", 0);
+      g_updSlowCut = 1;
+      ok = FALSE;
+      break;
+    }
+  }
+  if (ok && total > 512 * 1024) {
+    DWORD ms = GetTickCount() - t0;
+    upd_log(L"  %s: %lu КБ за %lu.%lu с", host, total / 1024, ms / 1000, (ms % 1000) / 100);
   }
   WinHttpCloseHandle(req);
   WinHttpCloseHandle(con);
@@ -1352,9 +1369,17 @@ static DWORD WINAPI update_thread(LPVOID param) {
   upd_log(L"");
   upd_log(L"Шаг 3 — качаю программу:");
   BOOL got_exe = FALSE;
+  g_updSlowCut = 0;
+  g_updCutSlow = 1;
   if (g_updPinned) got_exe = fetch_pinned(L"CursorPad.bin", tmpe, 16 * 1024 * 1024) &&
                              file_is_pe(tmpe) && upd_sha_ok(tmpe);
   if (!got_exe) got_exe = http_get_any(L"e", tmpe, 16 * 1024 * 1024) && file_is_pe(tmpe) && upd_sha_ok(tmpe);
+  if (!got_exe && g_updSlowCut) {
+    upd_log(L"  быстрых зеркал нет — качаю с любого, без ограничения по скорости");
+    g_updCutSlow = 0;
+    got_exe = http_get_any(L"e", tmpe, 16 * 1024 * 1024) && file_is_pe(tmpe) && upd_sha_ok(tmpe);
+  }
+  g_updCutSlow = 0;
   if (!got_exe) {
     upd_log(L"Итог: файл не скачался, повреждён или это не программа для Windows.");
     DeleteFileW(tmpe);
