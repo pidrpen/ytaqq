@@ -1,0 +1,1469 @@
+/* ai_local.c — локальный ИИ: llama.cpp (llama-server.exe) на 127.0.0.1.
+   Интерфейс и правила — в ai.h. Здесь: настройки (ai.txt в папке данных),
+   какие модели качать, запуск и остановка сервера, запросы к нему и
+   скачивание модели по кнопке. Окно настроек — ai_ui.c.
+
+   Почему отдельный процесс, а не библиотека внутри exe: llama.cpp — это C++
+   и десятки мегабайт под разные процессоры и видеокарты; в exe он утяжелил бы
+   каждое обновление, а упавшая модель уронила бы весь CursorPad вместе с
+   курсором. Сервер запускается с CREATE_NO_WINDOW в задании Windows (job),
+   которое убивает его вместе с CursorPad, и гасится после 10 минут без
+   запросов, чтобы не держать 2–5 ГБ памяти. */
+#include "ai.h"
+
+#define AI_IDLE_STOP_MS (10 * 60 * 1000)
+#define AI_PORT0 39281
+#define WM_AI_UI (WM_APP + 70)   /* в окно Настроек: обновить вкладку «ИИ» */
+#define WM_AI_TEST (WM_APP + 71) /* в окно Настроек: ответ кнопки «Проверить» */
+
+/* --- что качать ------------------------------------------------------------
+   Модели — с huggingface.co, ревизия закреплена: файл по этой ссылке не
+   подменить, а размер и sha256 сверяются после скачивания. Все — Apache 2.0. */
+typedef struct {
+  const wchar_t *repo, *rev, *file;
+  ULONGLONG size;
+  const char *sha;
+} AiFile;
+
+typedef struct {
+  const wchar_t *button; /* на кнопке уровня */
+  const wchar_t *model;  /* название модели для людей */
+  const wchar_t *dir;    /* подпапка в ai\models */
+  const wchar_t *hint;   /* для какого компьютера */
+  int nf;                /* файлов модели; mmproj — последний, если vision */
+  BOOL vision;
+  AiFile f[2];
+} AiTier;
+
+#define AI_TIERS 4
+static const AiTier kAiTiers[AI_TIERS] = {
+    {L"Слабый", L"Qwen2.5 1.5B", L"qwen2.5-1.5b", L"8 ГБ памяти, без видеокарты", 1, FALSE,
+     {{L"Qwen/Qwen2.5-1.5B-Instruct-GGUF", L"91cad51170dc346986eccefdc2dd33a9da36ead9",
+       L"qwen2.5-1.5b-instruct-q4_k_m.gguf", 1117320736ULL,
+       "6a1a2eb6d15622bf3c96857206351ba97e1af16c30d7a74ee38970e434e9407e"}}},
+    {L"Средний", L"Qwen3 4B", L"qwen3-4b", L"16 ГБ памяти, процессор как i5-11400", 1, FALSE,
+     {{L"unsloth/Qwen3-4B-Instruct-2507-GGUF", L"a06e946bb6b655725eafa393f4a9745d460374c9",
+       L"Qwen3-4B-Instruct-2507-Q4_K_M.gguf", 2497281120ULL,
+       "3605803b982cb64aead44f6c1b2ae36e3acdb41d8e46c8a94c6533bc4c67e597"}}},
+    {L"Мощный", L"Qwen2.5 7B", L"qwen2.5-7b", L"32 ГБ памяти или видеокарта от 8 ГБ", 2, FALSE,
+     {{L"Qwen/Qwen2.5-7B-Instruct-GGUF", L"bb5d59e06d9551d752d08b292a50eb208b07ab1f",
+       L"qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf", 3993201344ULL,
+       "dfce12e3862a5283ccfb88221b48480e58745165de856439950d0f22590580db"},
+      {L"Qwen/Qwen2.5-7B-Instruct-GGUF", L"bb5d59e06d9551d752d08b292a50eb208b07ab1f",
+       L"qwen2.5-7b-instruct-q4_k_m-00002-of-00002.gguf", 689872288ULL,
+       "539cf93f78e887edea1c04e2d7d8cdaca9d01dae9c9025bcb8accbe29df3d72a"}}},
+    {L"С картинками", L"Qwen3-VL 4B", L"qwen3-vl-4b", L"16 ГБ; читает и картинки, медленнее", 2, TRUE,
+     {{L"unsloth/Qwen3-VL-4B-Instruct-GGUF", L"00c00da0690c4b14b5539b02c4ea5d7c9102b35e",
+       L"Qwen3-VL-4B-Instruct-Q4_K_M.gguf", 2497282336ULL,
+       "d4dcd426bfba75752a312b266b80fec8136fbaca13c62d93b7ac41fa67f0492b"},
+      {L"unsloth/Qwen3-VL-4B-Instruct-GGUF", L"00c00da0690c4b14b5539b02c4ea5d7c9102b35e",
+       L"mmproj-F16.gguf", 836180640ULL,
+       "1b9f4e92f0fbda14d7d7b58baed86039b8a980fe503d9d6a9393f25c0028f1fc"}}},
+};
+
+/* --- настройки ------------------------------------------------------------ */
+static BOOL g_aiOn;                  /* по умолчанию выключен */
+static int g_aiTier = 1;             /* «Средний» */
+static BOOL g_aiGpu;                 /* llama.cpp со сборкой Vulkan и слоями на видеокарте */
+static wchar_t g_aiModel[MAX_PATH];  /* своя модель .gguf; пусто — модель уровня */
+static wchar_t g_aiExtHost[64];      /* свой сервер (Ollama…): адрес; пусто — свой llama-server */
+static int g_aiExtPort;
+static char g_aiExtModel[64];        /* имя модели для чужого сервера */
+static DWORD g_aiUiThread;           /* поток интерфейса — синхронные вызовы из него запрещены */
+
+static void ai_dir(wchar_t *out, const wchar_t *sub) {
+  if (sub && sub[0]) _snwprintf(out, MAX_PATH, L"%s\\ai\\%s", g_dataDir, sub);
+  else _snwprintf(out, MAX_PATH, L"%s\\ai", g_dataDir);
+  out[MAX_PATH - 1] = 0;
+}
+
+static void ai_model_file(int tier, int i, wchar_t *out) {
+  _snwprintf(out, MAX_PATH, L"%s\\ai\\models\\%s\\%s", g_dataDir, kAiTiers[tier].dir, kAiTiers[tier].f[i].file);
+  out[MAX_PATH - 1] = 0;
+}
+
+static BOOL ai_file_exists(const wchar_t *p) {
+  DWORD a = GetFileAttributesW(p);
+  return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+static ULONGLONG ai_file_size(const wchar_t *p) {
+  WIN32_FILE_ATTRIBUTE_DATA d;
+  if (!GetFileAttributesExW(p, GetFileExInfoStandard, &d)) return 0;
+  return ((ULONGLONG)d.nFileSizeHigh << 32) | d.nFileSizeLow;
+}
+
+/* файл модели уровня скачан и проверен: рядом лежит отметка .ok (sha256 считали
+   при скачивании; пересчитывать 2,5 ГБ на каждом запуске — десятки секунд) */
+static BOOL ai_tier_file_ok(int tier, int i) {
+  wchar_t p[MAX_PATH], ok[MAX_PATH + 4];
+  ai_model_file(tier, i, p);
+  _snwprintf(ok, MAX_PATH + 4, L"%s.ok", p);
+  return ai_file_size(p) == kAiTiers[tier].f[i].size && ai_file_exists(ok);
+}
+
+static BOOL ai_tier_ready(int tier) {
+  for (int i = 0; i < kAiTiers[tier].nf; i++)
+    if (!ai_tier_file_ok(tier, i)) return FALSE;
+  return TRUE;
+}
+
+/* llama-server.exe: путь записан в ai\llama\server.txt (или ai\llama-vk\…) после распаковки */
+static BOOL ai_server_exe(BOOL gpu, wchar_t *out) {
+  wchar_t d[MAX_PATH], p[MAX_PATH];
+  ai_dir(d, gpu ? L"llama-vk" : L"llama");
+  _snwprintf(p, MAX_PATH, L"%s\\llama-server.exe", d);
+  if (ai_file_exists(p)) {
+    lstrcpynW(out, p, MAX_PATH);
+    return TRUE;
+  }
+  /* в архиве он мог лежать во вложенной папке */
+  WIN32_FIND_DATAW fd;
+  wchar_t mask[MAX_PATH];
+  _snwprintf(mask, MAX_PATH, L"%s\\*", d);
+  HANDLE h = FindFirstFileW(mask, &fd);
+  if (h == INVALID_HANDLE_VALUE) return FALSE;
+  BOOL found = FALSE;
+  do {
+    if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || fd.cFileName[0] == L'.') continue;
+    _snwprintf(p, MAX_PATH, L"%s\\%s\\llama-server.exe", d, fd.cFileName);
+    if (ai_file_exists(p)) {
+      lstrcpynW(out, p, MAX_PATH);
+      found = TRUE;
+    }
+  } while (!found && FindNextFileW(h, &fd));
+  FindClose(h);
+  return found;
+}
+
+/* какую модель запускать: своя или уровня; mm — проектор картинок или пусто */
+static BOOL ai_pick_model(wchar_t *model, wchar_t *mm) {
+  mm[0] = 0;
+  if (g_aiModel[0]) {
+    if (!ai_file_exists(g_aiModel)) return FALSE;
+    lstrcpynW(model, g_aiModel, MAX_PATH);
+    /* рядом mmproj*.gguf — значит, модель с картинками */
+    wchar_t mask[MAX_PATH];
+    lstrcpynW(mask, g_aiModel, MAX_PATH);
+    wchar_t *sl = wcsrchr(mask, L'\\');
+    if (sl) {
+      wcscpy(sl + 1, L"mmproj*.gguf");
+      WIN32_FIND_DATAW fd;
+      HANDLE h = FindFirstFileW(mask, &fd);
+      if (h != INVALID_HANDLE_VALUE) {
+        *sl = 0;
+        _snwprintf(mm, MAX_PATH, L"%s\\%s", mask, fd.cFileName);
+        FindClose(h);
+      }
+    }
+    return TRUE;
+  }
+  if (!ai_tier_ready(g_aiTier)) return FALSE;
+  ai_model_file(g_aiTier, 0, model);
+  if (kAiTiers[g_aiTier].vision) ai_model_file(g_aiTier, kAiTiers[g_aiTier].nf - 1, mm);
+  return TRUE;
+}
+
+static BOOL ai_ext(void) { return g_aiExtHost[0] && g_aiExtPort > 0; }
+
+BOOL ai_ready(void) {
+  if (!g_aiOn) return FALSE;
+  if (ai_ext()) return TRUE;
+  wchar_t exe[MAX_PATH], m[MAX_PATH], mm[MAX_PATH];
+  return (ai_server_exe(g_aiGpu, exe) || ai_server_exe(!g_aiGpu, exe)) && ai_pick_model(m, mm);
+}
+
+const wchar_t *ai_status_text(int st) {
+  switch (st) {
+  case AI_OK: return L"готово";
+  case AI_OFF: return L"ИИ выключен (Настройки → ИИ)";
+  case AI_NO_MODEL: return L"модель не скачана (Настройки → ИИ → Скачать)";
+  case AI_NO_SERVER: return L"llama-server не запустился";
+  case AI_TIMEOUT: return L"ИИ не успел ответить";
+  case AI_CANCELLED: return L"отменено";
+  case AI_BUSY: return L"нельзя ждать ИИ в потоке окон";
+  case AI_NO_VISION: return L"нужна модель «С картинками»";
+  default: return L"ошибка ИИ";
+  }
+}
+
+/* ai.txt: строки «ключ значение», UTF-8 */
+static void ai_save(void) {
+  wchar_t p[MAX_PATH];
+  _snwprintf(p, MAX_PATH, L"%s\\ai.txt", g_dataDir);
+  char model[MAX_PATH * 3], buf[MAX_PATH * 3 + 300];
+  WideCharToMultiByte(CP_UTF8, 0, g_aiModel, -1, model, sizeof(model), NULL, NULL);
+  int n = snprintf(buf, sizeof(buf), "on %d\r\ntier %d\r\ngpu %d\r\nmodel %s\r\n", g_aiOn ? 1 : 0, g_aiTier,
+                   g_aiGpu ? 1 : 0, model);
+  if (ai_ext()) {
+    char host[64];
+    WideCharToMultiByte(CP_UTF8, 0, g_aiExtHost, -1, host, sizeof(host), NULL, NULL);
+    n += snprintf(buf + n, sizeof(buf) - n, "server %s %d %s\r\n", host, g_aiExtPort, g_aiExtModel);
+  }
+  HANDLE h = CreateFileW(p, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+  if (h == INVALID_HANDLE_VALUE) return;
+  DWORD w;
+  WriteFile(h, buf, (DWORD)n, &w, NULL);
+  CloseHandle(h);
+}
+
+static void ai_load(void) {
+  g_aiUiThread = GetCurrentThreadId();
+  wchar_t p[MAX_PATH];
+  _snwprintf(p, MAX_PATH, L"%s\\ai.txt", g_dataDir);
+  HANDLE h = CreateFileW(p, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+  if (h == INVALID_HANDLE_VALUE) return;
+  char buf[4096];
+  DWORD got = 0;
+  ReadFile(h, buf, sizeof(buf) - 1, &got, NULL);
+  CloseHandle(h);
+  buf[got] = 0;
+  for (char *line = strtok(buf, "\r\n"); line; line = strtok(NULL, "\r\n")) {
+    int v;
+    if (sscanf(line, "on %d", &v) == 1) g_aiOn = v == 1;
+    else if (sscanf(line, "tier %d", &v) == 1 && v >= 0 && v < AI_TIERS) g_aiTier = v;
+    else if (sscanf(line, "gpu %d", &v) == 1) g_aiGpu = v == 1;
+    else if (!strncmp(line, "model ", 6)) MultiByteToWideChar(CP_UTF8, 0, line + 6, -1, g_aiModel, MAX_PATH);
+    else if (!strncmp(line, "server ", 7)) {
+      /* свой сервер с OpenAI-совместимым API: «server 127.0.0.1 11434 qwen3:4b» —
+         Ollama или llama-server, запущенный руками. Только адреса этого компьютера:
+         данные не должны уходить с него. */
+      char host[64] = "", model[64] = "";
+      int port = 0;
+      if (sscanf(line + 7, "%63s %d %63s", host, &port, model) >= 2 &&
+          (!strcmp(host, "127.0.0.1") || !strcmp(host, "localhost")) && port > 0 && port < 65536) {
+        MultiByteToWideChar(CP_UTF8, 0, host, -1, g_aiExtHost, 64);
+        g_aiExtPort = port;
+        lstrcpynA(g_aiExtModel, model, sizeof(g_aiExtModel));
+      }
+    }
+  }
+}
+
+/* --- строки: UTF-8, JSON ------------------------------------------------------ */
+static char *ai_utf8(const wchar_t *w) {
+  if (!w) w = L"";
+  int n = WideCharToMultiByte(CP_UTF8, 0, w, -1, NULL, 0, NULL, NULL);
+  char *s = (char *)malloc(n > 0 ? n : 1);
+  if (!s) return NULL;
+  if (n <= 0) s[0] = 0;
+  else WideCharToMultiByte(CP_UTF8, 0, w, -1, s, n, NULL, NULL);
+  return s;
+}
+
+static wchar_t *ai_wide(const char *s, int len) {
+  int n = MultiByteToWideChar(CP_UTF8, 0, s, len, NULL, 0);
+  wchar_t *w = (wchar_t *)malloc((n + 1) * sizeof(wchar_t));
+  if (!w) return NULL;
+  if (n > 0) MultiByteToWideChar(CP_UTF8, 0, s, len, w, n);
+  w[n > 0 ? n : 0] = 0;
+  return w;
+}
+
+/* строка JSON в кавычках из wchar_t; malloc */
+static char *ai_json_str(const wchar_t *w) {
+  char *u = ai_utf8(w);
+  if (!u) return NULL;
+  size_t n = strlen(u);
+  char *o = (char *)malloc(n * 6 + 3), *q = o;
+  if (!o) {
+    free(u);
+    return NULL;
+  }
+  *q++ = '"';
+  for (const unsigned char *p = (const unsigned char *)u; *p; p++) {
+    if (*p == '"' || *p == '\\') {
+      *q++ = '\\';
+      *q++ = (char)*p;
+    } else if (*p == '\n') {
+      *q++ = '\\';
+      *q++ = 'n';
+    } else if (*p == '\r') {
+      *q++ = '\\';
+      *q++ = 'r';
+    } else if (*p == '\t') {
+      *q++ = '\\';
+      *q++ = 't';
+    } else if (*p < 0x20) {
+      q += sprintf(q, "\\u%04x", *p);
+    } else {
+      *q++ = (char)*p;
+    }
+  }
+  *q++ = '"';
+  *q = 0;
+  free(u);
+  return o;
+}
+
+static int ai_hex4(const char *p) {
+  int v = 0;
+  for (int i = 0; i < 4; i++) {
+    char c = p[i];
+    v <<= 4;
+    if (c >= '0' && c <= '9') v |= c - '0';
+    else if (c >= 'a' && c <= 'f') v |= c - 'a' + 10;
+    else if (c >= 'A' && c <= 'F') v |= c - 'A' + 10;
+    else return -1;
+  }
+  return v;
+}
+
+/* p — сразу после открывающей кавычки; строка JSON → wchar_t (malloc) */
+static wchar_t *ai_json_unstr(const char *p) {
+  size_t cap = strlen(p) + 1;
+  char *u = (char *)malloc(cap), *q = u;
+  if (!u) return NULL;
+  while (*p && *p != '"') {
+    if (*p != '\\') {
+      *q++ = *p++;
+      continue;
+    }
+    p++;
+    char c = *p ? *p++ : 0;
+    if (c == 'n') *q++ = '\n';
+    else if (c == 'r') *q++ = '\r';
+    else if (c == 't') *q++ = '\t';
+    else if (c == 'b' || c == 'f') *q++ = ' ';
+    else if (c == 'u') {
+      int cp = ai_hex4(p);
+      if (cp < 0) break;
+      p += 4;
+      if (cp >= 0xD800 && cp < 0xDC00 && p[0] == '\\' && p[1] == 'u') {
+        int lo = ai_hex4(p + 2);
+        if (lo >= 0xDC00 && lo < 0xE000) {
+          cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+          p += 6;
+        }
+      }
+      if (cp < 0x80) *q++ = (char)cp;
+      else if (cp < 0x800) {
+        *q++ = (char)(0xC0 | cp >> 6);
+        *q++ = (char)(0x80 | (cp & 63));
+      } else if (cp < 0x10000) {
+        *q++ = (char)(0xE0 | cp >> 12);
+        *q++ = (char)(0x80 | (cp >> 6 & 63));
+        *q++ = (char)(0x80 | (cp & 63));
+      } else {
+        *q++ = (char)(0xF0 | cp >> 18);
+        *q++ = (char)(0x80 | (cp >> 12 & 63));
+        *q++ = (char)(0x80 | (cp >> 6 & 63));
+        *q++ = (char)(0x80 | (cp & 63));
+      }
+    } else if (c) *q++ = c;
+  }
+  *q = 0;
+  wchar_t *w = ai_wide(u, -1);
+  free(u);
+  return w;
+}
+
+/* ответ модели: убрать рассуждения <think>…</think> и пробелы по краям */
+static void ai_tidy(wchar_t *t) {
+  wchar_t *e = wcsstr(t, L"</think>");
+  if (e && wcsstr(t, L"<think>")) memmove(t, e + 8, (wcslen(e + 8) + 1) * sizeof(wchar_t));
+  wchar_t *s = t;
+  while (*s && iswspace(*s)) s++;
+  if (s != t) memmove(t, s, (wcslen(s) + 1) * sizeof(wchar_t));
+  size_t n = wcslen(t);
+  while (n && iswspace(t[n - 1])) t[--n] = 0;
+}
+
+static char *ai_b64(const BYTE *d, DWORD n) {
+  static const char k[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  char *o = (char *)malloc((size_t)(n + 2) / 3 * 4 + 1), *q = o;
+  if (!o) return NULL;
+  for (DWORD i = 0; i < n; i += 3) {
+    DWORD v = (DWORD)d[i] << 16 | (i + 1 < n ? (DWORD)d[i + 1] << 8 : 0) | (i + 2 < n ? d[i + 2] : 0);
+    *q++ = k[v >> 18 & 63];
+    *q++ = k[v >> 12 & 63];
+    *q++ = i + 1 < n ? k[v >> 6 & 63] : '=';
+    *q++ = i + 2 < n ? k[v & 63] : '=';
+  }
+  *q = 0;
+  return o;
+}
+
+/* --- сервер ----------------------------------------------------------------- */
+static SRWLOCK g_aiSrvLock = SRWLOCK_INIT;
+static HANDLE g_aiProc, g_aiJob;
+static int g_aiPort;
+static char g_aiKey[40];
+static volatile LONG g_aiActive;    /* запросов сейчас */
+static volatile DWORD g_aiLastUse;  /* GetTickCount последнего ответа */
+static BOOL g_aiWatchOn;
+static wchar_t g_aiSrvNote[200];    /* почему не запустился — для «Проверить» */
+
+/* простой HTTP к 127.0.0.1. reqSlot — куда положить ручку запроса, чтобы
+   другой поток мог оборвать его, закрыв её. Возвращает код HTTP или 0. */
+static DWORD ai_http(const wchar_t *verb, int port, const wchar_t *path, const char *body, const char *key,
+                     DWORD timeoutMs, void *volatile *reqSlot, char **out) {
+  if (out) *out = NULL;
+  DWORD status = 0;
+  HINTERNET ses = WinHttpOpen(L"CursorPad-AI", WINHTTP_ACCESS_TYPE_NO_PROXY, WINHTTP_NO_PROXY_NAME,
+                              WINHTTP_NO_PROXY_BYPASS, 0);
+  if (!ses) return 0;
+  int t = timeoutMs > 0x7fffffff ? 0x7fffffff : (int)timeoutMs;
+  WinHttpSetTimeouts(ses, 2000, 2000, t, t);
+  HINTERNET con = WinHttpConnect(ses, ai_ext() ? g_aiExtHost : L"127.0.0.1", (INTERNET_PORT)port, 0);
+  HINTERNET req = con ? WinHttpOpenRequest(con, verb, path, NULL, WINHTTP_NO_REFERER,
+                                           WINHTTP_DEFAULT_ACCEPT_TYPES, 0)
+                      : NULL;
+  if (req) {
+    if (reqSlot) InterlockedExchangePointer((void *volatile *)reqSlot, req);
+    wchar_t hdr[160] = L"Content-Type: application/json\r\n";
+    if (key && key[0]) {
+      wchar_t wk[48];
+      MultiByteToWideChar(CP_UTF8, 0, key, -1, wk, 48);
+      _snwprintf(hdr + wcslen(hdr), 120, L"Authorization: Bearer %s\r\n", wk);
+    }
+    DWORD bn = body ? (DWORD)strlen(body) : 0;
+    if (WinHttpSendRequest(req, hdr, (DWORD)-1L, (LPVOID)body, bn, bn, 0) && WinHttpReceiveResponse(req, NULL)) {
+      DWORD sl = sizeof(status);
+      WinHttpQueryHeaders(req, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, NULL, &status, &sl,
+                          WINHTTP_NO_HEADER_INDEX);
+      size_t cap = 65536, n = 0;
+      char *buf = out ? (char *)malloc(cap) : NULL;
+      for (;;) {
+        DWORD avail = 0, got = 0;
+        if (!WinHttpQueryDataAvailable(req, &avail) || !avail) break;
+        if (!buf) { /* тело не нужно — дочитать впустую */
+          char tmp[4096];
+          if (!WinHttpReadData(req, tmp, avail < sizeof(tmp) ? avail : sizeof(tmp), &got) || !got) break;
+          continue;
+        }
+        if (n + avail + 1 > cap) {
+          while (n + avail + 1 > cap) cap *= 2;
+          char *nb = (char *)realloc(buf, cap);
+          if (!nb) break;
+          buf = nb;
+        }
+        if (!WinHttpReadData(req, buf + n, avail, &got) || !got) break;
+        n += got;
+      }
+      if (buf) {
+        buf[n] = 0;
+        *out = buf;
+      }
+    } else {
+      status = 0;
+    }
+    /* ручку закрывает тот, кто первым забрал её из слота: мы или отмена */
+    HINTERNET mine = reqSlot ? InterlockedExchangePointer((void *volatile *)reqSlot, NULL) : req;
+    if (mine) WinHttpCloseHandle(mine);
+  }
+  if (con) WinHttpCloseHandle(con);
+  WinHttpCloseHandle(ses);
+  return status;
+}
+
+static void ai_server_stop_locked(void) {
+  if (g_aiProc) {
+    TerminateProcess(g_aiProc, 0);
+    WaitForSingleObject(g_aiProc, 3000);
+    CloseHandle(g_aiProc);
+    g_aiProc = NULL;
+  }
+  g_aiPort = 0;
+}
+
+static void ai_server_stop(void) {
+  AcquireSRWLockExclusive(&g_aiSrvLock);
+  ai_server_stop_locked();
+  ReleaseSRWLockExclusive(&g_aiSrvLock);
+}
+
+/* сторож: гасит сервер после 10 минут без запросов или если ИИ выключили */
+static DWORD WINAPI ai_watch_thread(LPVOID p) {
+  (void)p;
+  for (;;) {
+    Sleep(15000);
+    AcquireSRWLockExclusive(&g_aiSrvLock);
+    BOOL idle = g_aiActive == 0 && (GetTickCount() - g_aiLastUse > AI_IDLE_STOP_MS || !g_aiOn);
+    BOOL dead = !g_aiProc || WaitForSingleObject(g_aiProc, 0) == WAIT_OBJECT_0;
+    if (idle || dead) {
+      ai_server_stop_locked();
+      g_aiWatchOn = FALSE;
+      ReleaseSRWLockExclusive(&g_aiSrvLock);
+      return 0;
+    }
+    ReleaseSRWLockExclusive(&g_aiSrvLock);
+  }
+}
+
+static int ai_cores(void) {
+  /* потоков столько, сколько физических ядер: на гиперпотоках llama.cpp не быстрее */
+  DWORD len = 0;
+  GetLogicalProcessorInformation(NULL, &len);
+  SYSTEM_LOGICAL_PROCESSOR_INFORMATION *info = (SYSTEM_LOGICAL_PROCESSOR_INFORMATION *)malloc(len ? len : 1);
+  int cores = 0;
+  if (info && GetLogicalProcessorInformation(info, &len))
+    for (DWORD i = 0; i < len / sizeof(*info); i++)
+      if (info[i].Relationship == RelationProcessorCore) cores++;
+  free(info);
+  if (cores <= 0) {
+    SYSTEM_INFO si;
+    GetSystemInfo(&si);
+    cores = (int)si.dwNumberOfProcessors / 2;
+  }
+  return cores < 1 ? 1 : (cores > 16 ? 16 : cores);
+}
+
+/* последняя непустая строка журнала сервера — почему он не поднялся */
+static void ai_log_tail(const wchar_t *log, wchar_t *out, int cap) {
+  out[0] = 0;
+  HANDLE h = CreateFileW(log, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+  if (h == INVALID_HANDLE_VALUE) return;
+  char buf[4096];
+  DWORD sz = GetFileSize(h, NULL), got = 0;
+  if (sz > sizeof(buf) - 1) SetFilePointer(h, (LONG)(sz - (sizeof(buf) - 1)), NULL, FILE_BEGIN);
+  ReadFile(h, buf, sizeof(buf) - 1, &got, NULL);
+  CloseHandle(h);
+  buf[got] = 0;
+  while (got && (buf[got - 1] == '\n' || buf[got - 1] == '\r' || buf[got - 1] == ' ')) buf[--got] = 0;
+  char *ln = strrchr(buf, '\n');
+  ln = ln ? ln + 1 : buf;
+  MultiByteToWideChar(CP_UTF8, 0, ln, -1, out, cap);
+  out[cap - 1] = 0;
+}
+
+/* поднять сервер, если он не идёт. Ждёт загрузки модели до deadline. */
+static int ai_server_ensure(DWORD deadline, volatile LONG *cancel) {
+  if (ai_ext()) return AI_OK;
+  AcquireSRWLockExclusive(&g_aiSrvLock);
+  if (g_aiProc && WaitForSingleObject(g_aiProc, 0) == WAIT_TIMEOUT && g_aiPort) {
+    ReleaseSRWLockExclusive(&g_aiSrvLock);
+    return AI_OK;
+  }
+  ai_server_stop_locked();
+  wchar_t exe[MAX_PATH], model[MAX_PATH], mm[MAX_PATH], log[MAX_PATH], dir[MAX_PATH];
+  BOOL gpu = g_aiGpu && ai_server_exe(TRUE, exe);
+  if (!gpu && !ai_server_exe(FALSE, exe) && !ai_server_exe(TRUE, exe)) {
+    lstrcpynW(g_aiSrvNote, L"нет llama-server.exe — нажмите «Скачать»", 200);
+    ReleaseSRWLockExclusive(&g_aiSrvLock);
+    return AI_NO_MODEL;
+  }
+  if (!ai_pick_model(model, mm)) {
+    lstrcpynW(g_aiSrvNote, L"нет модели — нажмите «Скачать»", 200);
+    ReleaseSRWLockExclusive(&g_aiSrvLock);
+    return AI_NO_MODEL;
+  }
+  if (!g_aiJob) {
+    g_aiJob = CreateJobObjectW(NULL, NULL);
+    if (g_aiJob) {
+      JOBOBJECT_EXTENDED_LIMIT_INFORMATION li;
+      memset(&li, 0, sizeof(li));
+      li.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+      SetInformationJobObject(g_aiJob, JobObjectExtendedLimitInformation, &li, sizeof(li));
+    }
+  }
+  { /* ключ на этот запуск: чужие программы на компьютере не будут спрашивать нашу модель */
+    HCRYPTPROV prov = 0;
+    BYTE r[16] = {0};
+    if (CryptAcquireContextW(&prov, NULL, NULL, PROV_RSA_AES, CRYPT_VERIFYCONTEXT)) {
+      CryptGenRandom(prov, sizeof(r), r);
+      CryptReleaseContext(prov, 0);
+    } else {
+      LARGE_INTEGER q;
+      QueryPerformanceCounter(&q);
+      memcpy(r, &q, sizeof(q));
+    }
+    for (int i = 0; i < 16; i++) snprintf(g_aiKey + i * 2, 3, "%02x", r[i]);
+  }
+  ai_dir(dir, NULL);
+  _snwprintf(log, MAX_PATH, L"%s\\server.log", dir);
+  int rc = AI_NO_SERVER;
+  g_aiSrvNote[0] = 0;
+  for (int attempt = 0; attempt < 4 && rc != AI_OK; attempt++) {
+    int port = AI_PORT0 + attempt * 7;
+    wchar_t cmd[MAX_PATH * 3 + 300], wkey[40];
+    MultiByteToWideChar(CP_UTF8, 0, g_aiKey, -1, wkey, 40);
+    int n = _snwprintf(cmd, MAX_PATH * 3 + 300,
+                       L"\"%s\" -m \"%s\" --host 127.0.0.1 --port %d --api-key %s -c 8192 -np 2 -t %d -ngl %d",
+                       exe, model, port, wkey, ai_cores(), gpu ? 99 : 0);
+    if (mm[0] && n > 0) _snwprintf(cmd + n, MAX_PATH * 3 + 300 - n, L" --mmproj \"%s\"", mm);
+    cmd[MAX_PATH * 3 + 299] = 0;
+    SECURITY_ATTRIBUTES sa = {sizeof(sa), NULL, TRUE};
+    HANDLE lf = CreateFileW(log, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, CREATE_ALWAYS,
+                            FILE_ATTRIBUTE_NORMAL, NULL);
+    STARTUPINFOW si;
+    PROCESS_INFORMATION pi;
+    memset(&si, 0, sizeof(si));
+    si.cb = sizeof(si);
+    if (lf != INVALID_HANDLE_VALUE) {
+      si.dwFlags = STARTF_USESTDHANDLES;
+      si.hStdOutput = lf;
+      si.hStdError = lf;
+      si.hStdInput = NULL;
+    }
+    wchar_t exeDir[MAX_PATH];
+    lstrcpynW(exeDir, exe, MAX_PATH);
+    wchar_t *sl = wcsrchr(exeDir, L'\\');
+    if (sl) *sl = 0;
+    BOOL ok = CreateProcessW(exe, cmd, NULL, NULL, lf != INVALID_HANDLE_VALUE, CREATE_NO_WINDOW | CREATE_SUSPENDED,
+                             NULL, exeDir, &si, &pi);
+    if (lf != INVALID_HANDLE_VALUE) CloseHandle(lf);
+    if (!ok) {
+      _snwprintf(g_aiSrvNote, 200, L"llama-server.exe не запустился (код %lu)", GetLastError());
+      break;
+    }
+    if (g_aiJob) AssignProcessToJobObject(g_aiJob, pi.hProcess);
+    SetPriorityClass(pi.hProcess, BELOW_NORMAL_PRIORITY_CLASS); /* мышь и окна важнее */
+    ResumeThread(pi.hThread);
+    CloseHandle(pi.hThread);
+    g_aiProc = pi.hProcess;
+    g_aiPort = port;
+    /* ждём /health: 503, пока грузится модель, 200 — готов */
+    for (;;) {
+      if (WaitForSingleObject(g_aiProc, 300) == WAIT_OBJECT_0) {
+        ai_log_tail(log, g_aiSrvNote, 200);
+        ai_server_stop_locked();
+        break; /* занят порт или не та модель — следующая попытка покажет */
+      }
+      if ((cancel && *cancel) || (LONG)(GetTickCount() - deadline) >= 0) {
+        rc = cancel && *cancel ? AI_CANCELLED : AI_TIMEOUT;
+        if (rc == AI_TIMEOUT) lstrcpynW(g_aiSrvNote, L"модель грузится слишком долго", 200);
+        ai_server_stop_locked();
+        attempt = 99;
+        break;
+      }
+      if (ai_http(L"GET", port, L"/health", NULL, NULL, 1500, NULL, NULL) == 200) {
+        rc = AI_OK;
+        break;
+      }
+    }
+  }
+  if (rc == AI_OK) {
+    g_aiLastUse = GetTickCount();
+    if (!g_aiWatchOn) {
+      HANDLE th = CreateThread(NULL, 0, ai_watch_thread, NULL, 0, NULL);
+      if (th) {
+        g_aiWatchOn = TRUE;
+        CloseHandle(th);
+      }
+    }
+  }
+  ReleaseSRWLockExclusive(&g_aiSrvLock);
+  return rc;
+}
+
+void ai_shutdown(void) {
+  ai_server_stop();
+}
+
+/* --- запросы ------------------------------------------------------------------ */
+typedef struct AiJob {
+  int id;
+  char *body;
+  DWORD timeout;
+  HWND notify;
+  UINT msg;
+  void *user;
+  volatile LONG cancel;
+  void *volatile req; /* открытый запрос — закрыть, чтобы оборвать */
+  int status;
+  wchar_t *text;
+  DWORD ms;
+  struct AiJob *next;
+} AiJob;
+
+static SRWLOCK g_aiJobLock = SRWLOCK_INIT;
+static AiJob *g_aiJobs;
+static volatile LONG g_aiNextId;
+
+static char *ai_body(const wchar_t *instruction, const char *userContent, int maxTokens) {
+  char *sys = ai_json_str(instruction);
+  if (!sys || !userContent) {
+    free(sys);
+    return NULL;
+  }
+  size_t n = strlen(sys) + strlen(userContent) + 400 + strlen(g_aiExtModel);
+  char *b = (char *)malloc(n);
+  if (b)
+    snprintf(b, n,
+             "{\"model\":\"%s\",\"messages\":[{\"role\":\"system\",\"content\":%s},"
+             "{\"role\":\"user\",\"content\":%s}],\"temperature\":0.2,\"max_tokens\":%d,"
+             "\"stream\":false,\"cache_prompt\":true}",
+             g_aiExtModel[0] ? g_aiExtModel : "local", sys, userContent, maxTokens);
+  free(sys);
+  return b;
+}
+
+static void ai_job_run(AiJob *j) {
+  DWORD t0 = GetTickCount(), deadline = t0 + j->timeout;
+  InterlockedIncrement(&g_aiActive);
+  int st = ai_server_ensure(deadline, &j->cancel);
+  if (st == AI_NO_SERVER || st == AI_NO_MODEL) {
+    AcquireSRWLockShared(&g_aiSrvLock);
+    j->text = _wcsdup(g_aiSrvNote[0] ? g_aiSrvNote : ai_status_text(st));
+    ReleaseSRWLockShared(&g_aiSrvLock);
+  }
+  if (st == AI_OK) {
+    DWORD left = deadline - GetTickCount();
+    if ((LONG)left < 1000) left = 1000;
+    char *resp = NULL;
+    int port = ai_ext() ? g_aiExtPort : g_aiPort;
+    DWORD code = j->cancel ? 0 : ai_http(L"POST", port, L"/v1/chat/completions", j->body, ai_ext() ? NULL : g_aiKey,
+                                         left, &j->req, &resp);
+    if (j->cancel) st = AI_CANCELLED;
+    else if (!code) st = GetTickCount() - t0 >= j->timeout - 500 ? AI_TIMEOUT : AI_NO_SERVER;
+    else {
+      const char *c = resp ? json_find_string(resp, code == 200 ? "content" : "message") : NULL;
+      if (c) j->text = ai_json_unstr(c);
+      if (code == 200 && j->text) {
+        ai_tidy(j->text);
+        st = AI_OK;
+      } else {
+        st = AI_ERROR;
+        if (!j->text) {
+          wchar_t m[64];
+          _snwprintf(m, 64, L"сервер ИИ ответил кодом %lu", code);
+          j->text = _wcsdup(m);
+        }
+      }
+    }
+    free(resp);
+    g_aiLastUse = GetTickCount();
+  }
+  InterlockedDecrement(&g_aiActive);
+  j->status = st;
+  j->ms = GetTickCount() - t0;
+  if (!j->text) j->text = _wcsdup(ai_status_text(st));
+}
+
+static void ai_job_free(AiJob *j) {
+  free(j->body);
+  free(j->text);
+  free(j);
+}
+
+static void ai_job_unlist(AiJob *j) {
+  AcquireSRWLockExclusive(&g_aiJobLock);
+  for (AiJob **pp = &g_aiJobs; *pp; pp = &(*pp)->next)
+    if (*pp == j) {
+      *pp = j->next;
+      break;
+    }
+  ReleaseSRWLockExclusive(&g_aiJobLock);
+}
+
+static DWORD WINAPI ai_job_thread(LPVOID p) {
+  AiJob *j = (AiJob *)p;
+  ai_job_run(j);
+  ai_job_unlist(j);
+  if (j->notify) {
+    AiResult *r = (AiResult *)calloc(1, sizeof(AiResult));
+    if (r) {
+      r->id = j->id;
+      r->status = j->status;
+      r->text = j->text;
+      r->user = j->user;
+      r->ms = j->ms;
+      j->text = NULL;
+      if (!PostMessageW(j->notify, j->msg, 0, (LPARAM)r)) ai_result_free(r); /* окно закрыто */
+    }
+    ai_job_free(j);
+  }
+  /* без notify — синхронный вызов: job освобождает тот, кто ждёт */
+  return 0;
+}
+
+static AiJob *ai_job_new(char *body, DWORD timeoutMs) {
+  AiJob *j = (AiJob *)calloc(1, sizeof(AiJob));
+  if (!j) {
+    free(body);
+    return NULL;
+  }
+  j->id = (int)InterlockedIncrement(&g_aiNextId);
+  j->body = body;
+  j->timeout = timeoutMs ? timeoutMs : 120000;
+  AcquireSRWLockExclusive(&g_aiJobLock);
+  j->next = g_aiJobs;
+  g_aiJobs = j;
+  ReleaseSRWLockExclusive(&g_aiJobLock);
+  return j;
+}
+
+void ai_cancel(int id) {
+  AcquireSRWLockExclusive(&g_aiJobLock);
+  for (AiJob *j = g_aiJobs; j; j = j->next)
+    if (j->id == id) {
+      j->cancel = 1;
+      HINTERNET h = InterlockedExchangePointer(&j->req, NULL);
+      if (h) WinHttpCloseHandle(h);
+    }
+  ReleaseSRWLockExclusive(&g_aiJobLock);
+}
+
+void ai_result_free(AiResult *r) {
+  if (!r) return;
+  free(r->text);
+  free(r);
+}
+
+static int ai_precheck(void) {
+  if (!g_aiOn) return AI_OFF;
+  if (!ai_ready()) return AI_NO_MODEL;
+  return AI_OK;
+}
+
+int ai_ask_async(const wchar_t *instruction, const wchar_t *text, DWORD timeoutMs, HWND notify, UINT msg,
+                 void *user) {
+  if (ai_precheck() != AI_OK || !notify) return 0;
+  char *u = ai_json_str(text);
+  char *body = ai_body(instruction, u, 1024);
+  free(u);
+  if (!body) return 0;
+  AiJob *j = ai_job_new(body, timeoutMs);
+  if (!j) return 0;
+  j->notify = notify;
+  j->msg = msg;
+  j->user = user;
+  int id = j->id;
+  HANDLE th = CreateThread(NULL, 0, ai_job_thread, j, 0, NULL);
+  if (!th) {
+    ai_job_unlist(j);
+    ai_job_free(j);
+    return 0;
+  }
+  CloseHandle(th);
+  return id;
+}
+
+/* синхронно: свой поток на запрос, а этот ждёт и следит за флагом отмены */
+static int ai_run_sync(char *body, DWORD timeoutMs, volatile LONG *cancel, wchar_t **answer) {
+  if (answer) *answer = NULL;
+  AiJob *j = ai_job_new(body, timeoutMs);
+  if (!j) return AI_BUSY;
+  HANDLE th = CreateThread(NULL, 0, ai_job_thread, j, 0, NULL);
+  if (!th) {
+    ai_job_unlist(j);
+    ai_job_free(j);
+    return AI_BUSY;
+  }
+  while (WaitForSingleObject(th, 100) == WAIT_TIMEOUT)
+    if (cancel && *cancel && !j->cancel) ai_cancel(j->id);
+  CloseHandle(th);
+  int st = j->status;
+  if (answer) {
+    *answer = j->text;
+    j->text = NULL;
+  }
+  ai_job_free(j);
+  return st;
+}
+
+int ai_ask_sync(const wchar_t *instruction, const wchar_t *text, DWORD timeoutMs, volatile LONG *cancel,
+                wchar_t **answer) {
+  if (answer) *answer = NULL;
+  if (GetCurrentThreadId() == g_aiUiThread) return AI_BUSY;
+  int pre = ai_precheck();
+  if (pre != AI_OK) return pre;
+  char *u = ai_json_str(text);
+  char *body = ai_body(instruction, u, 1024);
+  free(u);
+  if (!body) return AI_BUSY;
+  return ai_run_sync(body, timeoutMs, cancel, answer);
+}
+
+int ai_ask_image_sync(const wchar_t *instruction, const wchar_t *imagePath, DWORD timeoutMs, volatile LONG *cancel,
+                      wchar_t **answer) {
+  if (answer) *answer = NULL;
+  if (GetCurrentThreadId() == g_aiUiThread) return AI_BUSY;
+  int pre = ai_precheck();
+  if (pre != AI_OK) return pre;
+  wchar_t m[MAX_PATH], mm[MAX_PATH];
+  if (!ai_ext() && (!ai_pick_model(m, mm) || !mm[0])) return AI_NO_VISION;
+  HANDLE h = CreateFileW(imagePath, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+  if (h == INVALID_HANDLE_VALUE) return AI_ERROR;
+  DWORD sz = GetFileSize(h, NULL), got = 0;
+  BYTE *data = sz && sz < 32u * 1024 * 1024 ? (BYTE *)malloc(sz) : NULL;
+  BOOL rd = data && ReadFile(h, data, sz, &got, NULL) && got == sz;
+  CloseHandle(h);
+  if (!rd) {
+    free(data);
+    return AI_ERROR;
+  }
+  const wchar_t *ext = wcsrchr(imagePath, L'.');
+  const char *mime = ext && (!_wcsicmp(ext, L".jpg") || !_wcsicmp(ext, L".jpeg")) ? "image/jpeg"
+                     : ext && !_wcsicmp(ext, L".bmp")                             ? "image/bmp"
+                                                                                  : "image/png";
+  char *b64 = ai_b64(data, sz);
+  free(data);
+  if (!b64) return AI_BUSY;
+  size_t n = strlen(b64) + 200;
+  char *content = (char *)malloc(n);
+  if (content)
+    snprintf(content, n, "[{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:%s;base64,%s\"}}]", mime, b64);
+  free(b64);
+  char *body = ai_body(instruction, content, 1024);
+  free(content);
+  if (!body) return AI_BUSY;
+  return ai_run_sync(body, timeoutMs ? timeoutMs : 300000, cancel, answer);
+}
+
+/* --- точки расширения ------------------------------------------------------- */
+BOOL ai_refine_field(const wchar_t *field, const wchar_t *raw, const wchar_t *context, wchar_t *out, int cap,
+                     DWORD timeoutMs) {
+  if (!out || cap < 2 || !raw) return FALSE;
+  size_t n = wcslen(raw) + (context ? wcslen(context) : 0) + wcslen(field ? field : L"") + 200;
+  wchar_t *q = (wchar_t *)malloc(n * sizeof(wchar_t));
+  if (!q) return FALSE;
+  _snwprintf(q, n, L"Поле: %s\nРаспознано: %s\nКонтекст:\n%s", field ? field : L"", raw,
+             context && context[0] ? context : L"(нет)");
+  q[n - 1] = 0;
+  wchar_t *a = NULL;
+  int st = ai_ask_sync(
+      L"Ты помогаешь инженеру-технологу на заводе. Значение поля из конструкторской документации "
+      L"распознано автоматически и может содержать ошибки распознавания (О/0, З/3, лишние пробелы, "
+      L"латиница вместо кириллицы). Исправь его по правилам ГОСТ 2.201 и ЕСКД, ничего не выдумывая. "
+      L"Если не уверен — верни как есть. Ответь только значением одной строкой, без пояснений.",
+      q, timeoutMs ? timeoutMs : 60000, NULL, &a);
+  free(q);
+  BOOL ok = st == AI_OK && a && a[0] && !wcschr(a, L'\n');
+  if (ok) lstrcpynW(out, a, cap);
+  free(a);
+  return ok;
+}
+
+int ai_rank_candidates(const wchar_t *query, const wchar_t *const *cand, int n, int *order, DWORD timeoutMs) {
+  if (!query || !cand || !order || n <= 0) return 0;
+  if (n > 40) n = 40;
+  size_t len = wcslen(query) + 100;
+  for (int i = 0; i < n; i++) len += (cand[i] ? wcslen(cand[i]) : 0) + 12;
+  wchar_t *q = (wchar_t *)malloc(len * sizeof(wchar_t));
+  if (!q) return 0;
+  size_t at = (size_t)_snwprintf(q, len, L"Ищем: %s\nКандидаты:\n", query);
+  for (int i = 0; i < n && at < len; i++) at += (size_t)_snwprintf(q + at, len - at, L"%d. %s\n", i + 1, cand[i] ? cand[i] : L"");
+  q[len - 1] = 0;
+  wchar_t *a = NULL;
+  int st = ai_ask_sync(
+      L"Ты сопоставляешь позиции заводской номенклатуры (обозначения по ЕСКД, наименования, материалы по ГОСТ). "
+      L"Выбери кандидатов, которые обозначают то же самое, что искомое, от самого подходящего. "
+      L"Ответь только номерами через запятую, например: 3, 1. Если ни один не подходит — ответь 0.",
+      q, timeoutMs ? timeoutMs : 60000, NULL, &a);
+  free(q);
+  int got = 0;
+  if (st == AI_OK && a) {
+    BOOL seen[41] = {0};
+    for (wchar_t *p = a; *p && got < n;) {
+      if (*p >= L'0' && *p <= L'9') {
+        int v = (int)wcstol(p, &p, 10);
+        if (v >= 1 && v <= n && !seen[v]) {
+          seen[v] = TRUE;
+          order[got++] = v - 1;
+        }
+      } else {
+        p++;
+      }
+    }
+  }
+  free(a);
+  return got;
+}
+
+/* --- скачивание ------------------------------------------------------------- */
+typedef struct {
+  volatile LONG active, cancel;
+  volatile LONGLONG done, total; /* байт всего по плану */
+  wchar_t msg[240];              /* что сейчас / чем кончилось */
+  BOOL failed;
+} AiDl;
+static AiDl g_aiDl;
+static HWND g_aiDlNotify; /* окно Настроек — ему WM_AI_UI */
+
+static void ai_dl_say(const wchar_t *fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  _vsnwprintf(g_aiDl.msg, 240, fmt, ap);
+  va_end(ap);
+  g_aiDl.msg[239] = 0;
+  if (g_aiDlNotify) PostMessageW(g_aiDlNotify, WM_AI_UI, 0, 0);
+}
+
+static HINTERNET ai_net_open(void) {
+  HINTERNET ses = WinHttpOpen(L"CursorPad/" APP_VERSION_STR L" (+https://github.com/pidrpen/ytaqq)",
+                              WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+  if (!ses)
+    ses = WinHttpOpen(L"CursorPad/" APP_VERSION_STR, WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME,
+                      WINHTTP_NO_PROXY_BYPASS, 0);
+  if (ses) {
+    http_tune(ses);
+    WinHttpSetTimeouts(ses, 10000, 15000, 30000, 60000);
+  }
+  return ses;
+}
+
+/* HTTPS GET; from > 0 — докачать с этого байта. В файл (дописывает) или в память */
+static DWORD ai_net_get(HINTERNET ses, const wchar_t *host, const wchar_t *path, ULONGLONG from, HANDLE file,
+                        char **mem, ULONGLONG memMax) {
+  if (mem) *mem = NULL;
+  DWORD status = 0;
+  HINTERNET con = WinHttpConnect(ses, host, INTERNET_DEFAULT_HTTPS_PORT, 0);
+  HINTERNET req = con ? WinHttpOpenRequest(con, L"GET", path, NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
+                                           WINHTTP_FLAG_SECURE)
+                      : NULL;
+  if (req) {
+    wchar_t hdr[160] = L"Accept: */*\r\nAccept-Encoding: identity\r\n";
+    if (from) _snwprintf(hdr + wcslen(hdr), 100, L"Range: bytes=%llu-\r\n", from);
+    if (wcsstr(host, L"api.github.com")) wcscat(hdr, L"Accept: application/vnd.github+json\r\n");
+    DWORD lvl = WINHTTP_AUTOLOGON_SECURITY_LEVEL_LOW; /* прокси завода — от имени пользователя Windows */
+    WinHttpSetOption(req, WINHTTP_OPTION_AUTOLOGON_POLICY, &lvl, sizeof(lvl));
+    if (WinHttpSendRequest(req, hdr, (DWORD)-1L, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
+        WinHttpReceiveResponse(req, NULL)) {
+      DWORD sl = sizeof(status);
+      WinHttpQueryHeaders(req, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, NULL, &status, &sl,
+                          WINHTTP_NO_HEADER_INDEX);
+      if (status == 200 || status == 206) {
+        size_t cap = mem ? 1 << 16 : 0, n = 0;
+        char *buf = mem ? (char *)malloc(cap) : NULL;
+        BYTE *chunk = (BYTE *)malloc(1 << 16);
+        for (; chunk;) {
+          if (g_aiDl.cancel) {
+            status = 0;
+            break;
+          }
+          DWORD got = 0;
+          if (!WinHttpReadData(req, chunk, 1 << 16, &got)) {
+            status = 0; /* обрыв — докачаем со следующей попытки */
+            break;
+          }
+          if (!got) break;
+          if (file) {
+            DWORD w = 0;
+            if (!WriteFile(file, chunk, got, &w, NULL) || w != got) {
+              status = 1; /* диск — не сеть */
+              break;
+            }
+            InterlockedExchangeAdd64(&g_aiDl.done, got);
+          } else if (buf) {
+            if (n + got + 1 > cap) {
+              while (n + got + 1 > cap) cap *= 2;
+              if (cap > memMax) {
+                status = 0;
+                break;
+              }
+              char *nb = (char *)realloc(buf, cap);
+              if (!nb) break;
+              buf = nb;
+            }
+            memcpy(buf + n, chunk, got);
+            n += got;
+          }
+        }
+        free(chunk);
+        if (buf) {
+          buf[n] = 0;
+          if (status == 200 || status == 206) *mem = buf;
+          else free(buf);
+        }
+      }
+    }
+  }
+  if (req) WinHttpCloseHandle(req);
+  if (con) WinHttpCloseHandle(con);
+  return status;
+}
+
+static BOOL ai_sha256(const wchar_t *path, char out[65]) {
+  out[0] = 0;
+  HCRYPTPROV prov = 0;
+  HCRYPTHASH h = 0;
+  BOOL ok = FALSE;
+  HANDLE f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, NULL);
+  if (f == INVALID_HANDLE_VALUE) return FALSE;
+  BYTE *buf = (BYTE *)malloc(1 << 20);
+  if (buf && CryptAcquireContextW(&prov, NULL, NULL, PROV_RSA_AES, CRYPT_VERIFYCONTEXT) &&
+      CryptCreateHash(prov, CALG_SHA_256, 0, 0, &h)) {
+    DWORD got = 0;
+    ok = TRUE;
+    while (ReadFile(f, buf, 1 << 20, &got, NULL) && got) {
+      if (g_aiDl.cancel || !CryptHashData(h, buf, got, 0)) {
+        ok = FALSE;
+        break;
+      }
+    }
+    BYTE d[32];
+    DWORD dn = 32;
+    if (ok && CryptGetHashParam(h, HP_HASHVAL, d, &dn, 0) && dn == 32)
+      for (int i = 0; i < 32; i++) snprintf(out + i * 2, 3, "%02x", d[i]);
+    else ok = FALSE;
+  }
+  if (h) CryptDestroyHash(h);
+  if (prov) CryptReleaseContext(prov, 0);
+  free(buf);
+  CloseHandle(f);
+  return ok;
+}
+
+/* разобрать https://host/path */
+static BOOL ai_split_url(const char *url, wchar_t *host, int hcap, wchar_t *path, int pcap) {
+  if (strncmp(url, "https://", 8)) return FALSE;
+  const char *h = url + 8, *sl = strchr(h, '/');
+  if (!sl || sl - h >= hcap) return FALSE;
+  char hb[128];
+  memcpy(hb, h, sl - h);
+  hb[sl - h] = 0;
+  MultiByteToWideChar(CP_UTF8, 0, hb, -1, host, hcap);
+  MultiByteToWideChar(CP_UTF8, 0, sl, -1, path, pcap);
+  return TRUE;
+}
+
+/* скачать файл: .part с докачкой, размер, sha256, потом на место */
+static BOOL ai_fetch(HINTERNET ses, const wchar_t *host, const wchar_t *path, const wchar_t *dest, ULONGLONG size,
+                     const char *sha, const wchar_t *what) {
+  wchar_t part[MAX_PATH + 8];
+  _snwprintf(part, MAX_PATH + 8, L"%s.part", dest);
+  for (int attempt = 0; attempt < 6; attempt++) {
+    if (g_aiDl.cancel) return FALSE;
+    ULONGLONG have = ai_file_size(part);
+    if (have > size) {
+      DeleteFileW(part);
+      have = 0;
+    }
+    if (have < size) {
+      HANDLE f = CreateFileW(part, GENERIC_WRITE, 0, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+      if (f == INVALID_HANDLE_VALUE) {
+        ai_dl_say(L"Не создать файл %s (код %lu)", part, GetLastError());
+        return FALSE;
+      }
+      LARGE_INTEGER z = {{0}};
+      SetFilePointerEx(f, z, NULL, FILE_END);
+      ai_dl_say(attempt ? L"%s: докачиваю…" : L"%s: качаю…", what);
+      DWORD st = ai_net_get(ses, host, path, have, f, NULL, 0);
+      CloseHandle(f);
+      if (st == 200 && have) { /* сервер не умеет докачку и отдал файл с начала — дописали лишнее */
+        InterlockedExchangeAdd64(&g_aiDl.done, -(LONGLONG)ai_file_size(part));
+        DeleteFileW(part);
+        continue;
+      }
+      if (st == 1) {
+        ai_dl_say(L"%s: не записать на диск — место кончилось?", what);
+        return FALSE;
+      }
+      if (st != 200 && st != 206) {
+        if (g_aiDl.cancel) return FALSE;
+        if (st >= 400) {
+          ai_dl_say(L"%s: сервер ответил %lu", what, st);
+          return FALSE;
+        }
+        Sleep(2000u << (attempt < 4 ? attempt : 4)); /* сеть моргнула — ещё раз с того же места */
+        continue;
+      }
+    }
+    if (ai_file_size(part) != size) continue;
+    ai_dl_say(L"%s: проверяю контрольную сумму…", what);
+    char got[65];
+    if (!ai_sha256(part, got)) return FALSE;
+    if (_stricmp(got, sha)) {
+      DeleteFileW(part);
+      ai_dl_say(L"%s: контрольная сумма не сошлась, файл удалён. Попробуйте ещё раз.", what);
+      return FALSE;
+    }
+    DeleteFileW(dest);
+    if (!MoveFileW(part, dest)) {
+      ai_dl_say(L"%s: не переименовать (код %lu)", what, GetLastError());
+      return FALSE;
+    }
+    return TRUE;
+  }
+  ai_dl_say(L"%s: не скачалось — нет связи?", what);
+  return FALSE;
+}
+
+/* последний выпуск llama.cpp: ссылка на архив, размер и sha256 из GitHub */
+typedef struct {
+  char url[512];
+  ULONGLONG size;
+  char sha[65];
+  char tag[48];
+} AiAsset;
+
+static BOOL ai_find_llama(HINTERNET ses, BOOL gpu, AiAsset *a) {
+  char *js = NULL;
+  DWORD st = ai_net_get(ses, L"api.github.com", L"/repos/ggml-org/llama.cpp/releases/latest", 0, NULL, &js,
+                        8u << 20);
+  if (st != 200 || !js) {
+    free(js);
+    ai_dl_say(L"llama.cpp: GitHub не ответил (%lu)", st);
+    return FALSE;
+  }
+  memset(a, 0, sizeof(*a));
+  const char *tag = json_find_string(js, "tag_name");
+  if (tag) sscanf(tag, "%47[^\"]", a->tag);
+  /* в описании выпуска у каждого файла: name, …, size, digest, …, browser_download_url.
+     Нужный — «…-bin-win-cpu-x64.zip» (в старых выпусках «…-bin-win-avx2-x64.zip»)
+     или «…-bin-win-vulkan-x64.zip» для видеокарты */
+  const char *want[2] = {gpu ? "-bin-win-vulkan-x64.zip\"" : "-bin-win-cpu-x64.zip\"",
+                         gpu ? "-bin-win-vulkan-x64.zip\"" : "-bin-win-avx2-x64.zip\""};
+  BOOL found = FALSE;
+  for (int w = 0; w < 2 && !found; w++) {
+    const char *prev = js, *u;
+    while (!found && (u = strstr(prev, "\"browser_download_url\""))) {
+      const char *q = strchr(u + 22, '"');
+      const char *end = q ? strchr(q + 1, '"') : NULL;
+      if (!end) break;
+      if (end - q > (int)strlen(want[w]) && !strncmp(end + 1 - strlen(want[w]), want[w], strlen(want[w])) &&
+          end - q - 1 < (int)sizeof(a->url)) {
+        memcpy(a->url, q + 1, end - q - 1);
+        a->url[end - q - 1] = 0;
+        /* size и digest — между прошлым файлом и этой ссылкой */
+        char *seg = (char *)malloc(u - prev + 1);
+        if (seg) {
+          memcpy(seg, prev, u - prev);
+          seg[u - prev] = 0;
+          const char *s = strstr(seg, "\"size\":"), *d = json_find_string(seg, "digest");
+          const char *s2;
+          while (s && (s2 = strstr(s + 7, "\"size\":"))) s = s2; /* последний — у этого файла */
+          if (s) a->size = _strtoui64(s + 7, NULL, 10);
+          if (d && !strncmp(d, "sha256:", 7)) sscanf(d + 7, "%64[0-9a-fA-F]", a->sha);
+          free(seg);
+        }
+        found = TRUE;
+      }
+      prev = end;
+    }
+  }
+  free(js);
+  if (!found) {
+    ai_dl_say(L"llama.cpp: в выпуске нет сборки для Windows");
+    return FALSE;
+  }
+  if (!a->size || strlen(a->sha) != 64) {
+    ai_dl_say(L"llama.cpp: GitHub не дал контрольную сумму — без неё не ставлю");
+    return FALSE;
+  }
+  return TRUE;
+}
+
+/* распаковать zip встроенным в Windows 10/11 tar.exe (или PowerShell) */
+static BOOL ai_unzip(const wchar_t *zip, const wchar_t *dir) {
+  wchar_t sys[MAX_PATH], cmd[MAX_PATH * 3 + 200];
+  GetSystemDirectoryW(sys, MAX_PATH);
+  CreateDirectoryW(dir, NULL);
+  for (int k = 0; k < 2; k++) {
+    if (k == 0) _snwprintf(cmd, MAX_PATH * 3 + 200, L"\"%s\\tar.exe\" -xf \"%s\" -C \"%s\"", sys, zip, dir);
+    else
+      _snwprintf(cmd, MAX_PATH * 3 + 200,
+                 L"\"%s\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoProfile -NonInteractive -Command "
+                 L"\"Expand-Archive -LiteralPath '%s' -DestinationPath '%s' -Force\"",
+                 sys, zip, dir);
+    STARTUPINFOW si;
+    PROCESS_INFORMATION pi;
+    memset(&si, 0, sizeof(si));
+    si.cb = sizeof(si);
+    if (!CreateProcessW(NULL, cmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, dir, &si, &pi)) continue;
+    WaitForSingleObject(pi.hProcess, 180000);
+    DWORD code = 1;
+    GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    if (code == 0) return TRUE;
+  }
+  return FALSE;
+}
+
+static BOOL ai_free_space(const wchar_t *dir, ULONGLONG need, ULONGLONG *have) {
+  ULARGE_INTEGER fr;
+  if (!GetDiskFreeSpaceExW(dir, &fr, NULL, NULL)) return TRUE; /* не узнать — пусть пробует */
+  *have = fr.QuadPart;
+  return fr.QuadPart >= need + (300ull << 20);
+}
+
+static void ai_mkdirs(void) {
+  wchar_t d[MAX_PATH];
+  ai_dir(d, NULL);
+  CreateDirectoryW(d, NULL);
+  ai_dir(d, L"models");
+  CreateDirectoryW(d, NULL);
+  _snwprintf(d, MAX_PATH, L"%s\\ai\\models\\%s", g_dataDir, kAiTiers[g_aiTier].dir);
+  CreateDirectoryW(d, NULL);
+}
+
+static DWORD WINAPI ai_dl_thread(LPVOID p) {
+  (void)p;
+  int tier = g_aiTier;
+  BOOL gpu = g_aiGpu;
+  const AiTier *t = &kAiTiers[tier];
+  g_aiDl.failed = TRUE;
+  ai_mkdirs();
+  HINTERNET ses = ai_net_open();
+  if (!ses) {
+    ai_dl_say(L"Нет WinHTTP (код %lu)", GetLastError());
+    goto out;
+  }
+  /* план: что ещё не скачано */
+  ULONGLONG need = 0;
+  BOOL needModel[2] = {FALSE, FALSE};
+  for (int i = 0; i < t->nf; i++) {
+    if (ai_tier_file_ok(tier, i)) continue;
+    wchar_t f[MAX_PATH], part[MAX_PATH + 8];
+    ai_model_file(tier, i, f);
+    _snwprintf(part, MAX_PATH + 8, L"%s.part", f);
+    ULONGLONG have = ai_file_size(part);
+    needModel[i] = TRUE;
+    need += t->f[i].size;
+    if (have <= t->f[i].size) InterlockedExchangeAdd64(&g_aiDl.done, (LONGLONG)have);
+  }
+  wchar_t exe[MAX_PATH];
+  AiAsset la;
+  BOOL needLlama = !ai_server_exe(gpu, exe);
+  if (needLlama) {
+    ai_dl_say(L"Ищу последний выпуск llama.cpp…");
+    if (!ai_find_llama(ses, gpu, &la)) goto out;
+    need += la.size * 4; /* архив и распакованное */
+  }
+  g_aiDl.total = need + g_aiDl.done;
+  {
+    wchar_t d[MAX_PATH];
+    ULONGLONG have = 0;
+    ai_dir(d, NULL);
+    if (!ai_free_space(d, need, &have)) {
+      ai_dl_say(L"Мало места на диске: нужно %.1f ГБ, свободно %.1f ГБ", (need + (300ull << 20)) / 1e9,
+                have / 1e9);
+      goto out;
+    }
+  }
+  for (int i = 0; i < t->nf; i++) {
+    if (!needModel[i]) continue;
+    wchar_t f[MAX_PATH], path[600], what[120];
+    ai_model_file(tier, i, f);
+    _snwprintf(path, 600, L"/%s/resolve/%s/%s", t->f[i].repo, t->f[i].rev, t->f[i].file);
+    _snwprintf(what, 120, t->nf > 1 ? L"%s (часть %d из %d)" : L"%s", t->model, i + 1, t->nf);
+    if (!ai_fetch(ses, L"huggingface.co", path, f, t->f[i].size, t->f[i].sha, what)) goto out;
+    wchar_t ok[MAX_PATH + 4];
+    _snwprintf(ok, MAX_PATH + 4, L"%s.ok", f);
+    HANDLE h = CreateFileW(ok, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h != INVALID_HANDLE_VALUE) {
+      DWORD w;
+      WriteFile(h, t->f[i].sha, 64, &w, NULL);
+      CloseHandle(h);
+    }
+  }
+  if (needLlama) {
+    wchar_t host[128], path[512], zip[MAX_PATH], dir[MAX_PATH];
+    if (!ai_split_url(la.url, host, 128, path, 512)) {
+      ai_dl_say(L"llama.cpp: странная ссылка на архив");
+      goto out;
+    }
+    ai_dir(dir, gpu ? L"llama-vk" : L"llama");
+    ai_dir(zip, gpu ? L"llama-vk.zip" : L"llama.zip");
+    g_aiDl.total -= la.size * 3;
+    if (!ai_fetch(ses, host, path, zip, la.size, la.sha, L"llama.cpp")) goto out;
+    ai_dl_say(L"Распаковываю llama.cpp…");
+    if (!ai_unzip(zip, dir) || !ai_server_exe(gpu, exe)) {
+      ai_dl_say(L"Не распаковался архив llama.cpp — распакуйте %s в %s вручную", zip, dir);
+      goto out;
+    }
+    DeleteFileW(zip);
+  }
+  g_aiDl.failed = FALSE;
+  ai_dl_say(L"Готово: %s скачана. Включите ИИ и нажмите «Проверить».", t->model);
+out:
+  if (ses) WinHttpCloseHandle(ses);
+  if (g_aiDl.cancel) ai_dl_say(L"Скачивание остановлено. Скачанное сохранено — продолжится с того же места.");
+  InterlockedExchange(&g_aiDl.active, 0);
+  if (g_aiDlNotify) PostMessageW(g_aiDlNotify, WM_AI_UI, 0, 0);
+  return 0;
+}
+
+/* кнопка «Скачать»: второй раз — отменить */
+static void ai_download_toggle(HWND notify) {
+  if (g_aiDl.active) {
+    InterlockedExchange(&g_aiDl.cancel, 1);
+    return;
+  }
+  if (!g_dataDir[0]) return;
+  g_aiDlNotify = notify;
+  g_aiDl.cancel = 0;
+  g_aiDl.done = 0;
+  g_aiDl.total = 0;
+  g_aiDl.failed = FALSE;
+  g_aiDl.msg[0] = 0;
+  InterlockedExchange(&g_aiDl.active, 1);
+  HANDLE th = CreateThread(NULL, 0, ai_dl_thread, NULL, 0, NULL);
+  if (th) CloseHandle(th);
+  else InterlockedExchange(&g_aiDl.active, 0);
+}
+
+#ifdef SET_TEST
+/* проверочная сборка: --aitest отчёт.txt [модель.gguf] — спросить, поправить поле,
+   выбрать кандидата, отменить и дождаться таймаута; всё в отчёт (UTF-8) */
+static wchar_t g_aiTestOut[MAX_PATH];
+static char g_aiTestRep[16000];
+static volatile LONG g_aiTestFlag;
+
+static void ai_rep(const char *fmt, ...) {
+  size_t n = strlen(g_aiTestRep);
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(g_aiTestRep + n, sizeof(g_aiTestRep) - n, fmt, ap);
+  va_end(ap);
+  HANDLE h = CreateFileW(g_aiTestOut, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS, 0, NULL);
+  if (h != INVALID_HANDLE_VALUE) {
+    DWORD w;
+    WriteFile(h, g_aiTestRep, (DWORD)strlen(g_aiTestRep), &w, NULL);
+    CloseHandle(h);
+  }
+}
+
+static DWORD WINAPI ai_flag_later(LPVOID p) {
+  Sleep((DWORD)(INT_PTR)p);
+  InterlockedExchange(&g_aiTestFlag, 1);
+  return 0;
+}
+
+static DWORD WINAPI ai_selftest_thread(LPVOID p) {
+  (void)p;
+  wchar_t *a = NULL;
+  char u[2000];
+  DWORD t0 = GetTickCount();
+  int st = ai_ask_sync(L"Отвечай кратко, по-русски.", L"Расшифруй обозначение «Круг 20 ГОСТ 2590-2006» одной строкой.",
+                       600000, NULL, &a);
+  WideCharToMultiByte(CP_UTF8, 0, a ? a : L"(null)", -1, u, sizeof(u), NULL, NULL);
+  ai_rep("ask: st=%d ms=%lu port=%d\n  %s\n", st, GetTickCount() - t0, g_aiPort, u);
+  free(a);
+  wchar_t out[200];
+  t0 = GetTickCount();
+  BOOL ok = ai_refine_field(L"Материал", L"Круг 2О ГОСТ 259О-2ОО6 / 45 ГОСТ 1О5О-2О13", L"", out, 200, 120000);
+  WideCharToMultiByte(CP_UTF8, 0, ok ? out : L"-", -1, u, sizeof(u), NULL, NULL);
+  ai_rep("refine: ok=%d ms=%lu\n  %s\n", ok, GetTickCount() - t0, u);
+  const wchar_t *cand[] = {L"Лист 2 ГОСТ 19903-2015", L"Шестигранник 20 ГОСТ 2879-2006",
+                           L"Круг 20-В ГОСТ 2590-2006 / 45-2ГП ГОСТ 1050-2013", L"Круг 22 ГОСТ 2590-2006 / Ст3"};
+  int ord[4] = {-1, -1, -1, -1};
+  t0 = GetTickCount();
+  int n = ai_rank_candidates(L"Пруток круглый d20 сталь 45", cand, 4, ord, 120000);
+  ai_rep("rank: n=%d ms=%lu order=%d,%d,%d,%d\n", n, GetTickCount() - t0, ord[0], ord[1], ord[2], ord[3]);
+  /* отмена посреди длинного ответа */
+  g_aiTestFlag = 0;
+  HANDLE th = CreateThread(NULL, 0, ai_flag_later, (LPVOID)(INT_PTR)1500, 0, NULL);
+  if (th) CloseHandle(th);
+  t0 = GetTickCount();
+  st = ai_ask_sync(L"Пиши подробно.", L"Расскажи историю ГОСТ на 2000 слов.", 600000, &g_aiTestFlag, &a);
+  ai_rep("cancel: st=%d (ждём %d) ms=%lu\n", st, AI_CANCELLED, GetTickCount() - t0);
+  free(a);
+  t0 = GetTickCount();
+  st = ai_ask_sync(L"Пиши подробно.", L"Расскажи историю ГОСТ на 2000 слов.", 2500, NULL, &a);
+  ai_rep("timeout: st=%d (ждём %d) ms=%lu\n", st, AI_TIMEOUT, GetTickCount() - t0);
+  free(a);
+  st = ai_ask_image_sync(L"Что на картинке?", L"C:\\nope.png", 1000, NULL, &a);
+  ai_rep("image without vision: st=%d (ждём %d)\n", st, AI_NO_VISION);
+  free(a);
+  ai_rep("server alive before shutdown: %d\n", g_aiProc && WaitForSingleObject(g_aiProc, 0) == WAIT_TIMEOUT);
+  ai_shutdown();
+  ai_rep("server alive after shutdown: %d\nDONE\n", g_aiProc != NULL);
+  return 0;
+}
+
+static void ai_selftest(const wchar_t *out, const wchar_t *model) {
+  lstrcpynW(g_aiTestOut, out, MAX_PATH);
+  g_aiOn = TRUE;
+  if (model) lstrcpynW(g_aiModel, model, MAX_PATH);
+  wchar_t *a = NULL;
+  int st = ai_ask_sync(L"x", L"y", 1000, NULL, &a); /* из потока окон — нельзя */
+  free(a);
+  ai_rep("ui-thread sync: st=%d (ждём %d) ready=%d\n", st, AI_BUSY, ai_ready());
+  HANDLE th = CreateThread(NULL, 0, ai_selftest_thread, NULL, 0, NULL);
+  if (th) CloseHandle(th);
+}
+#endif
