@@ -6063,6 +6063,10 @@ static RECT norm_rect(POINT a, POINT b) {
   return r;
 }
 
+/* кто ждёт выделенную область: NULL — обычное «Выделить и прочитать»,
+   иначе окно, позвавшее выбор (например, «Распознать чертёж» — штамп с экрана) */
+static void (*g_pickDone)(RECT r);
+
 static LRESULT CALLBACK PickProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
   switch (msg) {
   case WM_SETCURSOR:
@@ -6097,7 +6101,10 @@ static LRESULT CALLBACK PickProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
       DestroyWindow(hwnd);
       g_pick = NULL;
       Sleep(30);
-      finish_ocr_rect(r);
+      void (*done)(RECT) = g_pickDone;
+      g_pickDone = NULL;
+      if (done) done(r);
+      else finish_ocr_rect(r);
     }
     return 0;
   case WM_KEYDOWN:
@@ -6107,6 +6114,12 @@ static LRESULT CALLBACK PickProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
       DestroyWindow(hwnd);
       g_pick = NULL;
       show_status(L"OCR отменён");
+      void (*done)(RECT) = g_pickDone;
+      g_pickDone = NULL;
+      if (done) { /* позвавшее окно — вернуть на экран */
+        RECT none = {0, 0, 0, 0};
+        done(none);
+      }
     }
     return 0;
   case WM_PAINT: {
