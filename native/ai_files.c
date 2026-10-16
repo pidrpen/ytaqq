@@ -258,7 +258,15 @@ static int af_match(const wchar_t *dir, const wchar_t *name) {
     if (!wcscmp(tok, L"эксель") || !wcscmp(tok, L"excel") || !wcscmp(tok, L"xls") || !wcscmp(tok, L"xlsx")) ext |= 1;
     else if (!wcscmp(tok, L"ворд") || !wcscmp(tok, L"word") || !wcscmp(tok, L"doc") || !wcscmp(tok, L"docx")) ext |= 2;
     else if (!wcscmp(tok, L"пдф") || !wcscmp(tok, L"pdf")) ext |= 4;
-    else if (!wcscmp(tok, L"все") || !wcscmp(tok, L"файл") || !wcscmp(tok, L"файлы") || !wcscmp(tok, L"файла")) continue;
+    else if (!wcscmp(tok, L"tif") || !wcscmp(tok, L"tiff") || !wcscmp(tok, L"тиф")) ext |= 8;
+    else if (!wcscmp(tok, L"jpg") || !wcscmp(tok, L"jpeg") || !wcscmp(tok, L"джипег")) ext |= 16;
+    else if (!wcscmp(tok, L"png") || !wcscmp(tok, L"пнг")) ext |= 32;
+    else if (!wcscmp(tok, L"dwg") || !wcscmp(tok, L"двг")) ext |= 64;
+    else if (!wcscmp(tok, L"bmp")) ext |= 128;
+    else if (!wcsncmp(tok, L"картин", 6)) ext |= 8 | 16 | 32 | 128;
+    else if (!wcscmp(tok, L"все") || !wcscmp(tok, L"файл") || !wcscmp(tok, L"файлы") || !wcscmp(tok, L"файла") ||
+             !wcscmp(tok, L"туда") || !wcscmp(tok, L"их"))
+      continue;
     else if (nw < 8) lstrcpynW(words[nw++], tok, 64);
   }
   g_afHitN = 0;
@@ -279,7 +287,10 @@ static int af_match(const wchar_t *dir, const wchar_t *name) {
     if (ext && !e) ok = FALSE;
     if (ok && ext) {
       BOOL t = ((ext & 1) && (!wcscmp(e, L".xls") || !wcscmp(e, L".xlsx"))) ||
-               ((ext & 2) && (!wcscmp(e, L".doc") || !wcscmp(e, L".docx"))) || ((ext & 4) && !wcscmp(e, L".pdf"));
+               ((ext & 2) && (!wcscmp(e, L".doc") || !wcscmp(e, L".docx"))) || ((ext & 4) && !wcscmp(e, L".pdf")) ||
+               ((ext & 8) && (!wcscmp(e, L".tif") || !wcscmp(e, L".tiff"))) ||
+               ((ext & 16) && (!wcscmp(e, L".jpg") || !wcscmp(e, L".jpeg"))) || ((ext & 32) && !wcscmp(e, L".png")) ||
+               ((ext & 64) && !wcscmp(e, L".dwg")) || ((ext & 128) && !wcscmp(e, L".bmp"));
       ok = t;
     }
     if (ok && g_afHitN < 200) _snwprintf(g_afHits[g_afHitN++], MAX_PATH, L"%s\\%s", dir, fd.cFileName);
@@ -396,6 +407,93 @@ static void ac_mkdir_now(const wchar_t *dst) {
   af_set_last(rd);
   _snwprintf(msg, MAX_PATH + 80, L"Создал папку:\r\n%s", rd);
   af_say(msg);
+}
+
+/* «pdf» или «все tif» — забирать все файлы этого типа, не переспрашивать */
+static BOOL ac_all_of_type(const wchar_t *what) {
+  wchar_t s[200];
+  lstrcpynW(s, what ? what : L"", 200);
+  af_lower(s);
+  const wchar_t *p = s;
+  int words = 0, types = 0;
+  while (*p) {
+    while (*p == L' ') p++;
+    if (!*p) break;
+    wchar_t tok[64];
+    int n = 0;
+    while (*p && *p != L' ' && n < 63) tok[n++] = *p++;
+    tok[n] = 0;
+    words++;
+    if (!wcscmp(tok, L"все") || !wcscmp(tok, L"файл") || !wcscmp(tok, L"файлы") || !wcscmp(tok, L"туда") ||
+        !wcscmp(tok, L"pdf") || !wcscmp(tok, L"пдф") || !wcscmp(tok, L"эксель") || !wcscmp(tok, L"excel") ||
+        !wcscmp(tok, L"xls") || !wcscmp(tok, L"xlsx") || !wcscmp(tok, L"ворд") || !wcscmp(tok, L"word") ||
+        !wcscmp(tok, L"doc") || !wcscmp(tok, L"docx") || !wcscmp(tok, L"tif") || !wcscmp(tok, L"tiff") ||
+        !wcscmp(tok, L"тиф") || !wcscmp(tok, L"jpg") || !wcscmp(tok, L"jpeg") || !wcscmp(tok, L"джипег") ||
+        !wcscmp(tok, L"png") || !wcscmp(tok, L"пнг") || !wcscmp(tok, L"dwg") || !wcscmp(tok, L"двг") ||
+        !wcscmp(tok, L"bmp") || !wcsncmp(tok, L"картин", 6))
+      types++;
+  }
+  return words > 0 && words == types;
+}
+
+/* создать папку и сложить в неё файлы из src. Перенос начнётся после «Применить». */
+static void af_queue_dir(const wchar_t *p);
+static void ac_take_plan(const wchar_t *src, const wchar_t *dst, const wchar_t *what, BOOL mv) {
+  wchar_t msg[600];
+  af_clear();
+  if (!src || !src[0] || !af_is_dir(src)) {
+    af_say(L"Не вижу, откуда брать файлы.");
+    return;
+  }
+  if (!what || !what[0]) {
+    af_say(L"Какие файлы положить? Например: все pdf или 8930.");
+    return;
+  }
+  if (!af_is_dir(dst)) {
+    wchar_t par[MAX_PATH];
+    af_parent(dst, par);
+    if (!af_is_dir(par)) {
+      af_say(L"Папки, куда класть, нет.");
+      return;
+    }
+    af_queue_dir(dst);
+  }
+  int n = af_match(src, what);
+  if (!n) {
+    wchar_t list[700] = L"";
+    af_list_dir(src, list, 700);
+    _snwprintf(msg, 600, L"В папке нет таких файлов («%s»). Что там есть:%s", what, list[0] ? list : L"\r\nпусто");
+    af_say(msg);
+    return;
+  }
+  if (n > 1 && !ac_all_of_type(what) && !wcsstr(g_acCmdText, L"все")) {
+    wchar_t list[700] = L"";
+    for (int i = 0; i < n && wcslen(list) < 550; i++) {
+      wcsncat(list, L"\r\n• ", 699 - wcslen(list));
+      wcsncat(list, wcsrchr(g_afHits[i], L'\\') + 1, 699 - wcslen(list));
+    }
+    _snwprintf(msg, 600, L"Подходит несколько:%s\r\nНапишите «все» или уточните имя.", list);
+    af_say(msg);
+    return;
+  }
+  for (int i = 0; i < n; i++) {
+    const wchar_t *base = wcsrchr(g_afHits[i], L'\\');
+    wchar_t target[MAX_PATH];
+    base = base ? base + 1 : g_afHits[i];
+    af_unique_target(dst, base, target);
+    if (!_wcsicmp(g_afHits[i], target)) continue;
+    af_add(mv ? AF_MOVE : AF_COPY, g_afHits[i], target);
+  }
+  if (!g_afN) {
+    af_say(L"Эти файлы уже в этой папке.");
+    return;
+  }
+  const wchar_t *leaf = wcsrchr(dst, L'\\');
+  leaf = leaf ? leaf + 1 : dst;
+  _snwprintf(msg, 600, L"Папка «%s» и %s файлов: %d. Кнопка «Отправить» стала «Применить».", leaf,
+             mv ? L"перенос" : L"копии", n);
+  ac_push(1, msg);
+  af_show_plan();
 }
 
 static void af_queue_dir(const wchar_t *p) {

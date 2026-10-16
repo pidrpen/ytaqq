@@ -62,12 +62,17 @@ static void af_set_last(const wchar_t *dir);
 static void af_known_folders(void);
 static BOOL af_resolve(const wchar_t *in, wchar_t *out, BOOL allowNew);
 static BOOL af_is_dir(const wchar_t *p);
+static void af_parent(const wchar_t *p, wchar_t *out);
+static void ac_take_plan(const wchar_t *src, const wchar_t *dst, const wchar_t *what, BOOL mv);
 static BOOL af_trusted(const wchar_t *p);
 static void af_clear(void);
 static BOOL g_acCmdWait;      /* ответ на команду для файлов, а не чат */
 static wchar_t g_acMkName[80];     /* имя новой папки, если путь ещё не назвали */
 static wchar_t g_acMkParent[MAX_PATH]; /* папка, куда класть, если имя ещё не назвали */
 static wchar_t g_acMkLast[MAX_PATH];   /* что создавали в прошлый раз — проверка диска, не слова чата */
+static wchar_t g_acTakeWhat[200];  /* какие файлы положить в новую папку */
+static BOOL g_acTakeMove = TRUE;
+static int g_acTakeWait;           /* папка есть, ждём какие файлы */
 static int g_acMkWait;                 /* 1 ждём имя, 2 ждём путь */
 static wchar_t g_acCmdText[2000];
 static wchar_t g_acSortDst[MAX_PATH];
@@ -555,12 +560,32 @@ static void ac_mk_go(const wchar_t *parent, const wchar_t *name) {
     return;
   }
   _snwprintf(full, MAX_PATH, L"%s\\%s", parent, name);
-  lstrcpynW(g_acCmdText, full, 2000);
+  if (!g_acCmdText[0]) lstrcpynW(g_acCmdText, full, 2000);
   lstrcpynW(g_acMkLast, full, MAX_PATH);
   g_acMkName[0] = 0;
   g_acMkParent[0] = 0;
   g_acMkWait = 0;
-  ac_mkdir_now(full);
+  if (g_acTakeWhat[0]) {
+    wchar_t spec[200];
+    BOOL mv = g_acTakeMove;
+    lstrcpynW(spec, g_acTakeWhat, 200);
+    ac_take_plan(parent, full, spec, mv);
+    if (!g_acPlanOn) g_acTakeWait = 1;
+    else {
+      g_acTakeWhat[0] = 0;
+      g_acTakeWait = 0;
+    }
+    return;
+  }
+  {
+    BOOL askFiles = g_acTakeWait;
+    g_acTakeWait = 0;
+    ac_mkdir_now(full);
+    if (askFiles) {
+      g_acTakeWait = 1;
+      ac_push(1, L"Какие файлы положить в эту папку? Например: все pdf или 8930.");
+    }
+  }
 }
 
 /* «создай папку…» разбирает программа: где кончается настоящая папка и как зовут новую.
@@ -572,10 +597,62 @@ static BOOL ac_mkdir_handle(const wchar_t *q) {
   BOOL verb = (wcsstr(low, L"создай") || wcsstr(low, L"сделай")) && wcsstr(low, L"папк");
   BOOL complain = wcsstr(low, L"не сделал") || wcsstr(low, L"не создал") || wcsstr(low, L"нет папки") ||
                   wcsstr(low, L"не появил");
-  wchar_t dir[MAX_PATH], name[80];
+  const wchar_t *mvAt = NULL;
+  {
+    static const wchar_t *const kMv[] = {L"закинь", L"перетащ", L"перенес", L"перемест", L"положи", L"скопиру", L"кинь"};
+    for (size_t i = 0; i < sizeof(kMv) / sizeof(kMv[0]); i++) {
+      const wchar_t *p = wcsstr(low, kMv[i]);
+      if (p && (!mvAt || p < mvAt)) mvAt = p;
+    }
+  }
+  wchar_t folderQ[500];
+  const wchar_t *parseQ = q;
+  if (verb && mvAt) {
+    int cut = (int)(mvAt - low);
+    if (cut > 0 && cut < 500) {
+      lstrcpynW(folderQ, q, cut + 1);
+      parseQ = folderQ;
+    }
+    wchar_t spec[200];
+    spec[0] = 0;
+    const wchar_t *p = q + (mvAt - low);
+    while (*p && *p != L' ' && *p != L'\t') p++;
+    while (*p) {
+      while (*p == L' ' || *p == L'\t') p++;
+      if (!*p) break;
+      wchar_t w[64];
+      int n = 0;
+      while (*p && *p != L' ' && *p != L'\t' && n < 63) w[n++] = *p++;
+      w[n] = 0;
+      wchar_t wl[64];
+      lstrcpynW(wl, w, 64);
+      CharLowerBuffW(wl, (DWORD)wcslen(wl));
+      if (!wcscmp(wl, L"туда") || !wcscmp(wl, L"их") || !wcscmp(wl, L"эти") || !wcscmp(wl, L"этих") ||
+          !wcscmp(wl, L"сюда") || !wcscmp(wl, L"тоже"))
+        continue;
+      if (spec[0] && wcslen(spec) + 1 < 199) wcscat(spec, L" ");
+      if (wcslen(spec) + wcslen(w) < 199) wcscat(spec, w);
+    }
+    lstrcpynW(g_acTakeWhat, spec, 200);
+    g_acTakeMove = wcsstr(low, L"скопир") == NULL;
+    if (!spec[0]) g_acTakeWait = 1;
+  }
+  wchar_t dir[MAX_PATH], name[80], around[500];
   const wchar_t *after = L"";
-  BOOL hasDir = ac_live_dir(q, dir, &after);
-  BOOL hasName = ac_mk_name(q, hasDir ? after : q, name);
+  BOOL hasDir = ac_live_dir(parseQ, dir, &after);
+  around[0] = 0;
+  if (hasDir) {
+    const wchar_t *at = wcsstr(parseQ, dir);
+    if (at && (int)(at - parseQ) < 450) {
+      lstrcpynW(around, parseQ, (int)(at - parseQ) + 1);
+      if (wcslen(around) + wcslen(after) + 2 < 500) {
+        wcscat(around, L" ");
+        wcscat(around, after);
+      }
+    } else
+      lstrcpynW(around, after, 500);
+  }
+  BOOL hasName = ac_mk_name(parseQ, hasDir ? around : parseQ, name);
   if (complain && g_acMkLast[0] && !verb) {
     wchar_t msg[MAX_PATH + 80];
     ac_push(0, q);
@@ -586,8 +663,23 @@ static BOOL ac_mkdir_handle(const wchar_t *q) {
     ac_push(1, msg);
     return TRUE;
   }
+  if (!verb && g_acTakeWait && g_acMkLast[0]) {
+    wchar_t par[MAX_PATH], spec[200];
+    ac_push(0, q);
+    lstrcpynW(g_acCmdText, q, 2000);
+    if (g_acTakeWhat[0] && wcsstr(low, L"все")) lstrcpynW(spec, g_acTakeWhat, 200);
+    else lstrcpynW(spec, q, 200);
+    af_parent(g_acMkLast, par);
+    ac_take_plan(par, g_acMkLast, spec, g_acTakeMove);
+    if (g_acPlanOn) {
+      g_acTakeWhat[0] = 0;
+      g_acTakeWait = 0;
+    }
+    return TRUE;
+  }
   if (!verb && !(g_acMkWait && (hasDir || (g_acMkWait == 1 && !wcschr(q, L'\\') && wcslen(q) < 80)))) return FALSE;
   ac_push(0, q);
+  lstrcpynW(g_acCmdText, q, 2000);
   if (!hasName && g_acMkName[0] && (wcsstr(low, L"тут") || wcsstr(low, L"здесь") || wcsstr(low, L"сюда") || !verb))
     lstrcpynW(name, g_acMkName, 80), hasName = TRUE;
   if (hasDir && hasName) {
