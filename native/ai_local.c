@@ -437,6 +437,8 @@ static volatile LONG g_aiActive;    /* запросов сейчас */
 static volatile DWORD g_aiLastUse;  /* GetTickCount последнего ответа */
 static BOOL g_aiWatchOn;
 static wchar_t g_aiSrvNote[200];    /* почему не запустился — для «Проверить» */
+static wchar_t g_aiRunNote[200];    /* как пришлось запустить (без видеокарты, малый контекст) */
+static int g_aiSlotCtx;             /* контекст ячейки у идущего сервера; 0 — как в настройках */
 
 /* простой HTTP к 127.0.0.1. reqSlot — куда положить ручку запроса, чтобы
    другой поток мог оборвать его, закрыв её. Возвращает код HTTP или 0. */
@@ -579,6 +581,51 @@ static void ai_log_tail(const wchar_t *log, wchar_t *out, int cap) {
   out[cap - 1] = 0;
 }
 
+/* порт занят другой программой */
+static BOOL strstr_log_port(const wchar_t *log) {
+  wchar_t t[200];
+  ai_log_tail(log, t, 200);
+  return wcsstr(t, L"bind") || wcsstr(t, L"address already in use");
+}
+
+/* почему llama-server не загрузил модель — по его журналу */
+enum { AI_LF_OTHER, AI_LF_VRAM, AI_LF_RAM, AI_LF_ARCH, AI_LF_FILE };
+static int ai_load_fail(const wchar_t *log) {
+  HANDLE h = CreateFileW(log, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+  if (h == INVALID_HANDLE_VALUE) return AI_LF_OTHER;
+  static char b[32768];
+  DWORD sz = GetFileSize(h, NULL), got = 0;
+  if (sz > sizeof(b) - 1) SetFilePointer(h, (LONG)(sz - (sizeof(b) - 1)), NULL, FILE_BEGIN);
+  ReadFile(h, b, sizeof(b) - 1, &got, NULL);
+  CloseHandle(h);
+  b[got] = 0;
+  for (DWORD i = 0; i < got; i++)
+    if (b[i] >= 'A' && b[i] <= 'Z') b[i] += 32;
+  if (strstr(b, "unknown model architecture") || strstr(b, "unknown architecture")) return AI_LF_ARCH;
+  if (strstr(b, "outofdevicememory") || strstr(b, "out of device memory") || strstr(b, "cudamalloc failed") ||
+      strstr(b, "unable to allocate vulkan") || strstr(b, "unable to allocate cuda") ||
+      (strstr(b, "failed to allocate") && (strstr(b, "vulkan") || strstr(b, "cuda"))))
+    return AI_LF_VRAM;
+  if (strstr(b, "failed to allocate") || strstr(b, "out of memory") || strstr(b, "bad_alloc") ||
+      strstr(b, "not enough memory") || strstr(b, "failed to mmap") || strstr(b, "unable to allocate"))
+    return AI_LF_RAM;
+  if (strstr(b, "invalid magic") || strstr(b, "not within the file bounds") || strstr(b, "failed to read") ||
+      strstr(b, "failed to open") || strstr(b, "corrupted") || strstr(b, "failed to load model from"))
+    return AI_LF_FILE;
+  return AI_LF_OTHER;
+}
+
+/* памяти: свободно сейчас и всего, МБ */
+static void ai_mem_mb(int *avail, int *total) {
+  MEMORYSTATUSEX ms;
+  ms.dwLength = sizeof(ms);
+  *avail = *total = 0;
+  if (GlobalMemoryStatusEx(&ms)) {
+    *avail = (int)(ms.ullAvailPhys >> 20);
+    *total = (int)(ms.ullTotalPhys >> 20);
+  }
+}
+
 static void ai_short_path(wchar_t *p) {
   BOOL ascii = TRUE;
   for (const wchar_t *c = p; *c; c++)
@@ -648,14 +695,21 @@ static int ai_server_ensure(DWORD deadline, volatile LONG *cancel) {
   ai_short_path(model);
   if (mm[0]) ai_short_path(mm);
   int rc = AI_NO_SERVER;
-  g_aiSrvNote[0] = 0;
-  for (int attempt = 0; attempt < 4 && rc != AI_OK; attempt++) {
-    int port = AI_PORT0 + attempt * 7;
+  g_aiSrvNote[0] = g_aiRunNote[0] = 0;
+  /* если модель не влезла, пробуем проще: без видеокарты, затем с малым контекстом */
+  int ngl = gpu ? 99 : 0, ctx = g_aiCtx * 2, np = 2, fail = -1;
+  {
+    int av, tot;
+    ai_mem_mb(&av, &tot);
+    ai_log(L"Память: свободно %d МБ из %d, модель %d МБ, контекст %d", av, tot, (int)(ai_file_size(model) >> 20), ctx);
+  }
+  for (int attempt = 0; attempt < 6 && rc != AI_OK; attempt++) {
+    int port = AI_PORT0 + (attempt % 4) * 7;
     wchar_t cmd[MAX_PATH * 4 + 300], wkey[40];
     MultiByteToWideChar(CP_UTF8, 0, g_aiKey, -1, wkey, 40);
     int n = _snwprintf(cmd, MAX_PATH * 4 + 300,
-                       L"\"%s\" -m \"%s\" --host 127.0.0.1 --port %d --api-key %s -c %d -np 2 -t %d -ngl %d",
-                       exe, model, port, wkey, g_aiCtx * 2, ai_cores(), gpu ? 99 : 0);
+                       L"\"%s\" -m \"%s\" --host 127.0.0.1 --port %d --api-key %s -c %d -np %d -t %d -ngl %d",
+                       exe, model, port, wkey, ctx, np, ai_cores(), ngl);
     if (mm[0] && n > 0) n += _snwprintf(cmd + n, MAX_PATH * 4 + 300 - n, L" --mmproj \"%s\"", mm);
     /* своя модель с дообучением: адаптер LoRA (lora*.gguf) рядом с ней подключается сам —
        так можно взять готовую модель и свой адаптер, обученный на своих документах */
@@ -712,7 +766,34 @@ static int ai_server_ensure(DWORD deadline, volatile LONG *cancel) {
         if (code == 0xC000001D) lstrcpynW(g_aiSrvNote, L"процессор не тянет эту сборку llama.cpp (нет AVX2?)", 200);
         if (code == 0xC0000135) lstrcpynW(g_aiSrvNote, L"llama-server не нашёл свои DLL — распакуйте архив целиком", 200);
         ai_server_stop_locked();
-        break; /* занят порт или не та модель — следующая попытка покажет */
+        if (code == 0xC000001D || code == 0xC0000135) {
+          attempt = 99;
+          break;
+        }
+        if (strstr_log_port(log)) break; /* порт занят — тот же запуск на другом порту */
+        fail = ai_load_fail(log);
+        ai_log(L"Причина по журналу: %s", fail == AI_LF_VRAM ? L"не хватило памяти видеокарты"
+                                         : fail == AI_LF_RAM  ? L"не хватило оперативной памяти"
+                                         : fail == AI_LF_ARCH ? L"llama.cpp не знает эту модель"
+                                         : fail == AI_LF_FILE ? L"файл модели не читается"
+                                                              : L"не ясна");
+        if (fail == AI_LF_ARCH || fail == AI_LF_FILE) {
+          attempt = 99;
+          break;
+        }
+        if (ngl) {
+          ngl = 0;
+          lstrcpynW(g_aiRunNote, L"видеокарте не хватило памяти, модель идёт на процессоре", 200);
+          ai_log(L"Повтор без видеокарты (-ngl 0)");
+        } else if (ctx > 2048) {
+          ctx = 2048;
+          np = 1;
+          lstrcpynW(g_aiRunNote, L"памяти мало, контекст урезан до 2048", 200);
+          ai_log(L"Повтор с малым контекстом (-c 2048 -np 1)");
+        } else {
+          attempt = 99;
+        }
+        break;
       }
       if ((cancel && *cancel) || (LONG)(GetTickCount() - deadline) >= 0) {
         rc = cancel && *cancel ? AI_CANCELLED : AI_TIMEOUT;
@@ -723,10 +804,30 @@ static int ai_server_ensure(DWORD deadline, volatile LONG *cancel) {
       }
       if (ai_http(L"GET", port, L"/health", NULL, NULL, 1500, NULL, NULL, NULL) == 200) {
         ai_log(L"llama-server готов, порт %d", port);
+        g_aiSlotCtx = ctx / np;
         rc = AI_OK;
         break;
       }
     }
+  }
+  if (rc != AI_OK && fail >= 0 && !(cancel && *cancel)) {
+    int av, tot;
+    ai_mem_mb(&av, &tot);
+    int need = (int)(ai_file_size(model) >> 20) + 700;
+    if (fail == AI_LF_ARCH)
+      lstrcpynW(g_aiSrvNote, L"эта llama.cpp старая для модели — поставьте свежую кнопкой «llama.cpp…» или «Скачать»", 200);
+    else if (fail == AI_LF_FILE)
+      lstrcpynW(g_aiSrvNote, L"файл модели не читается (испорчен или не та модель) — удалите его и нажмите «Скачать»", 200);
+    else if (fail == AI_LF_RAM || need > av)
+      _snwprintf(g_aiSrvNote, 200,
+                 L"не хватает памяти: свободно %d МБ, модели нужно около %d МБ — закройте лишние программы или возьмите %s%s%s",
+                 av, need, !g_aiModel[0] && g_aiTier > 0 ? L"уровень «" : L"модель поменьше",
+                 !g_aiModel[0] && g_aiTier > 0 ? kAiTiers[g_aiTier >= 2 ? 1 : 0].button : L"",
+                 !g_aiModel[0] && g_aiTier > 0 ? L"»" : L"");
+    else if (!g_aiSrvNote[0])
+      lstrcpynW(g_aiSrvNote, L"llama-server не загрузил модель", 200);
+    g_aiSrvNote[199] = 0;
+    ai_log(L"Итог: %s", g_aiSrvNote);
   }
   if (rc == AI_OK) {
     g_aiLastUse = GetTickCount();
@@ -1076,7 +1177,7 @@ static char *ai_body_chat(const wchar_t *instruction, const AiTurn *t, int n) {
   return b;
 }
 
-int ai_chat_budget(void) { return (g_aiCtx - 1024 - 300) * 2; } /* ≈ 2 символа на токен: запас для русского */
+int ai_chat_budget(void) { return ((g_aiSlotCtx ? g_aiSlotCtx : g_aiCtx) - 1024 - 300) * 2; } /* ≈ 2 символа на токен: запас для русского */
 int ai_ctx_size(void) { return g_aiCtx; }
 
 int ai_ask_chat_async(const wchar_t *instruction, const AiTurn *turns, int n, DWORD timeoutMs, HWND notify,

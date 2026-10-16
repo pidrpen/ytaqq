@@ -203,7 +203,8 @@ static void ai_ui_test_done(AiResult *r) {
       lstrcpynW(a, r->text, 80);
       for (wchar_t *c = a; *c; c++)
         if (*c == L'\r' || *c == L'\n') *c = L' ';
-      _snwprintf(g_aiTestMsg, 300, L"Работает: «%s» за %.1f с", a, r->ms / 1000.0);
+      _snwprintf(g_aiTestMsg, 300, L"Работает: «%s» за %.1f с%s%s", a, r->ms / 1000.0, g_aiRunNote[0] ? L". " : L"",
+                 g_aiRunNote);
     } else {
       _snwprintf(g_aiTestMsg, 300, L"Не вышло: %s. Подробности — «Скопировать отчёт»", r->text);
     }
