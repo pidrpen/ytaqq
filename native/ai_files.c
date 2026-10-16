@@ -531,3 +531,20 @@ static void ai_files_test(int argc, wchar_t **argv) {
   fclose(f);
 }
 #endif
+
+#ifdef SET_TEST
+/* проверочная сборка: --airoute папка файл — фраза из файла (UTF-8); пишет папка\\airoute.txt: 1 — файловая команда, 0 — чат */
+static void ai_route_test(wchar_t **argv) {
+  wchar_t out[MAX_PATH], q[400] = L"";
+  _snwprintf(out, MAX_PATH, L"%s\\airoute.txt", argv[2]);
+  FILE *in = _wfopen(argv[3], L"r, ccs=UTF-8");
+  if (in) {
+    fgetws(q, 400, in);
+    fclose(in);
+  }
+  FILE *f = _wfopen(out, L"w");
+  if (!f) return;
+  fprintf(f, "%d\n", ac_is_file_cmd(q) ? 1 : 0);
+  fclose(f);
+}
+#endif

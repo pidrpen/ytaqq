@@ -20,7 +20,6 @@ static const GUID kAcBgra = {0x6fddc324, 0x4e03, 0x4bfe, {0xb1, 0x85, 0x3d, 0x77
 #define ID_AC_SET 4707
 #define ID_AC_STAT 4708
 #define ID_AC_TITLE 4709
-#define ID_AC_CMD 4710
 #define ID_AC_SHOT 4711
 #define ID_AC_THUMB 4712
 #define ID_AC_LEARN 4713
@@ -32,8 +31,8 @@ static const GUID kAcBgra = {0x6fddc324, 0x4e03, 0x4bfe, {0xb1, 0x85, 0x3d, 0x77
   L"Отвечай по-русски, коротко и по делу. Числа, граммовки, пути и номера ГОСТ не выдумывай. "                           \
   L"Если ниже есть блок «Выучено» — отвечай по нему и не противоречь ему.\r\n"                                           \
   L"CursorPad: этот чат открывают «Мини-ИИ» и «Ещё → Спросить ИИ». Поиск PLM — это Союз, «Файлы» — имена в архиве. "      \
-  L"«Распознать чертёж» читает штамп ГОСТ 2.104. Галочка «Команда для файлов» создаёт папку, копирует, перемещает, "     \
-  L"переименовывает или раскладывает сканы по штампу — ничего не меняется, пока не нажали «Применить». "                 \
+  L"«Распознать чертёж» читает штамп ГОСТ 2.104. Фразы про файлы (создать папку, скопировать, переместить, переименовать, разложить сканы) понимаются сами, без галочки. "     \
+  L"Ничего не меняется, пока не нажали «Применить». "                 \
   L"«запомни: …» пишет факт в тетрадь на этом компьютере. Уровни модели: Слабый Qwen2.5 1.5B, Средний Qwen3 4B, "        \
   L"Мощный Qwen2.5 7B, С картинками Qwen3-VL 4B."
 
@@ -43,7 +42,7 @@ typedef struct {
   BYTE *png; /* картинка к вопросу, PNG; NULL — без неё */
   DWORD pngLen;
 } AcTurn;
-static HWND g_acWnd, g_acLog, g_acIn, g_acSend, g_acStop, g_acClear, g_acCopy, g_acSet, g_acStat, g_acTitle, g_acCmdChk,
+static HWND g_acWnd, g_acLog, g_acIn, g_acSend, g_acStop, g_acClear, g_acCopy, g_acSet, g_acStat, g_acTitle,
     g_acShot, g_acThumb, g_acLearn;
 static BYTE *g_acImg;      /* картинка, ждёт отправки */
 static DWORD g_acImgLen;
@@ -410,6 +409,26 @@ static void ac_remember(const wchar_t *raw, BOOL showUser) {
   ac_status(st == 1 ? L"Записано в ai_learn.txt" : L"");
 }
 
+/* файловая фраза: первое слово — действие над файлами. Вопрос со знаком «?» — чат */
+static BOOL ac_is_file_cmd(const wchar_t *q) {
+  wchar_t s[400];
+  lstrcpynW(s, q, 400);
+  CharLowerBuffW(s, (DWORD)wcslen(s));
+  if (wcschr(s, L'?')) return FALSE;
+  const wchar_t *p = s;
+  while (*p == L' ') p++;
+  wchar_t w[32];
+  int n = 0;
+  while (*p && *p != L' ' && n < 31) w[n++] = *p++;
+  w[n] = 0;
+  static const wchar_t *const kVerbs[] = {L"закинь", L"закидывай", L"перемести", L"перенеси", L"переложи", L"положи",
+                                          L"скопируй", L"копируй", L"переименуй", L"разложи", L"удали", L"сотри"};
+  for (size_t k = 0; k < sizeof(kVerbs) / sizeof(kVerbs[0]); k++)
+    if (!wcscmp(w, kVerbs[k])) return TRUE;
+  if (!wcscmp(w, L"создай") || !wcscmp(w, L"сделай")) return wcsstr(s, L"папк") != NULL;
+  return FALSE;
+}
+
 static void ac_send(void) {
   if (g_acPlanOn) {
     ac_status(L"Сначала «Применить» или «Отмена» для плана");
@@ -457,12 +476,7 @@ static void ac_send(void) {
     free(in);
     return;
   }
-  BOOL cmd = SendMessageW(g_acCmdChk, BM_GETCHECK, 0, 0) == BST_CHECKED;
-  if (cmd && g_acImg) {
-    ac_status(L"В командах для файлов картинки не нужны. Уберите картинку или снимите галочку.");
-    free(in);
-    return;
-  }
+  BOOL cmd = !g_acImg && ac_is_file_cmd(a); /* файловая фраза — навык «Файлы»; с картинкой — чат */
   ac_push(0, a);
   if (g_acImg && g_acN) {
     g_acTurns[g_acN - 1].png = g_acImg; /* пока только ссылка: отдадим, если запрос пойдёт */
@@ -912,8 +926,7 @@ static void ac_layout(int W, int H) {
   MoveWindow(GetDlgItem(g_acWnd, ID_PANEL_CLOSE), W - pad - 30, 8, 30, 26, TRUE);
   MoveWindow(g_acLog, pad, logY, W - 2 * pad, logH, TRUE);
   MoveWindow(g_acStat, pad, stY, W - 2 * pad, statH, TRUE);
-  MoveWindow(g_acCmdChk, pad, cmdY, W - 2 * pad - 100, 22, TRUE);
-  MoveWindow(g_acShot, W - pad - 96, cmdY, 96, 22, TRUE);
+  MoveWindow(g_acShot, pad, cmdY, 120, 22, TRUE);
   MoveWindow(g_acThumb, pad, inY - 84, 80, 80, TRUE);
   ShowWindow(g_acThumb, g_acImg ? SW_SHOW : SW_HIDE);
   MoveWindow(g_acIn, pad, inY, W - 2 * pad, inH, TRUE);
@@ -1047,15 +1060,13 @@ static void ac_create(void) {
   g_acCopy = mk_btn(g_acWnd, L"Копировать", ID_AC_COPY);
   g_acLearn = mk_btn(g_acWnd, L"Запомнить", ID_AC_LEARN);
   g_acSet = mk_btn(g_acWnd, L"Настройки", ID_AC_SET);
-  g_acCmdChk = CreateWindowExW(0, L"BUTTON", L"Команда для файлов: разложить папку по штампам", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
-                               0, 0, 10, 10, g_acWnd, (HMENU)(INT_PTR)ID_AC_CMD, g_inst, NULL);
   g_acShot = mk_btn(g_acWnd, L"С экрана", ID_AC_SHOT);
   g_acThumb = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | SS_BITMAP | SS_NOTIFY, 0, 0, 10, 10, g_acWnd,
                               (HMENU)(INT_PTR)ID_AC_THUMB, g_inst, NULL);
   DragAcceptFiles(g_acWnd, TRUE);
   for (HWND c = GetWindow(g_acWnd, GW_CHILD); c; c = GetWindow(c, GW_HWNDNEXT))
     if (c != g_acSend && c != g_acStop && c != g_acClear && c != g_acCopy && c != g_acLearn && c != g_acSet &&
-        c != g_acCmdChk && c != g_acShot) SendMessageW(c, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
+        c != g_acShot) SendMessageW(c, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
   SendMessageW(g_acLog, WM_SETFONT, (WPARAM)g_fontBody, TRUE);
   SendMessageW(g_acIn, WM_SETFONT, (WPARAM)g_fontBody, TRUE);
   g_acEditOld = (WNDPROC)SetWindowLongPtrW(g_acIn, GWLP_WNDPROC, (LONG_PTR)AcEditProc);
@@ -1082,7 +1093,6 @@ static void aichat_show(void) {
 static void aichat_ask(const wchar_t *q) {
   aichat_show();
   if (!g_acWnd) return;
-  SendMessageW(g_acCmdChk, BM_SETCHECK, BST_UNCHECKED, 0); /* вопрос из поиска — не команда */
   SetWindowTextW(g_acIn, q);
   ac_send();
 }
