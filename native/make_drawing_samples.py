@@ -189,7 +189,7 @@ def spec_table(s, rows, bottom):
             s.line(x0, y + 7, x0 + w, y + 7)
         else:
             fmt, zone, pos, des, name, qty, note = r
-            s.text(L + 0.5, y + 2.2, fmt, 3.5)
+            s.text(L + 0.6, y + 2.5, fmt, 3)
             s.text(L + 12, y + 2.2, pos, 3.5, center=8)
             s.text(L + 21, y + 2.2, des, 3.5)
             s.text(L + 91, y + 2.2, name, 3.5)

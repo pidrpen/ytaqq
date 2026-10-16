@@ -617,12 +617,14 @@ static void dr_box_rect(const DrLines *L, const DrStamp *s, const DrBox *b, int 
   double k = s->k;
   int x0 = s->sl + (int)(b->x0 * k), x1 = s->sl + (int)(b->x1 * k);
   int y0 = s->st + (int)(b->y0 * k), y1 = s->st + (int)(b->y1 * k);
-  int radx = (int)(4 * k), rady = (int)((b->y1 - b->y0) * k / 3);
+  /* искать линию не дальше четверти графы: узкая «Лист» не должна уехать на соседнюю */
+  int radx = (int)(4 * k), rady = (int)((b->y1 - b->y0) * k / 4);
+  if (radx > (x1 - x0) / 4) radx = (x1 - x0) / 4;
   if (rady > radx) rady = radx;
   int mx = (int)(0.4 * k), my = (int)(0.4 * k);
   int nx0 = dr_snap_x(L, x0, y0 + my, y1 - my, radx), nx1 = dr_snap_x(L, x1, y0 + my, y1 - my, radx);
   int ny0 = dr_snap_y(L, y0, x0 + mx, x1 - mx, rady), ny1 = dr_snap_y(L, y1, x0 + mx, x1 - mx, rady);
-  int in = (int)(0.7 * k) + 1;
+  int in = (int)(0.35 * k) + 1; /* остатки линий у края стирает dr_crop */
   *rx0 = nx0 + in;
   *rx1 = nx1 - in;
   *ry0 = ny0 + in;
@@ -651,6 +653,10 @@ static BOOL dr_crop(const DrImg *m, int thr, int x0, int y0, int x1, int y1, dou
   /* стереть линии: горизонтали длиннее 9 мм, вертикали длиннее 8,5 мм
      (буквы — до 7 мм); подчёркивание и дробь в материале — тоже линии */
   int lh = (int)(9 * k), lv = (int)(8.5 * k), gap = (int)(0.3 * k) + 1;
+  /* у края вырезки — остатки рамки графы: там линией считаем и короткое, от 60 % */
+  int bd = (int)(1.2 * k) + 1, lhb = w * 6 / 10, lvb = h * 6 / 10;
+  if (lhb > lh) lhb = lh;
+  if (lvb > lv) lvb = lv;
   BYTE *kill = (BYTE *)calloc((size_t)w * h, 1);
   if (kill) {
     for (int y = 0; y < h; y++) {
@@ -662,7 +668,7 @@ static BOOL dr_crop(const DrImg *m, int thr, int x0, int y0, int x1, int y1, dou
           last = x;
           continue;
         }
-        if (s0 >= 0 && last - s0 + 1 >= lh) memset(kill + (size_t)y * w + s0, 1, (size_t)(last - s0 + 1));
+        if (s0 >= 0 && last - s0 + 1 >= (y < bd || y >= h - bd ? lhb : lh)) memset(kill + (size_t)y * w + s0, 1, (size_t)(last - s0 + 1));
         s0 = d ? x : -1;
         last = d ? x : -1;
       }
@@ -676,7 +682,7 @@ static BOOL dr_crop(const DrImg *m, int thr, int x0, int y0, int x1, int y1, dou
           last = y;
           continue;
         }
-        if (s0 >= 0 && last - s0 + 1 >= lv)
+        if (s0 >= 0 && last - s0 + 1 >= (x < bd || x >= w - bd ? lvb : lv))
           for (int q = s0; q <= last; q++) kill[(size_t)q * w + x] = 1;
         s0 = d ? y : -1;
         last = d ? y : -1;
@@ -1044,6 +1050,15 @@ static void dr_norm_des(const wchar_t *in, wchar_t *out, int cap) {
   ocr_fix_query(t, out, cap);
   for (int i = 0; out[i]; i++)
     if (out[i] >= 0xE000 && out[i] <= 0xE003) out[i] = L"сСбБ"[out[i] - 0xE000];
+  /* код документа «ЗК» после точки: «.3 К», «.3К» → «.ЗК» */
+  for (int i = 1; out[i]; i++)
+    if (out[i - 1] == L'.' && (out[i] == L'3' || out[i] == L'З')) {
+      int j = i + 1 + (out[i + 1] == L' ');
+      if (out[j] == L'К' && (!out[j + 1] || out[j + 1] == L' ')) {
+        out[i] = L'З';
+        memmove(out + i + 1, out + j, (wcslen(out + j) + 1) * sizeof(wchar_t));
+      }
+    }
   /* хвост из букв, прилипший к цифрам: «…01.02СБ» → «…01.02 СБ» */
   int l = (int)wcslen(out), k = l;
   while (k > 0 && dr_isupper_cyr(out[k - 1])) k--;
@@ -1154,12 +1169,30 @@ static void dr_norm_fmt(wchar_t *s) {
   lstrcpyW(s, t);
 }
 
+/* формат листа: А0…А4, можно с кратностью «А4х3» */
+static BOOL dr_fmt_ok(const wchar_t *s) {
+  if (s[0] != L'А' || s[1] < L'0' || s[1] > L'4') return FALSE;
+  if (!s[2]) return TRUE;
+  if (s[2] != L'х' || !dr_isdig(s[3])) return FALSE;
+  for (int i = 3; s[i]; i++)
+    if (!dr_isdig(s[i])) return FALSE;
+  return TRUE;
+}
+
 /* резьба: «Мб» — это «М6» */
 static void dr_fix_thread(wchar_t *s) {
   for (int i = 0; s[i]; i++)
     if ((s[i] == L'М' || s[i] == L'M') && (i == 0 || s[i - 1] == L' ') && (s[i + 1] == L'б' || s[i + 1] == L'b') &&
         (s[i + 2] == 0 || s[i + 2] == L' ' || s[i + 2] == L'-' || s[i + 2] == L'х' || s[i + 2] == L'x'))
       s[i] = L'М', s[i + 1] = L'6';
+  /* поле допуска «М6-6gх20»: Tesseract читает g как 9 — «М6-69х20» */
+  for (int i = 0; s[i]; i++) {
+    if (s[i] != L'М' || (i && s[i - 1] != L' ') || !dr_isdig(s[i + 1])) continue;
+    int j = i + 1;
+    while (dr_isdig(s[j]) || s[j] == L',' || s[j] == L'.') j++;
+    if (s[j] == L'-' && dr_isdig(s[j + 1]) && s[j + 2] == L'9' && (s[j + 3] == L'х' || s[j + 3] == L'x'))
+      s[j + 2] = L'g';
+  }
 }
 
 /* Слово латиницей, но все его буквы похожи на русские («Cm3cn» — это
@@ -1202,6 +1235,7 @@ static void dr_field_set(DrPage *pg, int f, const wchar_t *raw, int conf) {
     dr_norm_des(v, t, DR_CELL);
     lstrcpyW(v, t);
     bad = !dr_des_ok(v);
+    if (bad && dr_find_des(v, t, DR_CELL) && dr_des_ok(t)) lstrcpyW(v, t); /* хвост чужих граф — прочь, подсветка остаётся */
     if (!bad && conf < 50) bad = TRUE;
     break;
   case DF_MASS:
@@ -1333,12 +1367,15 @@ static void dr_spec(DrImg *m, int thr, const DrLines *L, const DrStamp *s, DrPag
   for (int i = 0; i < ws.n; i++) {
     const DrWord *w = &ws.w[i];
     if (!w->t[1] && wcschr(L"|_—-–=~'\"`.,:;!", w->t[0])) continue;
-    if (w->conf < 40 || w->h < 1.6 * k * up) continue; /* остатки линий и пыль */
     double px = cx0 + (w->x + w->w / 2.0 - 12) / up, py = cy0 + (w->y + w->h / 2.0 - 12) / up;
     double mmx = (px - s->sl) / k;
     int col = -1;
     for (int c = 0; c < 7; c++)
       if (mmx >= kDrSpecX[c] && mmx < kDrSpecX[c + 1]) col = c;
+    /* остатки линий и пыль; одинокую цифру в «Поз.» и «Кол.» Tesseract часто
+       читает верно, но не уверен — берём, графа будет подсвечена */
+    BOOL lone = !w->t[1] && dr_isdig(w->t[0]) && (col + 1 == DS_POS || col + 1 == DS_QTY);
+    if (w->conf < (lone ? 10 : 40) || w->h < 1.6 * k * up) continue;
     int row = -1;
     for (int r = 0; r < nr; r++)
       if (py >= ys[r] && py < ys[r + 1]) row = r;
@@ -1384,9 +1421,12 @@ static void dr_spec(DrImg *m, int thr, const DrLines *L, const DrStamp *s, DrPag
       if (t[0] && c == DS_DES) {
         dr_norm_des(t, d, DR_CELL);
         lstrcpyW(t, d);
-        bad = !dr_des_ok(t);
+        bad = !dr_des_ok(t) || conf[r][c] < 80; /* «АДЕ»→«АМЕ» шаблон не ловит */
       }
-      if (t[0] && c == DS_FMT) dr_norm_fmt(t);
+      if (t[0] && c == DS_FMT) {
+        dr_norm_fmt(t);
+        bad = !dr_fmt_ok(t);
+      }
       if (c == DS_NAME || c == DS_NOTE) dr_fix_latin(t), dr_fix_thread(t);
       if (t[0] && (c == DS_POS || c == DS_QTY)) {
         if (dr_number(t, d, DR_CELL, c == DS_QTY)) lstrcpyW(t, d);
