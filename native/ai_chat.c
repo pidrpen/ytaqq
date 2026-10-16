@@ -32,7 +32,8 @@ static const GUID kAcBgra = {0x6fddc324, 0x4e03, 0x4bfe, {0xb1, 0x85, 0x3d, 0x77
   L"Если ниже есть блок «Выучено» — отвечай по нему и не противоречь ему.\r\n"                                           \
   L"CursorPad: этот чат открывают «Мини-ИИ» и «Ещё → Спросить ИИ». Поиск PLM — это Союз, «Файлы» — имена в архиве. "      \
   L"«Распознать чертёж» читает штамп ГОСТ 2.104. Фразы про файлы (создать папку, скопировать, переместить, переименовать, разложить сканы) понимаются сами, без галочки. "     \
-  L"Ничего не меняется, пока не нажали «Применить». "                 \
+  L"Копирование и перенос не меняют диск, пока не нажали «Применить». "                                                     \
+  L"Ты сам диск не видишь и папки не создаёшь. Никогда не пиши, что папка создана, проверена или уже есть: это скажет программа.\r\n" \
   L"«запомни: …» пишет факт в тетрадь на этом компьютере. Уровни модели: Слабый Qwen2.5 1.5B, Средний Qwen3 4B, "        \
   L"Мощный Qwen2.5 7B, С картинками Qwen3-VL 4B."
 
@@ -54,6 +55,7 @@ static void ac_plan_ui(BOOL on);
 static void ac_files_run(const wchar_t *j);
 static void ac_files_apply(void);
 static void ac_files_cancel(void);
+static void ac_mkdir_now(const wchar_t *dst);
 static const wchar_t *ac_cmd_instruction(void);
 static void af_set_last(const wchar_t *dir);
 static void af_known_folders(void);
@@ -429,6 +431,52 @@ static BOOL ac_is_file_cmd(const wchar_t *q) {
   return FALSE;
 }
 
+/* полный путь Windows в тексте: с буквы диска или с \\ */
+static BOOL ac_pick_path(const wchar_t *q, wchar_t *out) {
+  const wchar_t *p = q, *hit = NULL;
+  while (*p) {
+    BOOL drv = ((*p >= L'A' && *p <= L'Z') || (*p >= L'a' && *p <= L'z')) && p[1] == L':';
+    if (drv || (p[0] == L'\\' && p[1] == L'\\')) {
+      hit = p;
+      break;
+    }
+    p++;
+  }
+  if (!hit) return FALSE;
+  int n = 0;
+  while (hit[n] && hit[n] != L'\r' && hit[n] != L'\n' && hit[n] != L'"' && n < MAX_PATH - 1) {
+    out[n] = hit[n];
+    n++;
+  }
+  while (n > 3 && (out[n - 1] == L' ' || out[n - 1] == L'\\' || out[n - 1] == L'/')) n--;
+  out[n] = 0;
+  return n > 3;
+}
+
+/* «создай папку C:\…\новая» или сообщение из одного только пути — делает программа, не модель */
+static BOOL ac_wants_mkdir_now(const wchar_t *q, wchar_t *path) {
+  if (!ac_pick_path(q, path)) return FALSE;
+  const wchar_t *at = wcsstr(q, path);
+  if (!at) return FALSE;
+  wchar_t pre[200];
+  int n = (int)(at - q);
+  if (n >= 200) return FALSE;
+  lstrcpynW(pre, q, n + 1);
+  CharLowerBuffW(pre, (DWORD)n);
+  const wchar_t *p = pre;
+  while (*p == L' ' || *p == L'\t' || *p == L'"') p++;
+  if (!*p) {
+    const wchar_t *r = at + wcslen(path);
+    while (*r == L' ' || *r == L'\t' || *r == L'"' || *r == L'\r' || *r == L'\n') r++;
+    return !*r;
+  }
+  if (wcsncmp(p, L"создай", 6) && wcsncmp(p, L"сделай", 6)) return FALSE;
+  if (!wcsstr(p, L"папк")) return FALSE;
+  const wchar_t *r = at + wcslen(path);
+  while (*r == L' ' || *r == L'\t' || *r == L'"' || *r == L'\r' || *r == L'\n') r++;
+  return !*r;
+}
+
 static void ac_send(void) {
   if (g_acPlanOn) {
     ac_status(L"Сначала «Применить» или «Отмена» для плана");
@@ -462,6 +510,15 @@ static void ac_send(void) {
     }
   }
   if (g_acId) {
+    free(in);
+    return;
+  }
+  wchar_t made[MAX_PATH];
+  if (!g_acImg && ac_wants_mkdir_now(a, made)) {
+    ac_push(0, a);
+    lstrcpynW(g_acCmdText, a, 2000);
+    ac_mkdir_now(made);
+    SetWindowTextW(g_acIn, L"");
     free(in);
     return;
   }

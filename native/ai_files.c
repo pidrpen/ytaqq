@@ -339,6 +339,58 @@ static void af_say(const wchar_t *msg) {
   ac_redraw();
 }
 
+/* создать папку по пути, который человек написал. Диск смотрит программа, не модель.
+   Недостающие папки по дороге тоже создаются. «Применить» не нужно: путь уже назван. */
+static void ac_mkdir_now(const wchar_t *dst) {
+  wchar_t rd[MAX_PATH], msg[MAX_PATH + 80];
+  af_known_folders();
+  if (!af_resolve(dst, rd, TRUE) || !af_trusted(rd)) {
+    af_say(L"Не понял путь. Напишите его целиком, как в проводнике: C:\\Папка\\новая");
+    return;
+  }
+  size_t n = wcslen(rd);
+  while (n > 3 && (rd[n - 1] == L'\\' || rd[n - 1] == L'/')) rd[--n] = 0;
+  if (af_is_dir(rd)) {
+    _snwprintf(msg, MAX_PATH + 80, L"Эта папка уже есть:\r\n%s", rd);
+    af_say(msg);
+    return;
+  }
+  if (af_exists(rd)) {
+    af_say(L"По этому пути уже лежит файл, не папка.");
+    return;
+  }
+  wchar_t missing[16][MAX_PATH];
+  int nm = 0;
+  wchar_t cur[MAX_PATH];
+  lstrcpynW(cur, rd, MAX_PATH);
+  while (nm < 16 && !af_is_dir(cur)) {
+    if (af_exists(cur)) {
+      af_say(L"По дороге к папке уже лежит файл. Путь не создать.");
+      return;
+    }
+    lstrcpynW(missing[nm++], cur, MAX_PATH);
+    wchar_t par[MAX_PATH];
+    af_parent(cur, par);
+    if (!par[0] || !_wcsicmp(par, cur)) break;
+    lstrcpynW(cur, par, MAX_PATH);
+  }
+  if (!af_is_dir(cur)) {
+    _snwprintf(msg, MAX_PATH + 80, L"Нет такой верхней папки:\r\n%s", cur);
+    af_say(msg);
+    return;
+  }
+  for (int i = nm - 1; i >= 0; i--) {
+    if (!CreateDirectoryW(missing[i], NULL) && !af_is_dir(missing[i])) {
+      _snwprintf(msg, MAX_PATH + 80, L"Не создалась:\r\n%s", missing[i]);
+      af_say(msg);
+      return;
+    }
+  }
+  af_set_last(rd);
+  _snwprintf(msg, MAX_PATH + 80, L"Создал папку:\r\n%s", rd);
+  af_say(msg);
+}
+
 /* JSON от модели: проверки здесь, перед любым действием */
 static void ac_files_run(const wchar_t *j) {
   wchar_t op[16] = L"", src[MAX_PATH] = L"", dst[MAX_PATH] = L"", name[200] = L"", nw[200] = L"";
@@ -350,18 +402,7 @@ static void ac_files_run(const wchar_t *j) {
   ac_json_field(j, L"new", nw, 200);
   af_clear();
   if (!wcscmp(op, L"mkdir")) {
-    if (!af_resolve(dst, rd, TRUE) || !af_trusted(rd) || af_exists(rd)) {
-      af_say(L"Напишите полный путь новой папки, как в проводнике, и проверьте, что её ещё нет.");
-      return;
-    }
-    wchar_t par[MAX_PATH];
-    af_parent(rd, par);
-    if (!af_is_dir(par)) {
-      af_say(L"Папка, в которой должна быть новая, не найдена.");
-      return;
-    }
-    af_add(AF_MKDIR, L"", rd);
-    af_show_plan();
+    ac_mkdir_now(dst[0] ? dst : g_acCmdText);
     return;
   }
   if (!wcscmp(op, L"copy") || !wcscmp(op, L"move")) {
