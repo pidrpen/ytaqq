@@ -72,18 +72,17 @@ typedef struct {
   BYTE *px; /* серое, 0 — чёрное */
 } DrImg;
 
-/* Точка расширения под локальную модель («помощник для сомнительных полей»):
-   поле, что прочитал Tesseract, и подсказка (что за графа, шаблон). Вернёт
-   TRUE и out — уточнённое значение. Пока модели нет — ничего не делает.
-   В облако отсюда ничего не уходит и уходить не должно. */
+static void dr_trim(wchar_t *s);
+
+/* Помощник для сомнительных полей штампа — локальный ИИ (ai.h), только если он
+   включён в Настройках. Зовётся из рабочего потока распознавания; в облако
+   ничего не уходит. Нет ответа — остаётся то, что нашли правила. */
 static BOOL dr_ai_refine_field(const wchar_t *field, const wchar_t *text, const wchar_t *hint, wchar_t *out,
                                int cap) {
-  (void)field;
-  (void)text;
-  (void)hint;
-  (void)out;
-  (void)cap;
-  return FALSE;
+  if (!ai_ready() || !text[0]) return FALSE;
+  if (!ai_refine_field(field, text, hint, out, cap, 20000)) return FALSE;
+  dr_trim(out);
+  return out[0] != 0;
 }
 
 /* ---- картинка ------------------------------------------------------------------ */
@@ -545,7 +544,7 @@ static BOOL dr_find_stamp(const DrLines *L, double dpi, DrStamp *s, wchar_t *why
   int x65 = s->sl + (int)(65 * s->k + 0.5), hw = (int)(5 * s->k) + 1, tol = (int)(2 * s->k) + 2;
   int top = dr_vup(L, x65, hw, by, tol, (int)(1.2 * s->k) + 2);
   if (top < 0) {
-    _snwprintf(why, cap, L"не найдена граница граф штампа [rx %d by %d W %d img %dx%d]", rx, by, W, m->w, m->h);
+    _snwprintf(why, cap, L"не найдена граница граф штампа");
     return FALSE;
   }
   s->hmm = (by - top) / s->k;
@@ -1229,9 +1228,16 @@ static void dr_field_set(DrPage *pg, int f, const wchar_t *raw, int conf) {
   }
   if (bad) {
     wchar_t ai[DR_CELL];
-    if (dr_ai_refine_field(kDrField[f], v, f == DF_DES ? L"обозначение: АДЕ 3422-682.01.01.02" : L"", ai, DR_CELL)) {
-      lstrcpyW(v, ai);
-      bad = FALSE;
+    if (dr_ai_refine_field(kDrField[f], v,
+                           f == DF_DES ? L"Графа штампа чертежа по ГОСТ 2.104, распознана Tesseract. "
+                                         L"Пример обозначения: АДЕ 3422-682.01.01.02"
+                                       : L"Графа штампа чертежа по ГОСТ 2.104, распознана Tesseract.",
+                           ai, DR_CELL)) {
+      /* обозначение принимаем, только если сходится с шаблоном; остальное — подсветка остаётся */
+      if (f != DF_DES || dr_des_ok(ai)) {
+        lstrcpyW(v, ai);
+        if (f == DF_DES) bad = FALSE;
+      }
     }
   }
   lstrcpynW(pg->f[f], v, DR_CELL);

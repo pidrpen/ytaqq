@@ -48,15 +48,16 @@
 #define ID_CUR_K6 121 /* «Чёрный кот» */
 #define ID_CUR_K7 136 /* «Риас» */
 #define ID_FX_BASE 400    /* 400..415: эффект при нажатии в Настройках (до 2026.10.14 — 160…) */
-#define FX_OPTIONS 16    /* сколько вариантов в «Эффект при нажатии» */
+#define FX_OPTIONS 17    /* сколько вариантов в «Эффект при нажатии» */
 #define ID_CHK_TESS 176   /* точное распознавание (Tesseract) */
-#define ID_SEC_BASE 440   /* 440..444: вкладки Настроек */
-#define SEC_COUNT 5
-#define ID_CUR_ST_BASE 460 /* 460..465: персонажи «Ворон»…«Годжо» (styles.c) */
-#define ST_COUNT 6
+#define ID_SEC_BASE 440   /* 440..445: вкладки Настроек */
+#define SEC_COUNT 6
+#define SEC_AI 5          /* вкладка «ИИ» (ai_ui.c) */
+#define ID_CUR_ST_BASE 460 /* 460..466: персонажи «Ворон»…«Баклажан» (styles.c) */
+#define ST_COUNT 7
 #define ST_RAZREZ 3         /* «Разрез» — клинок вместо стрелки */
 #define ST_KNIGHT ST_COUNT  /* рыцарь (Мечник) рисуется кодом, но кнопки стиля у него нет */
-#define ST_SKIN0 7          /* g_skin первого из них; 7…12 */
+#define ST_SKIN0 7          /* g_skin первого из них; 7…13 */
 #define ID_PREVIEW 470      /* окошко просмотра курсора и эффекта */
 #define ID_IDLE_BASE 480    /* 480..484: бой при бездействии — выкл, 30 с, 1, 2, 5 мин */
 #define IDLE_OPTIONS 5
@@ -164,7 +165,7 @@ static wchar_t g_hkName[HK_COUNT][40]; /* на чём работает сейч�
 #define CLIP_H 26
 #define PAD 12
 #define GUTTER 26
-#define SET_W 312
+#define SET_W 356 /* шесть вкладок в ряд (с 2026.10.16.4, было 312) */
 #define SET_FOOT_H 34 /* внизу окна Настроек — подвал с версией, прокрутка под него не заходит */
 /* полная высота содержимого Настроек считается при раскладке (g_setContentH):
    она зависит от того, какие разделы раскрыты; окно прокручивается, если выше экрана */
@@ -271,7 +272,7 @@ static HWND g_btnSt[ST_COUNT];       /* стили, нарисованные к�
 static HWND g_btnSec[SEC_COUNT];     /* вкладки Настроек; индекс — что на вкладке, не место */
 static HWND g_preview;               /* просмотр курсора и эффекта (styles.c) */
 static int g_tab;                    /* открытая вкладка Настроек (что на ней, 0…SEC_COUNT-1) */
-static int g_tabOrder[SEC_COUNT] = {0, 1, 2, 3, 4}; /* слева направо: какая вкладка на каком месте */
+static int g_tabOrder[SEC_COUNT] = {0, 1, 2, 3, 4, 5}; /* слева направо: какая вкладка на каком месте */
 static HWND g_chkTess;
 static HWND g_min;
 static HWND g_ocr;
@@ -383,7 +384,7 @@ static HFONT g_ocrFontZoom;
 static BOOL g_statusOn = FALSE;
 static HINSTANCE g_inst;
 static int g_skin = 1; /* 0 system, 1 sword, 2 gauntlet, 3 fairy, 4 dragon, 5 black cat, 6 rias,
-                          7…11 нарисованные кодом стили (styles.c): неон, лёд, золото, лава, космос */
+                          7…13 нарисованные кодом стили (styles.c), последний — «Баклажан» */
 static BOOL g_sparkle = TRUE; /* у «Феи» — звёздочки при нажатии */
 static BOOL g_flame = TRUE;   /* у «Дракона» — пламя при нажатии */
 static int g_catFx = 1;       /* у «Чёрного кота» при нажатии: 0 ничего, 1 царапины, 2 звёздочки как у Феи */
@@ -1162,19 +1163,26 @@ static void load_cursor_pref(void) {
   /* до 2026.10.14.4 на месте вкладки было, какие разделы раскрыты: там вкладка
      окажется случайной, но допустимой */
   if (tab >= 0 && tab < SEC_COUNT) g_tab = tab;
-  if (order >= 0) { /* порядок — цифрами: 21034 — вторая, первая, нулевая… */
-    int o[SEC_COUNT], seen = 0, ok = 1;
-    for (int i = SEC_COUNT - 1; i >= 0; i--, order /= 10) {
-      o[i] = order % 10;
-      if (o[i] >= SEC_COUNT || (seen >> o[i]) & 1) ok = 0;
-      else seen |= 1 << o[i];
+  if (order >= 0) { /* порядок — цифрами: 210345 — вторая, первая, нулевая…;
+                       до 2026.10.16.4 вкладок было пять — «ИИ» тогда встаёт последней */
+    for (int cnt = SEC_COUNT; cnt >= SEC_COUNT - 1; cnt--) {
+      int o[SEC_COUNT], seen = 0, ok = 1, v = order;
+      for (int i = cnt - 1; i >= 0; i--, v /= 10) {
+        o[i] = v % 10;
+        if (o[i] >= cnt || (seen >> o[i]) & 1) ok = 0;
+        else seen |= 1 << o[i];
+      }
+      if (cnt < SEC_COUNT) o[cnt] = SEC_COUNT - 1;
+      if (ok && v == 0) {
+        memcpy(g_tabOrder, o, sizeof(o));
+        break;
+      }
     }
-    if (ok) memcpy(g_tabOrder, o, sizeof(o));
   }
   g_sparkle = sparkle != 0;
   g_flame = flame != 0;
   g_catFx = catFx == 0 ? 0 : (catFx == 2 ? 2 : 1);
-  g_fxPick = fxPick >= 0 && fxPick <= 14 ? fxPick : -1;
+  g_fxPick = fxPick >= 0 && fxPick <= 15 ? fxPick : -1;
   g_padMode = padMode == 1 ? 1 : 0;
   g_cardX = cx;
   g_cardY = cy;
@@ -1192,10 +1200,10 @@ static void load_cursor_pref(void) {
   if (cw >= 320 && cw <= 4000) g_cardW = cw;
   if (ch >= 200 && ch <= 3000) g_cardH = ch;
   if (pt >= 7 && pt <= 22) g_ansPt = pt;
-  /* t1…t8 — как до 2026.10.14.13: t4 и t5 (Огонёк, Череп) убраны и становятся Вороном,
-     t1…t3 — Ворон, Осьминог, Скорпион на местах Робота, Призрака и Слайма */
-  static const signed char kTSkin[8] = {0, 1, 2, 0, 0, 3, 4, 5};
-  if (skin[0] == 't' && skin[1] >= '1' && skin[1] <= '8') g_skin = ST_SKIN0 + kTSkin[skin[1] - '1'];
+  /* t1…t9 — t4 и t5 (Огонёк, Череп) убраны и становятся Вороном,
+     t1…t3 — Ворон, Осьминог, Скорпион, t6…t8 — Разрез, Сукуна, Годжо, t9 — Баклажан */
+  static const signed char kTSkin[9] = {0, 1, 2, 0, 0, 3, 4, 5, 6};
+  if (skin[0] == 't' && skin[1] >= '1' && skin[1] <= '9') g_skin = ST_SKIN0 + kTSkin[skin[1] - '1'];
   else if (skin[0] == 'k' && skin[1] == '7') g_skin = 6;
   else if (skin[0] == 'k' && skin[1] == '6') g_skin = 5;
   else if (skin[0] == 'k' && skin[1] == '5') g_skin = 4;
@@ -1214,7 +1222,7 @@ static void load_cursor_pref(void) {
 }
 
 static void save_cursor_pref(void) {
-  static const char *const kSt[ST_COUNT] = {"t1", "t2", "t3", "t6", "t7", "t8"};
+  static const char *const kSt[ST_COUNT] = {"t1", "t2", "t3", "t6", "t7", "t8", "t9"};
   const char *v = g_skin >= ST_SKIN0 && g_skin < ST_SKIN0 + ST_COUNT ? kSt[g_skin - ST_SKIN0]
                   : g_skin == 6 ? "k7"
                   : g_skin == 5 ? "k6"
@@ -1241,9 +1249,11 @@ static void save_cursor_pref(void) {
 static const wchar_t *const kFxNames[FX_OPTIONS] = {L"Как у курсора", L"Нет",    L"Звёздочки", L"Пламя",
                                                     L"Царапины",      L"Разрез", L"Кольца",    L"Конфетти",
                                                     L"Молния",        L"Сердечки", L"Рассечение", L"Пурпур",
-                                                    L"Перья",         L"Чернила",  L"Яд",       L"Бесконечность"};
-static const int kFxPick[FX_OPTIONS] = {-1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14};
-static const wchar_t *const kStyleNames[ST_COUNT] = {L"Ворон", L"Осьминог", L"Скорпион", L"Разрез", L"Сукуна", L"Годжо"};
+                                                    L"Перья",         L"Чернила",  L"Яд",       L"Бесконечность",
+                                                    L"Икра"};
+static const int kFxPick[FX_OPTIONS] = {-1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
+static const wchar_t *const kStyleNames[ST_COUNT] = {L"Ворон", L"Осьминог", L"Скорпион", L"Разрез", L"Сукуна", L"Годжо",
+                                                    L"Баклажан"};
 
 static void update_fx_buttons(void) {
   for (int i = 0; i < FX_OPTIONS; i++) {
@@ -1297,10 +1307,11 @@ static void set_skin(int skin) {
 
 /* эффект при нажатии отдельно от курсора: имена для строки состояния */
 static const wchar_t *fx_pick_name(int pick) {
-  static const wchar_t *const kNames[15] = {L"нет",   L"звёздочки", L"пламя",  L"царапины", L"разрез",
+  static const wchar_t *const kNames[16] = {L"нет",   L"звёздочки", L"пламя",  L"царапины", L"разрез",
                                            L"кольца", L"конфетти", L"молния", L"сердечки", L"рассечение",
-                                           L"пурпур", L"перья",    L"чернила", L"яд",     L"бесконечность"};
-  return pick >= 0 && pick < 15 ? kNames[pick] : L"как у курсора";
+                                           L"пурпур", L"перья",    L"чернила", L"яд",     L"бесконечность",
+                                           L"икра"};
+  return pick >= 0 && pick < 16 ? kNames[pick] : L"как у курсора";
 }
 
 /* то же с большой буквы — для окошка просмотра (там всегда сам эффект) */
@@ -3172,7 +3183,7 @@ static void draw_set_label(HDC hdc, const wchar_t *text, RECT r, int clientBotto
    щелчком по вкладке, он запоминается (g_tabOrder), как и открытая вкладка.
    Элементы других вкладок уезжают далеко за край — их прячет
    clip_settings_children, как и всё, что ушло под шапку при прокрутке. */
-static const wchar_t *const kSecNames[SEC_COUNT] = {L"Курсор", L"Эффект", L"Вид", L"Поиск", L"Ещё"};
+static const wchar_t *const kSecNames[SEC_COUNT] = {L"Курсор", L"Эффект", L"Вид", L"Поиск", L"Ещё", L"ИИ"};
 #define SET_SEC_H 28
 static int g_setContentH = 480; /* высота содержимого: по самой длинной вкладке */
 static BOOL g_layOpen;          /* раскладывается открытая вкладка */
@@ -3197,6 +3208,8 @@ static int set_grid(HWND *b, int n, int cols, int x, int y, int w, int bh, int g
   }
   return rows * (bh + gap);
 }
+
+#include "ai_ui.c" /* вкладка «ИИ» */
 
 static void layout_settings(void) {
   if (!g_setHwnd) return;
@@ -3273,6 +3286,9 @@ static void layout_settings(void) {
       set_place(g_plmUser, pad, y, half, btnH);
       set_place(g_plmPass, pad + half + gap, y, fullW - half - gap, btnH);
       y += btnH + gap;
+      break;
+    case SEC_AI: /* локальный ИИ */
+      y = ai_ui_layout(pad, y, fullW, cw, btnH, gap, lab, browseW);
       break;
     default: /* общая папка (нарды и шашки идут через неё), распознавание, программа */
       y += lab;
@@ -3464,6 +3480,7 @@ static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
       RECT d = {14, wr.top - 18, rc.right - 14, wr.top - 2};
       draw_set_label(hdc, L"размер бойцов", d, rc.bottom);
     }
+    ai_ui_paint(hdc, rc);
     {
       RECT ver = {14, rc.bottom - 28, rc.right - 14, rc.bottom - 10};
       wchar_t vs[64];
@@ -3530,11 +3547,18 @@ static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
   case WM_MOUSEWHEEL:
     scroll_settings(g_setScroll - GET_WHEEL_DELTA_WPARAM(wParam) * 48 / WHEEL_DELTA);
     return 0;
+  case WM_AI_UI:
+    ai_ui_refresh();
+    return 0;
+  case WM_AI_TEST:
+    ai_ui_test_done((AiResult *)lParam);
+    return 0;
   case WM_COMMAND:
     if (LOWORD(wParam) == ID_PANEL_CLOSE) {
       ShowWindow(hwnd, SW_HIDE);
       return 0;
     }
+    if (ai_ui_command(hwnd, LOWORD(wParam), HIWORD(wParam))) return 0;
     if (LOWORD(wParam) == ID_FILES_BROWSE) {
       wchar_t picked[MAX_PATH];
       if (pick_folder(hwnd, picked, MAX_PATH)) {
@@ -4043,6 +4067,7 @@ static void create_settings(HWND owner) {
   }
   if (g_chkAnsPin)
     SendMessageW(g_chkAnsPin, BM_SETCHECK, g_ansKeepPos ? BST_CHECKED : BST_UNCHECKED, 0);
+  ai_ui_create(g_setHwnd);
   if (g_chkNotify) {
     SendMessageW(g_chkNotify, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
     SendMessageW(g_chkNotify, BM_SETCHECK, g_filesNotify ? BST_CHECKED : BST_UNCHECKED, 0);
@@ -4477,11 +4502,14 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
       send_paste();
     }
     if (wParam == TIMER_CURSOR_KEEP && g_skin > 0) {
-      /* у «Риас» анимирован весь набор, а заново поставленный курсор начинает
-         анимацию с первого кадра: раз в 4 с это видно, раз в минуту — нет.
-         Сброс курсоров самой Windows ловит WM_SETTINGCHANGE — там сразу. */
+      /* у «Риас» и «Баклажана» курсор анимированный: заново поставленный
+         начинает мультик с первого кадра. Раз в 4 с это видно (блик Баклажана
+         прыгал бы к кончику), раз в минуту — нет. Копия .ani — один кадр,
+         поэтому эти наборы ставятся без CopyCursor. Сброс курсоров самой
+         Windows ловит WM_SETTINGCHANGE — там сразу. */
       static int keepTicks;
-      if (g_skin != 6 || ++keepTicks % 15 == 0) apply_scheme_slots();
+      int slow = g_skin == 6 || g_skin == ST_SKIN0 + ST_AUBERGINE;
+      if (!slow || ++keepTicks % 15 == 0) apply_scheme_slots();
     }
     if (wParam == TIMER_FILES) files_start_index(FALSE);
     if (wParam == TIMER_FILES_TICK) files_refresh_status();
@@ -4645,6 +4673,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     fx_shutdown();
     styles_free();
     share_stop();
+    ai_shutdown();
     save_notes();
     save_cursor_pref(); /* keeps the results panel's size across restarts */
     if (g_oldEdit && g_edit)
@@ -4849,6 +4878,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
     if (argv && argc >= 3 && !wcscmp(argv[1], L"--idlefight")) if_test_shots(argv[2]);
     if (argv && argc >= 3 && !wcscmp(argv[1], L"--xptest")) export_test(argv[2]);
     if (argv && argc >= 4 && !wcscmp(argv[1], L"--drawrec")) dr_test(argc, argv);
+    if (argv && argc >= 4 && !wcscmp(argv[1], L"--mttest")) match_test(argv[2], argv[3], argc >= 5 ? argv[4] : NULL);
     if (argv && argc >= 3 && !wcscmp(argv[1], L"--idlebench")) if_test_bench(argv[2]);
     if (argv && argc >= 3 && !wcscmp(argv[1], L"--idlestage")) if_test_stage(argv[2], 0);
     if (argv && argc >= 3 && !wcscmp(argv[1], L"--idlestage3")) if_test_stage(argv[2], 1);
@@ -4856,6 +4886,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
     if (argv && argc >= 3 && !wcscmp(argv[1], L"--figbench")) if_test_figbench(argv[2]);
     if (argv && argc >= 2 && !wcscmp(argv[1], L"--idledemo")) if_launch(2); /* бой без остановки по вводу */
     if (argv && argc >= 2 && !wcscmp(argv[1], L"--idlewatch")) set_idle_watch(1); /* режим просмотра, как кнопкой */
+    if (argv && argc >= 3 && !wcscmp(argv[1], L"--aitest")) ai_selftest(argv[2], argc >= 4 ? argv[3] : NULL);
     if (argv && argc >= 3 && !wcscmp(argv[1], L"--panel")) { /* проверка шапок окон: 1 карточка, 2 текст, 3 выгрузка, 4 маршрут, 5 нарды, 6 шашки, 7 пакет */
       int n = (int)wcstol(argv[2], NULL, 10);
       if (n == 1) { create_card(NULL); show_card_text(L"проверка"); }
