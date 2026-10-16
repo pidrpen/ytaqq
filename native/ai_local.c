@@ -1183,7 +1183,14 @@ int ai_ctx_size(void) { return g_aiCtx; }
 int ai_ask_chat_async(const wchar_t *instruction, const AiTurn *turns, int n, DWORD timeoutMs, HWND notify,
                       UINT msg, void *user) {
   if (ai_precheck() != AI_OK || !notify || !turns || n < 1 || !turns[n - 1].text) return 0;
-  long budget = ai_chat_budget(), used = ai_turn_cost(&turns[n - 1]);
+  /* роль system не входит в бюджет реплик: длинная тетрадь иначе вытесняет вопрос из окна */
+  long budget = ai_chat_budget();
+  long sysCost = instruction ? (long)wcslen(instruction) : 0;
+  if (sysCost > 200) {
+    budget -= sysCost - 200;
+    if (budget < 400) budget = 400;
+  }
+  long used = ai_turn_cost(&turns[n - 1]);
   if (used > budget) return 0;
   int s = n - 1;
   while (s > 0 && used + ai_turn_cost(&turns[s - 1]) <= budget) used += ai_turn_cost(&turns[--s]);

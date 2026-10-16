@@ -192,16 +192,13 @@ static const wchar_t *mini_after_verb(const wchar_t *q) {
   return NULL;
 }
 
-/* Fills out. Returns title to show as source. */
-static const wchar_t *mini_ai_ask(const wchar_t *query, wchar_t *out, int cap) {
-  if (!query || !query[0]) {
-    lstrcpynW(out, L"Напишите, что нужно — например «рецепт пельменей».", cap);
-    return L"Мини-ИИ";
-  }
+/* Карточка, если запрос на неё похож. NULL — общего текста модели не подсовывать. */
+static const wchar_t *mini_ai_card(const wchar_t *query, const wchar_t **title) {
+  if (title) *title = NULL;
+  if (!query || !query[0]) return NULL;
   wchar_t q[400];
   lstrcpynW(q, query, 400);
   mini_fold(q);
-
   int best = -1, bestScore = 0;
   int ncard = (int)(sizeof(kMiniCards) / sizeof(kMiniCards[0]));
   for (int i = 0; i < ncard; i++) {
@@ -211,9 +208,22 @@ static const wchar_t *mini_ai_ask(const wchar_t *query, wchar_t *out, int cap) {
       best = i;
     }
   }
-  if (best >= 0 && bestScore >= 2) {
-    lstrcpynW(out, kMiniCards[best].body, cap);
-    return kMiniCards[best].title;
+  if (best < 0 || bestScore < 2) return NULL;
+  if (title) *title = kMiniCards[best].title;
+  return kMiniCards[best].body;
+}
+
+/* Fills out. Returns title to show as source. */
+static const wchar_t *mini_ai_ask(const wchar_t *query, wchar_t *out, int cap) {
+  if (!query || !query[0]) {
+    lstrcpynW(out, L"Напишите, что нужно — например «рецепт пельменей».", cap);
+    return L"Мини-ИИ";
+  }
+  const wchar_t *title = NULL;
+  const wchar_t *card = mini_ai_card(query, &title);
+  if (card) {
+    lstrcpynW(out, card, cap);
+    return title ? title : L"Мини-ИИ";
   }
 
   wchar_t folded_orig[400];
