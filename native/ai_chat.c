@@ -65,6 +65,10 @@ static BOOL af_is_dir(const wchar_t *p);
 static BOOL af_trusted(const wchar_t *p);
 static void af_clear(void);
 static BOOL g_acCmdWait;      /* ответ на команду для файлов, а не чат */
+static wchar_t g_acMkName[80];     /* имя новой папки, если путь ещё не назвали */
+static wchar_t g_acMkParent[MAX_PATH]; /* папка, куда класть, если имя ещё не назвали */
+static wchar_t g_acMkLast[MAX_PATH];   /* что создавали в прошлый раз — проверка диска, не слова чата */
+static int g_acMkWait;                 /* 1 ждём имя, 2 ждём путь */
 static wchar_t g_acCmdText[2000];
 static wchar_t g_acSortDst[MAX_PATH];
 static BOOL g_acSortMove;
@@ -454,28 +458,168 @@ static BOOL ac_pick_path(const wchar_t *q, wchar_t *out) {
   return n > 3;
 }
 
-/* «создай папку C:\…\новая» или сообщение из одного только пути — делает программа, не модель */
-static BOOL ac_wants_mkdir_now(const wchar_t *q, wchar_t *path) {
-  if (!ac_pick_path(q, path)) return FALSE;
-  const wchar_t *at = wcsstr(q, path);
-  if (!at) return FALSE;
-  wchar_t pre[200];
-  int n = (int)(at - q);
-  if (n >= 200) return FALSE;
-  lstrcpynW(pre, q, n + 1);
-  CharLowerBuffW(pre, (DWORD)n);
-  const wchar_t *p = pre;
-  while (*p == L' ' || *p == L'\t' || *p == L'"') p++;
-  if (!*p) {
-    const wchar_t *r = at + wcslen(path);
-    while (*r == L' ' || *r == L'\t' || *r == L'"' || *r == L'\r' || *r == L'\n') r++;
-    return !*r;
+/* самое длинное начало пути, которое уже есть на диске. Хвост фразы — в *after. */
+static BOOL ac_live_dir(const wchar_t *q, wchar_t *dir, const wchar_t **after) {
+  const wchar_t *hit = NULL;
+  for (const wchar_t *p = q; *p; p++) {
+    BOOL drv = ((*p >= L'A' && *p <= L'Z') || (*p >= L'a' && *p <= L'z')) && p[1] == L':';
+    if (drv || (p[0] == L'\\' && p[1] == L'\\')) {
+      hit = p;
+      break;
+    }
   }
-  if (wcsncmp(p, L"создай", 6) && wcsncmp(p, L"сделай", 6)) return FALSE;
-  if (!wcsstr(p, L"папк")) return FALSE;
-  const wchar_t *r = at + wcslen(path);
-  while (*r == L' ' || *r == L'\t' || *r == L'"' || *r == L'\r' || *r == L'\n') r++;
-  return !*r;
+  if (!hit) return FALSE;
+  wchar_t best[MAX_PATH], buf[MAX_PATH];
+  best[0] = 0;
+  int bestN = 0, n = 0;
+  while (hit[n] && hit[n] != L'\r' && hit[n] != L'\n' && hit[n] != L'"' && hit[n] != L'«' && n < MAX_PATH - 1) {
+    buf[n] = hit[n];
+    n++;
+    buf[n] = 0;
+    wchar_t try[MAX_PATH];
+    lstrcpynW(try, buf, MAX_PATH);
+    int m = n;
+    while (m > 3 && (try[m - 1] == L' ' || try[m - 1] == L'\\' || try[m - 1] == L'/')) try[--m] = 0;
+    if (m > 3 && af_is_dir(try)) {
+      lstrcpynW(best, try, MAX_PATH);
+      bestN = n;
+    }
+  }
+  if (!best[0]) return FALSE;
+  lstrcpynW(dir, best, MAX_PATH);
+  const wchar_t *a = hit + bestN;
+  while (*a == L' ' || *a == L'\t') a++;
+  if (after) *after = a;
+  return TRUE;
+}
+
+static BOOL ac_mk_stop(const wchar_t *w) {
+  static const wchar_t *const k[] = {L"создай", L"сделай",     L"папку", L"папка", L"папке", L"папок", L"в",    L"во",
+                                     L"и",      L"назови",     L"назвать", L"ее",    L"её",    L"его",   L"тут", L"здесь",
+                                     L"сюда",   L"пожалуйста", L"новую",   L"новый", L"имя"};
+  for (size_t i = 0; i < sizeof(k) / sizeof(k[0]); i++)
+    if (!wcscmp(w, k[i])) return TRUE;
+  return FALSE;
+}
+
+/* имя из кавычек или из слов хвоста, которые не «создай», «папку», «тут» */
+static BOOL ac_mk_name(const wchar_t *q, const wchar_t *rest, wchar_t *name) {
+  name[0] = 0;
+  const wchar_t *a = wcschr(q, L'"');
+  wchar_t end = L'"';
+  if (!a) {
+    a = wcschr(q, L'«');
+    end = L'»';
+  }
+  if (a && a[1]) {
+    const wchar_t *b = wcschr(a + 1, end);
+    int n = b ? (int)(b - a - 1) : (int)wcslen(a + 1);
+    if (n > 0 && n < 80) {
+      lstrcpynW(name, a + 1, n + 1);
+      while (name[0] == L' ') memmove(name, name + 1, wcslen(name) * sizeof(wchar_t));
+      return name[0] != 0;
+    }
+  }
+  if (!rest) return FALSE;
+  wchar_t acc[80];
+  acc[0] = 0;
+  const wchar_t *p = rest;
+  while (*p) {
+    while (*p == L' ' || *p == L'\t' || *p == L'"' || *p == L'«' || *p == L'»' || *p == L'\\' || *p == L'/') p++;
+    if (!*p) break;
+    wchar_t w[80];
+    int n = 0;
+    while (*p && *p != L' ' && *p != L'\t' && *p != L'"' && *p != L'\\' && *p != L'/' && n < 79) w[n++] = *p++;
+    w[n] = 0;
+    wchar_t low[80];
+    lstrcpynW(low, w, 80);
+    CharLowerBuffW(low, (DWORD)wcslen(low));
+    if (ac_mk_stop(low)) continue;
+    if (acc[0] && wcslen(acc) + 1 < 79) wcscat(acc, L" ");
+    if (wcslen(acc) + wcslen(w) < 79) wcscat(acc, w);
+  }
+  if (!acc[0]) return FALSE;
+  lstrcpynW(name, acc, 80);
+  return TRUE;
+}
+
+static BOOL ac_mk_bad_name(const wchar_t *n) {
+  return !n[0] || !wcscmp(n, L".") || !wcscmp(n, L"..") || wcspbrk(n, L"\\/:*?\"<>|") != NULL;
+}
+
+static void ac_mk_go(const wchar_t *parent, const wchar_t *name) {
+  wchar_t full[MAX_PATH], msg[MAX_PATH + 80];
+  if (ac_mk_bad_name(name)) {
+    _snwprintf(msg, MAX_PATH + 80, L"Имя «%s» для папки не годится.", name);
+    ac_push(1, msg);
+    return;
+  }
+  _snwprintf(full, MAX_PATH, L"%s\\%s", parent, name);
+  lstrcpynW(g_acCmdText, full, 2000);
+  lstrcpynW(g_acMkLast, full, MAX_PATH);
+  g_acMkName[0] = 0;
+  g_acMkParent[0] = 0;
+  g_acMkWait = 0;
+  ac_mkdir_now(full);
+}
+
+/* «создай папку…» разбирает программа: где кончается настоящая папка и как зовут новую.
+   Модель сюда не пускаем — она пишет «создал», не трогая диск. */
+static BOOL ac_mkdir_handle(const wchar_t *q) {
+  wchar_t low[500];
+  lstrcpynW(low, q, 500);
+  CharLowerBuffW(low, (DWORD)wcslen(low));
+  BOOL verb = (wcsstr(low, L"создай") || wcsstr(low, L"сделай")) && wcsstr(low, L"папк");
+  BOOL complain = wcsstr(low, L"не сделал") || wcsstr(low, L"не создал") || wcsstr(low, L"нет папки") ||
+                  wcsstr(low, L"не появил");
+  wchar_t dir[MAX_PATH], name[80];
+  const wchar_t *after = L"";
+  BOOL hasDir = ac_live_dir(q, dir, &after);
+  BOOL hasName = ac_mk_name(q, hasDir ? after : q, name);
+  if (complain && g_acMkLast[0] && !verb) {
+    wchar_t msg[MAX_PATH + 80];
+    ac_push(0, q);
+    if (af_is_dir(g_acMkLast))
+      _snwprintf(msg, MAX_PATH + 80, L"На диске она есть:\r\n%s", g_acMkLast);
+    else
+      _snwprintf(msg, MAX_PATH + 80, L"На диске её нет:\r\n%s", g_acMkLast);
+    ac_push(1, msg);
+    return TRUE;
+  }
+  if (!verb && !(g_acMkWait && (hasDir || (g_acMkWait == 1 && !wcschr(q, L'\\') && wcslen(q) < 80)))) return FALSE;
+  ac_push(0, q);
+  if (!hasName && g_acMkName[0] && (wcsstr(low, L"тут") || wcsstr(low, L"здесь") || wcsstr(low, L"сюда") || !verb))
+    lstrcpynW(name, g_acMkName, 80), hasName = TRUE;
+  if (hasDir && hasName) {
+    ac_mk_go(dir, name);
+    return TRUE;
+  }
+  if (hasName && g_acMkParent[0] && !hasDir) {
+    ac_mk_go(g_acMkParent, name);
+    return TRUE;
+  }
+  if (hasDir && g_acMkName[0] && !hasName) {
+    ac_mk_go(dir, g_acMkName);
+    return TRUE;
+  }
+  wchar_t msg[MAX_PATH + 120];
+  if (hasName && !hasDir) {
+    lstrcpynW(g_acMkName, name, 80);
+    g_acMkWait = 2;
+    _snwprintf(msg, MAX_PATH + 120, L"Как назвать, понял: «%s». В какой папке её создать? Напишите путь, как в проводнике.",
+               name);
+    ac_push(1, msg);
+    return TRUE;
+  }
+  if (hasDir && !hasName) {
+    lstrcpynW(g_acMkParent, dir, MAX_PATH);
+    g_acMkWait = 1;
+    _snwprintf(msg, MAX_PATH + 120, L"Папка уже есть:\r\n%s\r\nКак назвать новую внутри неё?", dir);
+    ac_push(1, msg);
+    return TRUE;
+  }
+  ac_push(1, L"Напишите, где создать и как назвать. Например: создай папку в C:\\Папка и назови её Архив");
+  return TRUE;
 }
 
 /* 1 — по имени, 2 — по формату, 3 — и то и другое, -1 — сказано «отсортируй», но не сказано как.
@@ -532,7 +676,6 @@ static void ac_send(void) {
     free(in);
     return;
   }
-  wchar_t made[MAX_PATH];
   int group = !g_acImg ? ac_wants_group(a) : 0;
   if (group) {
     ac_push(0, a);
@@ -546,10 +689,8 @@ static void ac_send(void) {
     free(in);
     return;
   }
-  if (!g_acImg && ac_wants_mkdir_now(a, made)) {
-    ac_push(0, a);
-    lstrcpynW(g_acCmdText, a, 2000);
-    ac_mkdir_now(made);
+  if (!g_acImg && ac_mkdir_handle(a)) {
+    ac_redraw();
     SetWindowTextW(g_acIn, L"");
     free(in);
     return;
