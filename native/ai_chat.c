@@ -14,13 +14,24 @@
 #define ID_AC_SET 4707
 #define ID_AC_STAT 4708
 #define ID_AC_TITLE 4709
+#define ID_AC_CMD 4710
+#define AC_CMD_SYS                                                                                              \
+  L"Ты разбираешь команду для программы CursorPad. Ответь ОДНОЙ строкой JSON без текста вокруг. "         \
+  L"Единственная операция: {\"op\":\"sort\",\"src\":\"папка со сканами\",\"dst\":\"папка для результата\",\"mode\":\"copy\"}. "  \
+  L"Раскладка переименует файлы по обозначению из штампа и разнесёт по подпапкам. mode — copy по умолчанию, "  \
+  L"move только если пользователь прямо просит перенести. Пути копируй из текста пользователя дословно. "    \
+  L"Если папки не названы или просьба не про раскладку по штампам, ответь {\"op\":\"ask\",\"question\":\"короткий вопрос по-русски\"}. Ничего не выдумывай."
 #define AC_SYS L"Ты помощник в программе CursorPad. Отвечай по-русски, по делу и кратко, если не просят иначе."
 
 typedef struct {
   int assistant;
   wchar_t *text;
 } AcTurn;
-static HWND g_acWnd, g_acLog, g_acIn, g_acSend, g_acStop, g_acClear, g_acCopy, g_acSet, g_acStat, g_acTitle;
+static HWND g_acWnd, g_acLog, g_acIn, g_acSend, g_acStop, g_acClear, g_acCopy, g_acSet, g_acStat, g_acTitle, g_acCmdChk;
+static BOOL g_acCmdWait;      /* ответ на команду для файлов, а не чат */
+static wchar_t g_acCmdText[2000];
+static wchar_t g_acSortDst[MAX_PATH];
+static BOOL g_acSortMove;
 static WNDPROC g_acEditOld;
 static AcTurn *g_acTurns;
 static int g_acN, g_acCap;
@@ -125,6 +136,7 @@ static void ac_send(void) {
     free(in);
     return;
   }
+  BOOL cmd = SendMessageW(g_acCmdChk, BM_GETCHECK, 0, 0) == BST_CHECKED;
   ac_push(0, a);
   AiTurn *t = (AiTurn *)malloc(g_acN * sizeof(AiTurn));
   int id = 0;
@@ -133,7 +145,9 @@ static void ac_send(void) {
       t[i].assistant = g_acTurns[i].assistant;
       t[i].text = g_acTurns[i].text;
     }
-    id = ai_ask_chat_async(AC_SYS, t, g_acN, 180000, g_acWnd, WM_AI_CHAT, NULL);
+    /* команда разбирается без истории: ответ — только JSON */
+    int from = cmd ? g_acN - 1 : 0;
+    id = ai_ask_chat_async(cmd ? AC_CMD_SYS : AC_SYS, t + from, g_acN - from, 180000, g_acWnd, WM_AI_CHAT, NULL);
     free(t);
   }
   if (!id) {
@@ -143,11 +157,118 @@ static void ac_send(void) {
     return;
   }
   g_acId = id;
+  g_acCmdWait = cmd;
+  if (cmd) lstrcpynW(g_acCmdText, a, 2000);
   SetWindowTextW(g_acIn, L"");
   ac_redraw();
   ac_busy(TRUE);
   ac_status(L"Думаю… первый ответ после запуска модели может грузиться до минуты");
   free(in);
+}
+
+/* поле "key" из JSON-строки ответа модели; \\ и \" раскрываются */
+static BOOL ac_json_field(const wchar_t *j, const wchar_t *key, wchar_t *out, int cap) {
+  wchar_t pat[64];
+  _snwprintf(pat, 64, L"\"%s\"", key);
+  const wchar_t *p = wcsstr(j, pat);
+  if (!p) return FALSE;
+  p = wcschr(p + wcslen(pat), L'"');
+  if (!p) return FALSE;
+  int n = 0;
+  for (p++; *p && *p != L'"' && n < cap - 1; p++) {
+    if (*p == L'\\' && p[1]) p++;
+    out[n++] = *p;
+  }
+  out[n] = 0;
+  return TRUE;
+}
+
+static BOOL ac_dir_exists(const wchar_t *p) {
+  DWORD a = GetFileAttributesW(p);
+  return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+/* путь назван в тексте пользователя — модель не может подсунуть свою папку */
+static BOOL ac_named(const wchar_t *path) {
+  wchar_t t[MAX_PATH];
+  lstrcpynW(t, path, MAX_PATH);
+  size_t n = wcslen(t);
+  while (n > 3 && (t[n - 1] == L'\\' || t[n - 1] == L'/')) t[--n] = 0;
+  return wcsstr(g_acCmdText, t) != NULL;
+}
+
+/* запуск раскладки: сканы папки идут в «Распознать чертёж», потом предпросмотр */
+static void ac_sort_ready(void) {
+  drs_show();
+  if (!g_drsWnd) {
+    ac_push(1, L"Нечего раскладывать: ни один скан не распознан.");
+    ac_redraw();
+    return;
+  }
+  SetWindowTextW(g_drsDir, g_acSortDst);
+  SendMessageW(g_drsMove, BM_SETCHECK, g_acSortMove ? BST_CHECKED : BST_UNCHECKED, 0);
+  drs_plan();
+  InvalidateRect(g_drsWnd, NULL, FALSE);
+  ac_push(1, L"Предпросмотр в окне «Разложить по папкам». Ничего не изменится, пока вы не нажмёте «Применить».");
+  ac_redraw();
+  ac_status(L"");
+}
+
+static void ac_sort_start(const wchar_t *src, const wchar_t *dst, BOOL move) {
+  TmPaths l = {0};
+  wchar_t pat[MAX_PATH];
+  _snwprintf(pat, MAX_PATH, L"%s\\*", src);
+  WIN32_FIND_DATAW fd;
+  HANDLE h = FindFirstFileW(pat, &fd);
+  if (h != INVALID_HANDLE_VALUE) {
+    do {
+      if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+      const wchar_t *ext = wcsrchr(fd.cFileName, L'.');
+      if (!ext) continue;
+      if (!_wcsicmp(ext, L".pdf") || !_wcsicmp(ext, L".tif") || !_wcsicmp(ext, L".tiff") || !_wcsicmp(ext, L".png") ||
+          !_wcsicmp(ext, L".jpg") || !_wcsicmp(ext, L".jpeg") || !_wcsicmp(ext, L".bmp")) {
+        wchar_t full[MAX_PATH];
+        _snwprintf(full, MAX_PATH, L"%s\\%s", src, fd.cFileName);
+        tm_paths_add(&l, full);
+      }
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+  }
+  if (!l.n) {
+    free(l.p);
+    ac_push(1, L"В этой папке нет сканов (pdf, tif, png, jpg, bmp).");
+    ac_redraw();
+    return;
+  }
+  drawrec_show();
+  lstrcpynW(g_acSortDst, dst, MAX_PATH);
+  g_acSortMove = move;
+  g_drSortHook = ac_sort_ready;
+  dr_add_paths(&l);
+  ac_push(1, L"Распознаю сканы из папки. Когда закончу, покажу предпросмотр.");
+  ac_redraw();
+}
+
+/* ответ модели на команду: проверки здесь, а не в модели */
+static void ac_cmd_run(const wchar_t *j) {
+  wchar_t op[32] = L"", src[MAX_PATH] = L"", dst[MAX_PATH] = L"", mode[16] = L"", q[300] = L"";
+  ac_json_field(j, L"op", op, 32);
+  if (!wcscmp(op, L"sort") && ac_json_field(j, L"src", src, MAX_PATH) && ac_json_field(j, L"dst", dst, MAX_PATH)) {
+    ac_json_field(j, L"mode", mode, 16);
+    if (!ac_named(src) || !ac_named(dst) || !ac_dir_exists(src) || !ac_dir_exists(dst)) {
+      ac_push(1, L"Не нашёл такие папки. Напишите путь точно, как он открыт в проводнике.");
+      return;
+    }
+    /* перемещать — только если пользователь так и написал */
+    BOOL move = !wcscmp(mode, L"move") && (wcsstr(g_acCmdText, L"перемест") || wcsstr(g_acCmdText, L"перенес"));
+    ac_sort_start(src, dst, move);
+    return;
+  }
+  if (!wcscmp(op, L"ask") && ac_json_field(j, L"question", q, 300)) {
+    ac_push(1, q);
+    return;
+  }
+  ac_push(1, L"Не понял команду. Напишите, какую папку разложить и куда.");
 }
 
 static void ac_result(AiResult *r) {
@@ -158,7 +279,12 @@ static void ac_result(AiResult *r) {
   }
   g_acId = 0;
   ac_busy(FALSE);
-  if (r->status == AI_OK) {
+  BOOL cmd = g_acCmdWait;
+  g_acCmdWait = FALSE;
+  if (r->status == AI_OK && cmd) {
+    ac_cmd_run(r->text);
+    ac_redraw();
+  } else if (r->status == AI_OK) {
     ac_push(1, r->text);
     ac_redraw();
     ac_status(L"");
@@ -213,7 +339,8 @@ static void ac_layout(int W, int H) {
   int pad = 12, gap = 8, btnH = 30, inH = 72, statH = 20;
   int btnY = H - pad - btnH;
   int inY = btnY - gap - inH;
-  int stY = inY - 4 - statH;
+  int cmdY = inY - 4 - 22;
+  int stY = cmdY - 4 - statH;
   int logY = 46;
   int logH = stY - 6 - logY;
   if (logH < 40) logH = 40;
@@ -222,6 +349,7 @@ static void ac_layout(int W, int H) {
   MoveWindow(GetDlgItem(g_acWnd, ID_PANEL_CLOSE), W - pad - 30, 8, 30, 26, TRUE);
   MoveWindow(g_acLog, pad, logY, W - 2 * pad, logH, TRUE);
   MoveWindow(g_acStat, pad, stY, W - 2 * pad, statH, TRUE);
+  MoveWindow(g_acCmdChk, pad, cmdY, W - 2 * pad, 22, TRUE);
   MoveWindow(g_acIn, pad, inY, W - 2 * pad, inH, TRUE);
   HWND row[5] = {g_acSend, g_acStop, g_acClear, g_acCopy, g_acSet};
   int bw = (W - 2 * pad - 4 * gap) / 5;
@@ -316,8 +444,10 @@ static void ac_create(void) {
   g_acClear = mk_btn(g_acWnd, L"Очистить", ID_AC_CLEAR);
   g_acCopy = mk_btn(g_acWnd, L"Копировать", ID_AC_COPY);
   g_acSet = mk_btn(g_acWnd, L"Настройки", ID_AC_SET);
+  g_acCmdChk = CreateWindowExW(0, L"BUTTON", L"Команда для файлов: разложить папку по штампам", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+                               0, 0, 10, 10, g_acWnd, (HMENU)(INT_PTR)ID_AC_CMD, g_inst, NULL);
   for (HWND c = GetWindow(g_acWnd, GW_CHILD); c; c = GetWindow(c, GW_HWNDNEXT))
-    if (c != g_acSend && c != g_acStop && c != g_acClear && c != g_acCopy && c != g_acSet) SendMessageW(c, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
+    if (c != g_acSend && c != g_acStop && c != g_acClear && c != g_acCopy && c != g_acSet && c != g_acCmdChk) SendMessageW(c, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
   SendMessageW(g_acLog, WM_SETFONT, (WPARAM)g_fontBody, TRUE);
   SendMessageW(g_acIn, WM_SETFONT, (WPARAM)g_fontBody, TRUE);
   g_acEditOld = (WNDPROC)SetWindowLongPtrW(g_acIn, GWLP_WNDPROC, (LONG_PTR)AcEditProc);

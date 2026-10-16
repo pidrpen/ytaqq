@@ -29,6 +29,8 @@
 #define ID_DR_SORT 933 /* «Разложить по папкам…» — drawrec_sort.c */
 #define WM_DR_ADD (WM_APP + 140)  /* lParam — DrItem*: новая страница (ещё не прочитана) */
 #define WM_DR_DONE (WM_APP + 141) /* lParam — DrItem*: страница прочитана */
+/* вызвать один раз, когда очередь распознавания опустела (окно чата: команда «разложить») */
+static void (*g_drSortHook)(void);
 
 typedef struct {
   int id;
@@ -1175,6 +1177,11 @@ static LRESULT CALLBACK DrProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
         KillTimer(hwnd, ID_DR_TIMER);
         dr_fill();
         dr_run_status();
+        if (g_drSortHook) {
+          void (*h)(void) = g_drSortHook;
+          g_drSortHook = NULL;
+          h();
+        }
       }
       return 0;
     }
