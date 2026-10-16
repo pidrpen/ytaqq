@@ -20,12 +20,16 @@ static const GUID kAcBgra = {0x6fddc324, 0x4e03, 0x4bfe, {0xb1, 0x85, 0x3d, 0x77
 #define ID_AC_CMD 4710
 #define ID_AC_SHOT 4711
 #define ID_AC_THUMB 4712
-#define AC_CMD_SYS                                                                                              \
-  L"Ты разбираешь команду для программы CursorPad. Ответь ОДНОЙ строкой JSON без текста вокруг. "         \
-  L"Единственная операция: {\"op\":\"sort\",\"src\":\"папка со сканами\",\"dst\":\"папка для результата\",\"mode\":\"copy\"}. "  \
-  L"Раскладка переименует файлы по обозначению из штампа и разнесёт по подпапкам. mode — copy по умолчанию, "  \
-  L"move только если пользователь прямо просит перенести. Пути копируй из текста пользователя дословно. "    \
-  L"Если папки не названы или просьба не про раскладку по штампам, ответь {\"op\":\"ask\",\"question\":\"короткий вопрос по-русски\"}. Ничего не выдумывай."
+#define AC_CMD_SYS                                                                                             \
+  L"Ты разбираешь команду для программы CursorPad и переводишь её в ОДНУ операцию. Ответь ОДНОЙ строкой JSON "   \
+  L"без текста вокруг. Операции: sort — {\"op\":\"sort\",\"src\":папка со сканами,\"dst\":папка результата,"  \
+  L"\"mode\":\"copy\"} (раскладка сканов по штампу); mkdir — {\"op\":\"mkdir\",\"dst\":путь новой папки}; "   \
+  L"copy и move — {\"op\":\"move\",\"src\":папка,\"name\":часть имени файла,\"dst\":папка}; rename — "         \
+  L"{\"op\":\"rename\",\"src\":папка,\"name\":имя файла,\"new\":новое имя}; ask — {\"op\":\"ask\",\"question\":"\
+  L"вопрос по-русски}. Папку пиши из списка известных или полный путь, который назвал пользователь; пустой src "    \
+  L"значит последнюю папку. move — только если пользователь пишет «перемести», «перенеси», «закинь» или «переложи»; "  \
+  L"иначе copy. Имя файла — только слова из просьбы, ничего не додумывай. Удалять нельзя: ответь ask. "           \
+  L"Непонятно — ask, а не угадывай."
 #define AC_SYS L"Ты помощник в программе CursorPad. Отвечай по-русски, по делу и кратко, если не просят иначе."
 
 typedef struct {
@@ -41,6 +45,14 @@ static DWORD g_acImgLen;
 static HBITMAP g_acThumbBmp; /* миниатюра ждущей картинки (и той, что не ушла) */
 static void ac_relayout(void);
 static void ac_layout(int W, int H);
+static BOOL g_acPlanOn; /* план «было → станет» ждёт «Применить» */
+static void ac_plan_ui(BOOL on);
+static void ac_files_run(const wchar_t *j);
+static void ac_files_apply(void);
+static void ac_files_cancel(void);
+static const wchar_t *ac_cmd_instruction(void);
+static void af_set_last(const wchar_t *dir);
+static void af_clear(void);
 static BOOL g_acCmdWait;      /* ответ на команду для файлов, а не чат */
 static wchar_t g_acCmdText[2000];
 static wchar_t g_acSortDst[MAX_PATH];
@@ -120,6 +132,17 @@ static void ac_busy(BOOL on) {
   EnableWindow(g_acStop, on);
 }
 
+/* план ждёт ответа: кнопки «Отправить» и «Стоп» становятся «Применить» и «Отмена» */
+static void ac_plan_ui(BOOL on) {
+  SetWindowTextW(g_acSend, on ? L"Применить" : L"Отправить");
+  SetWindowTextW(g_acStop, on ? L"Отмена" : L"Стоп");
+  if (on) {
+    EnableWindow(g_acSend, TRUE);
+    EnableWindow(g_acStop, TRUE);
+  } else
+    ac_busy(g_acId != 0);
+}
+
 /* «ИИ выключен» / «нет модели» — ведём на вкладку «ИИ» Настроек */
 static void ac_open_settings(void) {
   select_tab(SEC_AI);
@@ -141,6 +164,10 @@ static void ac_clip(const wchar_t *s) {
 
 static void ac_send(void) {
   if (g_acId) return;
+  if (g_acPlanOn) {
+    ac_status(L"Сначала «Применить» или «Отмена» для плана");
+    return;
+  }
   int len = GetWindowTextLengthW(g_acIn);
   wchar_t *in = (wchar_t *)malloc((len + 1) * sizeof(wchar_t));
   if (!in) return;
@@ -186,7 +213,7 @@ static void ac_send(void) {
     }
     /* команда разбирается без истории: ответ — только JSON */
     int from = cmd ? g_acN - 1 : 0;
-    id = ai_ask_chat_async(cmd ? AC_CMD_SYS : AC_SYS, t + from, g_acN - from, 180000, g_acWnd, WM_AI_CHAT, NULL);
+    id = ai_ask_chat_async(cmd ? ac_cmd_instruction() : AC_SYS, t + from, g_acN - from, 180000, g_acWnd, WM_AI_CHAT, NULL);
     free(t);
   }
   if (!id) {
@@ -286,6 +313,7 @@ static void ac_sort_start(const wchar_t *src, const wchar_t *dst, BOOL move) {
     return;
   }
   drawrec_show();
+  af_set_last(dst);
   lstrcpynW(g_acSortDst, dst, MAX_PATH);
   g_acSortMove = move;
   g_drSortHook = ac_sort_ready;
@@ -313,7 +341,7 @@ static void ac_cmd_run(const wchar_t *j) {
     ac_push(1, q);
     return;
   }
-  ac_push(1, L"Не понял команду. Напишите, какую папку разложить и куда.");
+  ac_files_run(j);
 }
 
 static void ac_relayout(void) {
@@ -544,6 +572,8 @@ static void ac_result(AiResult *r) {
 }
 
 static void ac_clear(void) {
+  if (g_acPlanOn) af_clear();
+  ac_plan_ui(FALSE);
   if (g_acId) ai_cancel(g_acId);
   g_acId = 0;
   ac_busy(FALSE);
@@ -649,10 +679,12 @@ static LRESULT CALLBACK AcProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
       ShowWindow(hwnd, SW_MINIMIZE);
       break;
     case ID_AC_SEND:
-      ac_send();
+      if (g_acPlanOn) ac_files_apply();
+      else ac_send();
       break;
     case ID_AC_STOP:
-      if (g_acId) ai_cancel(g_acId);
+      if (g_acPlanOn) ac_files_cancel();
+      else if (g_acId) ai_cancel(g_acId);
       break;
     case ID_AC_CLEAR:
       ac_clear();
@@ -755,3 +787,5 @@ static void aichat_ask(const wchar_t *q) {
   SetWindowTextW(g_acIn, q);
   ac_send();
 }
+
+#include "ai_files.c" /* команды для файлов: копировать, переместить, переименовать, создать папку */

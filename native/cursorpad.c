@@ -4895,6 +4895,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
     if (argv && argc >= 2 && !wcscmp(argv[1], L"--idledemo")) if_launch(2); /* бой без остановки по вводу */
     if (argv && argc >= 2 && !wcscmp(argv[1], L"--idlewatch")) set_idle_watch(1); /* режим просмотра, как кнопкой */
     if (argv && argc >= 3 && !wcscmp(argv[1], L"--aitest")) ai_selftest(argv[2], argc >= 4 ? argv[3] : NULL);
+    if (argv && argc >= 5 && !wcscmp(argv[1], L"--aifiles")) ai_files_test(argc, argv);
     if (argv && argc >= 4 && !wcscmp(argv[1], L"--aidl")) ai_dltest(argv[2], (int)wcstol(argv[3], NULL, 10), argc >= 5);
     if (argv && argc >= 3 && !wcscmp(argv[1], L"--panel")) { /* проверка шапок окон: 1 карточка, 2 текст, 3 выгрузка, 4 маршрут, 5 нарды, 6 шашки, 7 пакет */
       int n = (int)wcstol(argv[2], NULL, 10);
