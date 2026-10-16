@@ -4096,6 +4096,7 @@ static void create_settings(HWND owner) {
 #include "tiffmerge.c"
 #include "tiffsort.c"
 #include "drawrec.c"    /* распознать чертёж: штамп, спецификация, тип листа */
+#include "drawrec_ui.c" /* окно «Распознать чертёж» */
 #include "nardy.c"
 #include "shashki.c" /* после нард: общий список «кто в сети» и мелочи работы с папкой */
 #include "hotkeys.c"    /* F8, F6, Pause… — какие назначены в Настройках */
@@ -4878,6 +4879,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
     if (argv && argc >= 3 && !wcscmp(argv[1], L"--idlefight")) if_test_shots(argv[2]);
     if (argv && argc >= 3 && !wcscmp(argv[1], L"--xptest")) export_test(argv[2]);
     if (argv && argc >= 4 && !wcscmp(argv[1], L"--drawrec")) dr_test(argc, argv);
+    if (argv && argc >= 4 && !wcscmp(argv[1], L"--drawui")) dr_ui_test(argc, argv);
     if (argv && argc >= 4 && !wcscmp(argv[1], L"--mttest")) match_test(argv[2], argv[3], argc >= 5 ? argv[4] : NULL);
     if (argv && argc >= 3 && !wcscmp(argv[1], L"--idlebench")) if_test_bench(argv[2]);
     if (argv && argc >= 3 && !wcscmp(argv[1], L"--idlestage")) if_test_stage(argv[2], 0);
