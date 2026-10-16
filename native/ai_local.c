@@ -66,10 +66,37 @@ static BOOL g_aiOn;                  /* по умолчанию выключен
 static int g_aiTier = 1;             /* «Средний» */
 static BOOL g_aiGpu;                 /* llama.cpp со сборкой Vulkan и слоями на видеокарте */
 static wchar_t g_aiModel[MAX_PATH];  /* своя модель .gguf; пусто — модель уровня */
+static wchar_t g_aiSrvExe[MAX_PATH]; /* llama-server.exe, указанный руками; пусто — скачанный */
 static wchar_t g_aiExtHost[64];      /* свой сервер (Ollama…): адрес; пусто — свой llama-server */
 static int g_aiExtPort;
 static char g_aiExtModel[64];        /* имя модели для чужого сервера */
 static DWORD g_aiUiThread;           /* поток интерфейса — синхронные вызовы из него запрещены */
+
+/* журнал ИИ: что качали, что запускали, чем кончилось — для «Скопировать отчёт» */
+static wchar_t g_aiLog[12000];
+static SRWLOCK g_aiLogLock = SRWLOCK_INIT;
+
+static void ai_log(const wchar_t *fmt, ...) {
+  wchar_t line[1200];
+  SYSTEMTIME t;
+  GetLocalTime(&t);
+  int n = _snwprintf(line, 1200, L"%02d:%02d:%02d ", t.wHour, t.wMinute, t.wSecond);
+  va_list ap;
+  va_start(ap, fmt);
+  _vsnwprintf(line + n, 1200 - n - 3, fmt, ap);
+  va_end(ap);
+  line[1196] = 0;
+  wcscat(line, L"\r\n");
+  AcquireSRWLockExclusive(&g_aiLogLock);
+  size_t have = wcslen(g_aiLog), add = wcslen(line), cap = sizeof(g_aiLog) / sizeof(g_aiLog[0]);
+  if (have + add + 1 > cap) { /* старое — вон, свежее важнее */
+    size_t drop = have + add + 1 - cap + cap / 4;
+    if (drop > have) drop = have;
+    memmove(g_aiLog, g_aiLog + drop, (have - drop + 1) * sizeof(wchar_t));
+  }
+  wcscat(g_aiLog, line);
+  ReleaseSRWLockExclusive(&g_aiLogLock);
+}
 
 static void ai_dir(wchar_t *out, const wchar_t *sub) {
   if (sub && sub[0]) _snwprintf(out, MAX_PATH, L"%s\\ai\\%s", g_dataDir, sub);
@@ -111,6 +138,10 @@ static BOOL ai_tier_ready(int tier) {
 /* llama-server.exe: путь записан в ai\llama\server.txt (или ai\llama-vk\…) после распаковки */
 static BOOL ai_server_exe(BOOL gpu, wchar_t *out) {
   wchar_t d[MAX_PATH], p[MAX_PATH];
+  if (g_aiSrvExe[0] && ai_file_exists(g_aiSrvExe)) {
+    lstrcpynW(out, g_aiSrvExe, MAX_PATH);
+    return TRUE;
+  }
   ai_dir(d, gpu ? L"llama-vk" : L"llama");
   _snwprintf(p, MAX_PATH, L"%s\\llama-server.exe", d);
   if (ai_file_exists(p)) {
@@ -196,10 +227,15 @@ const wchar_t *ai_status_text(int st) {
 static void ai_save(void) {
   wchar_t p[MAX_PATH];
   _snwprintf(p, MAX_PATH, L"%s\\ai.txt", g_dataDir);
-  char model[MAX_PATH * 3], buf[MAX_PATH * 3 + 300];
+  char model[MAX_PATH * 3], buf[MAX_PATH * 6 + 300];
   WideCharToMultiByte(CP_UTF8, 0, g_aiModel, -1, model, sizeof(model), NULL, NULL);
   int n = snprintf(buf, sizeof(buf), "on %d\r\ntier %d\r\ngpu %d\r\nmodel %s\r\n", g_aiOn ? 1 : 0, g_aiTier,
                    g_aiGpu ? 1 : 0, model);
+  if (g_aiSrvExe[0]) {
+    char se[MAX_PATH * 3];
+    WideCharToMultiByte(CP_UTF8, 0, g_aiSrvExe, -1, se, sizeof(se), NULL, NULL);
+    n += snprintf(buf + n, sizeof(buf) - n, "serverexe %s\r\n", se);
+  }
   if (ai_ext()) {
     char host[64];
     WideCharToMultiByte(CP_UTF8, 0, g_aiExtHost, -1, host, sizeof(host), NULL, NULL);
@@ -229,6 +265,7 @@ static void ai_load(void) {
     else if (sscanf(line, "tier %d", &v) == 1 && v >= 0 && v < AI_TIERS) g_aiTier = v;
     else if (sscanf(line, "gpu %d", &v) == 1) g_aiGpu = v == 1;
     else if (!strncmp(line, "model ", 6)) MultiByteToWideChar(CP_UTF8, 0, line + 6, -1, g_aiModel, MAX_PATH);
+    else if (!strncmp(line, "serverexe ", 10)) MultiByteToWideChar(CP_UTF8, 0, line + 10, -1, g_aiSrvExe, MAX_PATH);
     else if (!strncmp(line, "server ", 7)) {
       /* свой сервер с OpenAI-совместимым API: «server 127.0.0.1 11434 qwen3:4b» —
          Ollama или llama-server, запущенный руками. Только адреса этого компьютера:
@@ -540,6 +577,23 @@ static void ai_log_tail(const wchar_t *log, wchar_t *out, int cap) {
   out[cap - 1] = 0;
 }
 
+static void ai_short_path(wchar_t *p) {
+  BOOL ascii = TRUE;
+  for (const wchar_t *c = p; *c; c++)
+    if (*c > 127) ascii = FALSE;
+  if (ascii) return;
+  wchar_t s[MAX_PATH];
+  DWORD n = GetShortPathNameW(p, s, MAX_PATH);
+  if (n && n < MAX_PATH) {
+    for (const wchar_t *c = s; *c; c++)
+      if (*c > 127) {
+        ai_log(L"Путь с русскими буквами и без короткого имени: %s — llama.cpp может его не открыть", p);
+        break;
+      }
+    lstrcpynW(p, s, MAX_PATH);
+  }
+}
+
 /* поднять сервер, если он не идёт. Ждёт загрузки модели до deadline. */
 static int ai_server_ensure(DWORD deadline, volatile LONG *cancel) {
   if (ai_ext()) return AI_OK;
@@ -553,11 +607,13 @@ static int ai_server_ensure(DWORD deadline, volatile LONG *cancel) {
   BOOL gpu = g_aiGpu && ai_server_exe(TRUE, exe);
   if (!gpu && !ai_server_exe(FALSE, exe) && !ai_server_exe(TRUE, exe)) {
     lstrcpynW(g_aiSrvNote, L"нет llama-server.exe — нажмите «Скачать»", 200);
+    ai_log(L"Запуск: нет llama-server.exe в %s\\ai\\llama", g_dataDir);
     ReleaseSRWLockExclusive(&g_aiSrvLock);
     return AI_NO_MODEL;
   }
   if (!ai_pick_model(model, mm)) {
     lstrcpynW(g_aiSrvNote, L"нет модели — нажмите «Скачать»", 200);
+    ai_log(L"Запуск: нет модели (%s)", g_aiModel[0] ? g_aiModel : kAiTiers[g_aiTier].model);
     ReleaseSRWLockExclusive(&g_aiSrvLock);
     return AI_NO_MODEL;
   }
@@ -585,6 +641,10 @@ static int ai_server_ensure(DWORD deadline, volatile LONG *cancel) {
   }
   ai_dir(dir, NULL);
   _snwprintf(log, MAX_PATH, L"%s\\server.log", dir);
+  /* llama.cpp читает пути из командной строки не всегда как Юникод: русское имя
+     пользователя в C:\\Users\\Иван\\… ломает -m. Короткое имя 8.3 — латиница */
+  ai_short_path(model);
+  if (mm[0]) ai_short_path(mm);
   int rc = AI_NO_SERVER;
   g_aiSrvNote[0] = 0;
   for (int attempt = 0; attempt < 4 && rc != AI_OK; attempt++) {
@@ -598,8 +658,10 @@ static int ai_server_ensure(DWORD deadline, volatile LONG *cancel) {
     /* своя модель с дообучением: адаптер LoRA (lora*.gguf) рядом с ней подключается сам —
        так можно взять готовую модель и свой адаптер, обученный на своих документах */
     wchar_t lora[MAX_PATH];
-    if (g_aiModel[0] && n > 0 && ai_find_near(g_aiModel, L"lora*.gguf", lora))
+    if (g_aiModel[0] && n > 0 && ai_find_near(g_aiModel, L"lora*.gguf", lora)) {
+      ai_short_path(lora);
       _snwprintf(cmd + n, MAX_PATH * 4 + 300 - n, L" --lora \"%s\"", lora);
+    }
     cmd[MAX_PATH * 4 + 299] = 0;
     SECURITY_ATTRIBUTES sa = {sizeof(sa), NULL, TRUE};
     HANDLE lf = CreateFileW(log, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, CREATE_ALWAYS,
@@ -618,11 +680,18 @@ static int ai_server_ensure(DWORD deadline, volatile LONG *cancel) {
     lstrcpynW(exeDir, exe, MAX_PATH);
     wchar_t *sl = wcsrchr(exeDir, L'\\');
     if (sl) *sl = 0;
+    ai_log(L"Запуск: %s", cmd);
     BOOL ok = CreateProcessW(exe, cmd, NULL, NULL, lf != INVALID_HANDLE_VALUE, CREATE_NO_WINDOW | CREATE_SUSPENDED,
                              NULL, exeDir, &si, &pi);
     if (lf != INVALID_HANDLE_VALUE) CloseHandle(lf);
     if (!ok) {
-      _snwprintf(g_aiSrvNote, 200, L"llama-server.exe не запустился (код %lu)", GetLastError());
+      DWORD e = GetLastError();
+      _snwprintf(g_aiSrvNote, 200,
+                 e == ERROR_ACCESS_DENIED || e == 225 /* ERROR_VIRUS_INFECTED */
+                     ? L"Windows не дал запустить llama-server.exe (код %lu) — антивирус?"
+                     : L"llama-server.exe не запустился (код %lu)",
+                 e);
+      ai_log(L"%s", g_aiSrvNote);
       break;
     }
     if (g_aiJob) AssignProcessToJobObject(g_aiJob, pi.hProcess);
@@ -634,7 +703,12 @@ static int ai_server_ensure(DWORD deadline, volatile LONG *cancel) {
     /* ждём /health: 503, пока грузится модель, 200 — готов */
     for (;;) {
       if (WaitForSingleObject(g_aiProc, 300) == WAIT_OBJECT_0) {
+        DWORD code = 0;
+        GetExitCodeProcess(g_aiProc, &code);
         ai_log_tail(log, g_aiSrvNote, 200);
+        ai_log(L"llama-server завершился (код 0x%08lX): %s", code, g_aiSrvNote);
+        if (code == 0xC000001D) lstrcpynW(g_aiSrvNote, L"процессор не тянет эту сборку llama.cpp (нет AVX2?)", 200);
+        if (code == 0xC0000135) lstrcpynW(g_aiSrvNote, L"llama-server не нашёл свои DLL — распакуйте архив целиком", 200);
         ai_server_stop_locked();
         break; /* занят порт или не та модель — следующая попытка покажет */
       }
@@ -646,6 +720,7 @@ static int ai_server_ensure(DWORD deadline, volatile LONG *cancel) {
         break;
       }
       if (ai_http(L"GET", port, L"/health", NULL, NULL, 1500, NULL, NULL, NULL) == 200) {
+        ai_log(L"llama-server готов, порт %d", port);
         rc = AI_OK;
         break;
       }
@@ -792,6 +867,7 @@ static void ai_job_run(AiJob *j) {
   j->status = st;
   j->ms = GetTickCount() - t0;
   if (!j->text) j->text = _wcsdup(ai_status_text(st));
+  if (st != AI_OK && st != AI_CANCELLED) ai_log(L"Запрос: %s (%lu мс)", j->text, j->ms);
 }
 
 /* У запроса два хозяина: поток, который ходит к серверу, и тот, кто ждёт ответа.
@@ -1109,6 +1185,7 @@ static void ai_dl_say(const wchar_t *fmt, ...) {
   _vsnwprintf(g_aiDl.msg, 240, fmt, ap);
   va_end(ap);
   g_aiDl.msg[239] = 0;
+  ai_log(L"%s", g_aiDl.msg);
   if (g_aiDlNotify) PostMessageW(g_aiDlNotify, WM_AI_UI, 0, 0);
 }
 
@@ -1140,11 +1217,16 @@ static DWORD ai_net_get(HINTERNET ses, const wchar_t *host, const wchar_t *path,
     if (wcsstr(host, L"api.github.com")) wcscat(hdr, L"Accept: application/vnd.github+json\r\n");
     DWORD lvl = WINHTTP_AUTOLOGON_SECURITY_LEVEL_LOW; /* прокси завода — от имени пользователя Windows */
     WinHttpSetOption(req, WINHTTP_OPTION_AUTOLOGON_POLICY, &lvl, sizeof(lvl));
-    if (WinHttpSendRequest(req, hdr, (DWORD)-1L, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
-        WinHttpReceiveResponse(req, NULL)) {
+    if (!(WinHttpSendRequest(req, hdr, (DWORD)-1L, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
+          WinHttpReceiveResponse(req, NULL))) {
+      DWORD e = GetLastError();
+      const wchar_t *why = wh_reason(e);
+      ai_log(L"%s%s → %s (код %lu)", host, path, why ? why : L"нет ответа", e);
+    } else {
       DWORD sl = sizeof(status);
       WinHttpQueryHeaders(req, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, NULL, &status, &sl,
                           WINHTTP_NO_HEADER_INDEX);
+      if (status != 200 && status != 206) ai_log(L"%s%s → HTTP %lu", host, path, status);
       if (status == 200 || status == 206) {
         size_t cap = mem ? 1 << 16 : 0, n = 0;
         char *buf = mem ? (char *)malloc(cap) : NULL;
@@ -1310,61 +1392,106 @@ typedef struct {
   char tag[48];
 } AiAsset;
 
-static BOOL ai_find_llama(HINTERNET ses, BOOL gpu, AiAsset *a) {
-  char *js = NULL;
-  DWORD st = ai_net_get(ses, L"api.github.com", L"/repos/ggml-org/llama.cpp/releases/latest", 0, NULL, &js,
-                        8u << 20);
-  if (st != 200 || !js) {
-    free(js);
-    ai_dl_say(L"llama.cpp: GitHub не ответил (%lu)", st);
+static BOOL ai_has(const char *s, int n, const char *w) {
+  int wl = (int)strlen(w);
+  for (int i = 0; i + wl <= n; i++)
+    if (!memcmp(s + i, w, wl)) return TRUE;
+  return FALSE;
+}
+
+/* имя архива llama.cpp для Windows x64 с нужным движком: «llama-b8000-bin-win-cpu-x64.zip»,
+   в старых выпусках «…-bin-win-avx2-x64.zip», для видеокарты «…-bin-win-vulkan-x64.zip».
+   Сверяем по частям, а не целиком: имена у llama.cpp меняются от выпуска к выпуску */
+static BOOL ai_llama_name_ok(const char *name, int nlen, BOOL gpu) {
+  char n[256];
+  if (nlen <= 0 || nlen >= (int)sizeof(n)) return FALSE;
+  for (int i = 0; i < nlen; i++) n[i] = (char)tolower((unsigned char)name[i]);
+  n[nlen] = 0;
+  if (strncmp(n, "llama-", 6) || !strstr(n, "bin-win") || !strstr(n, "x64") || nlen < 4 ||
+      strcmp(n + nlen - 4, ".zip"))
     return FALSE;
-  }
+  return gpu ? strstr(n, "vulkan") != NULL : (strstr(n, "-cpu-") || strstr(n, "-avx2-")) != 0;
+}
+
+/* последний подходящий архив в ответе API (один выпуск или список выпусков, новые первыми).
+   Поля файла: name, …, size, digest, …, browser_download_url — size и digest берём
+   последние перед ссылкой */
+static BOOL ai_parse_llama(const char *js, BOOL gpu, AiAsset *a, char *names, int ncap) {
   memset(a, 0, sizeof(*a));
-  const char *tag = json_find_string(js, "tag_name");
-  if (tag) sscanf(tag, "%47[^\"]", a->tag);
-  /* в описании выпуска у каждого файла: name, …, size, digest, …, browser_download_url.
-     Нужный — «…-bin-win-cpu-x64.zip» (в старых выпусках «…-bin-win-avx2-x64.zip»)
-     или «…-bin-win-vulkan-x64.zip» для видеокарты */
-  const char *want[2] = {gpu ? "-bin-win-vulkan-x64.zip\"" : "-bin-win-cpu-x64.zip\"",
-                         gpu ? "-bin-win-vulkan-x64.zip\"" : "-bin-win-avx2-x64.zip\""};
-  BOOL found = FALSE;
-  for (int w = 0; w < 2 && !found; w++) {
-    const char *prev = js, *u;
-    while (!found && (u = strstr(prev, "\"browser_download_url\""))) {
-      const char *q = strchr(u + 22, '"');
-      const char *end = q ? strchr(q + 1, '"') : NULL;
-      if (!end) break;
-      if (end - q > (int)strlen(want[w]) && !strncmp(end + 1 - strlen(want[w]), want[w], strlen(want[w])) &&
-          end - q - 1 < (int)sizeof(a->url)) {
-        memcpy(a->url, q + 1, end - q - 1);
-        a->url[end - q - 1] = 0;
-        /* size и digest — между прошлым файлом и этой ссылкой */
-        char *seg = (char *)malloc(u - prev + 1);
-        if (seg) {
-          memcpy(seg, prev, u - prev);
-          seg[u - prev] = 0;
-          const char *s = strstr(seg, "\"size\":"), *d = json_find_string(seg, "digest");
-          const char *s2;
-          while (s && (s2 = strstr(s + 7, "\"size\":"))) s = s2; /* последний — у этого файла */
-          if (s) a->size = _strtoui64(s + 7, NULL, 10);
-          if (d && !strncmp(d, "sha256:", 7)) sscanf(d + 7, "%64[0-9a-fA-F]", a->sha);
-          free(seg);
-        }
-        found = TRUE;
-      }
-      prev = end;
+  if (names && ncap) names[0] = 0;
+  const char *prev = js, *u;
+  while ((u = strstr(prev, "\"browser_download_url\""))) {
+    const char *q = strchr(u + 22, '"');
+    const char *end = q ? strchr(q + 1, '"') : NULL;
+    if (!end) break;
+    const char *sl = q + 1, *s2;
+    while ((s2 = memchr(sl, '/', end - sl))) sl = s2 + 1;
+    int nlen = (int)(end - sl);
+    if (names && ai_has(sl, nlen, "win") && (int)strlen(names) + nlen + 3 < ncap) { /* для отчёта */
+      strncat(names, sl, nlen);
+      strcat(names, "; ");
     }
+    if (ai_llama_name_ok(sl, nlen, gpu) && end - q - 1 < (int)sizeof(a->url)) {
+      memcpy(a->url, q + 1, end - q - 1);
+      a->url[end - q - 1] = 0;
+      char *seg = (char *)malloc(u - prev + 1);
+      if (seg) {
+        memcpy(seg, prev, u - prev);
+        seg[u - prev] = 0;
+        const char *sz = NULL, *dg = NULL, *t;
+        for (t = seg; (t = strstr(t, "\"size\"")); t += 6) sz = t;
+        for (t = seg; (t = strstr(t, "\"digest\"")); t += 8) dg = t;
+        if (sz) {
+          const char *c = strchr(sz + 6, ':');
+          if (c) a->size = _strtoui64(c + 1, NULL, 10);
+        }
+        if (dg) {
+          const char *d = json_find_string(dg, "digest");
+          if (d && !strncmp(d, "sha256:", 7)) sscanf(d + 7, "%64[0-9a-fA-F]", a->sha);
+        }
+        free(seg);
+      }
+      /* тег выпуска — из ссылки …/download/<тег>/… */
+      const char *dl = strstr(a->url, "/download/");
+      if (dl) sscanf(dl + 10, "%47[^/]", a->tag);
+      return TRUE;
+    }
+    prev = end;
   }
-  free(js);
-  if (!found) {
-    ai_dl_say(L"llama.cpp: в выпуске нет сборки для Windows");
-    return FALSE;
+  return FALSE;
+}
+
+static BOOL ai_find_llama(HINTERNET ses, BOOL gpu, AiAsset *a) {
+  static const wchar_t *kApi[2] = {L"/repos/ggml-org/llama.cpp/releases/latest",
+                                   L"/repos/ggml-org/llama.cpp/releases?per_page=8"};
+  for (int k = 0; k < 2; k++) {
+    char *js = NULL;
+    DWORD st = ai_net_get(ses, L"api.github.com", kApi[k], 0, NULL, &js, 16u << 20);
+    if (st != 200 || !js) {
+      free(js);
+      continue;
+    }
+    char names[600];
+    BOOL ok = ai_parse_llama(js, gpu, a, names, sizeof(names));
+    if (!ok) {
+      char head[160];
+      int i = 0;
+      for (; js[i] && i < 159; i++) head[i] = js[i] < 32 ? ' ' : js[i];
+      head[i] = 0;
+      ai_log(L"GitHub %s: %u байт, нужного архива нет. Файлы для win: %hs. Начало ответа: %hs", kApi[k],
+             (unsigned)strlen(js), names[0] ? names : "нет", head);
+    }
+    free(js);
+    if (!ok) continue;
+    ai_log(L"llama.cpp %hs: %hs, %llu байт, sha256 %hs", a->tag, a->url, a->size, a->sha[0] ? a->sha : "нет");
+    if (!a->size || strlen(a->sha) != 64) {
+      ai_dl_say(L"llama.cpp: GitHub не дал размер или контрольную сумму архива");
+      return FALSE;
+    }
+    return TRUE;
   }
-  if (!a->size || strlen(a->sha) != 64) {
-    ai_dl_say(L"llama.cpp: GitHub не дал контрольную сумму — без неё не ставлю");
-    return FALSE;
-  }
-  return TRUE;
+  ai_dl_say(L"llama.cpp не нашёлся на GitHub. Скачайте архив вручную и укажите его кнопкой «llama.cpp…»");
+  return FALSE;
 }
 
 /* распаковать zip встроенным в Windows 10/11 tar.exe (или PowerShell) */
@@ -1389,6 +1516,7 @@ static BOOL ai_unzip(const wchar_t *zip, const wchar_t *dir) {
     GetExitCodeProcess(pi.hProcess, &code);
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
+    ai_log(L"Распаковка %s: код %lu", k ? L"PowerShell" : L"tar.exe", code);
     if (code == 0) return TRUE;
   }
   return FALSE;
@@ -1409,6 +1537,30 @@ static void ai_mkdirs(void) {
   CreateDirectoryW(d, NULL);
   _snwprintf(d, MAX_PATH, L"%s\\ai\\models\\%s", g_dataDir, kAiTiers[g_aiTier].dir);
   CreateDirectoryW(d, NULL);
+}
+
+/* скачать и распаковать llama.cpp (для видеокарты — сборку Vulkan) */
+static BOOL ai_get_llama(HINTERNET ses, BOOL gpu) {
+  AiAsset la;
+  wchar_t exe[MAX_PATH], host[128], path[512], zip[MAX_PATH], dir[MAX_PATH];
+  ai_dl_say(gpu ? L"Ищу llama.cpp для видеокарты…" : L"Ищу llama.cpp…");
+  if (!ai_find_llama(ses, gpu, &la)) return FALSE;
+  if (!ai_split_url(la.url, host, 128, path, 512)) {
+    ai_dl_say(L"llama.cpp: странная ссылка на архив");
+    return FALSE;
+  }
+  ai_dir(dir, gpu ? L"llama-vk" : L"llama");
+  ai_dir(zip, gpu ? L"llama-vk.zip" : L"llama.zip");
+  InterlockedExchangeAdd64(&g_aiDl.total, (LONGLONG)la.size);
+  if (!ai_fetch(ses, host, path, zip, la.size, la.sha, L"llama.cpp")) return FALSE;
+  ai_dl_say(L"Распаковываю llama.cpp…");
+  if (!ai_unzip(zip, dir) || !ai_server_exe(gpu, exe)) {
+    ai_dl_say(L"Не распаковался архив llama.cpp — распакуйте %s в %s вручную", zip, dir);
+    return FALSE;
+  }
+  ai_log(L"llama.cpp %hs распакован: %s", la.tag, exe);
+  DeleteFileW(zip);
+  return TRUE;
 }
 
 static DWORD WINAPI ai_dl_thread(LPVOID p) {
@@ -1436,23 +1588,28 @@ static DWORD WINAPI ai_dl_thread(LPVOID p) {
     need += t->f[i].size;
     if (have <= t->f[i].size) InterlockedExchangeAdd64(&g_aiDl.done, (LONGLONG)have);
   }
-  wchar_t exe[MAX_PATH];
-  AiAsset la;
-  BOOL needLlama = !ai_server_exe(gpu, exe);
-  if (needLlama) {
-    ai_dl_say(L"Ищу последний выпуск llama.cpp…");
-    if (!ai_find_llama(ses, gpu, &la)) goto out;
-    need += la.size * 4; /* архив и распакованное */
-  }
   g_aiDl.total = need + g_aiDl.done;
   {
     wchar_t d[MAX_PATH];
-    ULONGLONG have = 0;
+    ULONGLONG have = 0, want = need + (200ull << 20); /* и на llama.cpp */
     ai_dir(d, NULL);
-    if (!ai_free_space(d, need, &have)) {
-      ai_dl_say(L"Мало места на диске: нужно %.1f ГБ, свободно %.1f ГБ", (need + (300ull << 20)) / 1e9,
-                have / 1e9);
+    if (!ai_free_space(d, want, &have)) {
+      ai_dl_say(L"Мало места на диске: нужно %.1f ГБ, свободно %.1f ГБ", (want + (300ull << 20)) / 1e9, have / 1e9);
       goto out;
+    }
+  }
+  BOOL llamaFail = FALSE;
+  /* сначала llama.cpp: он маленький, и если не скачается — видно сразу, а не после 2 ГБ модели */
+  {
+    wchar_t exe[MAX_PATH];
+    if (!ai_server_exe(gpu, exe)) {
+      BOOL ok = ai_get_llama(ses, gpu);
+      if (!ok && gpu && !g_aiDl.cancel && !ai_server_exe(FALSE, exe)) {
+        ai_log(L"Сборка для видеокарты не скачалась — беру сборку для процессора");
+        ok = ai_get_llama(ses, FALSE);
+      }
+      llamaFail = !ok && !ai_server_exe(FALSE, exe);
+      if (g_aiDl.cancel) goto out;
     }
   }
   for (int i = 0; i < t->nf; i++) {
@@ -1461,6 +1618,7 @@ static DWORD WINAPI ai_dl_thread(LPVOID p) {
     ai_model_file(tier, i, f);
     _snwprintf(path, 600, L"/%s/resolve/%s/%s", t->f[i].repo, t->f[i].rev, t->f[i].file);
     _snwprintf(what, 120, t->nf > 1 ? L"%s (часть %d из %d)" : L"%s", t->model, i + 1, t->nf);
+    ai_log(L"Модель: https://huggingface.co%s → %s", path, f);
     if (!ai_fetch(ses, L"huggingface.co", path, f, t->f[i].size, t->f[i].sha, what)) goto out;
     wchar_t ok[MAX_PATH + 4];
     _snwprintf(ok, MAX_PATH + 4, L"%s.ok", f);
@@ -1471,22 +1629,10 @@ static DWORD WINAPI ai_dl_thread(LPVOID p) {
       CloseHandle(h);
     }
   }
-  if (needLlama) {
-    wchar_t host[128], path[512], zip[MAX_PATH], dir[MAX_PATH];
-    if (!ai_split_url(la.url, host, 128, path, 512)) {
-      ai_dl_say(L"llama.cpp: странная ссылка на архив");
-      goto out;
-    }
-    ai_dir(dir, gpu ? L"llama-vk" : L"llama");
-    ai_dir(zip, gpu ? L"llama-vk.zip" : L"llama.zip");
-    g_aiDl.total -= la.size * 3;
-    if (!ai_fetch(ses, host, path, zip, la.size, la.sha, L"llama.cpp")) goto out;
-    ai_dl_say(L"Распаковываю llama.cpp…");
-    if (!ai_unzip(zip, dir) || !ai_server_exe(gpu, exe)) {
-      ai_dl_say(L"Не распаковался архив llama.cpp — распакуйте %s в %s вручную", zip, dir);
-      goto out;
-    }
-    DeleteFileW(zip);
+  if (llamaFail) {
+    ai_dl_say(L"Модель %s скачана, а llama.cpp — нет. Скачайте llama-…-bin-win-cpu-x64.zip с "
+              L"github.com/ggml-org/llama.cpp/releases и укажите его кнопкой «llama.cpp…»", t->model);
+    goto out;
   }
   g_aiDl.failed = FALSE;
   ai_dl_say(L"Готово: %s скачана. Включите ИИ и нажмите «Проверить».", t->model);
@@ -1589,6 +1735,27 @@ static DWORD WINAPI ai_selftest_thread(LPVOID p) {
   ai_shutdown();
   ai_rep("server alive after shutdown: %d\nDONE\n", g_aiProc != NULL);
   return 0;
+}
+
+/* --aidl отчёт.txt уровень [gpu]: скачать как кнопкой и записать журнал */
+static DWORD WINAPI ai_dltest_thread(LPVOID p) {
+  (void)p;
+  ai_dl_thread(NULL);
+  char u[30000];
+  AcquireSRWLockShared(&g_aiLogLock);
+  WideCharToMultiByte(CP_UTF8, 0, g_aiLog, -1, u, sizeof(u), NULL, NULL);
+  ReleaseSRWLockShared(&g_aiLogLock);
+  ai_rep("%s\nfailed=%d\nDONE\n", u, g_aiDl.failed);
+  return 0;
+}
+
+static void ai_dltest(const wchar_t *out, int tier, BOOL gpu) {
+  lstrcpynW(g_aiTestOut, out, MAX_PATH);
+  g_aiTier = tier >= 0 && tier < AI_TIERS ? tier : 0;
+  g_aiGpu = gpu;
+  g_aiDl.active = 1;
+  HANDLE th = CreateThread(NULL, 0, ai_dltest_thread, NULL, 0, NULL);
+  if (th) CloseHandle(th);
 }
 
 static void ai_selftest(const wchar_t *out, const wchar_t *model) {

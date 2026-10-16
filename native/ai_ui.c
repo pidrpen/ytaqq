@@ -11,7 +11,10 @@
 #define ID_AI_BROWSE 510
 #define ID_AI_STAT 511
 #define ID_AI_BAR 512
+#define ID_AI_REPORT 513 /* «Скопировать отчёт» */
+#define ID_AI_LLAMA 514  /* «llama.cpp…» — указать скачанный руками архив */
 
+static HWND g_aiBtnReport, g_aiBtnLlama;
 static HWND g_aiChkOn, g_aiBtnTier[AI_TIERS], g_aiChkGpu, g_aiStat, g_aiBar, g_aiBtnDl, g_aiBtnTest, g_aiBtnDir,
     g_aiPathEdit, g_aiBtnBrowse;
 static int g_aiTestId;          /* идёт «Проверить» */
@@ -125,6 +128,10 @@ static void ai_ui_create(HWND p) {
   g_aiBtnDl = mk_btn(p, L"Скачать модель", ID_AI_DL);
   g_aiBtnTest = mk_btn(p, L"Проверить", ID_AI_TEST);
   g_aiBtnDir = mk_btn(p, L"Папка ИИ", ID_AI_DIR);
+  g_aiBtnReport = mk_btn(p, L"Скопировать отчёт", ID_AI_REPORT);
+  g_aiBtnLlama = mk_btn(p, L"llama.cpp…", ID_AI_LLAMA);
+  SendMessageW(g_aiBtnReport, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
+  SendMessageW(g_aiBtnLlama, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
   g_aiPathEdit = CreateWindowExW(0, L"EDIT", g_aiModel, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 0, 0, 200, 26, p,
                                  (HMENU)(INT_PTR)ID_AI_PATH, NULL, NULL);
   g_aiBtnBrowse = mk_btn(p, L"Обзор…", ID_AI_BROWSE);
@@ -152,7 +159,10 @@ static int ai_ui_layout(int pad, int y, int fullW, int cw, int btnH, int gap, in
   {
     int half = (fullW - gap) / 2;
     set_place(g_aiBtnTest, pad, y, half, btnH);
-    set_place(g_aiBtnDir, pad + half + gap, y, fullW - half - gap, btnH);
+    set_place(g_aiBtnReport, pad + half + gap, y, fullW - half - gap, btnH);
+    y += btnH + gap;
+    set_place(g_aiBtnDir, pad, y, half, btnH);
+    set_place(g_aiBtnLlama, pad + half + gap, y, fullW - half - gap, btnH);
   }
   y += btnH + gap + lab;
   set_place(g_aiPathEdit, pad, y, fullW - browseW - gap, btnH);
@@ -188,7 +198,7 @@ static void ai_ui_test_done(AiResult *r) {
         if (*c == L'\r' || *c == L'\n') *c = L' ';
       _snwprintf(g_aiTestMsg, 300, L"Работает: «%s» за %.1f с", a, r->ms / 1000.0);
     } else {
-      _snwprintf(g_aiTestMsg, 300, L"Не вышло: %s", r->text);
+      _snwprintf(g_aiTestMsg, 300, L"Не вышло: %s. Подробности — «Скопировать отчёт»", r->text);
     }
     g_aiTestMsg[299] = 0;
     ai_ui_refresh();
@@ -207,6 +217,124 @@ static void ai_ui_apply_path(void) {
   if (!wcscmp(s, g_aiModel)) return;
   lstrcpynW(g_aiModel, s, MAX_PATH);
   ai_server_stop(); /* следующий запрос поднимет сервер с новой моделью */
+  ai_save();
+  ai_ui_refresh();
+}
+
+/* «Скопировать отчёт»: всё, что нужно, чтобы понять, что сломалось, — в буфер обмена */
+static void ai_ui_copy_report(HWND hwnd) {
+  size_t cap = 24000;
+  wchar_t *r = (wchar_t *)calloc(cap, sizeof(wchar_t));
+  if (!r) return;
+  MEMORYSTATUSEX ms = {sizeof(ms)};
+  GlobalMemoryStatusEx(&ms);
+  wchar_t d[MAX_PATH], exe[MAX_PATH] = L"нет", m[MAX_PATH] = L"нет", mm[MAX_PATH] = L"";
+  ai_dir(d, NULL);
+  ULARGE_INTEGER fr = {{0}};
+  GetDiskFreeSpaceExW(g_dataDir, &fr, NULL, NULL);
+  if (!ai_server_exe(g_aiGpu, exe) && !ai_server_exe(!g_aiGpu, exe)) lstrcpynW(exe, L"нет", MAX_PATH);
+  if (!ai_pick_model(m, mm)) lstrcpynW(m, L"нет", MAX_PATH);
+  OSVERSIONINFOW ov = {sizeof(ov)};
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+  GetVersionExW(&ov);
+#pragma GCC diagnostic pop
+  size_t n = (size_t)_snwprintf(
+      r, cap,
+      L"CursorPad %s, Windows %lu.%lu.%lu\r\nПамять: %.1f ГБ, свободно %.1f ГБ; ядер %d; диск свободно %.1f ГБ\r\n"
+      L"ИИ: %s, уровень %s, видеокарта %s\r\nПапка: %s\r\nllama-server: %s\r\nМодель: %s %s\r\n"
+      L"Своя модель: %s\r\nСейчас: %s\r\nПроверка: %s\r\n\r\n--- журнал ---\r\n",
+      APP_VERSION_STR, ov.dwMajorVersion, ov.dwMinorVersion, ov.dwBuildNumber, ms.ullTotalPhys / 1e9,
+      ms.ullAvailPhys / 1e9, ai_cores(), fr.QuadPart / 1e9, g_aiOn ? L"включён" : L"выключен",
+      kAiTiers[g_aiTier].button, g_aiGpu ? L"да" : L"нет", d, exe, m, mm, g_aiModel[0] ? g_aiModel : L"нет",
+      g_aiDl.msg, g_aiTestMsg);
+  AcquireSRWLockShared(&g_aiLogLock);
+  if (n < cap) lstrcpynW(r + n, g_aiLog[0] ? g_aiLog : L"(пусто)\r\n", (int)(cap - n));
+  ReleaseSRWLockShared(&g_aiLogLock);
+  n = wcslen(r);
+  wchar_t log[MAX_PATH];
+  _snwprintf(log, MAX_PATH, L"%s\\server.log", d);
+  HANDLE h = CreateFileW(log, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+  if (h != INVALID_HANDLE_VALUE && n + 100 < cap) {
+    char b[3000];
+    DWORD sz = GetFileSize(h, NULL), got = 0;
+    if (sz > sizeof(b) - 1) SetFilePointer(h, (LONG)(sz - (sizeof(b) - 1)), NULL, FILE_BEGIN);
+    ReadFile(h, b, sizeof(b) - 1, &got, NULL);
+    b[got] = 0;
+    n += (size_t)_snwprintf(r + n, cap - n, L"\r\n--- конец server.log ---\r\n");
+    if (n < cap) MultiByteToWideChar(CP_UTF8, 0, b, -1, r + n, (int)(cap - n));
+  }
+  if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+  r[cap - 1] = 0;
+  BOOL ok = FALSE;
+  if (OpenClipboard(hwnd)) {
+    EmptyClipboard();
+    size_t bytes = (wcslen(r) + 1) * sizeof(wchar_t);
+    HGLOBAL g = GlobalAlloc(GMEM_MOVEABLE, bytes);
+    if (g) {
+      memcpy(GlobalLock(g), r, bytes);
+      GlobalUnlock(g);
+      ok = SetClipboardData(CF_UNICODETEXT, g) != NULL;
+      if (!ok) GlobalFree(g);
+    }
+    CloseClipboard();
+  }
+  free(r);
+  _snwprintf(g_aiTestMsg, 300, ok ? L"Отчёт скопирован — вставьте его в чат (Ctrl+V)" : L"Не удалось скопировать отчёт");
+  ai_ui_refresh();
+}
+
+static wchar_t g_aiZipPick[MAX_PATH];
+
+static DWORD WINAPI ai_ui_unzip_thread(LPVOID p) {
+  (void)p;
+  const wchar_t *f = g_aiZipPick, *nm = wcsrchr(f, L'\\');
+  nm = nm ? nm + 1 : f;
+  BOOL gpu = wcsstr(nm, L"vulkan") || wcsstr(nm, L"cuda");
+  wchar_t dir[MAX_PATH], exe[MAX_PATH];
+  ai_mkdirs();
+  ai_dir(dir, gpu ? L"llama-vk" : L"llama");
+  g_aiSrvExe[0] = 0;
+  BOOL ok = ai_unzip(f, dir) && ai_server_exe(gpu, exe);
+  ai_log(L"llama.cpp из %s → %s: %s", f, dir, ok ? L"готово" : L"не вышло");
+  ai_dl_say(ok ? L"llama.cpp распакован. Нажмите «Проверить»" : L"Не распаковался архив — в нём нет llama-server.exe?");
+  g_aiTestMsg[0] = 0;
+  ai_save();
+  InterlockedExchange(&g_aiDl.active, 0);
+  if (g_aiDlNotify) PostMessageW(g_aiDlNotify, WM_AI_UI, 0, 0);
+  return 0;
+}
+
+/* «llama.cpp…»: архив llama-…-bin-win-…-x64.zip, скачанный руками, или сам llama-server.exe */
+static void ai_ui_pick_llama(HWND hwnd) {
+  wchar_t f[MAX_PATH] = L"";
+  OPENFILENAMEW of;
+  memset(&of, 0, sizeof(of));
+  of.lStructSize = sizeof(of);
+  of.hwndOwner = hwnd;
+  of.lpstrFilter = L"llama.cpp (zip или llama-server.exe)\0*.zip;llama-server.exe\0Все файлы\0*.*\0";
+  of.lpstrFile = f;
+  of.nMaxFile = MAX_PATH;
+  of.lpstrTitle = L"Архив llama.cpp для Windows";
+  of.Flags = OFN_EXPLORER | OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+  if (!GetOpenFileNameW(&of)) return;
+  const wchar_t *ext = wcsrchr(f, L'.');
+  if (ext && !_wcsicmp(ext, L".exe")) {
+    lstrcpynW(g_aiSrvExe, f, MAX_PATH);
+    ai_log(L"llama-server указан руками: %s", f);
+    _snwprintf(g_aiTestMsg, 300, L"llama-server: %s", f);
+  } else {
+    if (g_aiDl.active) return;
+    lstrcpynW(g_aiZipPick, f, MAX_PATH);
+    g_aiDlNotify = hwnd;
+    g_aiDl.msg[0] = 0;
+    InterlockedExchange(&g_aiDl.active, 1);
+    _snwprintf(g_aiTestMsg, 300, L"Распаковываю llama.cpp…");
+    HANDLE th = CreateThread(NULL, 0, ai_ui_unzip_thread, NULL, 0, NULL); /* не держать поток окон */
+    if (th) CloseHandle(th);
+    else InterlockedExchange(&g_aiDl.active, 0);
+  }
+  ai_server_stop();
   ai_save();
   ai_ui_refresh();
 }
@@ -257,9 +385,25 @@ static BOOL ai_ui_command(HWND hwnd, int id, int code) {
                                 L"Расшифруй обозначение «Круг 20 ГОСТ 2590-2006» одной строкой.", 180000, hwnd,
                                 WM_AI_TEST, NULL);
       if (g_aiTestId) _snwprintf(g_aiTestMsg, 300, L"Спрашиваю модель… первый раз она грузится до минуты");
-      else _snwprintf(g_aiTestMsg, 300, L"Не вышло: %s", ai_status_text(AI_NO_MODEL));
+      else {
+        wchar_t exe[MAX_PATH], m[MAX_PATH], mm[MAX_PATH];
+        if (!ai_server_exe(g_aiGpu, exe) && !ai_server_exe(!g_aiGpu, exe))
+          _snwprintf(g_aiTestMsg, 300, L"Не вышло: нет llama.cpp — «Скачать» или «llama.cpp…»");
+        else if (!ai_pick_model(m, mm))
+          _snwprintf(g_aiTestMsg, 300, L"Не вышло: модель не скачана или файла своей модели нет");
+        else _snwprintf(g_aiTestMsg, 300, L"Не вышло: %s", ai_status_text(AI_NO_MODEL));
+        ai_log(L"Проверить: %s", g_aiTestMsg);
+      }
     }
     ai_ui_refresh();
+    return TRUE;
+  }
+  if (id == ID_AI_REPORT) {
+    ai_ui_copy_report(hwnd);
+    return TRUE;
+  }
+  if (id == ID_AI_LLAMA) {
+    ai_ui_pick_llama(hwnd);
     return TRUE;
   }
   if (id == ID_AI_DIR) {
