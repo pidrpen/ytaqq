@@ -746,3 +746,12 @@ static void aichat_show(void) {
     else ac_status(L"Enter — отправить, Shift+Enter — новая строка. Модель помнит эту беседу.");
   }
 }
+
+/* поиск с вопросом (мини-ИИ): открыть чат и сразу спросить */
+static void aichat_ask(const wchar_t *q) {
+  aichat_show();
+  if (!g_acWnd) return;
+  SendMessageW(g_acCmdChk, BM_SETCHECK, BST_UNCHECKED, 0); /* вопрос из поиска — не команда */
+  SetWindowTextW(g_acIn, q);
+  ac_send();
+}

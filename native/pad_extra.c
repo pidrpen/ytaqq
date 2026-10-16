@@ -5636,6 +5636,8 @@ static void show_ocr_text(const wchar_t *text) {
    нет связи), они остаются под его ответом, а не пропадают */
 static wchar_t *g_quickDraw;
 
+static void aichat_ask(const wchar_t *q); /* ai_chat.c: «Спросить ИИ» с этим вопросом */
+
 static void start_lookup(const wchar_t *q) {
   if (!q) return;
   /* пароль ввели и сразу ищут, не уходя из поля, — берём его и так */
@@ -5648,6 +5650,11 @@ static void start_lookup(const wchar_t *q) {
   while (*q == L' ' || *q == L'\t' || *q == L'\r' || *q == L'\n') q++;
   if (!q[0]) {
     show_status(L"Нечего искать — скопируйте текст");
+    return;
+  }
+  /* мини-ИИ из поиска — это чат «Спросить ИИ»; PLM и файлы ищут как раньше, в «Находках» */
+  if (g_engine != 4 && g_engine != 5) {
+    aichat_ask(q);
     return;
   }
   /* сперва — не идёт ли уже поиск: раньше «Ищу…» затирало окно, а потом
