@@ -4764,7 +4764,17 @@ static void enable_dpi(void) {
   FreeLibrary(user32);
 }
 
+#ifdef VISUAL_TEST
+#include "visual_test.c"
+#endif
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
+#ifdef VISUAL_TEST
+  { int n; LPWSTR *args = CommandLineToArgvW(GetCommandLineW(), &n);
+    if (args && n == 3 && !wcscmp(args[1], L"--render")) { int code = visual_test(args[2]); LocalFree(args); return code; }
+    if (args) LocalFree(args);
+    return 2;
+  }
+#endif
 #ifdef AGENT_LAB
   {
     int n = 0; LPWSTR *args = CommandLineToArgvW(GetCommandLineW(), &n);

@@ -48,6 +48,7 @@ int wmain(int argc, wchar_t **argv) {
     else {
       AgJson j;
       if (ag_json(w, &j) && ag_get(&j, L"goal")[0]) {
+        fs.count = 0;
         lstrcpynW(fs.goal, ag_get(&j, L"goal"), 4000);
         state = 0; lstrcpynW(out, L"Готов к задаче.", 6000);
       } else state = ag_tool(&fs, w, out, 6000);
@@ -59,7 +60,7 @@ int wmain(int argc, wchar_t **argv) {
       printf("%s{\"kind\":%d,\"src\":", i ? "," : "", a->kind); json_string(a->src);
       printf(",\"dst\":"); json_string(a->dst); putchar('}');
     }
-    printf("]}\n"); fflush(stdout);
+    printf("],\"last\":"); json_string(fs.last); printf("}\n"); fflush(stdout);
   }
   return 0;
 }

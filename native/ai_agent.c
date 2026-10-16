@@ -2,6 +2,7 @@
    in CursorPad.exe, independent of downloaded GGUF files and llama.cpp. */
 #include <wctype.h>
 #include "ai_agent_fs.c"
+#include "ai_app_tools.c"
 static AgFs g_agFs;
 static int g_agSteps, g_agErrors;
 static wchar_t g_agNotes[AG_TEXT], g_agObservation[6000];
@@ -70,7 +71,7 @@ static BOOL ag_request(void) {
   for (int i = 0; i < g_agFs.count && i < 12 && wcslen(prompt) + MAX_PATH * 2 + 80 < (size_t)cap; i++) {
     AgAction *a = &g_agFs.plan[i];
     swprintf(prompt + wcslen(prompt), cap - wcslen(prompt), L"В плане: %ls %ls -> %ls\n",
-      a->kind == AG_DIR ? L"mkdir" : a->kind == AG_COPY ? L"copy" : a->kind == AG_MOVE ? L"move" : a->kind == AG_OPEN ? L"open" : (a->kind == AG_DOCX || a->kind == AG_PLAIN) ? L"write" : L"rename", a->src, a->dst);
+      a->kind == AG_DIR ? L"mkdir" : a->kind == AG_COPY ? L"copy" : a->kind == AG_MOVE ? L"move" : a->kind == AG_OPEN ? L"open" : a->kind == AG_EXCEL ? L"excel_write" : (a->kind == AG_DOCX || a->kind == AG_PLAIN || a->kind == AG_XLSX) ? L"write" : L"rename", a->src, a->dst);
   }
   if (g_agFs.count > 12) wcscat(prompt, L"Остальные действия той же группы скрыты для экономии контекста; ориентируйся на результаты инструментов.\n");
   /* Keep the newest observations within the selected model's context. */
@@ -112,14 +113,17 @@ static BOOL ag_start(const wchar_t *text) {
 }
 
 static void ag_preview(void) {
-  size_t cap = (size_t)g_agFs.count * (MAX_PATH * 2 + 70) + 512;
+  size_t cap = (size_t)g_agFs.count * (MAX_PATH * 2 + 2400) + 512;
   wchar_t *out = (wchar_t *)calloc(cap, sizeof(wchar_t));
   if (!out) { ag_stop(); af_say(L"Не хватило памяти для плана. Диск не изменён."); return; }
   swprintf(out, cap, L"План действий: %d. Диск пока не изменён.\r\n", g_agFs.count);
   for (int i = 0; i < g_agFs.count; i++) {
     AgAction *a = &g_agFs.plan[i];
-    const wchar_t *verb = a->kind == AG_DIR ? L"Создать папку" : a->kind == AG_COPY ? L"Копировать" : a->kind == AG_MOVE ? L"Переместить" : a->kind == AG_OPEN ? L"Открыть в проводнике" : a->kind == AG_DOCX ? L"Создать Word-документ" : a->kind == AG_PLAIN ? L"Создать текстовый файл" : L"Переименовать";
+    const wchar_t *verb = a->kind == AG_DIR ? L"Создать папку" : a->kind == AG_COPY ? L"Копировать" : a->kind == AG_MOVE ? L"Переместить" : a->kind == AG_OPEN ? L"Открыть в проводнике" : a->kind == AG_DOCX ? L"Создать Word-документ" : a->kind == AG_XLSX ? L"Создать пустую книгу Excel" : a->kind == AG_EXCEL ? L"Заполнить новую книгу/копию Excel" : a->kind == AG_PLAIN ? L"Создать текстовый файл" : L"Переименовать";
     swprintf(out + wcslen(out), cap - wcslen(out), L"%ls: %ls%ls%ls\r\n", verb, a->src, a->src[0] ? L" → " : L"", a->dst);
+    if (a->kind == AG_EXCEL || a->kind == AG_DOCX || a->kind == AG_PLAIN) {
+      swprintf(out + wcslen(out), cap - wcslen(out), L"%ls%ls%ls\r\nСодержимое: %ls\r\n", a->kind == AG_EXCEL ? L"Лист: " : L"", a->sheet, a->formulas ? L"; ФОРМУЛЫ ВКЛЮЧЕНЫ" : L"", a->text[0] ? a->text : L"(пусто)");
+    }
   }
   ac_push(1, out); free(out);
   ac_push(1, L"Проверьте весь план. «Применить» выполнит его, «Отмена» оставит файлы на месте.");
@@ -132,10 +136,7 @@ static void ag_tool_ready(void *result) {
   g_agTool = NULL;
   if (job->applying) {
     if (job->state == 1 && job->fs.count) {
-      AgAction *last = &job->fs.plan[job->fs.count - 1];
-      wchar_t parent[MAX_PATH];
-      if (last->kind == AG_DIR || last->kind == AG_OPEN) af_set_last(last->dst);
-      else { af_parent(last->dst, parent); af_set_last(parent); }
+      af_set_last(job->fs.last);
     }
     lstrcpynW(g_agObservation, job->observation, 6000);
     free(job); g_agApplying = FALSE;
@@ -148,7 +149,7 @@ static void ag_tool_ready(void *result) {
   AgJson parsed;
   if (state == 0 && ag_json(job->json, &parsed)) {
     const wchar_t *tool = ag_get(&parsed, L"tool");
-    if (!wcscmp(tool, L"list") || !wcscmp(tool, L"find") || !wcscmp(tool, L"read")) {
+    if (!wcscmp(tool, L"list") || !wcscmp(tool, L"find") || !wcscmp(tool, L"read") || !wcscmp(tool, L"office_read") || !wcscmp(tool, L"compare_materials") || !wcscmp(tool, L"app")) {
       wchar_t actual[MAX_PATH];
       const wchar_t *input = ag_get(&parsed, L"path"); if (!input[0]) input = ag_get(&parsed, L"src");
       if (ag_path(&g_agFs, input, actual) && ag_dir(actual)) {
@@ -189,6 +190,16 @@ static void ag_result(AiResult *r) {
   if (r->status != AI_OK) {
     ag_stop(); ac_busy(FALSE);
     af_say(r->status == AI_CANCELLED ? L"Остановлено. Диск не изменён." : ai_status_text(r->status)); return;
+  }
+  AgJson appJson;
+  if (ag_json(r->text, &appJson) && !wcscmp(ag_get(&appJson, L"tool"), L"app")) {
+    int state = ag_app_call(&appJson, g_agObservation, 6000);
+    ag_note(r->text, g_agObservation);
+    if (state == 0 && wcslen(g_agReadout) + wcslen(g_agObservation) + 4 < 100000) {
+      wcscat(g_agReadout, g_agObservation); wcscat(g_agReadout, L"\r\n\r\n");
+    }
+    if (state < 0 && ++g_agErrors >= 3) { ag_stop(); ac_busy(FALSE); af_say(L"Не удалось выбрать доступную команду CursorPad. Ничего не изменено."); return; }
+    ag_request(); return;
   }
   AgToolJob *job = (AgToolJob *)calloc(1, sizeof(AgToolJob));
   if (!job) { ag_stop(); ac_busy(FALSE); af_say(L"Не хватило памяти. Диск не изменён."); return; }

@@ -20,7 +20,8 @@ for cursor in (native / 'cursors').glob('*.cur'):
 with zipfile.ZipFile(pub / 'CursorPad.zip', 'w', zipfile.ZIP_DEFLATED) as archive:
     for source, name in [(pub / 'CursorPad.exe', 'CursorPad.exe'),
                          (native / 'cursorpad.manifest', 'CursorPad.exe.manifest'),
-                         (native / 'README.txt', 'README.txt'), (native / 'ocr.ps1', 'ocr.ps1')]:
+                         (native / 'README.txt', 'README.txt'), (native / 'AI_TOOLS.md', 'AI_TOOLS.md'),
+                         (native / 'ocr.ps1', 'ocr.ps1')]:
         entry = zipfile.ZipInfo(name, date)
         entry.compress_type = zipfile.ZIP_DEFLATED
         entry.external_attr = 0o644 << 16

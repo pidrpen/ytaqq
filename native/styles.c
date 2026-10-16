@@ -465,12 +465,8 @@ static int st_scorp(float x, float y, float *c) {
 #define AUB_FRAMES 8 /* кадров бегущего глянца; дальше их крутит сама Windows */
 
 static float st_aub_hw(float tt, float hw0) {
-  if (tt < 0.14f) return hw0 * (0.09f + 0.40f * (tt / 0.14f));
-  float p = (tt - 0.14f) / 0.86f;
-  float s = sinf(3.14159265f * (p < 0.68f ? p / 0.68f : 1.0f));
-  if (p > 0.68f) s *= 1.0f - (p - 0.68f) / 0.32f * 0.28f;
-  if (s < 0.001f) s = 0.001f;
-  return hw0 * (0.30f + 0.70f * powf(s, 0.48f));
+  if (tt <= 0 || tt >= 1) return 0;
+  return hw0 * powf(sinf(3.14159265f * tt), 0.54f) * (0.62f + 0.65f * tt);
 }
 
 /* up — носик вверх (рука); иначе носик в левый верхний угол.
@@ -491,38 +487,40 @@ static int st_aubergine(float x, float y, int up, float *c) {
     L = 29.0f;
     hw0 = 7.0f;
   }
-  if (u >= L * 0.86f && u <= L * 0.86f + 4.4f && fabsf(v) <= 1.15f)
-    return fabsf(v) > 0.65f ? ST_C(28, 96, 36) : ST_C(86, 176, 62);
+  /* Green curved stalk at the hotspot, then a narrow neck and a round heavy
+     fruit. The silhouette no longer narrows to a purple arrow point. */
+  if (u >= 0 && u <= 7.0f && fabsf(v - 0.35f * sinf(u * 0.65f)) < 0.8f)
+    return v < 0 ? ST_C(130, 168, 61) : ST_C(40, 78, 25);
   {
-    float u0 = L * 0.78f;
-    static const float kSep[5][4] = {{0, 0, 2.3f, 1.35f},     {1.3f, 2.5f, 2.3f, 1.3f}, {1.3f, -2.5f, 2.3f, 1.3f},
-                                     {2.4f, 4.4f, 2.1f, 1.2f}, {2.4f, -4.4f, 2.1f, 1.2f}};
+    float u0 = 7.1f;
+    static const float kSep[5][4] = {{0, 0, 2.5f, 1.35f}, {0.3f, 1.7f, 2.7f, 0.9f}, {0.3f, -1.7f, 2.7f, 0.9f},
+                                    {1.4f, 3.0f, 2.5f, 0.75f}, {1.4f, -3.0f, 2.5f, 0.75f}};
     for (int i = 0; i < 5; i++) {
       float cu = u0 + kSep[i][0], cv = kSep[i][1], ru = kSep[i][2], rv = kSep[i][3];
       float a = (u - cu) / ru, b = (v - cv) / rv;
-      if (a * a + b * b <= 1.0f) return a * a + b * b > 0.5f ? ST_C(168, 220, 78) : ST_C(36, 124, 44);
+      if (a * a + b * b <= 1.0f) return b < -0.2f ? ST_C(130, 164, 57) : ST_C(45, 84, 29);
     }
   }
-  if (u < 0.0f || u > L) return 0;
-  float tt = u / L;
+  if (u < 6.0f || u > L) return 0;
+  float tt = (u - 5.0f) / (L - 5.0f);
   if (tt > 1.0f) tt = 1.0f;
   float hw = st_aub_hw(tt, hw0);
+  v -= 1.5f * sinf(tt * 3.14159265f); /* gentle natural bend */
   if (hw < 0.45f || fabsf(v) > hw) return 0;
-  if (st_ell(u, v, L * 0.36f, -hw * 0.30f, 2.2f, 0.85f)) return ST_C(232, 206, 246);
   {
     float ph = g_aubPhase;
     if (ph < 0.0f) ph = 0.0f;
     if (ph > 1.0f) ph = 1.0f;
-    float gu = L * (0.10f + 0.68f * ph);
+    float gu = L * (0.44f + 0.12f * ph);
     float shine = sinf(3.14159265f * ph);
-    if (st_ell(u, v, gu, -hw * 0.42f, 1.7f + shine, 0.95f)) return ST_C(255, 250, 255);
-    if (shine > 0.25f && st_ell(u, v, gu - 2.1f, -hw * 0.12f, 0.7f, 0.45f)) return ST_C(255, 230, 252);
+    if (st_ell(u, v, gu, -hw * 0.42f, 4.1f + shine, 0.65f)) return ST_C(220, 179, 227);
   }
   float side = fx_clamp01(0.52f - v / (hw * 2.05f));
   float shade = tt > 0.35f ? (tt - 0.35f) / 0.65f : 0.0f;
-  float r = (42.0f + 110.0f * side) * (1.0f - 0.42f * shade);
-  float g = (8.0f + 42.0f * side) * (1.0f - 0.35f * shade);
-  float b = (80.0f + 120.0f * side) * (1.0f - 0.22f * shade);
+  float gloss = expf(-powf((v / hw + 0.32f) * 3.2f, 2));
+  float r = (29.0f + 61.0f * side + 35 * gloss) * (1.0f - 0.25f * shade);
+  float g = (8.0f + 13.0f * side + 13 * gloss) * (1.0f - 0.2f * shade);
+  float b = (42.0f + 75.0f * side + 38 * gloss) * (1.0f - 0.18f * shade);
   if (fabsf(v) > hw * 0.84f) r *= 0.48f, g *= 0.48f, b *= 0.64f;
   return ST_C(r, g, b);
 }

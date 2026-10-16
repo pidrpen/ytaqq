@@ -2,12 +2,14 @@
    All mutations are staged; the UI applies the complete reviewed plan. */
 #define AG_MAX 512
 #define AG_TEXT 12000
-typedef enum { AG_DIR, AG_COPY, AG_MOVE, AG_RENAME, AG_OPEN, AG_DOCX, AG_PLAIN } AgKind;
+typedef enum { AG_DIR, AG_COPY, AG_MOVE, AG_RENAME, AG_OPEN, AG_DOCX, AG_PLAIN, AG_XLSX, AG_EXCEL } AgKind;
 typedef struct {
   AgKind kind;
   wchar_t src[MAX_PATH], dst[MAX_PATH];
   WIN32_FILE_ATTRIBUTE_DATA before;
   wchar_t text[2000];
+  wchar_t sheet[128], cell[16];
+  BOOL formulas;
 } AgAction;
 typedef struct {
   wchar_t desktop[MAX_PATH], downloads[MAX_PATH], documents[MAX_PATH], last[MAX_PATH];
@@ -299,11 +301,14 @@ static BOOL ag_target(const AgFs *fs, const wchar_t *dir, const wchar_t *name, w
 }
 
 #include "ai_agent_write.c"
-static BOOL ag_needs_word(const wchar_t *raw) {
+#include "ai_office.c"
+#include "ai_compare.c"
+static BOOL ag_needs_document(const wchar_t *raw, BOOL excel) {
   wchar_t goal[4000]; lstrcpynW(goal, raw, 4000); CharLowerBuffW(goal, (DWORD)wcslen(goal));
-  const wchar_t *word = wcsstr(goal, L"ворд");
-  if (!word) word = wcsstr(goal, L"word");
-  if (!word) word = wcsstr(goal, L"docx");
+  const wchar_t *word = wcsstr(goal, excel ? L"ексел" : L"ворд");
+  if (!word) word = wcsstr(goal, excel ? L"эксел" : L"word");
+  if (!word) word = wcsstr(goal, excel ? L"excel" : L"docx");
+  if (!word && excel) word = wcsstr(goal, L"xlsx");
   if (!word) return FALSE;
   BOOL create = FALSE;
   for (const wchar_t *p = goal; p < word; p++) {
@@ -311,6 +316,30 @@ static BOOL ag_needs_word(const wchar_t *raw) {
     if (!wcsncmp(p, L"скопир", 6) || !wcsncmp(p, L"перенес", 7) || !wcsncmp(p, L"перемест", 8) || !wcsncmp(p, L"переимен", 8)) create = FALSE;
   }
   return create;
+}
+static BOOL ag_needs_word(const wchar_t *raw) { return ag_needs_document(raw, FALSE); }
+/* A leading directory is a destination, e.g. C:\\Работа создай ексель.
+   Preserve spaces in paths; stop at the following creation verb or closing quote.
+   Other sentence structures remain the model's responsibility. */
+static BOOL ag_document_root(AgFs *fs, wchar_t *out) {
+  if (!ag_needs_word(fs->goal) && !ag_needs_document(fs->goal, TRUE)) return FALSE;
+  const wchar_t *p = fs->goal;
+  while (*p == L' ' || *p == L'\t') p++;
+  BOOL quoted = *p == L'"' || *p == L'«';
+  if (quoted) p++;
+  if (!p[0] || !p[1] || !p[2] || p[1] != L':' || p[2] != L'\\') return FALSE;
+  wchar_t path[MAX_PATH]; size_t n = 0;
+  while (p[n] && p[n] != L'\r' && p[n] != L'\n' && p[n] != L'"' && p[n] != L'»') {
+    if (!quoted && p[n] == L' ' &&
+        (!_wcsnicmp(p + n + 1, L"созда", 5) || !_wcsnicmp(p + n + 1, L"сдела", 5))) break;
+    if (n >= MAX_PATH - 1) return FALSE;
+    n++;
+  }
+  if (!n) return FALSE;
+  lstrcpynW(path, p, (int)n + 1); ag_trim(path);
+  const wchar_t *ext = wcsrchr(path, L'.');
+  if (ext && (!_wcsicmp(ext, L".xlsx") || !_wcsicmp(ext, L".docx"))) return FALSE;
+  return ag_path(fs, path, out);
 }
 /* Returns 0 observation, 1 done, 2 clarification, -1 rejected. On rejection
    roll back this tool's staged changes, never leave a partial bulk transfer. */
@@ -324,6 +353,17 @@ static int ag_tool(AgFs *fs, const wchar_t *json, wchar_t *out, int cap) {
       BOOL found = FALSE;
       for (int i = 0; i < fs->count; i++) if (fs->plan[i].kind == AG_DOCX) found = TRUE;
       if (!found) { lstrcpynW(out, L"План неполон: пользователь просил СОЗДАТЬ Word. Добавь write с путём .docx в нужной папке. Иначе ask; done запрещён.", cap); return -1; }
+    }
+    if (ag_needs_document(fs->goal, TRUE)) {
+      BOOL found = FALSE;
+      for (int i = 0; i < fs->count; i++) if (fs->plan[i].kind == AG_XLSX || fs->plan[i].kind == AG_EXCEL) found = TRUE;
+      if (!found) { lstrcpynW(out, L"План неполон: пользователь просил создать Excel. Добавь write с путём .xlsx. Иначе ask; done запрещён.", cap); return -1; }
+      wchar_t goal[4000]; lstrcpynW(goal, fs->goal, 4000); CharLowerBuffW(goal, (DWORD)wcslen(goal));
+      if (wcsstr(goal, L"формул") || wcsstr(goal, L"заполни") || wcsstr(goal, L"запиши")) {
+        BOOL content = FALSE;
+        for (int i = 0; i < fs->count; i++) if (fs->plan[i].kind == AG_EXCEL && fs->plan[i].text[0] && (!wcsstr(goal, L"формул") || fs->plan[i].formulas)) content = TRUE;
+        if (!content) { lstrcpynW(out, L"План неполон: требовались данные/формулы, а не пустой Excel. Нужен ОДИН excel_write с непустым text и mode=formulas для формул. Пустая книга не выполняет просьбу. Иначе ask.", cap); return -1; }
+      }
     }
     lstrcpynW(out, L"План готов к проверке.", cap); return 1;
   }
@@ -339,23 +379,73 @@ static int ag_tool(AgFs *fs, const wchar_t *json, wchar_t *out, int cap) {
     return -1;
   }
   int saved = fs->count;
+  if (!wcscmp(tool, L"compare_materials")) {
+    wchar_t ref[MAX_PATH]; const wchar_t *raw = ag_get(&j, L"offset"); wchar_t *end = NULL;
+    long offset = raw[0] ? wcstol(raw, &end, 10) : 0;
+    if (offset < 0 || offset > 10000 || (end && *end) || !ag_path(fs, ag_get(&j, L"dst"), ref)) goto fail;
+    return ag_compare_materials(path, ref, ag_get(&j, L"sheet"), ag_get(&j, L"name"), ag_get(&j, L"pattern"), (int)offset, fs->cancel, out, cap) ? 0 : -1;
+  }
+  if (!wcscmp(tool, L"office_read")) {
+    if (GetFileAttributesW(path) == INVALID_FILE_ATTRIBUTES) goto fail;
+    const wchar_t *raw = ag_get(&j, L"offset"); wchar_t *end = NULL;
+    long offset = raw[0] ? wcstol(raw, &end, 10) : 0;
+    if (offset < 0 || offset > 1000000 || (end && *end)) goto fail;
+    int row = 1, col = 1;
+    if (ag_get(&j, L"cell")[0] && (!of_cell(ag_get(&j, L"cell"), &row, &col) || row != 1)) goto fail;
+    return of_read(path, ag_get(&j, L"sheet"), (int)offset, col - 1, out, cap) ? 0 : -1;
+  }
+  if (!wcscmp(tool, L"excel_write")) {
+    const wchar_t *name = wcsrchr(path, L'\\'); wchar_t parent[MAX_PATH], source[MAX_PATH] = L"";
+    BOOL formulas = !wcscmp(ag_get(&j, L"mode"), L"formulas");
+    int r, c, nr, nc; const wchar_t *cell = ag_get(&j, L"cell"); if (!cell[0]) cell = L"A1";
+    if (!ag_get(&j, L"text")[0]) { lstrcpynW(out, L"excel_write отклонён: отсутствует text с данными. Для суммы 12 и 3 передай text=\"=12\\t=3\\t=SUM(A1:B1)\", mode=formulas. Все ячейки передаются ОДНИМ вызовом, без предварительного write. План не изменён.", cap); return -1; }
+    if (!name || !ag_name(name + 1) || !of_excel(path) || !of_cell(cell, &r, &c) ||
+        !of_table_valid(ag_get(&j, L"text"), formulas, &nr, &nc) || wcslen(ag_get(&j, L"sheet")) >= 128) {
+      lstrcpynW(out, L"excel_write: нужны путь новой .xlsx, ячейка A1 и TSV до 500 ячеек. В mode=formulas разрешены только локальные формулы; иначе значения — текст. Исправь параметры или ask.", cap); return -1;
+    }
+    if (ag_get(&j, L"src")[0] && (!ag_path(fs, ag_get(&j, L"src"), source) || !of_excel(source) || GetFileAttributesW(source) == INVALID_FILE_ATTRIBUTES)) goto fail;
+    if (source[0] && formulas) { lstrcpynW(out, L"Формулы разрешены только в новой книге без src. Копию существующей книги можно заполнять текстовыми значениями. Исходник не меняется.", cap); return -1; }
+    lstrcpynW(parent, path, MAX_PATH); *wcsrchr(parent, L'\\') = 0;
+    wchar_t explicitRoot[MAX_PATH];
+    if (ag_document_root(fs, explicitRoot) && !ag_under(parent, explicitRoot)) goto fail;
+    AgAction *a = NULL;
+    for (int i = 0; i < fs->count; i++) if (!_wcsicmp(fs->plan[i].dst, path)) {
+      if (fs->plan[i].kind == AG_XLSX && !source[0]) { a = &fs->plan[i]; a->kind = AG_EXCEL; }
+      else { lstrcpynW(out, L"Эта книга уже запланирована. Не создавай вторую копию и не повторяй excel_write. Если все данные переданы, используй done; иначе ask.", cap); return -1; }
+    }
+    if (!a) {
+      if (!ag_mkdir(fs, parent) || !ag_target(fs, parent, name + 1, dst) || !ag_add(fs, AG_EXCEL, source, dst)) goto fail;
+      a = &fs->plan[fs->count - 1];
+    } else lstrcpynW(dst, a->dst, MAX_PATH);
+    lstrcpynW(a->text, ag_get(&j, L"text"), 2000); lstrcpynW(a->sheet, ag_get(&j, L"sheet"), 128); lstrcpynW(a->cell, cell, 16); a->formulas = formulas;
+    swprintf(out, cap, L"В план добавлена новая %ls Excel: %ls; блок %d × %d от %ls; формулы %ls. Исходник не изменится.", source[0] ? L"копия" : L"книга", dst, nr, nc, cell, formulas ? L"включены с проверкой Excel" : L"выключены"); return 0;
+  }
   if (!wcscmp(tool, L"write")) {
     const wchar_t *name = wcsrchr(path, L'\\');
     const wchar_t *ext = wcsrchr(path, L'.');
     if (!name || !ext || !ag_name(name + 1)) goto fail;
     BOOL docx = !_wcsicmp(ext, L".docx");
-    if (!docx && _wcsicmp(ext, L".txt") && _wcsicmp(ext, L".md") && _wcsicmp(ext, L".csv") &&
+    BOOL xlsx = !_wcsicmp(ext, L".xlsx");
+    if (xlsx && ag_get(&j, L"text")[0]) {
+      lstrcpynW(out, L"write .xlsx создаёт только пустую книгу с одним листом; данные и формулы ещё не поддерживаются. Не подменяй их пустым файлом: объясни ограничение через ask.", cap); return -1;
+    }
+    if (!docx && !xlsx && _wcsicmp(ext, L".txt") && _wcsicmp(ext, L".md") && _wcsicmp(ext, L".csv") &&
         _wcsicmp(ext, L".tsv") && _wcsicmp(ext, L".json") && _wcsicmp(ext, L".xml")) {
-      lstrcpynW(out, L"Создавать можно .docx или текстовые .txt/.md/.csv/.tsv/.json/.xml. Для другого формата нужен отдельный инструмент; не пропускай просьбу, используй ask.", cap); return -1;
+      lstrcpynW(out, L"Создавать можно .docx, пустую книгу .xlsx или текстовые .txt/.md/.csv/.tsv/.json/.xml. Для другого формата нужен отдельный инструмент; не пропускай просьбу, используй ask.", cap); return -1;
     }
     wchar_t parent[MAX_PATH]; lstrcpynW(parent, path, MAX_PATH); *wcsrchr(parent, L'\\') = 0;
-    if (!ag_mkdir(fs, parent) || !ag_target(fs, parent, name + 1, dst) || !ag_add(fs, docx ? AG_DOCX : AG_PLAIN, L"", dst)) goto fail;
+    wchar_t explicitRoot[MAX_PATH];
+    if (ag_document_root(fs, explicitRoot) && !ag_under(parent, explicitRoot)) {
+      swprintf(out, cap, L"Ошибка папки назначения: пользователь указал %ls. Создай документ внутри неё через write, не в @last или другой папке. Исходный файл не нужен.", explicitRoot); return -1;
+    }
+    if (!ag_mkdir(fs, parent) || !ag_target(fs, parent, name + 1, dst) || !ag_add(fs, docx ? AG_DOCX : xlsx ? AG_XLSX : AG_PLAIN, L"", dst)) goto fail;
     lstrcpynW(fs->plan[fs->count - 1].text, ag_get(&j, L"text"), 2000);
-    swprintf(out, cap, L"Создание %ls добавлено в план: %ls. Диск пока не изменён.", docx ? L"Word-документа" : L"текстового файла", dst);
+    swprintf(out, cap, L"Создание %ls добавлено в план: %ls. Родительские папки УЖЕ добавлены автоматически: mkdir не нужен. Эта часть задачи запланирована полностью. Если других действий не просили, следующий вызов done. Диск пока не изменён.", docx ? L"Word-документа" : xlsx ? L"пустой книги Excel" : L"текстового файла", dst);
     return 0;
   }
   if (!wcscmp(tool, L"mkdir")) {
     if (!ag_mkdir(fs, path)) goto fail;
+    if (fs->count == saved) { lstrcpynW(out, L"Папка уже существует или УЖЕ ЕСТЬ В ПЛАНЕ. mkdir ничего не добавил; НЕ ПОВТОРЯЙ его. Если нужный документ уже в плане — done. Иначе выполни недостающий write/excel_write или другое запрошенное действие.", cap); return -1; }
     swprintf(out, cap, L"Папка запланирована (на диске пока не создавалась): %ls", path); return 0;
   }
   if (!wcscmp(tool, L"open")) {
@@ -488,7 +578,11 @@ static BOOL ag_apply(AgFs *fs, wchar_t *out, int cap) {
       return FALSE;
     }
     if (a->kind == AG_DIR) ok = CreateDirectoryW(a->dst, NULL);
-    else if (a->kind == AG_DOCX || a->kind == AG_PLAIN) ok = ag_write_new(a->dst, a->text, a->kind == AG_DOCX);
+    else if (a->kind == AG_DOCX || a->kind == AG_PLAIN || a->kind == AG_XLSX) ok = ag_write_new(a->dst, a->text, a->kind);
+    else if (a->kind == AG_EXCEL) {
+      wchar_t detail[6000]; ok = of_write_excel(a->src, a->dst, a->sheet, a->cell, a->text, a->formulas, detail, 6000);
+      if (!ok) { swprintf(out, cap, L"Остановлено после %d из %d действий. %ls Выполненные действия сохранены.", i, fs->count, detail); return FALSE; }
+    }
     else if (a->kind == AG_COPY) ok = CopyFileExW(a->src, a->dst, NULL, NULL, (BOOL *)fs->cancel, COPY_FILE_FAIL_IF_EXISTS);
     else if (a->kind == AG_OPEN) {
       wchar_t exe[MAX_PATH], params[MAX_PATH + 4];
@@ -502,7 +596,15 @@ static BOOL ag_apply(AgFs *fs, wchar_t *out, int cap) {
       return FALSE;
     }
     if (a->kind == AG_DIR) dirs++; else if (a->kind != AG_OPEN) files++;
-    if (a->kind == AG_DOCX || a->kind == AG_PLAIN) created++;
+    if (a->kind == AG_DOCX || a->kind == AG_PLAIN || a->kind == AG_XLSX || a->kind == AG_EXCEL) created++;
+  }
+  if (fs->count) {
+    AgAction *last = &fs->plan[fs->count - 1];
+    lstrcpynW(fs->last, last->dst, MAX_PATH);
+    if (last->kind != AG_DIR && last->kind != AG_OPEN) {
+      wchar_t *slash = wcsrchr(fs->last, L'\\');
+      if (slash) *slash = 0;
+    }
   }
   swprintf(out, cap, L"Готово. Обработано файлов: %d, из них создано новых: %d. Создано папок: %d.", files, created, dirs);
   return TRUE;

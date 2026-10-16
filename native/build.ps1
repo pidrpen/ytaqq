@@ -22,7 +22,7 @@ try {
   & $resourceCompiler cursorpad.rc -O coff -o $resourceObject
   if ($LASTEXITCODE -ne 0) { throw 'Resource compilation failed' }
   & $compiler @flags -o (Join-Path $releaseDir 'CursorPad.exe') cursorpad.c $resourceObject `
-    -luser32 -lgdi32 -lshell32 -lole32 -lcomctl32 -lwinhttp -ladvapi32 -lodbc32 -lcrypt32 -lcomdlg32 -lmsimg32 `
+    -luser32 -lgdi32 -lshell32 -lole32 -loleaut32 -luuid -lcomctl32 -lwinhttp -ladvapi32 -lodbc32 -lcrypt32 -lcomdlg32 -lmsimg32 `
     '-Wl,--subsystem,windows' '-Wl,--no-insert-timestamp' -municode -s -static
   if ($LASTEXITCODE -ne 0) { throw 'CursorPad compilation failed' }
   & $python package_release.py $releaseDir $PSScriptRoot
