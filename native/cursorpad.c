@@ -56,7 +56,7 @@
 #define ST_COUNT 7
 #define ST_RAZREZ 3         /* «Разрез» — клинок вместо стрелки */
 #define ST_KNIGHT ST_COUNT  /* рыцарь (Мечник) рисуется кодом, но кнопки стиля у него нет */
-#define ST_SKIN0 7          /* g_skin первого из них; 7…12 */
+#define ST_SKIN0 7          /* g_skin первого из них; 7…13 */
 #define ID_PREVIEW 470      /* окошко просмотра курсора и эффекта */
 #define ID_IDLE_BASE 480    /* 480..484: бой при бездействии — выкл, 30 с, 1, 2, 5 мин */
 #define IDLE_OPTIONS 5
@@ -4479,11 +4479,14 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
       send_paste();
     }
     if (wParam == TIMER_CURSOR_KEEP && g_skin > 0) {
-      /* у «Риас» анимирован весь набор, а заново поставленный курсор начинает
-         анимацию с первого кадра: раз в 4 с это видно, раз в минуту — нет.
-         Сброс курсоров самой Windows ловит WM_SETTINGCHANGE — там сразу. */
+      /* у «Риас» и «Баклажана» курсор анимированный: заново поставленный
+         начинает мультик с первого кадра. Раз в 4 с это видно (блик Баклажана
+         прыгал бы к кончику), раз в минуту — нет. Копия .ani — один кадр,
+         поэтому эти наборы ставятся без CopyCursor. Сброс курсоров самой
+         Windows ловит WM_SETTINGCHANGE — там сразу. */
       static int keepTicks;
-      if (g_skin != 6 || ++keepTicks % 15 == 0) apply_scheme_slots();
+      int slow = g_skin == 6 || g_skin == ST_SKIN0 + ST_AUBERGINE;
+      if (!slow || ++keepTicks % 15 == 0) apply_scheme_slots();
     }
     if (wParam == TIMER_FILES) files_start_index(FALSE);
     if (wParam == TIMER_FILES_TICK) files_refresh_status();

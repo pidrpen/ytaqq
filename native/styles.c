@@ -11,6 +11,11 @@
    «Осьминог» и «Скорпион» — тоже свои, со своими эффектами.
    С 2026.10.16.2 добавлен «Баклажан»: глянцевый плод указывает острым
    кончиком, при нажатии — «Икра».
+   С 2026.10.16.3 глянец — мультик из нескольких кадров: его крутит сама
+   Windows. Копия такого курсора замирает на одном кадре, а держатель
+   (раз в 4 с) заново поставленный мультик начинает с первого кадра,
+   поэтому Баклажан, как «Риас», ставится без копии и обновляется раз в
+   минуту. Сброс курсоров Windows по-прежнему ловится сразу.
 
    У каждого свой эффект при нажатии, если в Настройках выбрано «Как у
    курсора» (fx_kind_for). Здесь же — окошко просмотра в Настройках: в нём
@@ -26,6 +31,8 @@
 
 static HCURSOR g_stCur[ST_DRAW][ST_SLOTS];
 static int g_stSize[ST_DRAW]; /* под какой размер указателя нарисованы */
+static HCURSOR g_pvAub[2];    /* просмотр: .ani стрелки и руки, не те курсоры, что отданы системе */
+static int g_pvAubN;
 
 /* ---- формы в сетке 32×32 ---- */
 
@@ -455,6 +462,7 @@ static int st_scorp(float x, float y, float *c) {
    хвостик, на боку белый глянец. Текст, крест и стрелки размеров — та же
    фиолетовая отделка, что у остальных видов. */
 #define ST_AUBERGINE 6
+#define AUB_FRAMES 8 /* кадров бегущего глянца; дальше их крутит сама Windows */
 
 static float st_aub_hw(float tt, float hw0) {
   if (tt < 0.14f) return hw0 * (0.09f + 0.40f * (tt / 0.14f));
@@ -465,7 +473,11 @@ static float st_aub_hw(float tt, float hw0) {
   return hw0 * (0.30f + 0.70f * powf(s, 0.48f));
 }
 
-/* up — носик вверх (рука); иначе носик в левый верхний угол */
+/* up — носик вверх (рука); иначе носик в левый верхний угол.
+   g_aubPhase 0..1 — где сейчас бегущий блик. У живого курсора у каждого
+   кадра .ani своя фаза; статическая картинка держит 0.42. */
+static float g_aubPhase = 0.42f;
+
 static int st_aubergine(float x, float y, int up, float *c) {
   float u, v, L, hw0;
   if (up) {
@@ -496,8 +508,16 @@ static int st_aubergine(float x, float y, int up, float *c) {
   if (tt > 1.0f) tt = 1.0f;
   float hw = st_aub_hw(tt, hw0);
   if (hw < 0.45f || fabsf(v) > hw) return 0;
-  if (st_ell(u, v, L * 0.42f, -hw * 0.36f, 2.9f, 1.05f) || st_ell(u, v, L * 0.33f, -hw * 0.16f, 1.15f, 0.62f))
-    return ST_C(250, 238, 255);
+  if (st_ell(u, v, L * 0.36f, -hw * 0.30f, 2.2f, 0.85f)) return ST_C(232, 206, 246);
+  {
+    float ph = g_aubPhase;
+    if (ph < 0.0f) ph = 0.0f;
+    if (ph > 1.0f) ph = 1.0f;
+    float gu = L * (0.10f + 0.68f * ph);
+    float shine = sinf(3.14159265f * ph);
+    if (st_ell(u, v, gu, -hw * 0.42f, 1.7f + shine, 0.95f)) return ST_C(255, 250, 255);
+    if (shine > 0.25f && st_ell(u, v, gu - 2.1f, -hw * 0.12f, 0.7f, 0.45f)) return ST_C(255, 230, 252);
+  }
   float side = fx_clamp01(0.52f - v / (hw * 2.05f));
   float shade = tt > 0.35f ? (tt - 0.35f) / 0.65f : 0.0f;
   float r = (42.0f + 110.0f * side) * (1.0f - 0.42f * shade);
@@ -868,10 +888,176 @@ static void st_ensure(int st) {
   g_stSize[st] = N;
 }
 
+/* ---- «Баклажан»: бегущий глянец как .ani ---------------------------------
+   Windows сама сменяет кадры. CopyCursor от такого курсора оставляет один
+   неподвижный кадр, поэтому стрелка, рука и ожидание ставятся прямо из
+   файла (как виды «Риас»), без set_slot. Остальные виды — обычные картинки.
+   Файлы живут в папке данных: aub1_<размер>_<вид>.ani. Повторно не рисуются,
+   пока не сменится размер указателя. */
+static int g_aubReadyN;
+
+static void st_put_tag(BYTE *p, const char *s) {
+  p[0] = (BYTE)s[0];
+  p[1] = (BYTE)s[1];
+  p[2] = (BYTE)s[2];
+  p[3] = (BYTE)s[3];
+}
+static void st_put_u16(BYTE *p, unsigned v) {
+  p[0] = (BYTE)v;
+  p[1] = (BYTE)(v >> 8);
+}
+static void st_put_u32(BYTE *p, unsigned v) {
+  p[0] = (BYTE)v;
+  p[1] = (BYTE)(v >> 8);
+  p[2] = (BYTE)(v >> 16);
+  p[3] = (BYTE)(v >> 24);
+}
+static void st_put_i32(BYTE *p, int v) { st_put_u32(p, (unsigned)v); }
+
+static int st_and_row(int N) { return ((N + 31) / 32) * 4; }
+static int st_cur_bytes(int N) { return 62 + N * N * 4 + st_and_row(N) * N; }
+
+static BOOL st_aub_anim_slot(int slot) { return slot == 0 || slot == 2 || slot == 14; }
+
+static void st_aub_path(int slot, int N, wchar_t *out) {
+  _snwprintf(out, MAX_PATH, L"%s\\aub1_%d_%d.ani", g_dataDir, N, slot);
+}
+
+/* .cur в buf: BGRA сверху вниз, как пишет st_draw. Маска пустая — решает альфа. */
+static void st_fill_cur(BYTE *d, const BYTE *bgra, int N, int hx, int hy) {
+  int xorBytes = N * N * 4, andBytes = st_and_row(N) * N, image = 40 + xorBytes + andBytes;
+  memset(d, 0, (size_t)(22 + image));
+  st_put_u16(d + 2, 2);
+  st_put_u16(d + 4, 1);
+  d[6] = (BYTE)(N >= 256 ? 0 : N);
+  d[7] = (BYTE)(N >= 256 ? 0 : N);
+  st_put_u16(d + 10, (unsigned)hx);
+  st_put_u16(d + 12, (unsigned)hy);
+  st_put_u32(d + 14, (unsigned)image);
+  st_put_u32(d + 18, 22);
+  BYTE *dib = d + 22;
+  st_put_u32(dib, 40);
+  st_put_i32(dib + 4, N);
+  st_put_i32(dib + 8, N * 2);
+  st_put_u16(dib + 12, 1);
+  st_put_u16(dib + 14, 32);
+  st_put_u32(dib + 20, (unsigned)xorBytes);
+  BYTE *xor = dib + 40;
+  for (int y = 0; y < N; y++)
+    memcpy(xor + (size_t)y * N * 4, bgra + (size_t)(N - 1 - y) * N * 4, (size_t)N * 4);
+}
+
+static BOOL st_aub_write_slot(int slot, int N, const wchar_t *path) {
+  int curBytes = st_cur_bytes(N), rateBytes = AUB_FRAMES * 4;
+  int listInner = 4 + AUB_FRAMES * (8 + curBytes);
+  int riffInner = 4 + (8 + 36) + (8 + rateBytes) + (8 + listInner);
+  int fileBytes = 8 + riffInner;
+  BYTE *file = (BYTE *)malloc((size_t)fileBytes);
+  BYTE *frame = (BYTE *)malloc((size_t)N * N * 4);
+  if (!file || !frame) {
+    free(file);
+    free(frame);
+    return FALSE;
+  }
+  memset(file, 0, (size_t)fileBytes);
+  st_put_tag(file, "RIFF");
+  st_put_u32(file + 4, (unsigned)riffInner);
+  st_put_tag(file + 8, "ACON");
+  BYTE *p = file + 12;
+  st_put_tag(p, "anih");
+  st_put_u32(p + 4, 36);
+  st_put_u32(p + 8, 36);
+  st_put_u32(p + 12, AUB_FRAMES);
+  st_put_u32(p + 16, AUB_FRAMES);
+  st_put_u32(p + 36, 6); /* jifRate: 6/60 с на кадр */
+  st_put_u32(p + 40, 1); /* AF_ICON */
+  p += 44;
+  st_put_tag(p, "rate");
+  st_put_u32(p + 4, (unsigned)rateBytes);
+  for (int i = 0; i < AUB_FRAMES; i++) st_put_u32(p + 8 + i * 4, 6);
+  p += 8 + rateBytes;
+  st_put_tag(p, "LIST");
+  st_put_u32(p + 4, (unsigned)listInner);
+  st_put_tag(p + 8, "fram");
+  p += 12;
+  int hx, hy;
+  st_hotspot(slot, &hx, &hy);
+  hx = hx * N / 32;
+  hy = hy * N / 32;
+  float saved = g_aubPhase;
+  for (int i = 0; i < AUB_FRAMES; i++) {
+    g_aubPhase = (i + 0.5f) / AUB_FRAMES;
+    st_draw(ST_AUBERGINE, slot, N, frame);
+    st_put_tag(p, "icon");
+    st_put_u32(p + 4, (unsigned)curBytes);
+    st_fill_cur(p + 8, frame, N, hx, hy);
+    p += 8 + curBytes;
+  }
+  g_aubPhase = saved;
+  BOOL ok = p == file + fileBytes;
+  if (ok) {
+    HANDLE h = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) ok = FALSE;
+    else {
+      DWORD w = 0;
+      WriteFile(h, file, (DWORD)fileBytes, &w, NULL);
+      CloseHandle(h);
+      ok = w == (DWORD)fileBytes;
+    }
+  }
+  if (!ok) DeleteFileW(path);
+  free(file);
+  free(frame);
+  return ok;
+}
+
+static BOOL st_aub_file_ok(const wchar_t *path) {
+  WIN32_FILE_ATTRIBUTE_DATA fa;
+  return GetFileAttributesExW(path, GetFileExInfoStandard, &fa) && fa.nFileSizeLow > 1000;
+}
+
+/* дорисовать недостающие .ani этого размера. FALSE — папки данных нет или запись не вышла */
+static BOOL st_aub_ensure(int N) {
+  if (!g_dataDir[0] || N < 32) return FALSE;
+  if (g_aubReadyN == N) return TRUE;
+  static const int slots[3] = {0, 2, 14};
+  for (int i = 0; i < 3; i++) {
+    wchar_t path[MAX_PATH];
+    st_aub_path(slots[i], N, path);
+    if (st_aub_file_ok(path)) continue;
+    if (!st_aub_write_slot(slots[i], N, path)) return FALSE;
+  }
+  g_aubReadyN = N;
+  return TRUE;
+}
+
+/* все шестнадцать видов. Анимированные — из .ani без копии. FALSE — ставим как обычно */
+static BOOL st_aub_install(void) {
+  int N = st_cursor_size();
+  if (!st_aub_ensure(N)) return FALSE;
+  for (int i = 0; i < ST_SLOTS; i++) {
+    if (!st_aub_anim_slot(i)) {
+      set_slot(g_stCur[ST_AUBERGINE][i], kRias[i].ocr);
+      continue;
+    }
+    wchar_t path[MAX_PATH];
+    st_aub_path(i, N, path);
+    HCURSOR c = (HCURSOR)LoadImageW(NULL, path, IMAGE_CURSOR, N, N, LR_LOADFROMFILE);
+    if (!c) {
+      set_slot(g_stCur[ST_AUBERGINE][i], kRias[i].ocr);
+      continue;
+    }
+    SetSystemCursor(c, kRias[i].ocr);
+  }
+  return TRUE;
+}
+
 /* поставить стиль вместо курсоров Windows; SetSystemCursor забирает курсор
-   себе, поэтому ставится копия, а нарисованный остаётся для следующего раза */
+   себе, поэтому ставится копия, а нарисованный остаётся для следующего раза.
+   У Баклажана стрелка, рука и ожидание — .ani: копия их заморозила бы. */
 static void style_apply(int st) {
   st_ensure(st);
+  if (st == ST_AUBERGINE && st_aub_install()) return;
   for (int i = 0; i < ST_SLOTS; i++) set_slot(g_stCur[st][i], kRias[i].ocr);
 }
 
@@ -882,6 +1068,12 @@ static void styles_free(void) {
         DestroyCursor(g_stCur[s][i]);
         g_stCur[s][i] = NULL;
       }
+  for (int i = 0; i < 2; i++)
+    if (g_pvAub[i]) {
+      DestroyCursor(g_pvAub[i]);
+      g_pvAub[i] = NULL;
+    }
+  g_pvAubN = 0;
 }
 
 /* ---- просмотр в Настройках ----------------------------------------------
@@ -905,6 +1097,25 @@ static HCURSOR g_pvWin[3];
 /* для просмотра: стрелка, рука и текст набора skin */
 static HCURSOR pv_cursor(int skin, int which) {
   static const int slotOf[3] = {0, 2, 1}; /* в порядке kRias: стрелка, рука, текст */
+  /* Баклажан: стрелка и рука — .ani, чтобы в окошке блик тоже бежал.
+     Кадр выбирает pv_ani_step: DrawIconEx сам мультик не крутит. */
+  if (skin == ST_SKIN0 + ST_AUBERGINE && which < 2) {
+    int N = st_cursor_size();
+    if (g_pvAubN != N) {
+      for (int i = 0; i < 2; i++)
+        if (g_pvAub[i]) {
+          DestroyCursor(g_pvAub[i]);
+          g_pvAub[i] = NULL;
+        }
+      g_pvAubN = N;
+    }
+    if (!g_pvAub[which] && st_aub_ensure(N)) {
+      wchar_t path[MAX_PATH];
+      st_aub_path(which == 0 ? 0 : 2, N, path);
+      g_pvAub[which] = (HCURSOR)LoadImageW(NULL, path, IMAGE_CURSOR, N, N, LR_LOADFROMFILE);
+    }
+    if (g_pvAub[which]) return g_pvAub[which];
+  }
   if (skin >= ST_SKIN0 && skin < ST_SKIN0 + ST_COUNT) {
     st_ensure(skin - ST_SKIN0);
     return g_stCur[skin - ST_SKIN0][slotOf[which]];
@@ -947,6 +1158,11 @@ static HCURSOR pv_cursor(int skin, int which) {
   return LoadCursorW(NULL, which == 0 ? IDC_ARROW : which == 1 ? IDC_HAND : IDC_IBEAM);
 }
 
+static UINT pv_ani_step(HCURSOR c) {
+  if (c && (c == g_pvAub[0] || c == g_pvAub[1])) return (UINT)((g_pvTick / 5) % AUB_FRAMES);
+  return 0;
+}
+
 static void pv_draw_cursor(HDC dc, HCURSOR c, int x, int y) {
   if (!c) return;
   ICONINFO ii;
@@ -957,7 +1173,7 @@ static void pv_draw_cursor(HDC dc, HCURSOR c, int x, int y) {
     if (ii.hbmMask) DeleteObject(ii.hbmMask);
     if (ii.hbmColor) DeleteObject(ii.hbmColor);
   }
-  DrawIconEx(dc, x - hx, y - hy, c, 0, 0, 0, NULL, DI_NORMAL);
+  DrawIconEx(dc, x - hx, y - hy, c, 0, 0, pv_ani_step(c), NULL, DI_NORMAL);
 }
 
 static int settings_skin_of_id(int id); /* cursorpad.c: кнопка какого курсора; -1 — не курсора */
@@ -1078,7 +1294,7 @@ static void pv_paint(HWND hwnd, HDC hdc) {
       HCURSOR c = pv_cursor(skin, i);
       if (!c) continue;
       int sz = GetSystemMetrics(SM_CXCURSOR);
-      DrawIconEx(mem, 37 - sz / 2, col.top + step * i + step / 2 - sz / 2, c, 0, 0, 0, NULL, DI_NORMAL);
+      DrawIconEx(mem, 37 - sz / 2, col.top + step * i + step / 2 - sz / 2, c, 0, 0, pv_ani_step(c), NULL, DI_NORMAL);
     }
   }
   /* бегающий курсор: рука, пока «нажимает», иначе стрелка */
