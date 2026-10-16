@@ -199,35 +199,35 @@ static int dr_otsu(const DrImg *m) {
   return thr;
 }
 
-/* перекос: угол, при котором линии таблиц и рамки собираются в самые острые
-   пики. Берём только точки длинных горизонтальных отрезков: текст сбивает. */
-static double dr_skew(const DrImg *m, int thr) {
-  int s = m->w / 1400 + 1;
-  int w = m->w / s, h = m->h / s;
-  int mn = m->w < m->h ? m->w : m->h, runMin = mn / 80 > 12 ? mn / 80 : 12;
+/* Перекос. У скана он бывает разным по горизонтали и по вертикали (лист
+   повело в сканере), поэтому меряем отдельно: vert = FALSE — по длинным
+   горизонтальным отрезкам (линии таблиц, рамка), TRUE — по вертикальным.
+   Угол — тот, при котором их точки собираются в самые острые пики. */
+static double dr_skew(const DrImg *m, int thr, BOOL vert) {
+  int W = vert ? m->h : m->w, H = vert ? m->w : m->h; /* вдоль и поперёк линий */
+  int s = (m->w > m->h ? m->w : m->h) / 1400 + 1;
+  int mn = m->w < m->h ? m->w : m->h, runMin = mn / 25 > 16 ? mn / 25 : 16; /* длиннее букв */
   int cap = 300000;
   int *pts = (int *)malloc(sizeof(int) * 2 * (size_t)cap);
   if (!pts) return 0;
   int n = 0;
-  for (int y = 0; y < m->h && n < cap; y += s) {
-    const BYTE *row = m->px + (size_t)y * m->w;
+  for (int v = 0; v < H && n < cap; v += s) {
     int start = -1;
-    for (int x = 0; x <= m->w; x++) {
-      BOOL d = x < m->w && row[x] < thr;
+    for (int u = 0; u <= W; u++) {
+      BOOL d = u < W && (vert ? m->px[(size_t)u * m->w + v] : m->px[(size_t)v * m->w + u]) < thr;
       if (d) {
-        if (start < 0) start = x;
+        if (start < 0) start = u;
         continue;
       }
-      if (start >= 0 && x - start >= runMin)
-        for (int q = start; q < x && n < cap; q += s) pts[2 * n] = q / s, pts[2 * n + 1] = y / s, n++;
+      if (start >= 0 && u - start >= runMin)
+        for (int q = start; q < u && n < cap; q += s) pts[2 * n] = q / s, pts[2 * n + 1] = v / s, n++;
       start = -1;
     }
   }
-  if (n < 200) { /* линий почти нет — по всем чернилам */
-    n = 0;
-    for (int y = 0; y < h && n < cap; y++)
-      for (int x = 0; x < w && n < cap; x++)
-        if (m->px[(size_t)y * s * m->w + (size_t)x * s] < thr) pts[2 * n] = x, pts[2 * n + 1] = y, n++;
+  int w = W / s, h = H / s;
+  if (n < 200) {
+    free(pts);
+    return 0;
   }
   int nb = h + w;
   double *bins = (double *)malloc(sizeof(double) * (size_t)nb);
@@ -236,10 +236,10 @@ static double dr_skew(const DrImg *m, int thr) {
     for (int pass = 0; pass < 2; pass++) {
       double a0 = pass ? bestA - 0.1 : -3.0, a1 = pass ? bestA + 0.1 : 3.0, st = pass ? 0.01 : 0.1;
       for (double a = a0; a <= a1 + 1e-9; a += st) {
-        double t = tan(a * 3.14159265358979 / 180.0);
+        double tt = tan(a * 3.14159265358979 / 180.0);
         memset(bins, 0, sizeof(double) * (size_t)nb);
         for (int i = 0; i < n; i++) {
-          int yy = (int)(pts[2 * i + 1] + pts[2 * i] * t + w / 2 + 0.5);
+          int yy = (int)(pts[2 * i + 1] + pts[2 * i] * tt + w / 2 + 0.5);
           if (yy >= 0 && yy < nb) bins[yy]++;
         }
         double sc = 0;
@@ -253,18 +253,17 @@ static double dr_skew(const DrImg *m, int thr) {
   return bestA;
 }
 
-/* выпрямить: угол из dr_skew; поворот вокруг центра, края — белые */
-static BOOL dr_deskew(DrImg *m, double deg) {
-  if (fabs(deg) < 0.04) return TRUE;
+/* выпрямить: горизонтали — сдвигом по y, вертикали — по x (углы из dr_skew) */
+static BOOL dr_deskew(DrImg *m, double ah, double av) {
+  if (fabs(ah) < 0.03 && fabs(av) < 0.03) return TRUE;
   DrImg o;
   if (!dr_img_new(&o, m->w, m->h)) return FALSE;
-  double t = tan(deg * 3.14159265358979 / 180.0), phi = -atan(t);
-  double c = cos(phi), s = sin(phi), cx = m->w / 2.0, cy = m->h / 2.0;
+  double th = tan(ah * 3.14159265358979 / 180.0), tv = tan(av * 3.14159265358979 / 180.0);
+  double cx = m->w / 2.0, cy = m->h / 2.0;
   for (int y = 0; y < m->h; y++) {
-    double yn = y - cy;
-    double xo = -cx * c - yn * s + cx, yo = -cx * s + yn * c + cy;
     BYTE *row = o.px + (size_t)y * m->w;
-    for (int x = 0; x < m->w; x++, xo += c, yo += s) {
+    double xo = 0 - (y - cy) * tv, yo = y + cx * th;
+    for (int x = 0; x < m->w; x++, xo += 1, yo -= th) {
       int ix = (int)floor(xo), iy = (int)floor(yo);
       if (ix < 0 || iy < 0 || ix >= m->w - 1 || iy >= m->h - 1) continue;
       double fx = xo - ix, fy = yo - iy;
@@ -422,29 +421,56 @@ typedef struct {
   double hmm;   /* высота штампа, мм */
 } DrStamp;
 
+/* есть ли точка горизонтали в столбце x в строках y±r */
+static BOOL dr_hband(const DrLines *L, int y, int x, int r) {
+  for (int q = y - r; q <= y + r; q++)
+    if (q >= 0 && q < L->m->h && L->hm[(size_t)q * L->m->w + x]) return TRUE;
+  return FALSE;
+}
+
 static int dr_cmp_int(const void *a, const void *b) { return *(const int *)a - *(const int *)b; }
 
-static BOOL dr_find_stamp(const DrLines *L, DrStamp *s, wchar_t *why, int cap) {
+static BOOL dr_find_stamp(const DrLines *L, double dpi, DrStamp *s, wchar_t *why, int cap) {
   const DrImg *m = L->m;
   memset(s, 0, sizeof(*s));
   /* нижняя линия рамки: самая нижняя строка, где линий больше трети ширины */
+  int r0 = (m->w < m->h ? m->w : m->h) / 700 + 1;
   int by = -1;
   for (double frac = 0.3; frac > 0.12 && by < 0; frac -= 0.15)
-    for (int y = m->h - 1; y >= m->h * 6 / 10; y--)
-      if (L->rowc[y] >= frac * m->w) {
+    for (int y = m->h - 1 - r0; y >= m->h * 6 / 10; y--) {
+      int sum = 0;
+      for (int q = y - r0; q <= y + r0; q++) sum += L->rowc[q];
+      if (sum >= frac * m->w) {
         by = y;
         break;
       }
+    }
+  /* тонкая линия с остатком перекоса расползается по соседним столбцам —
+     считаем полосой в несколько точек */
+  int r = (m->w < m->h ? m->w : m->h) / 700 + 1;
   int rx = -1;
   for (double frac = 0.3; frac > 0.12 && rx < 0; frac -= 0.15)
-    for (int x = m->w - 1; x >= m->w * 6 / 10; x--)
-      if (L->colc[x] >= frac * m->h) {
+    for (int x = m->w - 1 - r; x >= m->w * 6 / 10; x--) {
+      int sum = 0;
+      for (int q = x - r; q <= x + r; q++) sum += L->colc[q];
+      if (sum >= frac * m->h) {
         rx = x;
         break;
       }
+    }
   if (by < 0 || rx < 0) {
     _snwprintf(why, cap, L"рамка листа не найдена");
     return FALSE;
+  }
+  /* окно нашло линию где-то рядом — встаём на саму линию */
+  {
+    int bb = by, bx = rx;
+    for (int q = by - r0; q <= by + r0; q++)
+      if (q >= 0 && q < m->h && L->rowc[q] > L->rowc[bb]) bb = q;
+    for (int q = rx - r; q <= rx + r; q++)
+      if (q >= 0 && q < m->w && L->colc[q] > L->colc[bx]) bx = q;
+    by = bb;
+    rx = bx;
   }
   /* внутренний край толстой линии */
   while (by > 0 && L->rowc[by - 1] >= 0.12 * m->w) by--;
@@ -452,46 +478,71 @@ static BOOL dr_find_stamp(const DrLines *L, DrStamp *s, wchar_t *why, int cap) {
   s->rx = rx;
   s->by = by;
   /* ширина штампа: горизонтали, упёртые в правую рамку; самая «весомая»
-     длина (сколько строк × длина) — это 185 мм */
-  int tolT = 4 + m->w / 250;
-  int *len = (int *)malloc(sizeof(int) * (size_t)(L->nhr + 1));
+     длина (сколько строк × длина) — это 185 мм. Линия скана рвётся на
+     куски — идём от рамки влево по точкам линий, прощая разрывы до ~2 мм. */
+  int tolT = 4 + m->w / 250, gapW = m->w / 120 + 2;
+  int ylo = by - (int)(0.36 * m->h);
+  if (ylo < 0) ylo = 0;
+  int *len = (int *)malloc(sizeof(int) * (size_t)(by - ylo + 1));
   if (!len) return FALSE;
-  int nl = 0;
-  for (int i = 0; i < L->nhr; i++) {
-    const DrRun *r = &L->hr[i];
-    if (r->y >= by - 1 || r->x1 < rx - tolT || r->x0 >= rx) continue;
-    int l = rx - r->x0;
-    if (l < m->w / 9 || by - r->y > 0.36 * l) continue; /* штамп не выше 55/185 своей ширины */
+  int nl = 0, nhit = 0, maxl = 0;
+  /* полоса ±r0 строк: остаток перекоса уводит тонкую линию на соседние строки */
+#define DR_HB(yy, xx) dr_hband(L, yy, xx, r0)
+  for (int y = by - 2 - r0; y >= ylo; y--) {
+    int x = rx + 2 < m->w ? rx + 2 : m->w - 1, lastHit = -1;
+    if (!L->hm[(size_t)y * m->w + (rx - 1 > 0 ? rx - 1 : 0)] && !L->hm[(size_t)y * m->w + (rx - tolT / 2 > 0 ? rx - tolT / 2 : 0)])
+      continue; /* сама строка у рамки пустая — не линия */
+    for (; x >= rx - tolT && x >= 0; x--)
+      if (DR_HB(y, x)) {
+        lastHit = x;
+        break;
+      }
+    if (lastHit < 0) continue;
+    nhit++;
+    for (x = lastHit; x >= 0 && lastHit - x <= gapW; x--)
+      if (DR_HB(y, x)) lastHit = x;
+    int l = rx - lastHit;
+    if (l > maxl) maxl = l;
+    if (l < m->w / 9 || by - y > 0.36 * l) continue;
     len[nl++] = l;
   }
-  if (!nl) {
+#undef DR_HB
+  BOOL dpiOk = ts_dpi_known(dpi) && dpi >= 100 && dpi <= 1200;
+  if (!nl && !dpiOk) {
     free(len);
     _snwprintf(why, cap, L"нет линий штампа у правой рамки");
     return FALSE;
   }
-  qsort(len, (size_t)nl, sizeof(int), dr_cmp_int);
-  double bestV = -1;
-  int bestL = 0;
-  for (int i = 0; i < nl; i++) {
-    int cnt = 0;
-    for (int j = 0; j < nl; j++)
-      if (abs(len[j] - len[i]) <= len[i] / 50 + 2) cnt++;
-    double v = (double)cnt * len[i];
-    if (v > bestV) bestV = v, bestL = len[i];
-  }
-  /* медиана своей группы */
-  int g0 = -1, g1 = -1;
-  for (int i = 0; i < nl; i++)
-    if (abs(len[i] - bestL) <= bestL / 50 + 2) {
-      if (g0 < 0) g0 = i;
-      g1 = i;
+  int W = 0;
+  if (nl) {
+    qsort(len, (size_t)nl, sizeof(int), dr_cmp_int);
+    double bestV = -1;
+    int bestL = 0;
+    for (int i = 0; i < nl; i++) {
+      int cnt = 0;
+      for (int j = 0; j < nl; j++)
+        if (abs(len[j] - len[i]) <= len[i] / 50 + 2) cnt++;
+      double v = (double)cnt * len[i];
+      if (v > bestV) bestV = v, bestL = len[i];
     }
-  int W = len[(g0 + g1) / 2];
+    /* медиана своей группы */
+    int g0 = -1, g1 = -1;
+    for (int i = 0; i < nl; i++)
+      if (abs(len[i] - bestL) <= bestL / 50 + 2) {
+        if (g0 < 0) g0 = i;
+        g1 = i;
+      }
+    W = len[(g0 + g1) / 2];
+  }
   free(len);
+  /* dpi скана, если он настоящий, точнее: линия у правой рамки бывает и
+     шире штампа (у ведомостей таблица во всю ширину кончается на нём) */
+  if (dpiOk) W = (int)(185 * dpi / 25.4 + 0.5);
   s->k = W / 185.0;
   s->sl = rx - W;
   /* высота: вертикаль в 65 мм от левого края штампа */
-  int x65 = s->sl + (int)(65 * s->k + 0.5), hw = (int)(1.5 * s->k) + 1, tol = (int)(2 * s->k) + 2;
+  /* ±5 мм: старые бланки и покоробленный скан расходятся с ГОСТ на 2–3 мм */
+  int x65 = s->sl + (int)(65 * s->k + 0.5), hw = (int)(5 * s->k) + 1, tol = (int)(2 * s->k) + 2;
   int top = dr_vup(L, x65, hw, by, tol, (int)(1.2 * s->k) + 2);
   if (top < 0) {
     _snwprintf(why, cap, L"не найдена граница граф штампа [rx %d by %d W %d img %dx%d]", rx, by, W, m->w, m->h);
@@ -517,22 +568,67 @@ typedef struct {
   int field;
 } DrBox;
 
+/* графы — по ГОСТ, мм от левого верха штампа; края потом прижимаются к
+   найденным линиям (старые бланки расходятся с ГОСТ на 2–3 мм) */
 static const DrBox kDrForm1[] = {
-    {65.8, 0.8, 184.2, 14.2, DF_DES},     {65.8, 15.8, 134.2, 39.2, DF_NAME},
-    {65.8, 40.6, 134.2, 54.4, DF_MAT},    {150.8, 20.8, 166.2, 34.2, DF_MASS},
-    {167.8, 20.8, 184.2, 34.2, DF_SCALE}, {135.6, 35.5, 154.5, 39.6, DF_SHEET},
-    {155.6, 35.5, 184.4, 39.6, DF_SHEETS},
+    {65, 0, 185, 15, DF_DES},      {65, 15, 135, 40, DF_NAME},     {65, 40, 135, 55, DF_MAT},
+    {150, 20, 167, 35, DF_MASS},   {167, 20, 185, 35, DF_SCALE},   {135, 35, 155, 40, DF_SHEET},
+    {155, 35, 185, 40, DF_SHEETS},
 };
 static const DrBox kDrForm2[] = {
-    {65.8, 0.8, 184.2, 14.2, DF_DES},
-    {65.8, 15.8, 134.2, 39.2, DF_NAME},
-    {150.8, 20.6, 164.2, 24.6, DF_SHEET},
-    {165.8, 20.6, 184.2, 24.6, DF_SHEETS},
+    {65, 0, 185, 15, DF_DES},
+    {65, 15, 135, 40, DF_NAME},
+    {150, 20, 165, 25, DF_SHEET},
+    {165, 20, 185, 25, DF_SHEETS},
 };
 static const DrBox kDrForm2a[] = {
-    {65.8, 0.8, 174.2, 14.2, DF_DES},
-    {175.8, 7.6, 184.2, 14.4, DF_SHEET},
+    {65, 0, 175, 15, DF_DES},
+    {175, 7, 185, 15, DF_SHEET},
 };
+
+/* край графы x — к вертикали поблизости (в строках y0…y1), если она есть */
+static int dr_snap_x(const DrLines *L, int x, int y0, int y1, int rad) {
+  const DrImg *m = L->m;
+  int best = x, bestN = (y1 - y0) * 85 / 100; /* во всю высоту графы: буквы так не умеют */
+  for (int c = x - rad; c <= x + rad; c++) {
+    if (c < 0 || c >= m->w) continue;
+    int n = 0;
+    for (int y = y0; y < y1; y++)
+      if (y >= 0 && y < m->h) n += L->vm[(size_t)y * m->w + c];
+    if (n > bestN || (n == bestN && n > 0 && abs(c - x) < abs(best - x))) bestN = n, best = c;
+  }
+  return best;
+}
+
+static int dr_snap_y(const DrLines *L, int y, int x0, int x1, int rad) {
+  const DrImg *m = L->m;
+  int best = y, bestN = (x1 - x0) * 85 / 100;
+  for (int r = y - rad; r <= y + rad; r++) {
+    if (r < 0 || r >= m->h) continue;
+    int n = 0;
+    for (int x = x0; x < x1; x++)
+      if (x >= 0 && x < m->w) n += L->hm[(size_t)r * m->w + x];
+    if (n > bestN || (n == bestN && n > 0 && abs(r - y) < abs(best - y))) bestN = n, best = r;
+  }
+  return best;
+}
+
+/* графа → прямоугольник вырезки в точках: прижать к линиям, отступить внутрь */
+static void dr_box_rect(const DrLines *L, const DrStamp *s, const DrBox *b, int *rx0, int *ry0, int *rx1, int *ry1) {
+  double k = s->k;
+  int x0 = s->sl + (int)(b->x0 * k), x1 = s->sl + (int)(b->x1 * k);
+  int y0 = s->st + (int)(b->y0 * k), y1 = s->st + (int)(b->y1 * k);
+  int radx = (int)(4 * k), rady = (int)((b->y1 - b->y0) * k / 3);
+  if (rady > radx) rady = radx;
+  int mx = (int)(0.4 * k), my = (int)(0.4 * k);
+  int nx0 = dr_snap_x(L, x0, y0 + my, y1 - my, radx), nx1 = dr_snap_x(L, x1, y0 + my, y1 - my, radx);
+  int ny0 = dr_snap_y(L, y0, x0 + mx, x1 - mx, rady), ny1 = dr_snap_y(L, y1, x0 + mx, x1 - mx, rady);
+  int in = (int)(0.7 * k) + 1;
+  *rx0 = nx0 + in;
+  *rx1 = nx1 - in;
+  *ry0 = ny0 + in;
+  *ry1 = ny1 - in;
+}
 
 /* вырезка из страницы: линии длиннее lineMin (точек) стираются, мелкое —
    увеличивается до ~12 точек на мм (Tesseract любит буквы от 25 точек) */
@@ -854,6 +950,12 @@ static int dr_des_core(const wchar_t *s, int i) {
   if (j > 0 && s[j] == L'-') {
     int k = dr_digits(s, j + 1, 1, 5), dots = 0;
     if (k < 0) return -1;
+    if (s[k] == L'-') { /* «830-01-сб115», «830-01-77» */
+      int q = k + 1;
+      if ((s[q] == L'с' || s[q] == L'С') && (s[q + 1] == L'б' || s[q + 1] == L'Б')) q += 2;
+      int e = dr_digits(s, q, 1, 4);
+      if (e > 0) return e;
+    }
     while (s[k] == L'.' && dr_isdig(s[k + 1])) {
       int q = dr_digits(s, k + 1, 1, 3);
       if (q < 0) break;
@@ -862,12 +964,22 @@ static int dr_des_core(const wchar_t *s, int i) {
     }
     return dots ? k : -1; /* без точек — это номер ГОСТ («14637-89»), не обозначение */
   }
-  /* классификационное: 4 буквы . 6 цифр . 3 цифры */
   int l = 0;
   while (dr_isupper_cyr(s[i + l]) && l < 5) l++;
+  /* классификационное: 4 буквы . 6 цифр . 3 цифры */
   if (l == 4 && s[i + 4] == L'.') {
     int k = dr_digits(s, i + 5, 6, 6);
     if (k > 0 && s[k] == L'.') return dr_digits(s, k + 1, 3, 3);
+  }
+  /* документ ведомости: «АДЕ.830.МК», «АДЕ.830.01.ЗК» */
+  if (l >= 2 && s[i + l] == L'.') {
+    int k = dr_digits(s, i + l + 1, 2, 6);
+    while (k > 0 && s[k] == L'.' && dr_isdig(s[k + 1])) k = dr_digits(s, k + 1, 1, 4);
+    if (k > 0 && s[k] == L'.' && dr_isupper_cyr(s[k + 1])) {
+      int q = k + 1;
+      while (dr_isupper_cyr(s[q]) || dr_isdig(s[q])) q++;
+      if (q - k - 1 <= 4) return q;
+    }
   }
   return -1;
 }
@@ -911,20 +1023,28 @@ static void dr_norm_des(const wchar_t *in, wchar_t *out, int cap) {
     t[n++] = c;
   }
   t[n] = 0;
-  /* кусок без цифр — буквы: латиницу в кириллицу и в прописные */
+  /* латиница в обозначении — это кириллица («MK» → «МК»); кусок без цифр —
+     буквенный код, он прописными */
+  for (int k = 0; t[k]; k++) {
+    const wchar_t *q = wcschr(lat, t[k]);
+    if (q) t[k] = cyr[q - lat];
+  }
   for (int i = 0; t[i];) {
     int j = i;
     BOOL dig = FALSE;
     while (t[j] && t[j] != L' ') dig |= dr_isdig(t[j]), j++;
-    if (!dig)
-      for (int k = i; k < j; k++) {
-        const wchar_t *q = wcschr(lat, t[k]);
-        if (q) t[k] = cyr[q - lat];
+    if (!dig && j - i <= 5)
+      for (int k = i; k < j; k++)
         if (t[k] >= L'а' && t[k] <= L'я') t[k] = (wchar_t)(t[k] - 0x20);
-      }
     i = t[j] ? j + 1 : j;
   }
+  /* «сб» в «830-01-сб115» — буквы, хоть и рядом с цифрами: прячем от исправления */
+  for (int i = 0; t[i] && t[i + 1]; i++)
+    if ((t[i] == L'с' || t[i] == L'С') && (t[i + 1] == L'б' || t[i + 1] == L'Б') && i > 0 && t[i - 1] == L'-')
+      t[i] = t[i] == L'с' ? 0xE000 : 0xE001, t[i + 1] = t[i + 1] == L'б' ? 0xE002 : 0xE003;
   ocr_fix_query(t, out, cap);
+  for (int i = 0; out[i]; i++)
+    if (out[i] >= 0xE000 && out[i] <= 0xE003) out[i] = L"сСбБ"[out[i] - 0xE000];
   /* хвост из букв, прилипший к цифрам: «…01.02СБ» → «…01.02 СБ» */
   int l = (int)wcslen(out), k = l;
   while (k > 0 && dr_isupper_cyr(out[k - 1])) k--;
@@ -989,6 +1109,15 @@ static BOOL dr_number(const wchar_t *in, wchar_t *out, int cap, BOOL frac) {
 /* «Лист 2», «Листов 12» → «2», «12»: слово отбросить, взять цифры */
 static void dr_sheetnum(wchar_t *s) {
   wchar_t d[16];
+  /* машинописная «I» и «О» — тоже цифры, но только в отдельном слове из них */
+  for (int i = 0; s[i];) {
+    int j = i;
+    BOOL digitish = TRUE;
+    while (s[j] && s[j] != L' ') digitish &= dr_isdig(s[j]) || ocr_digitize(s[j]) != s[j], j++;
+    if (digitish)
+      for (int q = i; q < j; q++) s[q] = ocr_digitize(s[q]);
+    i = s[j] ? j + 1 : j;
+  }
   const wchar_t *p = s;
   while (*p && !dr_isdig(*p)) p++;
   if (!*p) {
@@ -1267,7 +1396,7 @@ static void dr_spec(DrImg *m, int thr, const DrLines *L, const DrStamp *s, DrPag
 }
 
 #ifdef SET_TEST
-static double g_drAng;
+static double g_drAng, g_drAngV;
 /* проверка: уменьшенная страница, линии красным/синим, штамп зелёным */
 static void dr_debug_img(const DrLines *L, const DrStamp *s, const DrPage *pg) {
   const DrImg *m = L->m;
@@ -1368,15 +1497,15 @@ static void dr_recognize(IWICImagingFactory *f, DrPage *pg) {
     return;
   }
   int thr = dr_otsu(&m);
-  double ang = dr_skew(&m, thr);
-  dr_deskew(&m, ang);
+  double ang = dr_skew(&m, thr, FALSE), angv = dr_skew(&m, thr, TRUE);
+  dr_deskew(&m, ang, angv);
 #ifdef SET_TEST
-  g_drAng = ang;
+  g_drAng = ang, g_drAngV = angv;
 #endif
   DrLines L;
   DrStamp s;
   wchar_t why[200] = {0};
-  BOOL stamp = dr_lines(&m, thr, &L) && dr_find_stamp(&L, &s, why, 200);
+  BOOL stamp = dr_lines(&m, thr, &L) && dr_find_stamp(&L, dpi, &s, why, 200);
 #ifdef SET_TEST
   if (getenv("CP_DRDEBUG")) dr_debug_img(&L, stamp ? &s : NULL, pg);
 #endif
@@ -1389,9 +1518,9 @@ static void dr_recognize(IWICImagingFactory *f, DrPage *pg) {
     int fld[8], n = 0;
     for (int i = 0; i < nb; i++) {
       const DrBox *b = &bx[i];
-      if (dr_crop(&m, thr, s.sl + (int)(b->x0 * k), s.st + (int)(b->y0 * k), s.sl + (int)(b->x1 * k),
-                  s.st + (int)(b->y1 * k), k, &crops[n]))
-        fld[n++] = b->field;
+      int x0, y0, x1, y1;
+      dr_box_rect(&L, &s, b, &x0, &y0, &x1, &y1);
+      if (dr_crop(&m, thr, x0, y0, x1, y1, k, &crops[n])) fld[n++] = b->field;
     }
     DrWords ws;
     memset(&ws, 0, sizeof(ws));
@@ -1502,8 +1631,8 @@ static void dr_test(int argc, wchar_t **argv) {
   for (int i = 0; i < l.n; i++) {
     DrPage *pg = &l.p[i];
     dr_recognize(f, pg);
-    sb_add(&b, L"== %s стр.%u · %s · форма %d · %s · %.1f с · %.2f°%s%s\n", tm_base(pg->path), pg->frame + 1,
-           kDrType[pg->type], pg->form, pg->fmt, pg->secs, g_drAng, pg->note[0] ? L" · " : L"", pg->note);
+    sb_add(&b, L"== %s стр.%u · %s · форма %d · %s · %.1f с · %.2f° %.2f°%s%s\n", tm_base(pg->path), pg->frame + 1,
+           kDrType[pg->type], pg->form, pg->fmt, pg->secs, g_drAng, g_drAngV, pg->note[0] ? L" · " : L"", pg->note);
     for (int k = 0; k < DF_N; k++)
       if (pg->f[k][0] || pg->doubt[k]) sb_add(&b, L"  %s%s: %s\n", pg->doubt[k] ? L"? " : L"", kDrField[k], pg->f[k]);
     for (int r = 0; r < pg->nrows; r++) {
