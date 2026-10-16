@@ -52,6 +52,8 @@ int ai_ask_async(const wchar_t *instruction, const wchar_t *text, DWORD timeoutM
 typedef struct AiTurn {
   int assistant;
   const wchar_t *text;
+  const BYTE *png; /* картинка к реплике (PNG); NULL — без картинки, нужна модель «С картинками» */
+  DWORD pngLen;
 } AiTurn;
 
 /* то же, что ai_ask_async, но с историей: старые реплики обрезаются, чтобы влезть
@@ -61,6 +63,7 @@ int ai_ask_chat_async(const wchar_t *instruction, const AiTurn *turns, int n, DW
                       UINT msg, void *user);
 int ai_chat_budget(void); /* символов истории и вопроса, которые уйдут модели */
 int ai_ctx_size(void);    /* окно контекста модели, токенов (вкладка «ИИ») */
+BOOL ai_vision_ready(void); /* можно ли присылать картинки: модель «С картинками» скачана или свой сервер */
 void ai_cancel(int id); /* ответ всё равно придёт — со статусом AI_CANCELLED */
 void ai_result_free(AiResult *r);
 
