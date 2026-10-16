@@ -4101,6 +4101,7 @@ static void create_settings(HWND owner) {
 #include "drawrec.c"    /* распознать чертёж: штамп, спецификация, тип листа */
 #include "drawrec_ui.c" /* окно «Распознать чертёж» */
 #include "drawrec_sort.c" /* «Разложить по папкам»: имена по штампу, копия, журнал, отмена */
+#include "ai_chat.c" /* «Спросить ИИ»: чат с локальной моделью, после окон чертежа */
 #include "nardy.c"
 #include "shashki.c" /* после нард: общий список «кто в сети» и мелочи работы с папкой */
 #include "hotkeys.c"    /* F8, F6, Pause… — какие назначены в Настройках */

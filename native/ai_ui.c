@@ -13,8 +13,9 @@
 #define ID_AI_BAR 512
 #define ID_AI_REPORT 513 /* «Скопировать отчёт» */
 #define ID_AI_LLAMA 514  /* «llama.cpp…» — указать скачанный руками архив */
+#define ID_AI_CTX 515    /* «Контекст…» — окно контекста модели: 2048…16384 по кругу */
 
-static HWND g_aiBtnReport, g_aiBtnLlama;
+static HWND g_aiBtnReport, g_aiBtnLlama, g_aiBtnCtx;
 static HWND g_aiChkOn, g_aiBtnTier[AI_TIERS], g_aiChkGpu, g_aiStat, g_aiBar, g_aiBtnDl, g_aiBtnTest, g_aiBtnDir,
     g_aiPathEdit, g_aiBtnBrowse;
 static int g_aiTestId;          /* идёт «Проверить» */
@@ -25,6 +26,9 @@ static void ai_ui_refresh(void) {
   SendMessageW(g_aiChkOn, BM_SETCHECK, g_aiOn ? BST_CHECKED : BST_UNCHECKED, 0);
   SendMessageW(g_aiChkGpu, BM_SETCHECK, g_aiGpu ? BST_CHECKED : BST_UNCHECKED, 0);
   for (int i = 0; i < AI_TIERS; i++) set_mark(g_aiBtnTier[i], g_aiTier == i && !g_aiModel[0], kAiTiers[i].button);
+  wchar_t cx[80];
+  _snwprintf(cx, 80, L"Контекст: %d токенов (история чата)", g_aiCtx);
+  SetWindowTextW(g_aiBtnCtx, cx);
   const AiTier *t = &kAiTiers[g_aiTier];
   ULONGLONG total = 0;
   for (int i = 0; i < t->nf; i++) total += t->f[i].size;
@@ -118,6 +122,7 @@ static void ai_ui_create(HWND p) {
                               WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 0, 0, 240, 26, p, (HMENU)(INT_PTR)ID_AI_ON,
                               NULL, NULL);
   for (int i = 0; i < AI_TIERS; i++) g_aiBtnTier[i] = mk_btn(p, kAiTiers[i].button, ID_AI_TIER + i);
+  g_aiBtnCtx = mk_btn(p, L"", ID_AI_CTX);
   g_aiChkGpu = CreateWindowExW(0, L"BUTTON", L"Считать на видеокарте (если в ней от 4 ГБ)",
                                WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 0, 0, 240, 26, p, (HMENU)(INT_PTR)ID_AI_GPU,
                                NULL, NULL);
@@ -150,6 +155,8 @@ static int ai_ui_layout(int pad, int y, int fullW, int cw, int btnH, int gap, in
   y += btnH + gap + lab;
   y += set_grid(g_aiBtnTier, AI_TIERS, 2, pad, y, fullW, btnH, gap);
   set_place(g_aiChkGpu, pad, y, fullW, btnH);
+  y += btnH + gap;
+  set_place(g_aiBtnCtx, pad, y, fullW, btnH);
   y += btnH + gap;
   set_place(g_aiStat, pad, y, fullW, 44);
   set_place(g_aiBar, pad, y + 46, fullW, 6);
@@ -341,6 +348,16 @@ static void ai_ui_pick_llama(HWND hwnd) {
 
 /* TRUE — команда наша */
 static BOOL ai_ui_command(HWND hwnd, int id, int code) {
+  if (id == ID_AI_CTX && code == BN_CLICKED) {
+    static const int kCtx[] = {2048, 4096, 8192, 16384};
+    int i = 0;
+    while (i < 3 && kCtx[i] != g_aiCtx) i++;
+    g_aiCtx = kCtx[(i + 1) % 4];
+    ai_server_stop(); /* при следующем запросе запустится с новым окном */
+    ai_save();
+    ai_ui_refresh();
+    return TRUE;
+  }
   if (id == ID_AI_ON && code == BN_CLICKED) {
     g_aiOn = SendMessageW(g_aiChkOn, BM_GETCHECK, 0, 0) == BST_CHECKED;
     if (!g_aiOn) ai_server_stop();

@@ -64,6 +64,7 @@ static const AiTier kAiTiers[AI_TIERS] = {
 /* --- настройки ------------------------------------------------------------ */
 static BOOL g_aiOn;                  /* по умолчанию выключен */
 static int g_aiTier = 1;             /* «Средний» */
+static int g_aiCtx = 8192;           /* окно контекста модели, токенов; на каждую из двух ячеек сервера — половина */
 static BOOL g_aiGpu;                 /* llama.cpp со сборкой Vulkan и слоями на видеокарте */
 static wchar_t g_aiModel[MAX_PATH];  /* своя модель .gguf; пусто — модель уровня */
 static wchar_t g_aiSrvExe[MAX_PATH]; /* llama-server.exe, указанный руками; пусто — скачанный */
@@ -229,7 +230,7 @@ static void ai_save(void) {
   _snwprintf(p, MAX_PATH, L"%s\\ai.txt", g_dataDir);
   char model[MAX_PATH * 3], buf[MAX_PATH * 6 + 300];
   WideCharToMultiByte(CP_UTF8, 0, g_aiModel, -1, model, sizeof(model), NULL, NULL);
-  int n = snprintf(buf, sizeof(buf), "on %d\r\ntier %d\r\ngpu %d\r\nmodel %s\r\n", g_aiOn ? 1 : 0, g_aiTier,
+  int n = snprintf(buf, sizeof(buf), "on %d\r\ntier %d\r\nctx %d\r\ngpu %d\r\nmodel %s\r\n", g_aiOn ? 1 : 0, g_aiTier, g_aiCtx,
                    g_aiGpu ? 1 : 0, model);
   if (g_aiSrvExe[0]) {
     char se[MAX_PATH * 3];
@@ -263,6 +264,7 @@ static void ai_load(void) {
     int v;
     if (sscanf(line, "on %d", &v) == 1) g_aiOn = v == 1;
     else if (sscanf(line, "tier %d", &v) == 1 && v >= 0 && v < AI_TIERS) g_aiTier = v;
+    else if (sscanf(line, "ctx %d", &v) == 1 && v >= 2048 && v <= 16384) g_aiCtx = v;
     else if (sscanf(line, "gpu %d", &v) == 1) g_aiGpu = v == 1;
     else if (!strncmp(line, "model ", 6)) MultiByteToWideChar(CP_UTF8, 0, line + 6, -1, g_aiModel, MAX_PATH);
     else if (!strncmp(line, "serverexe ", 10)) MultiByteToWideChar(CP_UTF8, 0, line + 10, -1, g_aiSrvExe, MAX_PATH);
@@ -652,8 +654,8 @@ static int ai_server_ensure(DWORD deadline, volatile LONG *cancel) {
     wchar_t cmd[MAX_PATH * 4 + 300], wkey[40];
     MultiByteToWideChar(CP_UTF8, 0, g_aiKey, -1, wkey, 40);
     int n = _snwprintf(cmd, MAX_PATH * 4 + 300,
-                       L"\"%s\" -m \"%s\" --host 127.0.0.1 --port %d --api-key %s -c 8192 -np 2 -t %d -ngl %d",
-                       exe, model, port, wkey, ai_cores(), gpu ? 99 : 0);
+                       L"\"%s\" -m \"%s\" --host 127.0.0.1 --port %d --api-key %s -c %d -np 2 -t %d -ngl %d",
+                       exe, model, port, wkey, g_aiCtx * 2, ai_cores(), gpu ? 99 : 0);
     if (mm[0] && n > 0) n += _snwprintf(cmd + n, MAX_PATH * 4 + 300 - n, L" --mmproj \"%s\"", mm);
     /* своя модель с дообучением: адаптер LoRA (lora*.gguf) рядом с ней подключается сам —
        так можно взять готовую модель и свой адаптер, обученный на своих документах */
@@ -1001,6 +1003,8 @@ static DWORD WINAPI ai_async_thread(LPVOID p) {
   return 0;
 }
 
+static int ai_ask_body(char *body, DWORD timeoutMs, HWND notify, UINT msg, void *user);
+
 int ai_ask_async(const wchar_t *instruction, const wchar_t *text, DWORD timeoutMs, HWND notify, UINT msg,
                  void *user) {
   if (ai_precheck() != AI_OK || !notify) return 0;
@@ -1008,6 +1012,58 @@ int ai_ask_async(const wchar_t *instruction, const wchar_t *text, DWORD timeoutM
   char *body = ai_body(instruction, u, 1024);
   free(u);
   if (!body) return 0;
+  return ai_ask_body(body, timeoutMs, notify, msg, user);
+}
+
+/* беседа: system, затем реплики; тело запроса — как у ai_body */
+static char *ai_body_chat(const wchar_t *instruction, const AiTurn *t, int n) {
+  char *sys = ai_json_str(instruction);
+  char **js = (char **)calloc(n > 0 ? n : 1, sizeof(char *));
+  if (!sys || !js) {
+    free(sys);
+    free(js);
+    return NULL;
+  }
+  size_t total = strlen(sys) + strlen(g_aiExtModel) + 400;
+  for (int i = 0; i < n; i++) {
+    js[i] = ai_json_str(t[i].text);
+    if (!js[i]) break;
+    total += strlen(js[i]) + 64;
+  }
+  char *b = NULL;
+  if (js[n - 1]) b = (char *)malloc(total);
+  if (b) {
+    size_t k = snprintf(b, total, "{\"model\":\"%s\",\"messages\":[{\"role\":\"system\",\"content\":%s}",
+                        g_aiExtModel[0] ? g_aiExtModel : "local", sys);
+    for (int i = 0; i < n; i++)
+      k += snprintf(b + k, total - k, ",{\"role\":\"%s\",\"content\":%s}", t[i].assistant ? "assistant" : "user",
+                    js[i]);
+    snprintf(b + k, total - k,
+             "],\"temperature\":0.2,\"max_tokens\":1024,\"stream\":true,\"cache_prompt\":true}");
+  }
+  for (int i = 0; i < n; i++) free(js[i]);
+  free(js);
+  free(sys);
+  return b;
+}
+
+int ai_chat_budget(void) { return (g_aiCtx - 1024 - 300) * 2; } /* ≈ 2 символа на токен: запас для русского */
+int ai_ctx_size(void) { return g_aiCtx; }
+
+int ai_ask_chat_async(const wchar_t *instruction, const AiTurn *turns, int n, DWORD timeoutMs, HWND notify,
+                      UINT msg, void *user) {
+  if (ai_precheck() != AI_OK || !notify || !turns || n < 1 || !turns[n - 1].text) return 0;
+  long budget = ai_chat_budget(), used = (long)wcslen(turns[n - 1].text);
+  if (used > budget) return 0;
+  int s = n - 1;
+  while (s > 0 && used + (long)wcslen(turns[s - 1].text) <= budget) used += (long)wcslen(turns[--s].text);
+  while (s < n - 1 && turns[s].assistant) s++; /* модель начинает с вопроса */
+  char *body = ai_body_chat(instruction, turns + s, n - s);
+  if (!body) return 0;
+  return ai_ask_body(body, timeoutMs, notify, msg, user);
+}
+
+static int ai_ask_body(char *body, DWORD timeoutMs, HWND notify, UINT msg, void *user) {
   AiAsync *a = (AiAsync *)calloc(1, sizeof(AiAsync));
   AiJob *j = a ? ai_job_new(body, timeoutMs) : NULL;
   if (!j) {

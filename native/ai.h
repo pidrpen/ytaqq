@@ -48,6 +48,19 @@ const wchar_t *ai_status_text(int status); /* «ИИ выключен», «не�
    спросить (ИИ выключен…): тогда сообщения не будет. */
 int ai_ask_async(const wchar_t *instruction, const wchar_t *text, DWORD timeoutMs, HWND notify, UINT msg,
                  void *user);
+/* беседа: реплики по порядку; assistant 0 — вопрос, 1 — ответ модели */
+typedef struct AiTurn {
+  int assistant;
+  const wchar_t *text;
+} AiTurn;
+
+/* то же, что ai_ask_async, но с историей: старые реплики обрезаются, чтобы влезть
+   в окно контекста (ai_chat_budget — сколько символов можно передать). Последняя
+   реплика — вопрос; больше ai_chat_budget — возвращает 0. */
+int ai_ask_chat_async(const wchar_t *instruction, const AiTurn *turns, int n, DWORD timeoutMs, HWND notify,
+                      UINT msg, void *user);
+int ai_chat_budget(void); /* символов истории и вопроса, которые уйдут модели */
+int ai_ctx_size(void);    /* окно контекста модели, токенов (вкладка «ИИ») */
 void ai_cancel(int id); /* ответ всё равно придёт — со статусом AI_CANCELLED */
 void ai_result_free(AiResult *r);
 
