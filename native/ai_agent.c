@@ -5,7 +5,7 @@
 static AgFs g_agFs;
 static int g_agSteps, g_agErrors;
 static wchar_t g_agNotes[AG_TEXT], g_agObservation[6000];
-static wchar_t g_agReadout[AG_TEXT];
+static wchar_t g_agReadout[100000];
 typedef struct {
   AgFs fs;
   wchar_t json[6000], observation[6000];
@@ -20,18 +20,13 @@ static BOOL g_agApplying;
 
 #include "ai_agent_prompt.h"
 
+#include "ai_agent_route.h"
 static BOOL ag_wants(const wchar_t *text) {
-  if (g_agPending) return TRUE;
-  wchar_t s[2000]; lstrcpynW(s, text, 2000); CharLowerBuffW(s, (DWORD)wcslen(s));
-  if (wcsstr(s, L"штамп") || wcsstr(s, L"из рамки")) return FALSE;
-  if (!wcsncmp(s, L"как ", 4) || !wcsncmp(s, L"что такое", 9) || !wcsncmp(s, L"объясни", 7)) return FALSE;
-  const wchar_t *verbs[] = {L"созда", L"создай", L"сдела", L"перемест", L"перенес", L"перенёс", L"скопир", L"копир", L"закин", L"засун", L"полож", L"перелож", L"собер", L"собрат", L"найд", L"найти", L"покаж", L"показа", L"откро", L"откры", L"переимен", L"разлож", L"рассорт", L"отсорт", L"прочит", L"удал", L"очист", L"сотр", L"стереть"};
-  BOOL action = FALSE, file = FALSE;
-  for (size_t i = 0; i < sizeof(verbs) / sizeof(verbs[0]); i++) if (wcsstr(s, verbs[i])) action = TRUE;
-  const wchar_t *nouns[] = {L"файл", L"папк", L"рабоч", L"загруз", L"документ", L"проводник", L"каталог", L"копию", L"резерв", L"stl", L"pdf", L"xlsx", L"формат", L"расширен", L"туда", L"отсюда"};
-  for (size_t i = 0; i < sizeof(nouns) / sizeof(nouns[0]); i++) if (wcsstr(s, nouns[i])) file = TRUE;
-  if (wcschr(s, L'\\') || wcschr(s, L'.')) file = TRUE;
-  return (action && file) || ac_is_file_cmd(text);
+  if (g_acLastDir[0]) {
+    wchar_t q[400]; lstrcpynW(q, text, 400); CharLowerBuffW(q, (DWORD)wcslen(q));
+    if (wcsstr(q, L"что там") || wcsstr(q, L"что в ней") || wcsstr(q, L"а там") || wcsstr(q, L"сколько там")) return TRUE;
+  }
+  return g_agPending || ag_file_intent(text) || ac_is_file_cmd(text);
 }
 
 static void ag_note(const wchar_t *tool, const wchar_t *observation) {
@@ -75,7 +70,7 @@ static BOOL ag_request(void) {
   for (int i = 0; i < g_agFs.count && i < 12 && wcslen(prompt) + MAX_PATH * 2 + 80 < (size_t)cap; i++) {
     AgAction *a = &g_agFs.plan[i];
     swprintf(prompt + wcslen(prompt), cap - wcslen(prompt), L"В плане: %ls %ls -> %ls\n",
-      a->kind == AG_DIR ? L"mkdir" : a->kind == AG_COPY ? L"copy" : a->kind == AG_MOVE ? L"move" : a->kind == AG_OPEN ? L"open" : L"rename", a->src, a->dst);
+      a->kind == AG_DIR ? L"mkdir" : a->kind == AG_COPY ? L"copy" : a->kind == AG_MOVE ? L"move" : a->kind == AG_OPEN ? L"open" : (a->kind == AG_DOCX || a->kind == AG_PLAIN) ? L"write" : L"rename", a->src, a->dst);
   }
   if (g_agFs.count > 12) wcscat(prompt, L"Остальные действия той же группы скрыты для экономии контекста; ориентируйся на результаты инструментов.\n");
   /* Keep the newest observations within the selected model's context. */
@@ -123,7 +118,7 @@ static void ag_preview(void) {
   swprintf(out, cap, L"План действий: %d. Диск пока не изменён.\r\n", g_agFs.count);
   for (int i = 0; i < g_agFs.count; i++) {
     AgAction *a = &g_agFs.plan[i];
-    const wchar_t *verb = a->kind == AG_DIR ? L"Создать папку" : a->kind == AG_COPY ? L"Копировать" : a->kind == AG_MOVE ? L"Переместить" : a->kind == AG_OPEN ? L"Открыть в проводнике" : L"Переименовать";
+    const wchar_t *verb = a->kind == AG_DIR ? L"Создать папку" : a->kind == AG_COPY ? L"Копировать" : a->kind == AG_MOVE ? L"Переместить" : a->kind == AG_OPEN ? L"Открыть в проводнике" : a->kind == AG_DOCX ? L"Создать Word-документ" : a->kind == AG_PLAIN ? L"Создать текстовый файл" : L"Переименовать";
     swprintf(out + wcslen(out), cap - wcslen(out), L"%ls: %ls%ls%ls\r\n", verb, a->src, a->src[0] ? L" → " : L"", a->dst);
   }
   ac_push(1, out); free(out);
@@ -154,7 +149,12 @@ static void ag_tool_ready(void *result) {
   if (state == 0 && ag_json(job->json, &parsed)) {
     const wchar_t *tool = ag_get(&parsed, L"tool");
     if (!wcscmp(tool, L"list") || !wcscmp(tool, L"find") || !wcscmp(tool, L"read")) {
-      if (wcslen(g_agReadout) + wcslen(job->observation) + 4 >= AG_TEXT) g_agReadout[0] = 0;
+      wchar_t actual[MAX_PATH];
+      const wchar_t *input = ag_get(&parsed, L"path"); if (!input[0]) input = ag_get(&parsed, L"src");
+      if (ag_path(&g_agFs, input, actual) && ag_dir(actual)) {
+        af_set_last(actual); lstrcpynW(g_agFs.last, actual, MAX_PATH);
+      }
+      if (wcslen(g_agReadout) + wcslen(job->observation) + 4 >= 100000) g_agReadout[0] = 0;
       wcscat(g_agReadout, job->observation); wcscat(g_agReadout, L"\r\n\r\n");
     }
   }

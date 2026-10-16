@@ -15,6 +15,7 @@
 #include "ai_agent_fs.c"
 #include "ai_agent_prompt.h"
 #include "ai_agent_schema.h"
+#include "ai_agent_route.h"
 static AgFs fs;
 static void json_string(const wchar_t *s) {
   putchar('"');
@@ -31,6 +32,7 @@ static void json_string(const wchar_t *s) {
 int wmain(int argc, wchar_t **argv) {
   if (argc == 2 && !wcscmp(argv[1], L"--system")) { json_string(kAgSystem); return 0; }
   if (argc == 2 && !wcscmp(argv[1], L"--schema")) { printf("{%s}\n", kAiAgentSchema + 1); return 0; }
+  if (argc == 3 && !wcscmp(argv[1], L"--route")) { printf("%d\n", ag_file_intent(argv[2]) ? 1 : 0); return 0; }
   if (argc != 2) return 2;
   ag_fs_init(&fs, L"C:\\protected-cursorpad", L"");
   if (!GetFullPathNameW(argv[1], MAX_PATH, fs.desktop, NULL) || !ag_dir(fs.desktop)) return 2;

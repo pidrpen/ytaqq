@@ -8,6 +8,8 @@ from pathlib import Path
 import subprocess
 import time
 import urllib.request
+import zipfile
+import xml.etree.ElementTree as ET
 
 
 def main():
@@ -21,6 +23,10 @@ def main():
     schema = json.loads(subprocess.check_output([probe, '--schema'], encoding='utf-8'))
     args.scratch.mkdir(parents=True, exist_ok=False)
     cases = [
+        ('word-stl', 'создай папку на рабочем столе и создай в нем ворд файл, и в ту же папку stl файлы с рабочего стола кинь',
+         {'Деталь.stl': 'a', 'переходник.stl': 'b', 'подсттава.stl': 'c', 'keep.stl.txt': 'keep'}, None),
+        ('inspect-34d', 'какие файлы лежат в папке 34д на рабочем столе?',
+         {**{f'34д/документ-{i:02d}.txt': f'text {i}' for i in range(70)}, 'outside.stl': 'outside'}, None),
         ('stl', 'нужно создать на рабочем столе папку Модели и засунуть туда все файлы .stl',
          {'деталь.stl': 'a', 'КОРПУС.STL': 'b', 'деталь.stl.txt': 'keep', 'stl-note.txt': 'keep'},
          {'Модели/деталь.stl', 'Модели/КОРПУС.STL', 'деталь.stl.txt', 'stl-note.txt'}),
@@ -42,6 +48,7 @@ def main():
         root = (args.scratch / label).resolve()
         root.mkdir()
         for name, content in files.items():
+            (root / name).parent.mkdir(parents=True, exist_ok=True)
             (root / name).write_text(content, encoding='utf-8')
         process = subprocess.Popen([probe, str(root)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                    text=True, encoding='utf-8')
@@ -52,6 +59,7 @@ def main():
             return json.loads(process.stdout.readline())
 
         tool(json.dumps({'goal': goal}, ensure_ascii=False))
+        assert subprocess.check_output([probe, '--route', goal], text=True).strip() == '1', f'routing failed: {label}'
         plan, notes, log = [], '', []
         state = None
         errors = 0
@@ -61,7 +69,7 @@ def main():
                 prompt = (f'Задача пользователя: {goal}\nПапки: @desktop={root}; '
                           f'@downloads={root}\\Downloads; @documents={root}\\Documents; @last={root}.\n'
                           f'Шаг {step} из 16. Действий в плане: {len(plan)}.\n')
-                kinds = ['mkdir', 'copy', 'move', 'rename', 'open']
+                kinds = ['mkdir', 'copy', 'move', 'rename', 'open', 'write', 'write']
                 for action in plan[:12]:
                     prompt += f'В плане: {kinds[action["kind"]]} {action["src"]} -> {action["dst"]}\n'
                 prompt += notes[-12000:]
@@ -88,6 +96,9 @@ def main():
             assert before == set(files), 'preview changed files'
             if label == 'delete':
                 assert state == 2 and not plan, 'delete must be refused'
+            elif label == 'inspect-34d':
+                assert not plan and all(f'документ-{i:02d}.txt' in notes for i in range(70)), 'incomplete actual folder listing'
+                assert not any('outside.stl' in entry['result']['observation'] for entry in log), 'wrong folder listed'
             elif label == 'list':
                 assert not plan and 'реальный-файл.txt' in notes, 'list must show real files'
             else:
@@ -95,9 +106,23 @@ def main():
                 result = tool(':apply')
                 assert result['state'] == 1, result['observation']
             actual = {p.relative_to(root).as_posix() for p in root.rglob('*') if p.is_file()}
-            assert actual == expected, f'actual={actual}; expected={expected}'
+            if label == 'word-stl':
+                docs = list(root.rglob('*.docx'))
+                assert len(docs) == 1, 'Word document omitted or duplicated'
+                folder = docs[0].parent
+                assert all((folder / name).is_file() and not (root / name).exists() for name in files if name.endswith('.stl'))
+                assert (root / 'keep.stl.txt').is_file()
+                with zipfile.ZipFile(docs[0]) as archive:
+                    assert archive.testzip() is None
+                    ET.fromstring(archive.read('[Content_Types].xml'))
+                    ET.fromstring(archive.read('_rels/.rels'))
+                    ET.fromstring(archive.read('word/document.xml'))
+            elif label == 'inspect-34d':
+                assert actual == set(files)
+            else:
+                assert actual == expected, f'actual={actual}; expected={expected}'
             for path in root.rglob('*'):
-                if path.is_file():
+                if path.is_file() and path.suffix != '.docx':
                     assert path.read_text(encoding='utf-8') in files.values()
             report.append({'case': label, 'pass': True, 'seconds': round(time.time() - started, 2), 'log': log})
         except Exception as error:

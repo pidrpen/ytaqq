@@ -12,6 +12,7 @@
 #include <wchar.h>
 #include <wctype.h>
 #include "ai_agent_fs.c"
+#include "ai_agent_route.h"
 static AgFs fs;
 static wchar_t result[6000], scratch[MAX_PATH];
 static int checks;
@@ -45,6 +46,11 @@ int wmain(int argc, wchar_t **argv) {
   tag.dwReserved0 = 0xa0000003UL; CHECK(ag_redirect(&tag)); /* junction */
   tag.dwReserved0 = 0xa000000cUL; CHECK(ag_redirect(&tag)); /* symlink */
   reset();
+  CHECK(ag_file_intent(L"какие файлы лежат в папке 34д на рабочем столе?"));
+  CHECK(ag_file_intent(L"сколько файлов в загрузках?"));
+  CHECK(!ag_file_intent(L"Что такое файл STL?"));
+  CHECK(ag_needs_word(L"создай папку и создай в ней ворд и перенеси STL"));
+  CHECK(!ag_needs_word(L"создай папку и скопируй в неё ворд файл"));
   wchar_t p[MAX_PATH];
   CHECK(ag_path(&fs, L"@desktop\\Модели", p));
   CHECK(!ag_path(&fs, L"@desktop\\..\\outside", p));
@@ -102,6 +108,19 @@ int wmain(int argc, wchar_t **argv) {
   for (int i = 0; i < 513; i++) { wchar_t name[40]; swprintf(name, 40, L"limit-%d.test", i); touch(name, "x"); }
   CHECK(run(L"{\"tool\":\"move\",\"src\":\"@desktop\",\"dst\":\"@desktop\\\\TooMany\",\"pattern\":\"*.test\"}") < 0);
   CHECK(fs.count == 0); CHECK(!exists(L"TooMany")); CHECK(exists(L"limit-512.test"));
-  printf("PASS: %d checks; filesystem tools, preview, apply, collisions, races, limits, malformed JSON.\n", checks);
+  reset();
+  lstrcpynW(fs.goal, L"Создай папку и в ней ворд файл и туда STL", 4000);
+  CHECK(run(L"{\"tool\":\"done\"}") < 0);
+  CHECK(run(L"{\"tool\":\"write\",\"path\":\"@desktop\\\\WordTest\\\\Документ.docx\",\"text\":\"Текст & <проверка>\\nВторая строка\"}") == 0);
+  CHECK(!exists(L"WordTest")); CHECK(run(L"{\"tool\":\"done\"}") == 1);
+  CHECK(ag_apply(&fs, result, 6000)); CHECK(exists(L"WordTest\\Документ.docx"));
+  reset();
+  CHECK(run(L"{\"tool\":\"write\",\"path\":\"@desktop\\\\WordTest\\\\Документ.docx\",\"text\":\"\"}") == 0);
+  CHECK(wcsstr(fs.plan[0].dst, L"(2)")); CHECK(ag_apply(&fs, result, 6000));
+  CHECK(run(L"{\"tool\":\"write\",\"path\":\"@desktop\\\\evil.exe\"}") < 0);
+  reset();
+  CHECK(run(L"{\"tool\":\"list\",\"path\":\"@desktop\"}") == 0); CHECK(wcsstr(result, L"НЕПОЛНЫЙ"));
+  CHECK(run(L"{\"tool\":\"list\",\"path\":\"@desktop\",\"offset\":\"-1\"}") < 0);
+  printf("PASS: %d checks; filesystem tools, routing, docx, completeness, paging.\n", checks);
   return 0;
 }
