@@ -136,26 +136,31 @@ static BOOL ai_server_exe(BOOL gpu, wchar_t *out) {
   return found;
 }
 
+/* файл по маске рядом с моделью (в той же папке) — в out полный путь */
+static BOOL ai_find_near(const wchar_t *model, const wchar_t *mask, wchar_t *out) {
+  out[0] = 0;
+  wchar_t m[MAX_PATH];
+  lstrcpynW(m, model, MAX_PATH);
+  wchar_t *sl = wcsrchr(m, L'\\');
+  if (!sl || (size_t)(sl - m) + wcslen(mask) + 2 >= MAX_PATH) return FALSE;
+  wcscpy(sl + 1, mask);
+  WIN32_FIND_DATAW fd;
+  HANDLE h = FindFirstFileW(m, &fd);
+  if (h == INVALID_HANDLE_VALUE) return FALSE;
+  *sl = 0;
+  _snwprintf(out, MAX_PATH, L"%s\\%s", m, fd.cFileName);
+  out[MAX_PATH - 1] = 0;
+  FindClose(h);
+  return TRUE;
+}
+
 /* какую модель запускать: своя или уровня; mm — проектор картинок или пусто */
 static BOOL ai_pick_model(wchar_t *model, wchar_t *mm) {
   mm[0] = 0;
   if (g_aiModel[0]) {
     if (!ai_file_exists(g_aiModel)) return FALSE;
     lstrcpynW(model, g_aiModel, MAX_PATH);
-    /* рядом mmproj*.gguf — значит, модель с картинками */
-    wchar_t mask[MAX_PATH];
-    lstrcpynW(mask, g_aiModel, MAX_PATH);
-    wchar_t *sl = wcsrchr(mask, L'\\');
-    if (sl) {
-      wcscpy(sl + 1, L"mmproj*.gguf");
-      WIN32_FIND_DATAW fd;
-      HANDLE h = FindFirstFileW(mask, &fd);
-      if (h != INVALID_HANDLE_VALUE) {
-        *sl = 0;
-        _snwprintf(mm, MAX_PATH, L"%s\\%s", mask, fd.cFileName);
-        FindClose(h);
-      }
-    }
+    ai_find_near(g_aiModel, L"mmproj*.gguf", mm); /* рядом mmproj — модель с картинками */
     return TRUE;
   }
   if (!ai_tier_ready(g_aiTier)) return FALSE;
@@ -584,13 +589,18 @@ static int ai_server_ensure(DWORD deadline, volatile LONG *cancel) {
   g_aiSrvNote[0] = 0;
   for (int attempt = 0; attempt < 4 && rc != AI_OK; attempt++) {
     int port = AI_PORT0 + attempt * 7;
-    wchar_t cmd[MAX_PATH * 3 + 300], wkey[40];
+    wchar_t cmd[MAX_PATH * 4 + 300], wkey[40];
     MultiByteToWideChar(CP_UTF8, 0, g_aiKey, -1, wkey, 40);
-    int n = _snwprintf(cmd, MAX_PATH * 3 + 300,
+    int n = _snwprintf(cmd, MAX_PATH * 4 + 300,
                        L"\"%s\" -m \"%s\" --host 127.0.0.1 --port %d --api-key %s -c 8192 -np 2 -t %d -ngl %d",
                        exe, model, port, wkey, ai_cores(), gpu ? 99 : 0);
-    if (mm[0] && n > 0) _snwprintf(cmd + n, MAX_PATH * 3 + 300 - n, L" --mmproj \"%s\"", mm);
-    cmd[MAX_PATH * 3 + 299] = 0;
+    if (mm[0] && n > 0) n += _snwprintf(cmd + n, MAX_PATH * 4 + 300 - n, L" --mmproj \"%s\"", mm);
+    /* своя модель с дообучением: адаптер LoRA (lora*.gguf) рядом с ней подключается сам —
+       так можно взять готовую модель и свой адаптер, обученный на своих документах */
+    wchar_t lora[MAX_PATH];
+    if (g_aiModel[0] && n > 0 && ai_find_near(g_aiModel, L"lora*.gguf", lora))
+      _snwprintf(cmd + n, MAX_PATH * 4 + 300 - n, L" --lora \"%s\"", lora);
+    cmd[MAX_PATH * 4 + 299] = 0;
     SECURITY_ATTRIBUTES sa = {sizeof(sa), NULL, TRUE};
     HANDLE lf = CreateFileW(log, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, CREATE_ALWAYS,
                             FILE_ATTRIBUTE_NORMAL, NULL);
