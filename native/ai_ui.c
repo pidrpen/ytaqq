@@ -60,8 +60,57 @@ static void ai_ui_refresh(void) {
   InvalidateRect(g_aiBtnDl, NULL, FALSE);
 }
 
+/* «Сопоставить с Союзом» (match.c) спрашивает, когда правила не уверены. ИИ выключен
+   или не ответил — 0, и остаётся порядок правил. Два таймаута подряд — ИИ не
+   спрашиваем 10 минут: на медленном компьютере сотня неясных строк иначе
+   растянулась бы на час. */
+static volatile LONG g_aiMtFails;
+static volatile DWORD g_aiMtPause;
+
+static int ai_mt_rank(const wchar_t *des, const wchar_t *name, MtAiCand *cand, int n, int *order) {
+  int all = n;
+  if (!ai_ready() || n < 2) return 0;
+  if (g_aiMtFails >= 2) {
+    if (GetTickCount() - g_aiMtPause < 10 * 60 * 1000) return 0;
+    InterlockedExchange(&g_aiMtFails, 0);
+  }
+  if (n > 40) n = 40;
+  wchar_t q[600], *txt[40];
+  const wchar_t *cp[40];
+  _snwprintf(q, 600, L"%s %s", des ? des : L"", name ? name : L"");
+  q[599] = 0;
+  for (int i = 0; i < n; i++) {
+    txt[i] = (wchar_t *)malloc(600 * sizeof(wchar_t));
+    if (txt[i]) {
+      _snwprintf(txt[i], 600, L"%s %s", cand[i].des ? cand[i].des : L"", cand[i].name ? cand[i].name : L"");
+      txt[i][599] = 0;
+    }
+    cp[i] = txt[i] ? txt[i] : L"";
+  }
+  int pick[40];
+  DWORD t0 = GetTickCount();
+  int got = ai_rank_candidates(q, cp, n, pick, 30000);
+  for (int i = 0; i < n; i++) free(txt[i]);
+  if (!got) {
+    if (GetTickCount() - t0 >= 29000 && InterlockedIncrement(&g_aiMtFails) >= 2) g_aiMtPause = GetTickCount();
+    return 0;
+  }
+  InterlockedExchange(&g_aiMtFails, 0);
+  /* названные ИИ — вперёд, остальные в порядке правил */
+  BOOL used[40] = {0};
+  int k = 0;
+  for (int i = 0; i < got; i++) {
+    order[k++] = pick[i];
+    used[pick[i]] = TRUE;
+  }
+  for (int i = 0; i < all; i++)
+    if (i >= 40 || !used[i]) order[k++] = i;
+  return 1;
+}
+
 static void ai_ui_create(HWND p) {
   ai_load();
+  mt_set_ai_ranker(ai_mt_rank);
   g_aiChkOn = CreateWindowExW(0, L"BUTTON", L"Включить ИИ (без интернета)",
                               WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 0, 0, 240, 26, p, (HMENU)(INT_PTR)ID_AI_ON,
                               NULL, NULL);

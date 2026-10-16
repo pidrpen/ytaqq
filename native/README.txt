@@ -1687,3 +1687,22 @@ Windows SmartScreen
 Предупреждение компилятора считается ошибкой — их ноль, и пусть так и будет. Номер
 выпуска правится в version.h и version.txt; если они разошлись, сборка остановится.
 public/version.txt скрипт обновляет сам.
+
+Локальный ИИ (2026.10.16.2)
+
+Вкладка «ИИ» в Настройках. Всё на этом компьютере: CursorPad запускает
+llama.cpp (llama-server.exe) на 127.0.0.1 с одноразовым ключом, в задании Windows —
+сервер умирает вместе с CursorPad и гасится сам после 10 минут без запросов.
+«Скачать модель» качает в %LOCALAPPDATA%\CursorPad\ai: модель GGUF с huggingface.co
+(ревизия закреплена, размер и sha256 сверяются, докачка .part) и последний выпуск
+llama.cpp с GitHub (sha256 из описания выпуска; распаковка tar.exe Windows).
+Уровни: Слабый — Qwen2.5 1.5B (1,1 ГБ), Средний — Qwen3 4B Instruct 2507 (2,5 ГБ),
+Мощный — Qwen2.5 7B (4,7 ГБ), С картинками — Qwen3-VL 4B + mmproj (3,3 ГБ).
+«Считать на видеокарте» берёт сборку llama.cpp с Vulkan и все слои на GPU.
+Можно указать свою модель .gguf; mmproj*.gguf рядом с ней включает картинки.
+Свой сервер вместо llama-server (Ollama и т.п., только этот компьютер): строка
+«server 127.0.0.1 11434 qwen3:4b» в ai.txt.
+Для программистов: ai.h — запросы в фоне (ai_ask_async), из рабочих потоков
+(ai_ask_sync, ai_ask_image_sync) и точки расширения ai_refine_field и
+ai_rank_candidates. Код — ai_local.c, вкладка — ai_ui.c. Проверка в Wine:
+сборка с -DSET_TEST, --aitest отчёт.txt модель.gguf (llama-server.exe в ai\llama).

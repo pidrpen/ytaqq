@@ -397,7 +397,7 @@ static wchar_t g_aiSrvNote[200];    /* почему не запустился �
 /* простой HTTP к 127.0.0.1. reqSlot — куда положить ручку запроса, чтобы
    другой поток мог оборвать его, закрыв её. Возвращает код HTTP или 0. */
 static DWORD ai_http(const wchar_t *verb, int port, const wchar_t *path, const char *body, const char *key,
-                     DWORD timeoutMs, void *volatile *reqSlot, char **out) {
+                     DWORD timeoutMs, void *volatile *reqSlot, volatile LONG *abort, char **out) {
   if (out) *out = NULL;
   DWORD status = 0;
   HINTERNET ses = WinHttpOpen(L"CursorPad-AI", WINHTTP_ACCESS_TYPE_NO_PROXY, WINHTTP_NO_PROXY_NAME,
@@ -411,7 +411,9 @@ static DWORD ai_http(const wchar_t *verb, int port, const wchar_t *path, const c
                       : NULL;
   if (req) {
     if (reqSlot) InterlockedExchangePointer((void *volatile *)reqSlot, req);
-    wchar_t hdr[160] = L"Content-Type: application/json\r\n";
+    /* без keep-alive: после ответа потоком сервер закрывает соединение, а WinHTTP
+       (в Wine — точно) пытался отправить следующий запрос в уже закрытое */
+    wchar_t hdr[200] = L"Content-Type: application/json\r\nConnection: close\r\n";
     if (key && key[0]) {
       wchar_t wk[48];
       MultiByteToWideChar(CP_UTF8, 0, key, -1, wk, 48);
@@ -426,6 +428,12 @@ static DWORD ai_http(const wchar_t *verb, int port, const wchar_t *path, const c
       char *buf = out ? (char *)malloc(cap) : NULL;
       for (;;) {
         DWORD avail = 0, got = 0;
+        /* отмена: бросаем чтение и закрываем соединение — llama-server, не сумев
+           отправить следующее слово, сам прекращает генерацию */
+        if (abort && *abort) {
+          status = 0;
+          break;
+        }
         if (!WinHttpQueryDataAvailable(req, &avail) || !avail) break;
         if (!buf) { /* тело не нужно — дочитать впустую */
           char tmp[4096];
@@ -627,7 +635,7 @@ static int ai_server_ensure(DWORD deadline, volatile LONG *cancel) {
         attempt = 99;
         break;
       }
-      if (ai_http(L"GET", port, L"/health", NULL, NULL, 1500, NULL, NULL) == 200) {
+      if (ai_http(L"GET", port, L"/health", NULL, NULL, 1500, NULL, NULL, NULL) == 200) {
         rc = AI_OK;
         break;
       }
@@ -664,6 +672,7 @@ typedef struct AiJob {
   int status;
   wchar_t *text;
   DWORD ms;
+  volatile LONG refs;
   struct AiJob *next;
 } AiJob;
 
@@ -683,10 +692,44 @@ static char *ai_body(const wchar_t *instruction, const char *userContent, int ma
     snprintf(b, n,
              "{\"model\":\"%s\",\"messages\":[{\"role\":\"system\",\"content\":%s},"
              "{\"role\":\"user\",\"content\":%s}],\"temperature\":0.2,\"max_tokens\":%d,"
-             "\"stream\":false,\"cache_prompt\":true}",
+             "\"stream\":true,\"cache_prompt\":true}",
              g_aiExtModel[0] ? g_aiExtModel : "local", sys, userContent, maxTokens);
   free(sys);
   return b;
+}
+
+/* ответ потоком (SSE): строки «data: {…"delta":{"content":"кусок"}…}» — склеить куски */
+static wchar_t *ai_sse_text(const char *s) {
+  size_t cap = 256, n = 0;
+  wchar_t *acc = (wchar_t *)malloc(cap * sizeof(wchar_t));
+  if (!acc) return NULL;
+  acc[0] = 0;
+  for (const char *p = strstr(s, "data:"); p; p = strstr(p + 5, "data:")) {
+    const char *eol = strchr(p, '\n');
+    size_t ln = eol ? (size_t)(eol - p) : strlen(p);
+    char *line = (char *)malloc(ln + 1);
+    if (!line) break;
+    memcpy(line, p, ln);
+    line[ln] = 0;
+    const char *c = json_find_string(line, "content");
+    wchar_t *piece = c ? ai_json_unstr(c) : NULL;
+    free(line);
+    if (!piece) continue;
+    size_t pl = wcslen(piece);
+    if (n + pl + 1 > cap) {
+      while (n + pl + 1 > cap) cap *= 2;
+      wchar_t *na = (wchar_t *)realloc(acc, cap * sizeof(wchar_t));
+      if (!na) {
+        free(piece);
+        break;
+      }
+      acc = na;
+    }
+    wmemcpy(acc + n, piece, pl + 1);
+    n += pl;
+    free(piece);
+  }
+  return acc;
 }
 
 static void ai_job_run(AiJob *j) {
@@ -703,13 +746,23 @@ static void ai_job_run(AiJob *j) {
     if ((LONG)left < 1000) left = 1000;
     char *resp = NULL;
     int port = ai_ext() ? g_aiExtPort : g_aiPort;
-    DWORD code = j->cancel ? 0 : ai_http(L"POST", port, L"/v1/chat/completions", j->body, ai_ext() ? NULL : g_aiKey,
-                                         left, &j->req, &resp);
+    DWORD code = 0;
+    for (int tr = 0; tr < 2 && !code && !j->cancel; tr++) { /* сразу не ушло — ещё раз, по новому соединению */
+      DWORD t1 = GetTickCount();
+      code = ai_http(L"POST", port, L"/v1/chat/completions", j->body, ai_ext() ? NULL : g_aiKey, left, &j->req,
+                     &j->cancel, &resp);
+      if (code || GetTickCount() - t1 > 1000) break;
+      free(resp);
+      resp = NULL;
+    }
     if (j->cancel) st = AI_CANCELLED;
     else if (!code) st = GetTickCount() - t0 >= j->timeout - 500 ? AI_TIMEOUT : AI_NO_SERVER;
     else {
-      const char *c = resp ? json_find_string(resp, code == 200 ? "content" : "message") : NULL;
-      if (c) j->text = ai_json_unstr(c);
+      if (code == 200 && resp && strstr(resp, "data:")) j->text = ai_sse_text(resp);
+      else {
+        const char *c = resp ? json_find_string(resp, code == 200 ? "content" : "message") : NULL;
+        if (c) j->text = ai_json_unstr(c);
+      }
       if (code == 200 && j->text) {
         ai_tidy(j->text);
         st = AI_OK;
@@ -731,40 +784,32 @@ static void ai_job_run(AiJob *j) {
   if (!j->text) j->text = _wcsdup(ai_status_text(st));
 }
 
-static void ai_job_free(AiJob *j) {
-  free(j->body);
-  free(j->text);
-  free(j);
-}
-
-static void ai_job_unlist(AiJob *j) {
+/* У запроса два хозяина: поток, который ходит к серверу, и тот, кто ждёт ответа.
+   Ждущий не зависит от того, оборвёт ли WinHTTP запрос по закрытию ручки или по
+   таймауту (в Wine — не обрывает): по отмене или сроку он бросает запрос и
+   отвечает сразу, а ходящий поток доделает своё и освободит job сам — кто
+   последний, тот и освобождает. */
+static void ai_job_release(AiJob *j) {
   AcquireSRWLockExclusive(&g_aiJobLock);
-  for (AiJob **pp = &g_aiJobs; *pp; pp = &(*pp)->next)
-    if (*pp == j) {
-      *pp = j->next;
-      break;
-    }
+  BOOL last = InterlockedDecrement(&j->refs) == 0;
+  if (last)
+    for (AiJob **pp = &g_aiJobs; *pp; pp = &(*pp)->next)
+      if (*pp == j) {
+        *pp = j->next;
+        break;
+      }
   ReleaseSRWLockExclusive(&g_aiJobLock);
+  if (last) {
+    free(j->body);
+    free(j->text);
+    free(j);
+  }
 }
 
-static DWORD WINAPI ai_job_thread(LPVOID p) {
+static DWORD WINAPI ai_worker(LPVOID p) {
   AiJob *j = (AiJob *)p;
   ai_job_run(j);
-  ai_job_unlist(j);
-  if (j->notify) {
-    AiResult *r = (AiResult *)calloc(1, sizeof(AiResult));
-    if (r) {
-      r->id = j->id;
-      r->status = j->status;
-      r->text = j->text;
-      r->user = j->user;
-      r->ms = j->ms;
-      j->text = NULL;
-      if (!PostMessageW(j->notify, j->msg, 0, (LPARAM)r)) ai_result_free(r); /* окно закрыто */
-    }
-    ai_job_free(j);
-  }
-  /* без notify — синхронный вызов: job освобождает тот, кто ждёт */
+  ai_job_release(j);
   return 0;
 }
 
@@ -777,6 +822,7 @@ static AiJob *ai_job_new(char *body, DWORD timeoutMs) {
   j->id = (int)InterlockedIncrement(&g_aiNextId);
   j->body = body;
   j->timeout = timeoutMs ? timeoutMs : 120000;
+  j->refs = 1; /* ждущий */
   AcquireSRWLockExclusive(&g_aiJobLock);
   j->next = g_aiJobs;
   g_aiJobs = j;
@@ -795,6 +841,40 @@ void ai_cancel(int id) {
   ReleaseSRWLockExclusive(&g_aiJobLock);
 }
 
+/* запустить ходящий поток и ждать: ответа, отмены (j->cancel или ext) или срока.
+   Ответ — в *text (malloc). Освобождает ссылку ждущего. */
+static int ai_wait(AiJob *j, volatile LONG *ext, wchar_t **text, DWORD *ms) {
+  *text = NULL;
+  DWORD t0 = GetTickCount();
+  InterlockedIncrement(&j->refs);
+  HANDLE th = CreateThread(NULL, 0, ai_worker, j, 0, NULL);
+  if (!th) {
+    InterlockedDecrement(&j->refs);
+    ai_job_release(j);
+    return AI_BUSY;
+  }
+  int st;
+  for (;;) {
+    if (WaitForSingleObject(th, 100) == WAIT_OBJECT_0) {
+      st = j->status;
+      *text = j->text;
+      j->text = NULL;
+      break;
+    }
+    BOOL stop = j->cancel || (ext && *ext);
+    if (stop || GetTickCount() - t0 >= j->timeout) {
+      st = stop ? AI_CANCELLED : AI_TIMEOUT;
+      ai_cancel(j->id); /* на Windows закрытая ручка обрывает и генерацию на сервере */
+      *text = _wcsdup(ai_status_text(st));
+      break;
+    }
+  }
+  CloseHandle(th);
+  if (ms) *ms = GetTickCount() - t0;
+  ai_job_release(j);
+  return st;
+}
+
 void ai_result_free(AiResult *r) {
   if (!r) return;
   free(r->text);
@@ -807,6 +887,34 @@ static int ai_precheck(void) {
   return AI_OK;
 }
 
+typedef struct {
+  AiJob *j;
+  int id;
+  HWND notify;
+  UINT msg;
+  void *user;
+} AiAsync;
+
+static DWORD WINAPI ai_async_thread(LPVOID p) {
+  AiAsync *a = (AiAsync *)p;
+  AiResult *r = (AiResult *)calloc(1, sizeof(AiResult));
+  wchar_t *text = NULL;
+  DWORD ms = 0;
+  int st = ai_wait(a->j, NULL, &text, &ms);
+  if (r) {
+    r->id = a->id;
+    r->status = st;
+    r->text = text ? text : _wcsdup(ai_status_text(st));
+    r->user = a->user;
+    r->ms = ms;
+    if (!PostMessageW(a->notify, a->msg, 0, (LPARAM)r)) ai_result_free(r); /* окно закрыто */
+  } else {
+    free(text);
+  }
+  free(a);
+  return 0;
+}
+
 int ai_ask_async(const wchar_t *instruction, const wchar_t *text, DWORD timeoutMs, HWND notify, UINT msg,
                  void *user) {
   if (ai_precheck() != AI_OK || !notify) return 0;
@@ -814,19 +922,26 @@ int ai_ask_async(const wchar_t *instruction, const wchar_t *text, DWORD timeoutM
   char *body = ai_body(instruction, u, 1024);
   free(u);
   if (!body) return 0;
-  AiJob *j = ai_job_new(body, timeoutMs);
-  if (!j) return 0;
-  j->notify = notify;
-  j->msg = msg;
-  j->user = user;
-  int id = j->id;
-  HANDLE th = CreateThread(NULL, 0, ai_job_thread, j, 0, NULL);
-  if (!th) {
-    ai_job_unlist(j);
-    ai_job_free(j);
+  AiAsync *a = (AiAsync *)calloc(1, sizeof(AiAsync));
+  AiJob *j = a ? ai_job_new(body, timeoutMs) : NULL;
+  if (!j) {
+    if (!a) free(body);
+    free(a);
     return 0;
   }
-  CloseHandle(th);
+  int id = j->id;
+  a->j = j;
+  a->id = id;
+  a->notify = notify;
+  a->msg = msg;
+  a->user = user;
+  HANDLE th = CreateThread(NULL, 0, ai_async_thread, a, 0, NULL);
+  if (!th) {
+    ai_job_release(j);
+    free(a);
+    return 0;
+  }
+  CloseHandle(th); /* a и j теперь у потока — не трогать */
   return id;
 }
 
@@ -835,21 +950,10 @@ static int ai_run_sync(char *body, DWORD timeoutMs, volatile LONG *cancel, wchar
   if (answer) *answer = NULL;
   AiJob *j = ai_job_new(body, timeoutMs);
   if (!j) return AI_BUSY;
-  HANDLE th = CreateThread(NULL, 0, ai_job_thread, j, 0, NULL);
-  if (!th) {
-    ai_job_unlist(j);
-    ai_job_free(j);
-    return AI_BUSY;
-  }
-  while (WaitForSingleObject(th, 100) == WAIT_TIMEOUT)
-    if (cancel && *cancel && !j->cancel) ai_cancel(j->id);
-  CloseHandle(th);
-  int st = j->status;
-  if (answer) {
-    *answer = j->text;
-    j->text = NULL;
-  }
-  ai_job_free(j);
+  wchar_t *text = NULL;
+  int st = ai_wait(j, cancel, &text, NULL);
+  if (answer) *answer = text;
+  else free(text);
   return st;
 }
 
@@ -905,23 +1009,40 @@ int ai_ask_image_sync(const wchar_t *instruction, const wchar_t *imagePath, DWOR
 /* --- точки расширения ------------------------------------------------------- */
 BOOL ai_refine_field(const wchar_t *field, const wchar_t *raw, const wchar_t *context, wchar_t *out, int cap,
                      DWORD timeoutMs) {
-  if (!out || cap < 2 || !raw) return FALSE;
+  if (!out || cap < 2 || !raw || !raw[0]) return FALSE;
   size_t n = wcslen(raw) + (context ? wcslen(context) : 0) + wcslen(field ? field : L"") + 200;
   wchar_t *q = (wchar_t *)malloc(n * sizeof(wchar_t));
   if (!q) return FALSE;
-  _snwprintf(q, n, L"Поле: %s\nРаспознано: %s\nКонтекст:\n%s", field ? field : L"", raw,
-             context && context[0] ? context : L"(нет)");
+  if (context && context[0])
+    _snwprintf(q, n, L"%s (распознано): %s\nРядом на листе: %s", field ? field : L"Значение", raw, context);
+  else _snwprintf(q, n, L"%s (распознано): %s", field ? field : L"Значение", raw);
   q[n - 1] = 0;
   wchar_t *a = NULL;
   int st = ai_ask_sync(
-      L"Ты помогаешь инженеру-технологу на заводе. Значение поля из конструкторской документации "
-      L"распознано автоматически и может содержать ошибки распознавания (О/0, З/3, лишние пробелы, "
-      L"латиница вместо кириллицы). Исправь его по правилам ГОСТ 2.201 и ЕСКД, ничего не выдумывая. "
-      L"Если не уверен — верни как есть. Ответь только значением одной строкой, без пояснений.",
+      L"Ты исправляешь ошибки автоматического распознавания текста в конструкторской документации завода "
+      L"(ЕСКД, ГОСТ 2.201, обозначения материалов и сортамента по ГОСТ). Типичные ошибки: буква О вместо "
+      L"цифры 0, З вместо 3, латинские буквы вместо русских, лишние или потерянные пробелы, точки и дефисы. "
+      L"Ничего не добавляй и не выдумывай. Если ошибок нет — повтори значение как есть. "
+      L"Ответь только исправленным значением, одной строкой, без кавычек и пояснений.",
       q, timeoutMs ? timeoutMs : 60000, NULL, &a);
   free(q);
-  BOOL ok = st == AI_OK && a && a[0] && !wcschr(a, L'\n');
-  if (ok) lstrcpynW(out, a, cap);
+  BOOL ok = FALSE;
+  if (st == AI_OK && a) {
+    wchar_t *v = a;
+    size_t l = wcslen(v);
+    if (l >= 2 && (v[0] == L'«' || v[0] == L'"') && (v[l - 1] == L'»' || v[l - 1] == L'"')) {
+      v[l - 1] = 0;
+      v++;
+    }
+    const wchar_t *colon = wcschr(v, L':');
+    if (colon && field && !_wcsnicmp(v, field, wcslen(field))) v = (wchar_t *)colon + 1; /* «Материал: …» */
+    while (*v == L' ') v++;
+    l = wcslen(v);
+    /* модель повторила название поля, ответила пустым или написала рассказ — не берём */
+    ok = l > 0 && !wcschr(v, L'\n') && (!field || _wcsicmp(v, field)) && l <= wcslen(raw) * 2 + 10 &&
+         l * 2 + 2 >= wcslen(raw);
+    if (ok) lstrcpynW(out, v, cap);
+  }
   free(a);
   return ok;
 }
@@ -1445,6 +1566,11 @@ static DWORD WINAPI ai_selftest_thread(LPVOID p) {
   t0 = GetTickCount();
   st = ai_ask_sync(L"Пиши подробно.", L"Расскажи историю ГОСТ на 2000 слов.", 2500, NULL, &a);
   ai_rep("timeout: st=%d (ждём %d) ms=%lu\n", st, AI_TIMEOUT, GetTickCount() - t0);
+  free(a);
+  t0 = GetTickCount();
+  st = ai_ask_sync(L"Отвечай одним словом.", L"Столица России?", 120000, NULL, &a);
+  WideCharToMultiByte(CP_UTF8, 0, a ? a : L"(null)", -1, u, sizeof(u), NULL, NULL);
+  ai_rep("after abandoned: st=%d ms=%lu %s\n", st, GetTickCount() - t0, u);
   free(a);
   st = ai_ask_image_sync(L"Что на картинке?", L"C:\\nope.png", 1000, NULL, &a);
   ai_rep("image without vision: st=%d (ждём %d)\n", st, AI_NO_VISION);
