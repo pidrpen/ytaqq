@@ -9,6 +9,8 @@
    с 2026.10.14.12 — свои, без общего острия, и со своими эффектами.
    С 2026.10.14.13 Робота, Призрака, Слайма, Огонька и Черепа сменили «Ворон»,
    «Осьминог» и «Скорпион» — тоже свои, со своими эффектами.
+   С 2026.10.16.2 добавлен «Баклажан»: глянцевый плод указывает острым
+   кончиком, при нажатии — «Икра».
 
    У каждого свой эффект при нажатии, если в Настройках выбрано «Как у
    курсора» (fx_kind_for). Здесь же — окошко просмотра в Настройках: в нём
@@ -120,6 +122,7 @@ static const StLook kLooks[ST_DRAW] = {
     {{255, 90, 90}, {200, 20, 30}, {110, 0, 10}, {20, 0, 5}, {255, 30, 40}, 1.2f, 0.40f, 0},     /* Разрез */
     {{255, 175, 200}, {235, 110, 150}, {150, 30, 60}, {30, 10, 15}, {255, 40, 60}, 1.2f, 0.35f, 0},   /* Сукуна */
     {{245, 248, 255}, {170, 210, 255}, {60, 120, 230}, {15, 20, 45}, {90, 190, 255}, 1.2f, 0.45f, 0}, /* Годжо */
+    {{150, 72, 196}, {92, 32, 140}, {42, 14, 72}, {18, 8, 28}, {186, 110, 255}, 1.2f, 0.42f, 0},     /* Баклажан */
     {{235, 238, 245}, {185, 190, 202}, {130, 135, 148}, {30, 30, 40}, {0, 0, 0}, 1.2f, 0.0f, 2}, /* Рыцарь */
 };
 
@@ -200,7 +203,7 @@ static int st_blade_px(int st, float x, float y, float tx, float ty, float dx, f
 }
 
 static const BYTE kCharTip[ST_DRAW][3] = {{150, 130, 230}, {255, 120, 200}, {120, 230, 70}, {255, 60, 60},
-                                          {230, 40, 50},   {90, 190, 255},  {225, 230, 240}};
+                                          {230, 40, 50},   {90, 190, 255},  {190, 120, 255}, {225, 230, 240}};
 static const float kTip[] = {2, 1, 2, 15, 5.8f, 11.6f, 11, 11.2f};   /* острие стрелки */
 static const float kTipUp[] = {16, 1, 21, 8, 11, 8};                 /* острие руки — вверх */
 
@@ -446,6 +449,69 @@ static int st_scorp(float x, float y, float *c) {
   return 0;
 }
 
+/* ---- «Баклажан» (с 2026.10.16.2) ----
+   Указывает сам плод: острый кончик — в рабочей точке (у стрелки в левом
+   верхнем углу, над ссылками — сверху). Сзади зелёная чашечка и короткий
+   хвостик, на боку белый глянец. Текст, крест и стрелки размеров — та же
+   фиолетовая отделка, что у остальных видов. */
+#define ST_AUBERGINE 6
+
+static float st_aub_hw(float tt, float hw0) {
+  if (tt < 0.14f) return hw0 * (0.09f + 0.40f * (tt / 0.14f));
+  float p = (tt - 0.14f) / 0.86f;
+  float s = sinf(3.14159265f * (p < 0.68f ? p / 0.68f : 1.0f));
+  if (p > 0.68f) s *= 1.0f - (p - 0.68f) / 0.32f * 0.28f;
+  if (s < 0.001f) s = 0.001f;
+  return hw0 * (0.30f + 0.70f * powf(s, 0.48f));
+}
+
+/* up — носик вверх (рука); иначе носик в левый верхний угол */
+static int st_aubergine(float x, float y, int up, float *c) {
+  float u, v, L, hw0;
+  if (up) {
+    u = y - 0.6f;
+    v = x - 16.0f;
+    L = 26.8f;
+    hw0 = 6.9f;
+  } else {
+    u = ((x - 1.6f) + (y - 0.6f)) * 0.70710678f;
+    v = ((y - 0.6f) - (x - 1.6f)) * 0.70710678f;
+    L = 29.0f;
+    hw0 = 7.0f;
+  }
+  if (u >= L * 0.86f && u <= L * 0.86f + 4.4f && fabsf(v) <= 1.15f)
+    return fabsf(v) > 0.65f ? ST_C(28, 96, 36) : ST_C(86, 176, 62);
+  {
+    float u0 = L * 0.78f;
+    static const float kSep[5][4] = {{0, 0, 2.3f, 1.35f},     {1.3f, 2.5f, 2.3f, 1.3f}, {1.3f, -2.5f, 2.3f, 1.3f},
+                                     {2.4f, 4.4f, 2.1f, 1.2f}, {2.4f, -4.4f, 2.1f, 1.2f}};
+    for (int i = 0; i < 5; i++) {
+      float cu = u0 + kSep[i][0], cv = kSep[i][1], ru = kSep[i][2], rv = kSep[i][3];
+      float a = (u - cu) / ru, b = (v - cv) / rv;
+      if (a * a + b * b <= 1.0f) return a * a + b * b > 0.5f ? ST_C(168, 220, 78) : ST_C(36, 124, 44);
+    }
+  }
+  if (u < 0.0f || u > L) return 0;
+  float tt = u / L;
+  if (tt > 1.0f) tt = 1.0f;
+  float hw = st_aub_hw(tt, hw0);
+  if (hw < 0.45f || fabsf(v) > hw) return 0;
+  if (st_ell(u, v, L * 0.42f, -hw * 0.36f, 2.9f, 1.05f) || st_ell(u, v, L * 0.33f, -hw * 0.16f, 1.15f, 0.62f))
+    return ST_C(250, 238, 255);
+  float side = fx_clamp01(0.52f - v / (hw * 2.05f));
+  float shade = tt > 0.35f ? (tt - 0.35f) / 0.65f : 0.0f;
+  float r = (42.0f + 110.0f * side) * (1.0f - 0.42f * shade);
+  float g = (8.0f + 42.0f * side) * (1.0f - 0.35f * shade);
+  float b = (80.0f + 120.0f * side) * (1.0f - 0.22f * shade);
+  if (fabsf(v) > hw * 0.84f) r *= 0.48f, g *= 0.48f, b *= 0.64f;
+  return ST_C(r, g, b);
+}
+
+static int st_aubergine_slot_px(int slot, float x, float y, float *c) {
+  if (slot == 14) x += 2.0f, y += 1.0f; /* ожидание — чуть сдвинут, как у зверей */
+  return st_aubergine(x, y, slot == 2, c);
+}
+
 /* над ссылками: перо, щупальце или хвост с жалом; острие — 16,1 */
 static int st_beast_hand(int st, float x, float y, float *c) {
   float dx = x - 16, adx = fabsf(dx), s, r;
@@ -496,6 +562,7 @@ static int st_char_slot_px(int st, int slot, float x, float y, float *c) {
   }
   if (st == ST_SUKUNA || st == ST_GOJO) return st_jjk_slot_px(st, slot, x, y, c);
   if (st <= ST_SCORP) return st_beast_slot_px(st, slot, x, y, c);
+  if (st == ST_AUBERGINE) return st_aubergine_slot_px(slot, x, y, c);
   if (st == ST_RAZREZ) { /* «Разрез»: сам курсор — алый клинок */
     if (slot == 2) return st_blade_px(st, x, y, 16, 1, 0, 1, 15, c);
     return st_blade_px(st, x, y, 2, 1, 0.70710678f, 0.70710678f, 19, c);
@@ -1131,7 +1198,7 @@ static void st_gallery(const wchar_t *path) {
   fx_init_sprites();
   int S = (int)(200 * g_fxScale), N = 48, cell = 56;
   int W = S * 4 > cell * ST_SLOTS ? S * 4 : cell * ST_SLOTS;
-  int rowsCur = ST_DRAW * 2, H = rowsCur * cell + 14 * (S / 2);
+  int rowsCur = ST_DRAW * 2, H = rowsCur * cell + 15 * (S / 2);
   BYTE *img = (BYTE *)malloc((size_t)W * H * 4);
   BYTE *cur = (BYTE *)malloc((size_t)N * N * 4);
   FxWin fw;
@@ -1154,8 +1221,8 @@ static void st_gallery(const wchar_t *path) {
             for (int c = 0; c < 3; c++) d[c] = (BYTE)((s[c] * s[3] + back * (255 - s[3])) / 255);
           }
       }
-  /* эффекты 1…13: по четыре кадра, половина облачка */
-  for (int kind = 1; kind <= 14; kind++) {
+  /* эффекты 1…15: по четыре кадра, половина облачка */
+  for (int kind = 1; kind <= 15; kind++) {
     g_fxSeed = 777u + kind;
     fx_seed(&fw, kind, S);
     int at[4] = {2, fw.frames / 4, fw.frames / 2, fw.frames * 3 / 4};

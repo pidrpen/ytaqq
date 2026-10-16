@@ -48,12 +48,12 @@
 #define ID_CUR_K6 121 /* «Чёрный кот» */
 #define ID_CUR_K7 136 /* «Риас» */
 #define ID_FX_BASE 400    /* 400..415: эффект при нажатии в Настройках (до 2026.10.14 — 160…) */
-#define FX_OPTIONS 16    /* сколько вариантов в «Эффект при нажатии» */
+#define FX_OPTIONS 17    /* сколько вариантов в «Эффект при нажатии» */
 #define ID_CHK_TESS 176   /* точное распознавание (Tesseract) */
 #define ID_SEC_BASE 440   /* 440..444: вкладки Настроек */
 #define SEC_COUNT 5
-#define ID_CUR_ST_BASE 460 /* 460..465: персонажи «Ворон»…«Годжо» (styles.c) */
-#define ST_COUNT 6
+#define ID_CUR_ST_BASE 460 /* 460..466: персонажи «Ворон»…«Баклажан» (styles.c) */
+#define ST_COUNT 7
 #define ST_RAZREZ 3         /* «Разрез» — клинок вместо стрелки */
 #define ST_KNIGHT ST_COUNT  /* рыцарь (Мечник) рисуется кодом, но кнопки стиля у него нет */
 #define ST_SKIN0 7          /* g_skin первого из них; 7…12 */
@@ -383,7 +383,7 @@ static HFONT g_ocrFontZoom;
 static BOOL g_statusOn = FALSE;
 static HINSTANCE g_inst;
 static int g_skin = 1; /* 0 system, 1 sword, 2 gauntlet, 3 fairy, 4 dragon, 5 black cat, 6 rias,
-                          7…11 нарисованные кодом стили (styles.c): неон, лёд, золото, лава, космос */
+                          7…13 нарисованные кодом стили (styles.c), последний — «Баклажан» */
 static BOOL g_sparkle = TRUE; /* у «Феи» — звёздочки при нажатии */
 static BOOL g_flame = TRUE;   /* у «Дракона» — пламя при нажатии */
 static int g_catFx = 1;       /* у «Чёрного кота» при нажатии: 0 ничего, 1 царапины, 2 звёздочки как у Феи */
@@ -1174,7 +1174,7 @@ static void load_cursor_pref(void) {
   g_sparkle = sparkle != 0;
   g_flame = flame != 0;
   g_catFx = catFx == 0 ? 0 : (catFx == 2 ? 2 : 1);
-  g_fxPick = fxPick >= 0 && fxPick <= 14 ? fxPick : -1;
+  g_fxPick = fxPick >= 0 && fxPick <= 15 ? fxPick : -1;
   g_padMode = padMode == 1 ? 1 : 0;
   g_cardX = cx;
   g_cardY = cy;
@@ -1192,10 +1192,10 @@ static void load_cursor_pref(void) {
   if (cw >= 320 && cw <= 4000) g_cardW = cw;
   if (ch >= 200 && ch <= 3000) g_cardH = ch;
   if (pt >= 7 && pt <= 22) g_ansPt = pt;
-  /* t1…t8 — как до 2026.10.14.13: t4 и t5 (Огонёк, Череп) убраны и становятся Вороном,
-     t1…t3 — Ворон, Осьминог, Скорпион на местах Робота, Призрака и Слайма */
-  static const signed char kTSkin[8] = {0, 1, 2, 0, 0, 3, 4, 5};
-  if (skin[0] == 't' && skin[1] >= '1' && skin[1] <= '8') g_skin = ST_SKIN0 + kTSkin[skin[1] - '1'];
+  /* t1…t9 — t4 и t5 (Огонёк, Череп) убраны и становятся Вороном,
+     t1…t3 — Ворон, Осьминог, Скорпион, t6…t8 — Разрез, Сукуна, Годжо, t9 — Баклажан */
+  static const signed char kTSkin[9] = {0, 1, 2, 0, 0, 3, 4, 5, 6};
+  if (skin[0] == 't' && skin[1] >= '1' && skin[1] <= '9') g_skin = ST_SKIN0 + kTSkin[skin[1] - '1'];
   else if (skin[0] == 'k' && skin[1] == '7') g_skin = 6;
   else if (skin[0] == 'k' && skin[1] == '6') g_skin = 5;
   else if (skin[0] == 'k' && skin[1] == '5') g_skin = 4;
@@ -1214,7 +1214,7 @@ static void load_cursor_pref(void) {
 }
 
 static void save_cursor_pref(void) {
-  static const char *const kSt[ST_COUNT] = {"t1", "t2", "t3", "t6", "t7", "t8"};
+  static const char *const kSt[ST_COUNT] = {"t1", "t2", "t3", "t6", "t7", "t8", "t9"};
   const char *v = g_skin >= ST_SKIN0 && g_skin < ST_SKIN0 + ST_COUNT ? kSt[g_skin - ST_SKIN0]
                   : g_skin == 6 ? "k7"
                   : g_skin == 5 ? "k6"
@@ -1241,9 +1241,11 @@ static void save_cursor_pref(void) {
 static const wchar_t *const kFxNames[FX_OPTIONS] = {L"Как у курсора", L"Нет",    L"Звёздочки", L"Пламя",
                                                     L"Царапины",      L"Разрез", L"Кольца",    L"Конфетти",
                                                     L"Молния",        L"Сердечки", L"Рассечение", L"Пурпур",
-                                                    L"Перья",         L"Чернила",  L"Яд",       L"Бесконечность"};
-static const int kFxPick[FX_OPTIONS] = {-1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14};
-static const wchar_t *const kStyleNames[ST_COUNT] = {L"Ворон", L"Осьминог", L"Скорпион", L"Разрез", L"Сукуна", L"Годжо"};
+                                                    L"Перья",         L"Чернила",  L"Яд",       L"Бесконечность",
+                                                    L"Икра"};
+static const int kFxPick[FX_OPTIONS] = {-1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
+static const wchar_t *const kStyleNames[ST_COUNT] = {L"Ворон", L"Осьминог", L"Скорпион", L"Разрез", L"Сукуна", L"Годжо",
+                                                    L"Баклажан"};
 
 static void update_fx_buttons(void) {
   for (int i = 0; i < FX_OPTIONS; i++) {
@@ -1297,10 +1299,11 @@ static void set_skin(int skin) {
 
 /* эффект при нажатии отдельно от курсора: имена для строки состояния */
 static const wchar_t *fx_pick_name(int pick) {
-  static const wchar_t *const kNames[15] = {L"нет",   L"звёздочки", L"пламя",  L"царапины", L"разрез",
+  static const wchar_t *const kNames[16] = {L"нет",   L"звёздочки", L"пламя",  L"царапины", L"разрез",
                                            L"кольца", L"конфетти", L"молния", L"сердечки", L"рассечение",
-                                           L"пурпур", L"перья",    L"чернила", L"яд",     L"бесконечность"};
-  return pick >= 0 && pick < 15 ? kNames[pick] : L"как у курсора";
+                                           L"пурпур", L"перья",    L"чернила", L"яд",     L"бесконечность",
+                                           L"икра"};
+  return pick >= 0 && pick < 16 ? kNames[pick] : L"как у курсора";
 }
 
 /* то же с большой буквы — для окошка просмотра (там всегда сам эффект) */
