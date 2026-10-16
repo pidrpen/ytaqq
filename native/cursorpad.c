@@ -2502,7 +2502,8 @@ static void draw_pad_button(const DRAWITEMSTRUCT *dis) {
                  id == ID_ND_INVITE || id == ID_ND_ACCEPT || id == ID_ND_ROLL || id == ID_ND_DONE ||
                  id == ID_SH_INVITE || id == ID_SH_ACCEPT || id == ID_SH_DRAWOK ||
                  id == ID_ANS_DRAW || id == ID_ANS_SHOW || /* чертёж нашёлся — кнопки синие */
-                 id == ID_MSG_SEND || id == ID_MSG_REPLY || id == ID_RT_BUILD || id == ID_RT_SAVE;
+                 id == ID_MSG_SEND || id == ID_MSG_REPLY || id == ID_RT_BUILD || id == ID_RT_SAVE ||
+                 id == 4714; /* «Применить» в окне «Спросить ИИ» */
   BOOL quiet = id == ID_CLOSE || id == ID_MIN || id == ID_PANEL_CLOSE || id == ID_PANEL_MIN;
   COLORREF fill, fg, bd;
   /* рыцарская тема рисует кнопки целиком по-своему; кнопка выбора

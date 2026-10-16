@@ -23,6 +23,8 @@ static const GUID kAcBgra = {0x6fddc324, 0x4e03, 0x4bfe, {0xb1, 0x85, 0x3d, 0x77
 #define ID_AC_SHOT 4711
 #define ID_AC_THUMB 4712
 #define ID_AC_LEARN 4713
+#define ID_AC_APPLY 4714
+#define ID_AC_CANCEL 4715
 #define AC_CMD_SYS                                                                                                      \
   L"Ты выполняешь навык «Файлы» программы CursorPad. Ответь ОДНОЙ строкой JSON, без пояснений и без ``` . "            \
   L"Сам файлы не трогаешь: человек ещё нажмёт «Применить»."
@@ -44,7 +46,7 @@ typedef struct {
   DWORD pngLen;
 } AcTurn;
 static HWND g_acWnd, g_acLog, g_acIn, g_acSend, g_acStop, g_acClear, g_acCopy, g_acSet, g_acStat, g_acTitle,
-    g_acShot, g_acThumb, g_acLearn;
+    g_acShot, g_acThumb, g_acLearn, g_acApply, g_acCancel;
 static BYTE *g_acImg;      /* картинка, ждёт отправки */
 static DWORD g_acImgLen;
 static HBITMAP g_acThumbBmp; /* миниатюра ждущей картинки (и той, что не ушла) */
@@ -152,15 +154,30 @@ static void ac_busy(BOOL on) {
   EnableWindow(g_acStop, on);
 }
 
-/* план ждёт ответа: кнопки «Отправить» и «Стоп» становятся «Применить» и «Отмена» */
+/* план ждёт ответа: «Применить» и «Отмена» над полем ввода, вместо «С экрана» */
+static void ac_layout(int W, int H);
 static void ac_plan_ui(BOOL on) {
   SetWindowTextW(g_acSend, on ? L"Применить" : L"Отправить");
   SetWindowTextW(g_acStop, on ? L"Отмена" : L"Стоп");
+  ShowWindow(g_acApply, on ? SW_SHOW : SW_HIDE);
+  ShowWindow(g_acCancel, on ? SW_SHOW : SW_HIDE);
+  ShowWindow(g_acShot, on ? SW_HIDE : SW_SHOW);
+  if (g_acWnd) {
+    RECT rc;
+    GetClientRect(g_acWnd, &rc);
+    ac_layout(rc.right, rc.bottom);
+  }
   if (on) {
     EnableWindow(g_acSend, TRUE);
     EnableWindow(g_acStop, TRUE);
+    EnableWindow(g_acApply, TRUE);
+    EnableWindow(g_acCancel, TRUE);
   } else
     ac_busy(g_acId != 0);
+  if (g_acApply) InvalidateRect(g_acApply, NULL, TRUE);
+  if (g_acCancel) InvalidateRect(g_acCancel, NULL, TRUE);
+  if (g_acSend) InvalidateRect(g_acSend, NULL, TRUE);
+  if (g_acStop) InvalidateRect(g_acStop, NULL, TRUE);
 }
 
 /* «ИИ выключен» / «нет модели» — ведём на вкладку «ИИ» Настроек */
@@ -1248,7 +1265,13 @@ static void ac_layout(int W, int H) {
   MoveWindow(GetDlgItem(g_acWnd, ID_PANEL_CLOSE), W - pad - 30, 8, 30, 26, TRUE);
   MoveWindow(g_acLog, pad, logY, W - 2 * pad, logH, TRUE);
   MoveWindow(g_acStat, pad, stY, W - 2 * pad, statH, TRUE);
-  MoveWindow(g_acShot, pad, cmdY, 120, 22, TRUE);
+  if (g_acPlanOn) {
+    int half = (W - 2 * pad - gap) / 2;
+    if (half < 80) half = 80;
+    MoveWindow(g_acApply, pad, cmdY, half, 26, TRUE);
+    MoveWindow(g_acCancel, pad + half + gap, cmdY, half, 26, TRUE);
+  } else
+    MoveWindow(g_acShot, pad, cmdY, 120, 22, TRUE);
   MoveWindow(g_acThumb, pad, inY - 84, 80, 80, TRUE);
   ShowWindow(g_acThumb, g_acImg ? SW_SHOW : SW_HIDE);
   MoveWindow(g_acIn, pad, inY, W - 2 * pad, inH, TRUE);
@@ -1292,10 +1315,12 @@ static LRESULT CALLBACK AcProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
       ShowWindow(hwnd, SW_MINIMIZE);
       break;
     case ID_AC_SEND:
+    case ID_AC_APPLY:
       if (g_acPlanOn) ac_files_apply();
       else ac_send();
       break;
     case ID_AC_STOP:
+    case ID_AC_CANCEL:
       if (g_acPlanOn) ac_files_cancel();
       else if (g_acId) ai_cancel(g_acId);
       break;
@@ -1383,6 +1408,10 @@ static void ac_create(void) {
   g_acLearn = mk_btn(g_acWnd, L"Запомнить", ID_AC_LEARN);
   g_acSet = mk_btn(g_acWnd, L"Настройки", ID_AC_SET);
   g_acShot = mk_btn(g_acWnd, L"С экрана", ID_AC_SHOT);
+  g_acApply = mk_btn(g_acWnd, L"Применить", ID_AC_APPLY);
+  g_acCancel = mk_btn(g_acWnd, L"Отмена", ID_AC_CANCEL);
+  ShowWindow(g_acApply, SW_HIDE);
+  ShowWindow(g_acCancel, SW_HIDE);
   g_acThumb = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | SS_BITMAP | SS_NOTIFY, 0, 0, 10, 10, g_acWnd,
                               (HMENU)(INT_PTR)ID_AC_THUMB, g_inst, NULL);
   DragAcceptFiles(g_acWnd, TRUE);

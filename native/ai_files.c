@@ -344,7 +344,7 @@ static void af_show_plan(void) {
   }
   if (left) _snwprintf(s + wcslen(s), 64, L"… и ещё %d\r\n", left);
   ac_push(1, s);
-  ac_push(1, L"Ничего ещё не изменено. Нажмите «Применить» или «Отмена».");
+  ac_push(1, L"Ничего ещё не изменено. Над полем ввода кнопки «Применить» и «Отмена».");
   free(s);
   g_acPlanOn = TRUE;
   ac_plan_ui(TRUE);
