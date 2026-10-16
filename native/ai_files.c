@@ -317,14 +317,21 @@ static void af_show_plan(void) {
   wchar_t *s = (wchar_t *)malloc(cap * sizeof(wchar_t));
   if (!s) return;
   s[0] = 0;
+  int shown = 0, left = 0;
   for (int i = 0; i < g_afN; i++) {
+    if (shown >= 30) {
+      left++;
+      continue;
+    }
     AfItem *it = &g_afItems[i];
     if (it->kind == AF_MKDIR) _snwprintf(s + wcslen(s), 64 + MAX_PATH, L"Создать папку: %s\r\n", it->dst);
     else
       _snwprintf(s + wcslen(s), MAX_PATH * 2 + 64, L"%s: %s\r\n      → %s\r\n",
                  it->kind == AF_COPY ? L"Скопировать" : it->kind == AF_MOVE ? L"Переместить" : L"Переименовать",
                  it->src, it->dst);
+    shown++;
   }
+  if (left) _snwprintf(s + wcslen(s), 64, L"… и ещё %d\r\n", left);
   ac_push(1, s);
   ac_push(1, L"Ничего ещё не изменено. Нажмите «Применить» или «Отмена».");
   free(s);
@@ -389,6 +396,155 @@ static void ac_mkdir_now(const wchar_t *dst) {
   af_set_last(rd);
   _snwprintf(msg, MAX_PATH + 80, L"Создал папку:\r\n%s", rd);
   af_say(msg);
+}
+
+static void af_queue_dir(const wchar_t *p) {
+  if (af_is_dir(p)) return;
+  for (int i = 0; i < g_afN; i++)
+    if (g_afItems[i].kind == AF_MKDIR && !_wcsicmp(g_afItems[i].dst, p)) return;
+  af_add(AF_MKDIR, L"", p);
+}
+
+/* папка формата: PDF, Excel, Word, TIFF… */
+static void af_ext_folder(const wchar_t *file, wchar_t *out) {
+  const wchar_t *dot = wcsrchr(file, L'.');
+  wchar_t e[16];
+  if (!dot || dot == file || !dot[1]) {
+    lstrcpynW(out, L"Без типа", 32);
+    return;
+  }
+  lstrcpynW(e, dot, 16);
+  CharLowerBuffW(e, (DWORD)wcslen(e));
+  if (!wcscmp(e, L".pdf")) lstrcpynW(out, L"PDF", 32);
+  else if (!wcscmp(e, L".xls") || !wcscmp(e, L".xlsx") || !wcscmp(e, L".xlsm")) lstrcpynW(out, L"Excel", 32);
+  else if (!wcscmp(e, L".doc") || !wcscmp(e, L".docx")) lstrcpynW(out, L"Word", 32);
+  else if (!wcscmp(e, L".tif") || !wcscmp(e, L".tiff")) lstrcpynW(out, L"TIFF", 32);
+  else if (!wcscmp(e, L".jpg") || !wcscmp(e, L".jpeg")) lstrcpynW(out, L"JPG", 32);
+  else if (!wcscmp(e, L".png")) lstrcpynW(out, L"PNG", 32);
+  else if (!wcscmp(e, L".bmp")) lstrcpynW(out, L"BMP", 32);
+  else if (!wcscmp(e, L".gif")) lstrcpynW(out, L"GIF", 32);
+  else if (!wcscmp(e, L".dwg")) lstrcpynW(out, L"DWG", 32);
+  else if (!wcscmp(e, L".dxf")) lstrcpynW(out, L"DXF", 32);
+  else if (!wcscmp(e, L".txt")) lstrcpynW(out, L"TXT", 32);
+  else if (!wcscmp(e, L".zip") || !wcscmp(e, L".rar") || !wcscmp(e, L".7z")) lstrcpynW(out, L"Архивы", 32);
+  else {
+    lstrcpynW(out, e + 1, 12);
+    CharUpperBuffW(out, (DWORD)wcslen(out));
+  }
+}
+
+/* папка имени: имя файла без расширения, без знаков, которые Windows не пускает в имя */
+static void af_name_folder(const wchar_t *file, wchar_t *out) {
+  wchar_t s[180];
+  lstrcpynW(s, file, 180);
+  wchar_t *dot = wcsrchr(s, L'.');
+  if (dot && dot != s) *dot = 0;
+  int n = 0;
+  for (wchar_t *p = s; *p && n < 80; p++) out[n++] = wcschr(L"\\/:*?\"<>|", *p) ? L'_' : *p;
+  while (n && (out[n - 1] == L' ' || out[n - 1] == L'.')) n--;
+  int b = 0;
+  while (b < n && (out[b] == L' ' || out[b] == L'.')) b++;
+  if (b) {
+    n -= b;
+    memmove(out, out + b, (size_t)n * sizeof(wchar_t));
+  }
+  out[n] = 0;
+  if (!out[0]) lstrcpynW(out, L"Без имени", 80);
+}
+
+/* mode: 1 имя, 2 формат, 3 имя\формат. Файлы только верхнего уровня папки.
+   Ничего не двигается, пока не нажата «Применить». */
+static void ac_group_plan(const wchar_t *user, int mode) {
+  wchar_t srcIn[MAX_PATH] = L"", dstIn[MAX_PATH] = L"";
+  wchar_t src[MAX_PATH], dst[MAX_PATH], msg[400];
+  BOOL have = ac_pick_path(user, srcIn);
+  const wchar_t *rest = NULL;
+  if (have) {
+    const wchar_t *at = wcsstr(user, srcIn);
+    if (at) rest = at + wcslen(srcIn);
+  }
+  af_known_folders();
+  af_clear();
+  if (have) {
+    if (!af_resolve(srcIn, src, FALSE) || !af_is_dir(src) || !af_trusted(src)) {
+      af_say(L"Не нашёл папку, которую раскладывать. Напишите путь, как в проводнике.");
+      return;
+    }
+  } else if (g_acLastDir[0] && af_is_dir(g_acLastDir)) {
+    lstrcpynW(src, g_acLastDir, MAX_PATH);
+  } else {
+    af_say(L"Напишите путь к папке целиком. Например: разложи по форматам C:\\Папка");
+    return;
+  }
+  if (rest && ac_pick_path(rest, dstIn)) {
+    if (!af_resolve(dstIn, dst, TRUE) || !af_trusted(dst)) {
+      af_say(L"Не понял, в какую папку складывать.");
+      return;
+    }
+  } else
+    lstrcpynW(dst, src, MAX_PATH);
+  wchar_t low[500];
+  lstrcpynW(low, user, 500);
+  CharLowerBuffW(low, (DWORD)wcslen(low));
+  BOOL mv = wcsstr(low, L"скопир") == NULL;
+  wchar_t par[MAX_PATH];
+  if (!af_is_dir(dst)) {
+    af_parent(dst, par);
+    if (!af_is_dir(par)) {
+      af_say(L"Папки назначения нет, и папки выше тоже.");
+      return;
+    }
+    af_queue_dir(dst);
+  }
+  wchar_t pat[MAX_PATH];
+  _snwprintf(pat, MAX_PATH, L"%s\\*", src);
+  WIN32_FIND_DATAW fd;
+  HANDLE h = FindFirstFileW(pat, &fd);
+  if (h == INVALID_HANDLE_VALUE) {
+    af_say(L"Папку не открыть.");
+    return;
+  }
+  int files = 0, skip = 0;
+  BOOL more = FALSE;
+  do {
+    if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+    if (!wcscmp(fd.cFileName, L"desktop.ini") || !_wcsicmp(fd.cFileName, L"Thumbs.db")) continue;
+    if (files >= 400) {
+      more = TRUE;
+      break;
+    }
+    wchar_t kind[32], stem[88], dir[MAX_PATH], full[MAX_PATH], target[MAX_PATH];
+    af_ext_folder(fd.cFileName, kind);
+    af_name_folder(fd.cFileName, stem);
+    if (mode == 1) _snwprintf(dir, MAX_PATH, L"%s\\%s", dst, stem);
+    else if (mode == 2) _snwprintf(dir, MAX_PATH, L"%s\\%s", dst, kind);
+    else _snwprintf(dir, MAX_PATH, L"%s\\%s\\%s", dst, stem, kind);
+    _snwprintf(full, MAX_PATH, L"%s\\%s", src, fd.cFileName);
+    af_unique_target(dir, fd.cFileName, target);
+    if (!_wcsicmp(full, target)) {
+      skip++;
+      continue;
+    }
+    if (mode == 3) {
+      wchar_t mid[MAX_PATH];
+      _snwprintf(mid, MAX_PATH, L"%s\\%s", dst, stem);
+      af_queue_dir(mid);
+    }
+    af_queue_dir(dir);
+    af_add(mv ? AF_MOVE : AF_COPY, full, target);
+    files++;
+  } while (FindNextFileW(h, &fd));
+  FindClose(h);
+  if (!files) {
+    af_clear();
+    af_say(skip ? L"Файлы уже лежат по таким папкам." : L"В папке нет файлов, которые можно разложить.");
+    return;
+  }
+  const wchar_t *how = mode == 3 ? L"по имени и формату" : mode == 1 ? L"по имени файла" : L"по формату";
+  _snwprintf(msg, 400, L"Разложить %s (%s). Файлов: %d%s. Кнопка «Отправить» стала «Применить».", how,
+             mv ? L"перенос" : L"копии", files, more ? L", дальше ещё есть" : L"");
+  ac_push(1, msg);
+  af_show_plan();
 }
 
 /* JSON от модели: проверки здесь, перед любым действием */

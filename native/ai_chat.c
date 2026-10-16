@@ -56,6 +56,7 @@ static void ac_files_run(const wchar_t *j);
 static void ac_files_apply(void);
 static void ac_files_cancel(void);
 static void ac_mkdir_now(const wchar_t *dst);
+static void ac_group_plan(const wchar_t *user, int mode);
 static const wchar_t *ac_cmd_instruction(void);
 static void af_set_last(const wchar_t *dir);
 static void af_known_folders(void);
@@ -477,6 +478,24 @@ static BOOL ac_wants_mkdir_now(const wchar_t *q, wchar_t *path) {
   return !*r;
 }
 
+/* 1 — по имени, 2 — по формату, 3 — и то и другое, -1 — сказано «отсортируй», но не сказано как.
+   «по штампу» сюда не входит: это прежняя раскладка сканов. */
+static int ac_wants_group(const wchar_t *q) {
+  wchar_t s[500];
+  lstrcpynW(s, q, 500);
+  CharLowerBuffW(s, (DWORD)wcslen(s));
+  if (wcschr(s, L'?')) return 0;
+  if (wcsstr(s, L"штамп") || wcsstr(s, L"обозначен")) return 0;
+  BOOL sortVerb = wcsstr(s, L"рассорт") || wcsstr(s, L"отсорт") || wcsstr(s, L"сортир");
+  BOOL lay = wcsstr(s, L"разлож") != NULL;
+  BOOL copy = wcsstr(s, L"скопир") != NULL;
+  BOOL byName = wcsstr(s, L"назван") || wcsstr(s, L"имени") || wcsstr(s, L"именам");
+  BOOL byExt = wcsstr(s, L"формат") || wcsstr(s, L"расширен");
+  if (!byName && !byExt) return sortVerb ? -1 : 0;
+  if (!sortVerb && !lay && !copy) return 0;
+  return (byName ? 1 : 0) | (byExt ? 2 : 0);
+}
+
 static void ac_send(void) {
   if (g_acPlanOn) {
     ac_status(L"Сначала «Применить» или «Отмена» для плана");
@@ -514,6 +533,19 @@ static void ac_send(void) {
     return;
   }
   wchar_t made[MAX_PATH];
+  int group = !g_acImg ? ac_wants_group(a) : 0;
+  if (group) {
+    ac_push(0, a);
+    lstrcpynW(g_acCmdText, a, 2000);
+    if (group < 0)
+      ac_push(1, L"Как разложить: по формату, по имени файла или и так и так? Например: «разложи по форматам C:\\Папка» или «разложи по именам и форматам C:\\Папка».");
+    else
+      ac_group_plan(a, group);
+    ac_redraw();
+    SetWindowTextW(g_acIn, L"");
+    free(in);
+    return;
+  }
   if (!g_acImg && ac_wants_mkdir_now(a, made)) {
     ac_push(0, a);
     lstrcpynW(g_acCmdText, a, 2000);
