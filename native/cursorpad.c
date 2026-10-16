@@ -3050,8 +3050,11 @@ static const GUID kIID_FileOpenDialog = {0xd57c7288, 0xd4ad, 0x4768,
 
 /* Typing a network path by hand is the easiest thing in the program to get
    wrong, and a typo just yields an empty index with no explanation. */
+static const wchar_t *g_pickFolderTitle; /* заголовок окна выбора; NULL — «для поиска файлов» */
 static BOOL pick_folder(HWND owner, wchar_t *out, int cap) {
   out[0] = 0;
+  const wchar_t *title = g_pickFolderTitle ? g_pickFolderTitle : L"Папка для поиска файлов";
+  g_pickFolderTitle = NULL;
   HRESULT init = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
   BOOL ok = FALSE;
   IFileOpenDialog *dlg = NULL;
@@ -3061,7 +3064,7 @@ static BOOL pick_folder(HWND owner, wchar_t *out, int cap) {
     dlg->lpVtbl->GetOptions(dlg, &opts);
     dlg->lpVtbl->SetOptions(dlg, opts | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM |
                                      FOS_PATHMUSTEXIST);
-    dlg->lpVtbl->SetTitle(dlg, L"Папка для поиска файлов");
+    dlg->lpVtbl->SetTitle(dlg, title);
     if (SUCCEEDED(dlg->lpVtbl->Show(dlg, owner))) {
       IShellItem *item = NULL;
       if (SUCCEEDED(dlg->lpVtbl->GetResult(dlg, &item)) && item) {
@@ -3080,7 +3083,7 @@ static BOOL pick_folder(HWND owner, wchar_t *out, int cap) {
     BROWSEINFOW bi;
     memset(&bi, 0, sizeof(bi));
     bi.hwndOwner = owner;
-    bi.lpszTitle = L"Папка для поиска файлов";
+    bi.lpszTitle = title;
     bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
     LPITEMIDLIST id = SHBrowseForFolderW(&bi);
     if (id) {
@@ -4097,6 +4100,7 @@ static void create_settings(HWND owner) {
 #include "tiffsort.c"
 #include "drawrec.c"    /* распознать чертёж: штамп, спецификация, тип листа */
 #include "drawrec_ui.c" /* окно «Распознать чертёж» */
+#include "drawrec_sort.c" /* «Разложить по папкам»: имена по штампу, копия, журнал, отмена */
 #include "nardy.c"
 #include "shashki.c" /* после нард: общий список «кто в сети» и мелочи работы с папкой */
 #include "hotkeys.c"    /* F8, F6, Pause… — какие назначены в Настройках */
@@ -4880,6 +4884,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
     if (argv && argc >= 3 && !wcscmp(argv[1], L"--xptest")) export_test(argv[2]);
     if (argv && argc >= 4 && !wcscmp(argv[1], L"--drawrec")) dr_test(argc, argv);
     if (argv && argc >= 4 && !wcscmp(argv[1], L"--drawui")) dr_ui_test(argc, argv);
+    if (argv && argc >= 4 && !wcscmp(argv[1], L"--drawsort")) drs_test(argc, argv);
     if (argv && argc >= 4 && !wcscmp(argv[1], L"--mttest")) match_test(argv[2], argv[3], argc >= 5 ? argv[4] : NULL);
     if (argv && argc >= 3 && !wcscmp(argv[1], L"--idlebench")) if_test_bench(argv[2]);
     if (argv && argc >= 3 && !wcscmp(argv[1], L"--idlestage")) if_test_stage(argv[2], 0);
