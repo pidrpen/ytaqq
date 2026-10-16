@@ -439,6 +439,9 @@ static BOOL g_aiWatchOn;
 static wchar_t g_aiSrvNote[200];    /* почему не запустился — для «Проверить» */
 static wchar_t g_aiRunNote[200];    /* как пришлось запустить (без видеокарты, малый контекст) */
 static int g_aiSlotCtx;             /* контекст ячейки у идущего сервера; 0 — как в настройках */
+static int g_aiOutCap = 1024; /* длина ответа, токенов */
+
+void ai_out_cap(int n) { g_aiOutCap = (n >= 64 && n <= 1024) ? n : 1024; }
 
 /* простой HTTP к 127.0.0.1. reqSlot — куда положить ручку запроса, чтобы
    другой поток мог оборвать его, закрыв её. Возвращает код HTTP или 0. */
@@ -1169,7 +1172,7 @@ static char *ai_body_chat(const wchar_t *instruction, const AiTurn *t, int n) {
       k += snprintf(b + k, total - k, ",{\"role\":\"%s\",\"content\":%s}", t[i].assistant ? "assistant" : "user",
                     js[i]);
     snprintf(b + k, total - k,
-             "],\"temperature\":0.2,\"max_tokens\":1024,\"stream\":true,\"cache_prompt\":true}");
+             "],\"temperature\":0.2,\"max_tokens\":%d,\"stream\":true,\"cache_prompt\":true}", g_aiOutCap);
   }
   for (int i = 0; i < n; i++) free(js[i]);
   free(js);
