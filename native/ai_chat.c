@@ -3,6 +3,9 @@
    окно контекста (вкладка «ИИ»). Enter — отправить, Shift+Enter — новая строка.
    Ответ приходит сообщением WM_AI_CHAT с AiResult*. Беседа живёт в памяти окна. */
 
+/* GUID форматов WIC: без библиотеки wincodecsdk их нет в ссылке */
+static const GUID kAcPngFormat = {0x1b7cfaf4, 0x713f, 0x473c, {0xbb, 0xcd, 0x61, 0x37, 0x42, 0x5f, 0xae, 0xaf}};
+static const GUID kAcBgra = {0x6fddc324, 0x4e03, 0x4bfe, {0xb1, 0x85, 0x3d, 0x77, 0x76, 0x8d, 0xc9, 0x0f}};
 #define WM_AI_CHAT (WM_APP + 72) /* lParam — AiResult*, освободить ai_result_free */
 #define WM_AC_SEND (WM_APP + 73) /* из поля ввода: отправить */
 #define ID_AC_LOG 4701
@@ -15,6 +18,8 @@
 #define ID_AC_STAT 4708
 #define ID_AC_TITLE 4709
 #define ID_AC_CMD 4710
+#define ID_AC_SHOT 4711
+#define ID_AC_THUMB 4712
 #define AC_CMD_SYS                                                                                              \
   L"Ты разбираешь команду для программы CursorPad. Ответь ОДНОЙ строкой JSON без текста вокруг. "         \
   L"Единственная операция: {\"op\":\"sort\",\"src\":\"папка со сканами\",\"dst\":\"папка для результата\",\"mode\":\"copy\"}. "  \
@@ -26,8 +31,16 @@
 typedef struct {
   int assistant;
   wchar_t *text;
+  BYTE *png; /* картинка к вопросу, PNG; NULL — без неё */
+  DWORD pngLen;
 } AcTurn;
-static HWND g_acWnd, g_acLog, g_acIn, g_acSend, g_acStop, g_acClear, g_acCopy, g_acSet, g_acStat, g_acTitle, g_acCmdChk;
+static HWND g_acWnd, g_acLog, g_acIn, g_acSend, g_acStop, g_acClear, g_acCopy, g_acSet, g_acStat, g_acTitle, g_acCmdChk,
+    g_acShot, g_acThumb;
+static BYTE *g_acImg;      /* картинка, ждёт отправки */
+static DWORD g_acImgLen;
+static HBITMAP g_acThumbBmp; /* миниатюра ждущей картинки (и той, что не ушла) */
+static void ac_relayout(void);
+static void ac_layout(int W, int H);
 static BOOL g_acCmdWait;      /* ответ на команду для файлов, а не чат */
 static wchar_t g_acCmdText[2000];
 static wchar_t g_acSortDst[MAX_PATH];
@@ -50,20 +63,34 @@ static void ac_push(int assistant, const wchar_t *text) {
   wcscpy(c, text);
   g_acTurns[g_acN].assistant = assistant;
   g_acTurns[g_acN].text = c;
+  g_acTurns[g_acN].png = NULL;
+  g_acTurns[g_acN].pngLen = 0;
   g_acN++;
 }
 
 /* снять последнюю реплику и вернуть её текст в поле ввода (вопрос не дошёл) */
+/* вопрос не дошёл: текст и картинка возвращаются в поле ввода */
 static void ac_unsend(void) {
   if (!g_acN) return;
-  wchar_t *q = g_acTurns[g_acN - 1].text;
-  SetWindowTextW(g_acIn, q);
+  AcTurn *t = &g_acTurns[g_acN - 1];
+  SetWindowTextW(g_acIn, t->text);
+  if (t->png) {
+    if (g_acImg) free(t->png);
+    else {
+      g_acImg = t->png;
+      g_acImgLen = t->pngLen;
+      ac_relayout();
+    }
+  }
+  free(t->text);
   g_acN--;
-  free(q);
 }
 
 static void ac_clear_turns(void) {
-  for (int i = 0; i < g_acN; i++) free(g_acTurns[i].text);
+  for (int i = 0; i < g_acN; i++) {
+    free(g_acTurns[i].text);
+    free(g_acTurns[i].png);
+  }
   g_acN = 0;
 }
 
@@ -75,6 +102,7 @@ static void ac_redraw(void) {
   s[0] = 0;
   for (int i = 0; i < g_acN; i++) {
     wcscat(s, g_acTurns[i].assistant ? L"ИИ:\r\n" : L"Вы:\r\n");
+    if (g_acTurns[i].png) wcscat(s, L"[картинка] ");
     wcscat(s, g_acTurns[i].text);
     wcscat(s, L"\r\n\r\n");
   }
@@ -137,13 +165,24 @@ static void ac_send(void) {
     return;
   }
   BOOL cmd = SendMessageW(g_acCmdChk, BM_GETCHECK, 0, 0) == BST_CHECKED;
+  if (cmd && g_acImg) {
+    ac_status(L"В командах для файлов картинки не нужны. Уберите картинку или снимите галочку.");
+    free(in);
+    return;
+  }
   ac_push(0, a);
+  if (g_acImg && g_acN) {
+    g_acTurns[g_acN - 1].png = g_acImg; /* пока только ссылка: отдадим, если запрос пойдёт */
+    g_acTurns[g_acN - 1].pngLen = g_acImgLen;
+  }
   AiTurn *t = (AiTurn *)malloc(g_acN * sizeof(AiTurn));
   int id = 0;
   if (t) {
     for (int i = 0; i < g_acN; i++) {
       t[i].assistant = g_acTurns[i].assistant;
       t[i].text = g_acTurns[i].text;
+      t[i].png = g_acTurns[i].png;
+      t[i].pngLen = g_acTurns[i].pngLen;
     }
     /* команда разбирается без истории: ответ — только JSON */
     int from = cmd ? g_acN - 1 : 0;
@@ -151,6 +190,7 @@ static void ac_send(void) {
     free(t);
   }
   if (!id) {
+    if (g_acN) g_acTurns[g_acN - 1].png = NULL; /* картинка осталась ждать */
     ac_unsend();
     ac_status(L"Не вышло спросить модель, попробуйте ещё раз");
     free(in);
@@ -158,6 +198,11 @@ static void ac_send(void) {
   }
   g_acId = id;
   g_acCmdWait = cmd;
+  if (g_acImg) { /* ушла вместе с вопросом */
+    g_acImg = NULL;
+    g_acImgLen = 0;
+    ac_relayout();
+  }
   if (cmd) lstrcpynW(g_acCmdText, a, 2000);
   SetWindowTextW(g_acIn, L"");
   ac_redraw();
@@ -271,6 +316,207 @@ static void ac_cmd_run(const wchar_t *j) {
   ac_push(1, L"Не понял команду. Напишите, какую папку разложить и куда.");
 }
 
+static void ac_relayout(void) {
+  if (!g_acWnd) return;
+  RECT rc;
+  GetClientRect(g_acWnd, &rc);
+  ac_layout(rc.right, rc.bottom);
+}
+
+static IWICImagingFactory *ac_factory(void) {
+  IWICImagingFactory *f = NULL;
+  CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+  CoCreateInstance(&kTmClsidFactory, NULL, CLSCTX_INPROC_SERVER, &kTmIidFactory, (void **)&f);
+  return f;
+}
+
+/* картинка по большей стороне не больше maxSide, 32 бита BGRA */
+static IWICBitmapSource *ac_scaled(IWICImagingFactory *f, IWICBitmapSource *src, UINT maxSide, UINT *ow, UINT *oh) {
+  UINT w = 0, h = 0;
+  if (FAILED(src->lpVtbl->GetSize(src, &w, &h)) || !w || !h) return NULL;
+  if (w > maxSide || h > maxSide) {
+    if (w >= h) {
+      h = (UINT)((UINT64)h * maxSide / w);
+      w = maxSide;
+    } else {
+      w = (UINT)((UINT64)w * maxSide / h);
+      h = maxSide;
+    }
+  }
+  if (!w) w = 1;
+  if (!h) h = 1;
+  IWICBitmapScaler *sc = NULL;
+  IWICFormatConverter *cv = NULL;
+  if (FAILED(f->lpVtbl->CreateBitmapScaler(f, &sc))) return NULL;
+  sc->lpVtbl->Initialize(sc, src, w, h, WICBitmapInterpolationModeFant);
+  if (FAILED(f->lpVtbl->CreateFormatConverter(f, &cv))) {
+    sc->lpVtbl->Release(sc);
+    return NULL;
+  }
+  cv->lpVtbl->Initialize(cv, (IWICBitmapSource *)sc, &kAcBgra, WICBitmapDitherTypeNone, NULL, 0.0,
+                         WICBitmapPaletteTypeCustom);
+  sc->lpVtbl->Release(sc);
+  *ow = w;
+  *oh = h;
+  return (IWICBitmapSource *)cv;
+}
+
+static BOOL ac_png(IWICImagingFactory *f, IWICBitmapSource *src, UINT w, UINT h, BYTE **out, DWORD *outLen) {
+  IStream *st = NULL;
+  IWICBitmapEncoder *enc = NULL;
+  IWICBitmapFrameEncode *fr = NULL;
+  IPropertyBag2 *pb = NULL;
+  BOOL ok = FALSE;
+  if (FAILED(CreateStreamOnHGlobal(NULL, TRUE, &st))) return FALSE;
+  if (SUCCEEDED(f->lpVtbl->CreateEncoder(f, &kAcPngFormat, NULL, &enc)) &&
+      SUCCEEDED(enc->lpVtbl->Initialize(enc, st, WICBitmapEncoderNoCache)) &&
+      SUCCEEDED(enc->lpVtbl->CreateNewFrame(enc, &fr, &pb)) && SUCCEEDED(fr->lpVtbl->Initialize(fr, pb)) &&
+      SUCCEEDED(fr->lpVtbl->SetSize(fr, w, h))) {
+    WICPixelFormatGUID pf = kAcBgra;
+    if (SUCCEEDED(fr->lpVtbl->SetPixelFormat(fr, &pf)) && SUCCEEDED(fr->lpVtbl->WriteSource(fr, src, NULL)) &&
+        SUCCEEDED(fr->lpVtbl->Commit(fr)) && SUCCEEDED(enc->lpVtbl->Commit(enc))) {
+      LARGE_INTEGER zero = {{0, 0}};
+      ULARGE_INTEGER pos = {{0, 0}};
+      HGLOBAL g = NULL;
+      st->lpVtbl->Seek(st, zero, STREAM_SEEK_CUR, &pos); /* конец записанного */
+      if (SUCCEEDED(GetHGlobalFromStream(st, &g))) {
+        BYTE *lk = (BYTE *)GlobalLock(g);
+        BYTE *p = (BYTE *)malloc((size_t)pos.QuadPart);
+        if (p && lk) {
+          memcpy(p, lk, (size_t)pos.QuadPart);
+          *out = p;
+          *outLen = (DWORD)pos.QuadPart;
+          ok = TRUE;
+        } else
+          free(p);
+        GlobalUnlock(g);
+      }
+    }
+  }
+  if (pb) pb->lpVtbl->Release(pb);
+  if (fr) fr->lpVtbl->Release(fr);
+  if (enc) enc->lpVtbl->Release(enc);
+  st->lpVtbl->Release(st);
+  return ok;
+}
+
+/* картинка прикрепляется к следующему вопросу: PNG до 768 px и миниатюра 80 px */
+static void ac_take(IWICImagingFactory *f, IWICBitmapSource *src) {
+  if (!ai_vision_ready()) {
+    ac_status(L"Картинки читает модель «С картинками». Скачайте её на вкладке «ИИ».");
+    ac_open_settings();
+    return;
+  }
+  UINT w = 0, h = 0, tw = 0, th = 0;
+  IWICBitmapSource *big = ac_scaled(f, src, 768, &w, &h);
+  BYTE *png = NULL;
+  DWORD pl = 0;
+  if (!big || !ac_png(f, big, w, h, &png, &pl)) {
+    if (big) big->lpVtbl->Release(big);
+    ac_status(L"Не вышло прочитать картинку");
+    return;
+  }
+  HBITMAP hb = NULL;
+  IWICBitmapSource *small = ac_scaled(f, big, 80, &tw, &th);
+  if (small) {
+    BITMAPINFO bi;
+    memset(&bi, 0, sizeof(bi));
+    bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bi.bmiHeader.biWidth = (LONG)tw;
+    bi.bmiHeader.biHeight = -(LONG)th;
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+    void *bits = NULL;
+    HDC dc = GetDC(NULL);
+    hb = CreateDIBSection(dc, &bi, DIB_RGB_COLORS, &bits, NULL, 0);
+    ReleaseDC(NULL, dc);
+    if (hb && bits) small->lpVtbl->CopyPixels(small, NULL, tw * 4, tw * 4 * th, (BYTE *)bits);
+    small->lpVtbl->Release(small);
+  }
+  big->lpVtbl->Release(big);
+  free(g_acImg);
+  g_acImg = png;
+  g_acImgLen = pl;
+  if (g_acThumbBmp) DeleteObject(g_acThumbBmp);
+  g_acThumbBmp = hb;
+  SendMessageW(g_acThumb, STM_SETIMAGE, IMAGE_BITMAP, (LPARAM)hb);
+  ac_relayout();
+  ac_status(L"Картинка прикреплена к следующему вопросу. Клик по миниатюре — убрать.");
+}
+
+static void ac_drop_img(void) {
+  free(g_acImg);
+  g_acImg = NULL;
+  g_acImgLen = 0;
+  ac_relayout();
+  ac_status(L"Картинка убрана");
+}
+
+static void ac_from_file(const wchar_t *path) {
+  IWICImagingFactory *f = ac_factory();
+  IWICBitmapDecoder *dec = NULL;
+  if (!f || FAILED(f->lpVtbl->CreateDecoderFromFilename(f, path, NULL, GENERIC_READ, WICDecodeMetadataCacheOnDemand, &dec))) {
+    ac_status(L"Это не картинка (нужны PNG, JPG, BMP, TIFF)");
+  } else {
+    IWICBitmapFrameDecode *fr = NULL;
+    if (SUCCEEDED(dec->lpVtbl->GetFrame(dec, 0, &fr))) ac_take(f, (IWICBitmapSource *)fr);
+    if (fr) fr->lpVtbl->Release(fr);
+  }
+  if (dec) dec->lpVtbl->Release(dec);
+  if (f) f->lpVtbl->Release(f);
+}
+
+/* Ctrl+V: картинка из буфера (скриншот) */
+static void ac_paste_img(void) {
+  if (!OpenClipboard(g_acWnd)) return;
+  HBITMAP clip = (HBITMAP)GetClipboardData(CF_BITMAP);
+  IWICImagingFactory *f = clip ? ac_factory() : NULL;
+  IWICBitmap *bmp = NULL;
+  if (f && SUCCEEDED(f->lpVtbl->CreateBitmapFromHBITMAP(f, clip, NULL, WICBitmapUseAlpha, &bmp)))
+    ac_take(f, (IWICBitmapSource *)bmp);
+  if (bmp) bmp->lpVtbl->Release(bmp);
+  if (f) f->lpVtbl->Release(f);
+  CloseClipboard();
+}
+
+/* «С экрана»: область мышью, как в «Распознать чертёж» */
+static void ac_shot_done(RECT r) {
+  ShowWindow(g_acWnd, SW_SHOWNORMAL);
+  int w = r.right - r.left, h = r.bottom - r.top;
+  if (w < 20 || h < 20) {
+    ac_status(L"Выделено слишком мало — обведите картинку целиком");
+    return;
+  }
+  HDC s = GetDC(NULL);
+  HDC m = CreateCompatibleDC(s);
+  HBITMAP hb = CreateCompatibleBitmap(s, w, h);
+  HGDIOBJ old = SelectObject(m, hb);
+  BitBlt(m, 0, 0, w, h, s, r.left, r.top, SRCCOPY);
+  SelectObject(m, old);
+  DeleteDC(m);
+  ReleaseDC(NULL, s);
+  IWICImagingFactory *f = ac_factory();
+  IWICBitmap *bmp = NULL;
+  if (f && SUCCEEDED(f->lpVtbl->CreateBitmapFromHBITMAP(f, hb, NULL, WICBitmapUseAlpha, &bmp)))
+    ac_take(f, (IWICBitmapSource *)bmp);
+  if (bmp) bmp->lpVtbl->Release(bmp);
+  if (f) f->lpVtbl->Release(f);
+  DeleteObject(hb);
+}
+
+static void ac_shot(void) {
+  if (!ai_vision_ready()) {
+    ac_status(L"Картинки читает модель «С картинками». Скачайте её на вкладке «ИИ».");
+    ac_open_settings();
+    return;
+  }
+  ShowWindow(g_acWnd, SW_HIDE);
+  Sleep(150);
+  g_pickDone = ac_shot_done;
+  start_ocr_pick();
+}
+
 static void ac_result(AiResult *r) {
   if (!r) return;
   if (r->id != g_acId) {
@@ -302,6 +548,10 @@ static void ac_clear(void) {
   g_acId = 0;
   ac_busy(FALSE);
   ac_clear_turns();
+  free(g_acImg);
+  g_acImg = NULL;
+  g_acImgLen = 0;
+  ac_relayout();
   SetWindowTextW(g_acLog, L"");
   ac_status(L"");
 }
@@ -324,6 +574,11 @@ static LRESULT CALLBACK AcEditProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
     return 0;
   }
   if (msg == WM_CHAR && wParam == L'\r' && !shift) return 0;
+  if (msg == WM_KEYDOWN && wParam == 'V' && (GetKeyState(VK_CONTROL) & 0x8000) && hwnd == g_acIn &&
+      IsClipboardFormatAvailable(CF_BITMAP) && !IsClipboardFormatAvailable(CF_UNICODETEXT)) {
+    ac_paste_img();
+    return 0;
+  }
   if (msg == WM_CHAR && wParam == 1) {
     SendMessageW(hwnd, EM_SETSEL, 0, -1);
     return 0;
@@ -339,7 +594,8 @@ static void ac_layout(int W, int H) {
   int pad = 12, gap = 8, btnH = 30, inH = 72, statH = 20;
   int btnY = H - pad - btnH;
   int inY = btnY - gap - inH;
-  int cmdY = inY - 4 - 22;
+  int thumbH = g_acImg ? 84 : 0;
+  int cmdY = inY - 4 - 22 - thumbH;
   int stY = cmdY - 4 - statH;
   int logY = 46;
   int logH = stY - 6 - logY;
@@ -349,7 +605,10 @@ static void ac_layout(int W, int H) {
   MoveWindow(GetDlgItem(g_acWnd, ID_PANEL_CLOSE), W - pad - 30, 8, 30, 26, TRUE);
   MoveWindow(g_acLog, pad, logY, W - 2 * pad, logH, TRUE);
   MoveWindow(g_acStat, pad, stY, W - 2 * pad, statH, TRUE);
-  MoveWindow(g_acCmdChk, pad, cmdY, W - 2 * pad, 22, TRUE);
+  MoveWindow(g_acCmdChk, pad, cmdY, W - 2 * pad - 100, 22, TRUE);
+  MoveWindow(g_acShot, W - pad - 96, cmdY, 96, 22, TRUE);
+  MoveWindow(g_acThumb, pad, inY - 84, 80, 80, TRUE);
+  ShowWindow(g_acThumb, g_acImg ? SW_SHOW : SW_HIDE);
   MoveWindow(g_acIn, pad, inY, W - 2 * pad, inH, TRUE);
   HWND row[5] = {g_acSend, g_acStop, g_acClear, g_acCopy, g_acSet};
   int bw = (W - 2 * pad - 4 * gap) / 5;
@@ -366,9 +625,23 @@ static LRESULT CALLBACK AcProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
   case WM_SIZE:
     ac_layout(LOWORD(lParam), HIWORD(lParam));
     return 0;
+  case WM_DROPFILES: {
+    wchar_t p[MAX_PATH] = L"";
+    HDROP hd = (HDROP)wParam;
+    if (DragQueryFileW(hd, 0, p, MAX_PATH)) ac_from_file(p);
+    DragFinish(hd);
+    return 0;
+  }
   case WM_COMMAND:
+    if (LOWORD(wParam) == ID_AC_THUMB && HIWORD(wParam) == STN_CLICKED) {
+      ac_drop_img();
+      return 0;
+    }
     if (HIWORD(wParam) != BN_CLICKED) break;
     switch (LOWORD(wParam)) {
+    case ID_AC_SHOT:
+      ac_shot();
+      break;
     case ID_PANEL_CLOSE:
       ShowWindow(hwnd, SW_HIDE);
       break;
@@ -446,8 +719,12 @@ static void ac_create(void) {
   g_acSet = mk_btn(g_acWnd, L"Настройки", ID_AC_SET);
   g_acCmdChk = CreateWindowExW(0, L"BUTTON", L"Команда для файлов: разложить папку по штампам", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
                                0, 0, 10, 10, g_acWnd, (HMENU)(INT_PTR)ID_AC_CMD, g_inst, NULL);
+  g_acShot = mk_btn(g_acWnd, L"С экрана", ID_AC_SHOT);
+  g_acThumb = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | SS_BITMAP | SS_NOTIFY, 0, 0, 10, 10, g_acWnd,
+                              (HMENU)(INT_PTR)ID_AC_THUMB, g_inst, NULL);
+  DragAcceptFiles(g_acWnd, TRUE);
   for (HWND c = GetWindow(g_acWnd, GW_CHILD); c; c = GetWindow(c, GW_HWNDNEXT))
-    if (c != g_acSend && c != g_acStop && c != g_acClear && c != g_acCopy && c != g_acSet && c != g_acCmdChk) SendMessageW(c, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
+    if (c != g_acSend && c != g_acStop && c != g_acClear && c != g_acCopy && c != g_acSet && c != g_acCmdChk && c != g_acShot) SendMessageW(c, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
   SendMessageW(g_acLog, WM_SETFONT, (WPARAM)g_fontBody, TRUE);
   SendMessageW(g_acIn, WM_SETFONT, (WPARAM)g_fontBody, TRUE);
   g_acEditOld = (WNDPROC)SetWindowLongPtrW(g_acIn, GWLP_WNDPROC, (LONG_PTR)AcEditProc);

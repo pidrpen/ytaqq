@@ -1016,6 +1016,35 @@ int ai_ask_async(const wchar_t *instruction, const wchar_t *text, DWORD timeoutM
 }
 
 /* беседа: system, затем реплики; тело запроса — как у ai_body */
+/* вопрос с картинкой: текст и image_url с PNG в data-адресе */
+static char *ai_content_img(const wchar_t *text, const BYTE *png, DWORD len) {
+  char *tx = ai_json_str(text);
+  char *b64 = ai_b64(png, len);
+  if (!tx || !b64) {
+    free(tx);
+    free(b64);
+    return NULL;
+  }
+  size_t n = strlen(tx) + strlen(b64) + 200;
+  char *c = (char *)malloc(n);
+  if (c)
+    snprintf(c, n,
+             "[{\"type\":\"text\",\"text\":%s},{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,%s\"}}]",
+             tx, b64);
+  free(tx);
+  free(b64);
+  return c;
+}
+
+BOOL ai_vision_ready(void) {
+  if (ai_ext()) return TRUE;
+  wchar_t m[MAX_PATH], mm[MAX_PATH];
+  return ai_pick_model(m, mm) && mm[0] != 0;
+}
+
+/* картинка весит как ~3000 символов истории: модель тратит на неё много контекста */
+static long ai_turn_cost(const AiTurn *t) { return (long)wcslen(t->text) + (t->png ? 3000 : 0); }
+
 static char *ai_body_chat(const wchar_t *instruction, const AiTurn *t, int n) {
   char *sys = ai_json_str(instruction);
   char **js = (char **)calloc(n > 0 ? n : 1, sizeof(char *));
@@ -1026,7 +1055,7 @@ static char *ai_body_chat(const wchar_t *instruction, const AiTurn *t, int n) {
   }
   size_t total = strlen(sys) + strlen(g_aiExtModel) + 400;
   for (int i = 0; i < n; i++) {
-    js[i] = ai_json_str(t[i].text);
+    js[i] = t[i].png ? ai_content_img(t[i].text, t[i].png, t[i].pngLen) : ai_json_str(t[i].text);
     if (!js[i]) break;
     total += strlen(js[i]) + 64;
   }
@@ -1053,10 +1082,10 @@ int ai_ctx_size(void) { return g_aiCtx; }
 int ai_ask_chat_async(const wchar_t *instruction, const AiTurn *turns, int n, DWORD timeoutMs, HWND notify,
                       UINT msg, void *user) {
   if (ai_precheck() != AI_OK || !notify || !turns || n < 1 || !turns[n - 1].text) return 0;
-  long budget = ai_chat_budget(), used = (long)wcslen(turns[n - 1].text);
+  long budget = ai_chat_budget(), used = ai_turn_cost(&turns[n - 1]);
   if (used > budget) return 0;
   int s = n - 1;
-  while (s > 0 && used + (long)wcslen(turns[s - 1].text) <= budget) used += (long)wcslen(turns[--s].text);
+  while (s > 0 && used + ai_turn_cost(&turns[s - 1]) <= budget) used += ai_turn_cost(&turns[--s]);
   while (s < n - 1 && turns[s].assistant) s++; /* модель начинает с вопроса */
   char *body = ai_body_chat(instruction, turns + s, n - s);
   if (!body) return 0;
