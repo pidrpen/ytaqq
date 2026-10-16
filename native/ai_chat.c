@@ -57,6 +57,10 @@ static void ac_files_apply(void);
 static void ac_files_cancel(void);
 static const wchar_t *ac_cmd_instruction(void);
 static void af_set_last(const wchar_t *dir);
+static void af_known_folders(void);
+static BOOL af_resolve(const wchar_t *in, wchar_t *out, BOOL allowNew);
+static BOOL af_is_dir(const wchar_t *p);
+static BOOL af_trusted(const wchar_t *p);
 static void af_clear(void);
 static BOOL g_acCmdWait;      /* ответ на команду для файлов, а не чат */
 static wchar_t g_acCmdText[2000];
@@ -527,11 +531,6 @@ static BOOL ac_json_field(const wchar_t *j, const wchar_t *key, wchar_t *out, in
   return TRUE;
 }
 
-static BOOL ac_dir_exists(const wchar_t *p) {
-  DWORD a = GetFileAttributesW(p);
-  return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
-}
-
 /* путь назван в тексте пользователя — модель не может подсунуть свою папку */
 static BOOL ac_named(const wchar_t *path) {
   wchar_t t[MAX_PATH];
@@ -599,14 +598,20 @@ static void ac_cmd_run(const wchar_t *j) {
   wchar_t op[32] = L"", src[MAX_PATH] = L"", dst[MAX_PATH] = L"", mode[16] = L"", q[300] = L"";
   ac_json_field(j, L"op", op, 32);
   if (!wcscmp(op, L"sort") && ac_json_field(j, L"src", src, MAX_PATH) && ac_json_field(j, L"dst", dst, MAX_PATH)) {
+    wchar_t rs[MAX_PATH], rd[MAX_PATH];
     ac_json_field(j, L"mode", mode, 16);
-    if (!ac_named(src) || !ac_named(dst) || !ac_dir_exists(src) || !ac_dir_exists(dst)) {
-      ac_push(1, L"Не нашёл такие папки. Напишите путь точно, как он открыт в проводнике.");
+    af_known_folders();
+    /* короткое имя — из списка известных; полный путь — как назвал пользователь.
+       обе папки должны уже быть. новую для штампа не выдумываем. */
+    if (!af_resolve(src, rs, FALSE) || !af_is_dir(rs) || !af_trusted(rs) || !af_resolve(dst, rd, FALSE) ||
+        !af_is_dir(rd) || !af_trusted(rd)) {
+      ac_push(1, L"Не нашёл обе папки. Напишите, откуда сканы и куда класть, как в проводнике. Обе должны уже быть.");
+      ac_redraw();
       return;
     }
     /* перемещать — только если пользователь так и написал */
     BOOL move = !wcscmp(mode, L"move") && (wcsstr(g_acCmdText, L"перемест") || wcsstr(g_acCmdText, L"перенес"));
-    ac_sort_start(src, dst, move);
+    ac_sort_start(rs, rd, move);
     return;
   }
   if (!wcscmp(op, L"ask") && ac_json_field(j, L"question", q, 300)) {
