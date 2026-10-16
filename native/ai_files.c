@@ -244,6 +244,7 @@ static void af_lower(wchar_t *s) { CharLowerBuffW(s, (DWORD)wcslen(s)); }
 static int af_match(const wchar_t *dir, const wchar_t *name) {
   wchar_t words[8][64];
   int nw = 0, ext = 0;
+  BOOL all = FALSE;
   wchar_t lname[200];
   lstrcpynW(lname, name, 200);
   af_lower(lname);
@@ -255,7 +256,9 @@ static int af_match(const wchar_t *dir, const wchar_t *name) {
     int n = 0;
     while (*p && *p != L' ' && n < 63) tok[n++] = *p++;
     tok[n] = 0;
-    if (!wcscmp(tok, L"эксель") || !wcscmp(tok, L"excel") || !wcscmp(tok, L"xls") || !wcscmp(tok, L"xlsx")) ext |= 1;
+    if (wcsstr(tok, L"эксел") || wcsstr(tok, L"ексел") || wcsstr(tok, L"excel") || !wcscmp(tok, L"xls") ||
+        !wcscmp(tok, L"xlsx"))
+      ext |= 1;
     else if (!wcscmp(tok, L"ворд") || !wcscmp(tok, L"word") || !wcscmp(tok, L"doc") || !wcscmp(tok, L"docx")) ext |= 2;
     else if (!wcscmp(tok, L"пдф") || !wcscmp(tok, L"pdf")) ext |= 4;
     else if (!wcscmp(tok, L"tif") || !wcscmp(tok, L"tiff") || !wcscmp(tok, L"тиф")) ext |= 8;
@@ -264,13 +267,14 @@ static int af_match(const wchar_t *dir, const wchar_t *name) {
     else if (!wcscmp(tok, L"dwg") || !wcscmp(tok, L"двг")) ext |= 64;
     else if (!wcscmp(tok, L"bmp")) ext |= 128;
     else if (!wcsncmp(tok, L"картин", 6)) ext |= 8 | 16 | 32 | 128;
-    else if (!wcscmp(tok, L"все") || !wcscmp(tok, L"файл") || !wcscmp(tok, L"файлы") || !wcscmp(tok, L"файла") ||
-             !wcscmp(tok, L"туда") || !wcscmp(tok, L"их"))
+    else if (!wcscmp(tok, L"все") || !wcscmp(tok, L"всё")) all = TRUE;
+    else if (!wcscmp(tok, L"файл") || !wcscmp(tok, L"файлы") || !wcscmp(tok, L"файла") || !wcscmp(tok, L"туда") ||
+             !wcscmp(tok, L"их"))
       continue;
     else if (nw < 8) lstrcpynW(words[nw++], tok, 64);
   }
   g_afHitN = 0;
-  if (!nw && !ext) return 0;
+  if (!nw && !ext && !all) return 0;
   wchar_t pat[MAX_PATH];
   _snwprintf(pat, MAX_PATH, L"%s\\*", dir);
   WIN32_FIND_DATAW fd;
@@ -425,8 +429,8 @@ static BOOL ac_all_of_type(const wchar_t *what) {
     tok[n] = 0;
     words++;
     if (!wcscmp(tok, L"все") || !wcscmp(tok, L"файл") || !wcscmp(tok, L"файлы") || !wcscmp(tok, L"туда") ||
-        !wcscmp(tok, L"pdf") || !wcscmp(tok, L"пдф") || !wcscmp(tok, L"эксель") || !wcscmp(tok, L"excel") ||
-        !wcscmp(tok, L"xls") || !wcscmp(tok, L"xlsx") || !wcscmp(tok, L"ворд") || !wcscmp(tok, L"word") ||
+        !wcscmp(tok, L"pdf") || !wcscmp(tok, L"пдф") || wcsstr(tok, L"эксел") || wcsstr(tok, L"ексел") ||
+        wcsstr(tok, L"excel") || !wcscmp(tok, L"xls") || !wcscmp(tok, L"xlsx") || !wcscmp(tok, L"ворд") || !wcscmp(tok, L"word") ||
         !wcscmp(tok, L"doc") || !wcscmp(tok, L"docx") || !wcscmp(tok, L"tif") || !wcscmp(tok, L"tiff") ||
         !wcscmp(tok, L"тиф") || !wcscmp(tok, L"jpg") || !wcscmp(tok, L"jpeg") || !wcscmp(tok, L"джипег") ||
         !wcscmp(tok, L"png") || !wcscmp(tok, L"пнг") || !wcscmp(tok, L"dwg") || !wcscmp(tok, L"двг") ||
