@@ -51,38 +51,10 @@ trap 'rm -rf "$TMP"' EXIT
 
 cd "$HERE"
 # помощник распознавания зашит в exe ресурсом, поэтому собирается первым
-$CC $CFLAGS -o CursorPadOcr.exe ocr_module.c -lole32 -lruntimeobject -luser32 -municode -s $LDX
+$CC $CFLAGS -o CursorPadOcr.exe ocr_module.c -lole32 -lruntimeobject -luser32 -municode -s -Wl,--no-insert-timestamp $LDX
 $RC cursorpad.rc -O coff -o "$TMP/cursorpad.res"
 $CC $CFLAGS -finput-charset=UTF-8 -o "$PUB/CursorPad.exe" cursorpad.c "$TMP/cursorpad.res" \
   -luser32 -lgdi32 -lshell32 -lole32 -lcomctl32 -lwinhttp -ladvapi32 -lodbc32 -lcrypt32 -lcomdlg32 -lmsimg32 \
-  -Wl,--subsystem,windows -municode -s $LDX
+  -Wl,--subsystem,windows -municode -s -Wl,--no-insert-timestamp $LDX
 
-cp -f cursorpad.manifest "$PUB/CursorPad.exe.manifest"
-mkdir -p "$PUB/cursors-win"
-cp -f cursors/*.cur "$PUB/cursors-win/"
-
-"$PY" - "$PUB" "$HERE" <<'PY'
-import sys, zipfile, pathlib
-pub, native = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
-with zipfile.ZipFile(pub / "CursorPad.zip", "w", zipfile.ZIP_DEFLATED) as z:
-    z.write(pub / "CursorPad.exe", "CursorPad.exe")
-    z.write(native / "cursorpad.manifest", "CursorPad.exe.manifest")
-    z.write(native / "README.txt", "README.txt")
-    z.write(native / "ocr.ps1", "ocr.ps1")
-    # курсоры зашиты в exe ресурсами; в архиве они были бы второй копией
-PY
-
-# jsDelivr не отдаёт .exe, поэтому зеркала получают те же байты как .bin.
-# Сам public/CursorPad.exe тоже лежит в репозитории — его скачивают руками.
-cp -f "$PUB/CursorPad.exe" "$PUB/CursorPad.bin"
-# version.txt для обновления: номер, версия, отпечаток sha256 программы (по нему
-# CursorPad проверяет скачанное) и «что нового» из whatsnew.txt (его же видно
-# во всплывашке «вышла новая версия»; старые версии читают только 2 строки)
-{
-  sed -n '1,2p' "$HERE/version.txt"
-  echo "sha256 $(sha256sum "$PUB/CursorPad.bin" | cut -c1-64)"
-  cat "$HERE/whatsnew.txt"
-} > "$PUB/version.txt"
-
-echo "CursorPad $V_STR"
-ls -l "$PUB/CursorPad.bin" "$PUB/CursorPad.zip" | awk '{print "  " $9 "  " $5}'
+"$PY" "$HERE/package_release.py" "$PUB" "$HERE"

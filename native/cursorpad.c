@@ -4765,6 +4765,15 @@ static void enable_dpi(void) {
 }
 
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
+#ifdef AGENT_LAB
+  {
+    int n = 0; LPWSTR *args = CommandLineToArgvW(GetCommandLineW(), &n);
+    if (args && n >= 3 && !wcscmp(args[1], L"--agent-lab")) {
+      int code = ag_lab(inst, args[2]); LocalFree(args); return code;
+    }
+    if (args) LocalFree(args);
+  }
+#endif
   (void)prev;
   (void)cmd;
   (void)show;

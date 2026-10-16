@@ -61,6 +61,7 @@ typedef struct AiTurn {
    реплика — вопрос; больше ai_chat_budget — возвращает 0. */
 int ai_ask_chat_async(const wchar_t *instruction, const AiTurn *turns, int n, DWORD timeoutMs, HWND notify,
                       UINT msg, void *user);
+int ai_ask_files_async(const wchar_t *instruction, const AiTurn *turns, int n, HWND notify, UINT msg);
 void ai_out_cap(int n); /* сколько токенов просить в ответе; 0 — снова 1024. Для навыка «Файлы» хватает 192 */
 int ai_chat_budget(void); /* символов истории и вопроса, которые уйдут модели */
 int ai_ctx_size(void);    /* окно контекста модели, токенов (вкладка «ИИ») */

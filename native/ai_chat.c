@@ -11,6 +11,7 @@ static const GUID kAcPngFormat = {0x1b7cfaf4, 0x713f, 0x473c, {0xbb, 0xcd, 0x61,
 static const GUID kAcBgra = {0x6fddc324, 0x4e03, 0x4bfe, {0xb1, 0x85, 0x3d, 0x77, 0x76, 0x8d, 0xc9, 0x0f}};
 #define WM_AI_CHAT (WM_APP + 72) /* lParam — AiResult*, освободить ai_result_free */
 #define WM_AC_SEND (WM_APP + 73) /* из поля ввода: отправить */
+#define WM_AG_TOOL (WM_APP + 74) /* результат файлового инструмента из рабочего потока */
 #define ID_AC_LOG 4701
 #define ID_AC_IN 4702
 #define ID_AC_SEND 4703
@@ -68,6 +69,15 @@ static void af_parent(const wchar_t *p, wchar_t *out);
 static void ac_take_plan(const wchar_t *src, const wchar_t *dst, const wchar_t *what, BOOL mv);
 static BOOL af_trusted(const wchar_t *p);
 static void af_clear(void);
+static BOOL g_agActive, g_agReview, g_agPending;
+static BOOL ag_wants(const wchar_t *text);
+static BOOL ag_start(const wchar_t *text);
+static void ag_result(AiResult *r);
+static void ag_stop(void);
+static void ag_apply_review(void);
+static void ag_tool_ready(void *result);
+static void ag_cancel_work(void);
+static BOOL ag_can_clear(void);
 static BOOL g_acCmdWait;      /* ответ на команду для файлов, а не чат */
 static wchar_t g_acMkName[80];     /* имя новой папки, если путь ещё не назвали */
 static wchar_t g_acMkParent[MAX_PATH]; /* папка, куда класть, если имя ещё не назвали */
@@ -856,7 +866,13 @@ static void ac_send(void) {
       return;
     }
   }
-  if (g_acId) {
+  if (g_acId || g_agActive) {
+    free(in);
+    return;
+  }
+  if (!g_acImg && ai_ready() && ag_wants(a)) {
+    ag_start(a);
+    SetWindowTextW(g_acIn, L"");
     free(in);
     return;
   }
@@ -1262,6 +1278,11 @@ static void ac_result(AiResult *r) {
     ai_result_free(r);
     return;
   }
+  if (g_agActive) {
+    ag_result(r);
+    ai_result_free(r);
+    return;
+  }
   g_acId = 0;
   ac_busy(FALSE);
   BOOL cmd = g_acCmdWait;
@@ -1283,6 +1304,8 @@ static void ac_result(AiResult *r) {
 }
 
 static void ac_clear(void) {
+  if (!ag_can_clear()) return;
+  ag_stop();
   if (g_acPlanOn) af_clear();
   ac_plan_ui(FALSE);
   if (g_acId) ai_cancel(g_acId);
@@ -1403,6 +1426,7 @@ static LRESULT CALLBACK AcProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
     case ID_AC_STOP:
     case ID_AC_CANCEL:
       if (g_acPlanOn) ac_files_cancel();
+      else if (g_agActive && !g_acId) ag_cancel_work();
       else if (g_acId) ai_cancel(g_acId);
       break;
     case ID_AC_CLEAR:
@@ -1440,6 +1464,9 @@ static LRESULT CALLBACK AcProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
     return 0;
   case WM_AI_CHAT:
     ac_result((AiResult *)lParam);
+    return 0;
+  case WM_AG_TOOL:
+    ag_tool_ready((void *)lParam);
     return 0;
   case WM_CLOSE:
     ShowWindow(hwnd, SW_HIDE);
@@ -1530,3 +1557,4 @@ static void aichat_ask(const wchar_t *q) {
 }
 
 #include "ai_files.c" /* команды для файлов: копировать, переместить, переименовать, создать папку */
+#include "ai_agent.c" /* составные файловые задачи с реальными наблюдениями и общим планом */

@@ -1149,7 +1149,8 @@ BOOL ai_vision_ready(void) {
 /* картинка весит как ~3000 символов истории: модель тратит на неё много контекста */
 static long ai_turn_cost(const AiTurn *t) { return (long)wcslen(t->text) + (t->png ? 3000 : 0); }
 
-static char *ai_body_chat(const wchar_t *instruction, const AiTurn *t, int n) {
+#include "ai_agent_schema.h"
+static char *ai_body_chat(const wchar_t *instruction, const AiTurn *t, int n, BOOL fileTools) {
   char *sys = ai_json_str(instruction);
   char **js = (char **)calloc(n > 0 ? n : 1, sizeof(char *));
   if (!sys || !js) {
@@ -1157,7 +1158,7 @@ static char *ai_body_chat(const wchar_t *instruction, const AiTurn *t, int n) {
     free(js);
     return NULL;
   }
-  size_t total = strlen(sys) + strlen(g_aiExtModel) + 400;
+  size_t total = strlen(sys) + strlen(g_aiExtModel) + 400 + (fileTools ? strlen(kAiAgentSchema) : 0);
   for (int i = 0; i < n; i++) {
     js[i] = t[i].png ? ai_content_img(t[i].text, t[i].png, t[i].pngLen) : ai_json_str(t[i].text);
     if (!js[i]) break;
@@ -1172,7 +1173,8 @@ static char *ai_body_chat(const wchar_t *instruction, const AiTurn *t, int n) {
       k += snprintf(b + k, total - k, ",{\"role\":\"%s\",\"content\":%s}", t[i].assistant ? "assistant" : "user",
                     js[i]);
     snprintf(b + k, total - k,
-             "],\"temperature\":0.2,\"max_tokens\":%d,\"stream\":true,\"cache_prompt\":true}", g_aiOutCap);
+             "],\"temperature\":0.2,\"max_tokens\":%d,\"stream\":true,\"cache_prompt\":true%s}", g_aiOutCap,
+             fileTools ? kAiAgentSchema : "");
   }
   for (int i = 0; i < n; i++) free(js[i]);
   free(js);
@@ -1183,8 +1185,8 @@ static char *ai_body_chat(const wchar_t *instruction, const AiTurn *t, int n) {
 int ai_chat_budget(void) { return ((g_aiSlotCtx ? g_aiSlotCtx : g_aiCtx) - 1024 - 300) * 2; } /* ≈ 2 символа на токен: запас для русского */
 int ai_ctx_size(void) { return g_aiCtx; }
 
-int ai_ask_chat_async(const wchar_t *instruction, const AiTurn *turns, int n, DWORD timeoutMs, HWND notify,
-                      UINT msg, void *user) {
+static int ai_ask_chat_kind(const wchar_t *instruction, const AiTurn *turns, int n, DWORD timeoutMs, HWND notify,
+                            UINT msg, void *user, BOOL fileTools) {
   if (ai_precheck() != AI_OK || !notify || !turns || n < 1 || !turns[n - 1].text) return 0;
   /* роль system не входит в бюджет реплик: длинная тетрадь иначе вытесняет вопрос из окна */
   long budget = ai_chat_budget();
@@ -1198,9 +1200,18 @@ int ai_ask_chat_async(const wchar_t *instruction, const AiTurn *turns, int n, DW
   int s = n - 1;
   while (s > 0 && used + ai_turn_cost(&turns[s - 1]) <= budget) used += ai_turn_cost(&turns[--s]);
   while (s < n - 1 && turns[s].assistant) s++; /* модель начинает с вопроса */
-  char *body = ai_body_chat(instruction, turns + s, n - s);
+  char *body = ai_body_chat(instruction, turns + s, n - s, fileTools);
   if (!body) return 0;
   return ai_ask_body(body, timeoutMs, notify, msg, user);
+}
+
+int ai_ask_chat_async(const wchar_t *instruction, const AiTurn *turns, int n, DWORD timeoutMs, HWND notify,
+                      UINT msg, void *user) {
+  return ai_ask_chat_kind(instruction, turns, n, timeoutMs, notify, msg, user, FALSE);
+}
+
+int ai_ask_files_async(const wchar_t *instruction, const AiTurn *turns, int n, HWND notify, UINT msg) {
+  return ai_ask_chat_kind(instruction, turns, n, 180000, notify, msg, NULL, TRUE);
 }
 
 static int ai_ask_body(char *body, DWORD timeoutMs, HWND notify, UINT msg, void *user) {
