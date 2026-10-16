@@ -26,6 +26,7 @@
 #define ID_DR_CSV 930
 #define ID_DR_OPEN 931
 #define ID_DR_TIMER 932
+#define ID_DR_SORT 933 /* «Разложить по папкам…» — drawrec_sort.c */
 #define WM_DR_ADD (WM_APP + 140)  /* lParam — DrItem*: новая страница (ещё не прочитана) */
 #define WM_DR_DONE (WM_APP + 141) /* lParam — DrItem*: страница прочитана */
 
@@ -72,6 +73,7 @@ static BOOL g_drDrag;
 static int g_drEditRow = -1, g_drEditCol = -1;
 
 static int DRS(int v) { return (int)(v * g_drS + 0.5f); }
+static void drs_show(void);
 
 static void dr_status(const wchar_t *fmt, ...) {
   va_list ap;
@@ -1052,7 +1054,7 @@ static void dr_layout(void) {
   MoveWindow(g_drList, pad, ly, rc.right - pad * 2, by - DRS(10) - ly, TRUE);
   static const struct {
     int id, w;
-  } bot[] = {{ID_DR_COPY, 190}, {ID_DR_PKG, 130}, {ID_DR_CSV, 160}, {ID_DR_OPEN, 130}};
+  } bot[] = {{ID_DR_COPY, 190}, {ID_DR_PKG, 130}, {ID_DR_CSV, 160}, {ID_DR_SORT, 200}, {ID_DR_OPEN, 130}};
   x = pad;
   for (size_t i = 0; i < sizeof(bot) / sizeof(bot[0]); i++) {
     MoveWindow(GetDlgItem(g_drWnd, bot[i].id), x, by, DRS(bot[i].w), DRS(30), TRUE);
@@ -1078,8 +1080,8 @@ static void dr_paint(HWND hwnd, HDC hdc) {
   if (g_fontSmall) SelectObject(hdc, g_fontSmall);
   SetTextColor(hdc, COL_MUTED);
   int by = rc.bottom - pad - DRS(30);
-  RECT hint = {pad + DRS(650), by, rc.right - pad, by + DRS(30)};
-  DrawTextW(hdc, L"Жёлтым — прочитано неуверенно, проверьте. F2 — поправить, Ctrl+C — в Excel.", -1, &hint,
+  RECT hint = {pad + DRS(860), by, rc.right - pad, by + DRS(30)};
+  DrawTextW(hdc, L"Жёлтым — проверьте. F2 — поправить.", -1, &hint,
             DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 }
 
@@ -1238,6 +1240,7 @@ static LRESULT CALLBACK DrProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
     if (id == ID_DR_PKG) dr_to_package();
     if (id == ID_DR_CSV) dr_csv();
     if (id == ID_DR_OPEN) dr_open_sheet();
+    if (id == ID_DR_SORT) drs_show();
     return 0;
   }
   case WM_KEYDOWN:
@@ -1289,6 +1292,7 @@ static void drawrec_show(void) {
     mk_btn(g_drWnd, L"Копировать для Excel", ID_DR_COPY);
     mk_btn(g_drWnd, L"В пакет PLM", ID_DR_PKG);
     mk_btn(g_drWnd, L"CSV для Союза…", ID_DR_CSV);
+    mk_btn(g_drWnd, L"Разложить по папкам…", ID_DR_SORT);
     mk_btn(g_drWnd, L"Открыть лист", ID_DR_OPEN);
     g_drList = CreateWindowExW(0, WC_LISTVIEWW, L"",
                                WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP | LVS_REPORT | LVS_OWNERDATA |
