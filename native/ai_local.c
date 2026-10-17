@@ -41,10 +41,13 @@ static const AiTier kAiTiers[AI_TIERS] = {
      {{L"Qwen/Qwen2.5-1.5B-Instruct-GGUF", L"91cad51170dc346986eccefdc2dd33a9da36ead9",
        L"qwen2.5-1.5b-instruct-q4_k_m.gguf", 1117320736ULL,
        "6a1a2eb6d15622bf3c96857206351ba97e1af16c30d7a74ee38970e434e9407e"}}},
-    {L"Средний", L"Qwen3.5 4B · Q4_K_M", L"qwen3.5-4b", L"16 ГБ памяти; актуальная llama.cpp, Vulkan или процессор", 1, FALSE,
+    {L"Средний", L"Qwen3.5 4B · текст и картинки", L"qwen3.5-4b", L"16 ГБ памяти; текст и картинки, Vulkan или процессор", 2, TRUE,
      {{L"unsloth/Qwen3.5-4B-GGUF", L"e87f176479d0855a907a41277aca2f8ee7a09523",
        L"Qwen3.5-4B-Q4_K_M.gguf", 2740937888ULL,
-       "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4"}}},
+       "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4"},
+      {L"unsloth/Qwen3.5-4B-GGUF", L"e87f176479d0855a907a41277aca2f8ee7a09523",
+       L"mmproj-F16.gguf", 672423616ULL,
+       "cd88edcf8d031894960bb0c9c5b9b7e1fea6ebee02b9f7ce925a00d12891f864"}}},
     {L"Мощный", L"Qwen2.5 7B", L"qwen2.5-7b", L"32 ГБ памяти или видеокарта от 8 ГБ", 2, FALSE,
      {{L"Qwen/Qwen2.5-7B-Instruct-GGUF", L"bb5d59e06d9551d752d08b292a50eb208b07ab1f",
        L"qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf", 3993201344ULL,
@@ -223,7 +226,7 @@ const wchar_t *ai_status_text(int st) {
   case AI_TIMEOUT: return L"ИИ не успел ответить";
   case AI_CANCELLED: return L"отменено";
   case AI_BUSY: return L"нельзя ждать ИИ в потоке окон";
-  case AI_NO_VISION: return L"нужна модель «С картинками»";
+  case AI_NO_VISION: return L"нужна модель с картинками: «Средний» или «С картинками»";
   default: return L"ошибка ИИ";
   }
 }
@@ -724,6 +727,10 @@ static int ai_server_ensure(DWORD deadline, volatile LONG *cancel, int minimumCo
        Server default also covers QwenPaw's auxiliary checklist/audit calls. */
     if (ai_qwen35(model) && n > 0)
       n += _snwprintf(cmd + n, MAX_PATH * 4 + 300 - n, L" --jinja --chat-template-kwargs \"{\\\"enable_thinking\\\":false}\"");
+    /* The vision loader recommends at least 1024 image tokens for details.
+       This affects attached images only; text requests keep their budget. */
+    if (ai_qwen35(model) && mm[0] && n > 0)
+      n += _snwprintf(cmd + n, MAX_PATH * 4 + 300 - n, L" --image-min-tokens 1024");
     /* своя модель с дообучением: адаптер LoRA (lora*.gguf) рядом с ней подключается сам —
        так можно взять готовую модель и свой адаптер, обученный на своих документах */
     wchar_t lora[MAX_PATH];
@@ -1850,7 +1857,7 @@ static DWORD WINAPI ai_dl_thread(LPVOID p) {
     /* First download of the new architecture refreshes the managed engine too.
        An old existing EXE is not evidence that it supports qwen35 / Vulkan GDN.
        A manually selected engine is retained and tested by normal startup. */
-    if (!ai_server_exe(gpu, exe) || (tier == 1 && needModel[0] && !g_aiSrvExe[0])) {
+    if (!ai_server_exe(gpu, exe) || (tier == 1 && (needModel[0] || needModel[1]) && !g_aiSrvExe[0])) {
       if (!g_aiSrvExe[0]) ai_server_stop(); /* release only our managed engine/DLLs before updating */
       BOOL ok = ai_get_llama(ses, gpu);
       if (!ok && gpu && !g_aiDl.cancel && !ai_server_exe(FALSE, exe)) {

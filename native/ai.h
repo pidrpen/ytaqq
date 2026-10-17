@@ -52,7 +52,7 @@ int ai_ask_async(const wchar_t *instruction, const wchar_t *text, DWORD timeoutM
 typedef struct AiTurn {
   int assistant;
   const wchar_t *text;
-  const BYTE *png; /* картинка к реплике (PNG); NULL — без картинки, нужна модель «С картинками» */
+  const BYTE *png; /* картинка к реплике (PNG); NULL — без картинки, нужна модель с проектором */
   DWORD pngLen;
 } AiTurn;
 
@@ -68,7 +68,7 @@ void ai_out_cap(int n); /* сколько токенов просить в от�
 int ai_chat_budget(void); /* символов истории и вопроса, которые уйдут модели */
 int ai_agent_budget(void); /* agent automatically requests a 16384-token slot */
 int ai_ctx_size(void);    /* окно контекста модели, токенов (вкладка «ИИ») */
-BOOL ai_vision_ready(void); /* можно ли присылать картинки: модель «С картинками» скачана или свой сервер */
+BOOL ai_vision_ready(void); /* у выбранной модели есть проектор или используется свой сервер */
 void ai_cancel(int id); /* ответ всё равно придёт — со статусом AI_CANCELLED */
 void ai_result_free(AiResult *r);
 
@@ -77,7 +77,7 @@ void ai_result_free(AiResult *r);
    отмены: стал не 0 — запрос обрывается. */
 int ai_ask_sync(const wchar_t *instruction, const wchar_t *text, DWORD timeoutMs, volatile LONG *cancel,
                 wchar_t **answer);
-/* то же с картинкой (PNG/JPG/BMP-файл); нужна модель уровня «С картинками» */
+/* то же с картинкой (PNG/JPG/BMP-файл); нужна модель с проектором */
 int ai_ask_image_sync(const wchar_t *instruction, const wchar_t *imagePath, DWORD timeoutMs,
                       volatile LONG *cancel, wchar_t **answer);
 

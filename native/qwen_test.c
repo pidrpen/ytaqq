@@ -24,6 +24,29 @@ static int aq_test(void) {
     if (result) { sprintf(result, "{\"state\":%d,\"count\":%d,\"observation\":%s}", state, fs->count, observed ? observed : "null"); aq_write(argv[3], result); }
     free(result); free(observed); free(fs); free(action); free(job.body); LocalFree(argv);
     return state >= 0 ? 0 : 1;
+  } else if (port == -4 && argc == 7 && job.body) {
+    /* Real chat image body + managed tier selection + production launcher.
+       The caller supplies an isolated profile containing model hard links. */
+    g_aiOn = TRUE; g_aiTier = 1; g_aiCtx = 4096; g_aiGpu = TRUE; ai_out_cap(200);
+    lstrcpynW(g_aiSrvExe, argv[6], MAX_PATH);
+    job.agentTask = 0; job.timeout = 180000;
+    wchar_t model[MAX_PATH], mm[MAX_PATH];
+    if (!ai_pick_model(model, mm) || !ai_vision_ready()) status = AI_NO_VISION;
+    else {
+      char *raw = aq_read(argv[5]);
+      wchar_t *question = ai_wide(job.body, -1);
+      if (!raw || !question) status = AI_ERROR;
+      else {
+        AiTurn turn = {0}; turn.text = question;
+        turn.png = (BYTE *)raw; turn.pngLen = (DWORD)ai_file_size(argv[5]);
+        char *body = ai_body_chat(L"Ответь на вопрос по приложенной картинке. Кратко, по-русски.", &turn, 1, FALSE);
+        free(job.body); job.body = body;
+        if (body) { ai_job_run(&job); status = job.status; testedSlot = g_aiSlotCtx; }
+        else status = AI_ERROR;
+      }
+      free(raw); free(question);
+    }
+    ai_shutdown();
   } else if (port == -2 && argc == 7 && job.body) {
     g_aiOn = TRUE; g_aiCtx = 2048; g_aiGpu = TRUE;
     lstrcpynW(g_aiModel, argv[5], MAX_PATH); lstrcpynW(g_aiSrvExe, argv[6], MAX_PATH);
