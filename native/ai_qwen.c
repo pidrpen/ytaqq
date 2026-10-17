@@ -1,11 +1,12 @@
 /* QwenPaw runs in its own bundled Python; no system installation or shell
    commands from the model. All mutations still go through native tools. */
 #include "agent_pack.h"
+#include "addons_pack.h"
 static SRWLOCK g_aqPackLock = SRWLOCK_INIT;
 static wchar_t g_aqReady[MAX_PATH];
 static BOOL aq_cancelled(AiJob *j) { return j->cancel || (j->externalCancel && *j->externalCancel); }
 
-static BOOL aq_hash(const wchar_t *path) {
+static BOOL aq_hash_expected(const wchar_t *path, const char *expected) {
   HCRYPTPROV prov = 0; HCRYPTHASH hash = 0;
   HANDLE f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
   if (f == INVALID_HANDLE_VALUE) return FALSE;
@@ -25,7 +26,7 @@ static BOOL aq_hash(const wchar_t *path) {
   if (hash) CryptDestroyHash(hash);
   if (prov) CryptReleaseContext(prov, 0);
   CloseHandle(f);
-  return ok && !strcmp(hex, AQ_PACK_SHA);
+  return ok && !strcmp(hex, expected);
 }
 
 static BOOL aq_write(const wchar_t *path, const char *text) {
@@ -73,13 +74,13 @@ static int aq_process(const wchar_t *exe, wchar_t *cmd, const wchar_t *cwd, AiJo
   CloseHandle(group); CloseHandle(pi.hProcess); return status;
 }
 
-static BOOL aq_download(AiJob *j, const wchar_t *dest, DWORD deadline) {
+static BOOL aq_download(AiJob *j, const wchar_t *dest, DWORD deadline, const wchar_t *file, DWORD packSize, const char *sha) {
   /* Archive name is content-addressed and compiled into this version. */
   static const wchar_t *hosts[] = {L"raw.githubusercontent.com", L"github.com", L"github.com"};
   for (int attempt = 0; attempt < 3 && !aq_cancelled(j); attempt++) {
     wchar_t path[220];
-    if (attempt == 2) swprintf(path, 220, L"/pidrpen/ytaqq/releases/download/v%ls/%ls", APP_VERSION_STR, AQ_PACK_FILE);
-    else swprintf(path, 220, attempt ? L"/pidrpen/ytaqq/raw/main/public/%ls" : L"/pidrpen/ytaqq/main/public/%ls", AQ_PACK_FILE);
+    if (attempt == 2) swprintf(path, 220, L"/pidrpen/ytaqq/releases/download/v%ls/%ls", APP_VERSION_STR, file);
+    else swprintf(path, 220, attempt ? L"/pidrpen/ytaqq/raw/main/public/%ls" : L"/pidrpen/ytaqq/main/public/%ls", file);
     HINTERNET ses = WinHttpOpen(L"CursorPad-QwenPaw", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, NULL, NULL, 0);
     if (!ses) continue;
     WinHttpSetTimeouts(ses, 5000, 5000, 10000, 10000);
@@ -99,7 +100,7 @@ static BOOL aq_download(AiJob *j, const wchar_t *dest, DWORD deadline) {
             if (aq_cancelled(j) || (LONG)(deadline - GetTickCount()) <= 0 ||
                 !WinHttpReadData(req, buf, sizeof(buf), &got)) { ok = FALSE; break; }
             if (!got) break;
-            if (total + got > AQ_PACK_SIZE || !WriteFile(f, buf, got, &wrote, NULL) || wrote != got) { ok = FALSE; break; }
+            if (total + got > packSize || !WriteFile(f, buf, got, &wrote, NULL) || wrote != got) { ok = FALSE; break; }
             total += got;
           }
           CloseHandle(f);
@@ -110,13 +111,16 @@ static BOOL aq_download(AiJob *j, const wchar_t *dest, DWORD deadline) {
     }
     if (con) WinHttpCloseHandle(con);
     WinHttpCloseHandle(ses);
-    if (ok && total == AQ_PACK_SIZE && aq_hash(dest)) return TRUE;
+    if (ok && total == packSize && aq_hash_expected(dest, sha)) return TRUE;
     DeleteFileW(dest);
   }
   return FALSE;
 }
 
-static int aq_prepare(AiJob *j, DWORD deadline, wchar_t root[MAX_PATH]) {
+static int aq_prepare_pack(AiJob *j, DWORD deadline, wchar_t root[MAX_PATH], BOOL tools, const wchar_t *python) {
+  const wchar_t *file = tools ? AT_PACK_FILE : AQ_PACK_FILE;
+  const char *sha = tools ? AT_PACK_SHA : AQ_PACK_SHA;
+  DWORD packSize = tools ? AT_PACK_SIZE : AQ_PACK_SIZE;
   if (aq_cancelled(j)) return AI_CANCELLED;
   while (!TryAcquireSRWLockExclusive(&g_aqPackLock)) {
     if (aq_cancelled(j)) return AI_CANCELLED;
@@ -126,24 +130,30 @@ static int aq_prepare(AiJob *j, DWORD deadline, wchar_t root[MAX_PATH]) {
   int status = AI_ERROR;
   wchar_t parent[MAX_PATH], pack[MAX_PATH], marker[MAX_PATH], py[MAX_PATH], script[MAX_PATH];
     if (wcslen(g_dataDir) > 130) goto done;
-  swprintf(parent, MAX_PATH, L"%ls\\agent", g_dataDir); CreateDirectoryW(parent, NULL);
-  swprintf(root, MAX_PATH, L"%ls\\%hs", parent, AQ_PACK_SHA);
+  swprintf(parent, MAX_PATH, L"%ls\\%ls", g_dataDir, tools ? L"tools" : L"agent"); CreateDirectoryW(parent, NULL);
+  swprintf(root, MAX_PATH, L"%ls\\%hs", parent, sha);
   swprintf(marker, MAX_PATH, L"%ls\\ready.txt", root);
-  swprintf(py, MAX_PATH, L"%ls\\python.exe", root);
-  swprintf(script, MAX_PATH, L"%ls\\bridge.py", root);
+  if (tools) lstrcpynW(py, python, MAX_PATH);
+  else swprintf(py, MAX_PATH, L"%ls\\python.exe", root);
+  swprintf(script, MAX_PATH, L"%ls\\%ls", root, tools ? L"executor.py" : L"bridge.py");
   char *ready = aq_read(marker);
-  BOOL installed = ready && !strcmp(ready, AQ_PACK_SHA) && GetFileAttributesW(py) != INVALID_FILE_ATTRIBUTES &&
+  BOOL installed = ready && !strcmp(ready, sha) && GetFileAttributesW(py) != INVALID_FILE_ATTRIBUTES &&
                    GetFileAttributesW(script) != INVALID_FILE_ATTRIBUTES;
+  if (installed && tools) {
+    wchar_t required[MAX_PATH];
+    const wchar_t *names[] = {L"node.exe", L"filesystem.cjs", L"lib\\xlsxwriter\\__init__.py"};
+    for (int i = 0; i < 3; i++) { swprintf(required, MAX_PATH, L"%ls\\%ls", root, names[i]); if (GetFileAttributesW(required) == INVALID_FILE_ATTRIBUTES) installed = FALSE; }
+  }
   free(ready);
   if (installed) { status = AI_OK; goto done; }
-  ai_log(L"QwenPaw: автоматически подготавливаю комплект и навыки %hs", AQ_PACK_SHA);
+  ai_log(L"ИИ: подготавливаю локальный комплект %ls · %hs", tools ? L"XlsxWriter / Filesystem MCP" : L"QwenPaw", sha);
   wchar_t self[MAX_PATH]; GetModuleFileNameW(NULL, self, MAX_PATH);
   wchar_t *slash = wcsrchr(self, L'\\'); if (slash) *slash = 0;
-  swprintf(pack, MAX_PATH, L"%ls\\%ls", self, AQ_PACK_FILE);
-  if (!aq_hash(pack)) {
-    swprintf(pack, MAX_PATH, L"%ls\\%ls", parent, AQ_PACK_FILE);
-    if (!aq_hash(pack) && !aq_download(j, pack, deadline)) {
-      j->text = _wcsdup(L"Не удалось получить комплект QwenPaw из GitHub. Нужен интернет для первой подготовки; скачанные модели сохранены. Повторите запрос после подключения.");
+  swprintf(pack, MAX_PATH, L"%ls\\%ls", self, file);
+  if (!aq_hash_expected(pack, sha)) {
+    swprintf(pack, MAX_PATH, L"%ls\\%ls", parent, file);
+    if (!aq_hash_expected(pack, sha) && !aq_download(j, pack, deadline, file, packSize, sha)) {
+      j->text = _wcsdup(L"Не удалось получить локальный комплект ИИ из GitHub. Нужен интернет для первой подготовки или архив комплекта рядом с EXE; скачанные модели сохранены.");
       goto done;
     }
   }
@@ -158,11 +168,21 @@ static int aq_prepare(AiJob *j, DWORD deadline, wchar_t root[MAX_PATH]) {
   if (status != AI_OK) goto done;
   swprintf(cmd, MAX_PATH * 4, L"\"%ls\" -I -B \"%ls\" --self-test", py, script);
   status = aq_process(py, cmd, root, j, deadline);
-  if (status == AI_OK && !aq_write(marker, AQ_PACK_SHA)) status = AI_ERROR;
+  if (status == AI_OK && !aq_write(marker, sha)) status = AI_ERROR;
 done:
-  if (status == AI_OK) lstrcpynW(g_aqReady, root, MAX_PATH);
+  if (status == AI_OK && !tools) lstrcpynW(g_aqReady, root, MAX_PATH);
   ReleaseSRWLockExclusive(&g_aqPackLock);
   return aq_cancelled(j) ? AI_CANCELLED : status;
+}
+static int aq_prepare(AiJob *j, DWORD deadline, wchar_t root[MAX_PATH]) {
+  return aq_prepare_pack(j, deadline, root, FALSE, L"");
+}
+static int at_prepare(AiJob *j, DWORD deadline, wchar_t root[MAX_PATH], wchar_t py[MAX_PATH]) {
+  wchar_t core[MAX_PATH];
+  int status = aq_prepare(j, deadline, core);
+  if (status != AI_OK) return status;
+  swprintf(py, MAX_PATH, L"%ls\\python.exe", core);
+  return aq_prepare_pack(j, deadline, root, TRUE, py);
 }
 
 static int aq_run(AiJob *j, DWORD deadline, int port) {
@@ -212,7 +232,8 @@ static DWORD WINAPI aq_warm_thread(LPVOID unused) {
   (void)unused;
   wchar_t root[MAX_PATH];
   int status = aq_prepare(&g_aqWarm, GetTickCount() + 600000, root);
-  ai_log(status == AI_OK ? L"QwenPaw и навыки готовы к локальной работе." : L"QwenPaw: фоновая подготовка не завершена; повторится при запросе.");
+  if (status == AI_OK) { wchar_t py[MAX_PATH]; status = at_prepare(&g_aqWarm, GetTickCount() + 600000, root, py); }
+  ai_log(status == AI_OK ? L"QwenPaw, XlsxWriter и Filesystem MCP готовы к локальной работе." : L"ИИ: фоновая подготовка не завершена; повторится при запросе.");
   free(g_aqWarm.text); g_aqWarm.text = NULL;
   InterlockedExchange(&g_aqWarmActive, 0); return 0;
 }

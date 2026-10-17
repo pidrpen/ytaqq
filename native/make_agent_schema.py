@@ -6,11 +6,11 @@ precede the required text payload. Empty data is never a valid excel_write.
 import json
 from pathlib import Path
 
-names = ['list', 'find', 'read', 'office_read', 'compare_materials', 'app', 'new_folder', 'inventory',
+names = ['filesystem', 'list', 'find', 'read', 'office_read', 'compare_materials', 'app', 'new_folder', 'inventory',
          'mkdir', 'write', 'copy', 'move', 'rename', 'open', 'ask', 'done']
 fields = {name: {'type': 'string'} for name in
           ['path', 'src', 'dst', 'pattern', 'name', 'sheet', 'cell', 'text', 'mode', 'offset', 'recursive']}
-fields['mode']['enum'] = ['text', 'formulas']
+fields['mode']['enum'] = ['text', 'formulas', 'table', 'list', 'info', 'read']
 fields['recursive']['enum'] = ['yes', 'no']
 
 normal = {'type': 'object', 'properties': {'tool': {'type': 'string', 'enum': names}, **fields},

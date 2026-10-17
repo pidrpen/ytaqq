@@ -7,17 +7,20 @@ import hashlib
 import json
 from pathlib import Path
 import subprocess
+import sys
 import time
 import zipfile
 
 
 def main():
+    sys.stdout.reconfigure(encoding='utf-8')
     p = argparse.ArgumentParser()
     p.add_argument('--runtime', type=Path, required=True)
     p.add_argument('--probe', type=Path, required=True)
     p.add_argument('--scratch', type=Path, required=True)
     p.add_argument('--port', type=int, default=39285)
     p.add_argument('--case', action='append', help='Run selected cases after a targeted fix')
+    p.add_argument('--keep-going', action='store_true', help='Report every selected case, including failures')
     a = p.parse_args()
     a.scratch.mkdir(parents=True, exist_ok=False)
     probe = str(a.probe.resolve())
@@ -32,6 +35,7 @@ def main():
         ('read-34d', 'какие файлы лежат в папке 34д на рабочем столе?',
          {**{f'34д/Файл-{i:02}.txt': str(i).encode() for i in range(65)}, 'Модели/old.stl': b'wrong folder'}),
         ('excel-sum', 'Создай на рабочем столе Расчёт.xlsx и запиши числа 12 и 3, а рядом формулу SUM для их суммы.', {}),
+        ('excel-table', 'Создай на рабочем столе Материалы.xlsx с оформленной таблицей: шапка Материал и Код; строки Сталь 40Х, 00123 и Алюминий, 00124. Сделай шапку жирной с цветом, добавь фильтр и закрепи первую строку. Коды оставь текстом с нулями.', {}),
         ('word-text', 'Создай на рабочем столе Отчёт.docx с текстом: Проверка локального помощника.', {}),
         ('mixed', 'В папке Результат на рабочем столе создай Word с текстом Привет и пустую книгу Excel, а все файлы .pdf с рабочего стола скопируй туда.',
          {'a.pdf': b'pdf-one', 'b.PDF': b'pdf-two', 'keep.pdf.txt': b'keep'}),
@@ -59,6 +63,7 @@ def main():
             return json.loads(process.stdout.readline())
         result = tool({'goal': goal})
         notes, plan, log, new_dir = '', [], [], ''
+        errors = 0
         state_file = root / 'backend-state.json'
         # Harness artifacts belong outside the simulated desktop.
         state_file = a.scratch.resolve() / (label + '.state.json')
@@ -90,6 +95,9 @@ def main():
                 log.append({'action': action, 'result': result})
                 print(label, step + 1, action, '->', result['state'], flush=True)
                 notes += f'\nВызов: {reply["action"]}\nРезультат: {result["observation"]}\n'
+                if result['state'] < 0:
+                    errors += 1
+                    assert errors < 3, 'production UI stops after 3 rejected tool calls'
                 if result['state'] in (1, 2): break
             assert result['state'] in (1, 2), 'agent did not finish'
             assert {p.relative_to(root).as_posix(): p.read_bytes() for p in root.rglob('*') if p.is_file()} == fixtures
@@ -127,6 +135,11 @@ def main():
                     dest = root/'Результат'
                     assert len(list(dest.glob('*.docx'))) == len(list(dest.glob('*.xlsx'))) == 1
                     for name in ('a.pdf', 'b.PDF'): assert (dest/name).read_bytes() == (root/name).read_bytes()
+                elif label == 'excel-table':
+                    import openpyxl
+                    sheet = openpyxl.load_workbook(root/'Материалы.xlsx').active
+                    assert sheet['A1'].font.bold and sheet.freeze_panes == 'A2' and sheet.auto_filter.ref == 'A1:B3'
+                    assert list(sheet.values) == [('Материал', 'Код'), ('Сталь 40Х', '00123'), ('Алюминий', '00124')]
                 elif label.startswith('dir-'):
                     assert len([x for x in plan if x['kind'] == 10]) == 1
                     dest = root/'Вайбкокинг'
@@ -138,13 +151,15 @@ def main():
             report.append({'case': label, 'pass': True, 'seconds': round(time.monotonic()-started, 2),
                            'requirements': state['requirements'], 'skills': state['skills'], 'steps': log})
         except Exception as error:
-            report.append({'case': label, 'pass': False, 'error': str(error), 'steps': log})
+            report.append({'case': label, 'pass': False, 'seconds':round(time.monotonic()-started, 2), 'error': str(error), 'steps': log})
             (a.scratch/'report.json').write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')
-            raise
+            if not a.keep_going: raise
         finally:
             process.stdin.close(); process.wait(timeout=10)
     (a.scratch/'report.json').write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')
-    print('PASS', len(report), 'real QwenPaw scenarios')
+    passed = sum(row['pass'] for row in report)
+    print('RESULT', passed, '/', len(report), 'real QwenPaw scenarios')
+    if passed != len(report): raise SystemExit(1)
 
 
 if __name__ == '__main__':

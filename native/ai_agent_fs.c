@@ -13,8 +13,10 @@ typedef struct {
   WIN32_FILE_ATTRIBUTE_DATA before;
   wchar_t text[2000];
   wchar_t sheet[128], cell[16];
-  BOOL formulas;
+  BOOL formulas, table;
 } AgAction;
+typedef BOOL (*AgBackend)(const wchar_t *, const wchar_t *, const wchar_t *, const wchar_t *, const wchar_t *,
+                         const wchar_t *, const wchar_t *, volatile LONG *, wchar_t *, int);
 typedef struct {
   wchar_t desktop[MAX_PATH], downloads[MAX_PATH], documents[MAX_PATH], last[MAX_PATH];
   wchar_t protectedDir[MAX_PATH], goal[4000];
@@ -22,6 +24,7 @@ typedef struct {
   AgAction plan[AG_MAX];
   int count;
   volatile LONG *cancel;
+  AgBackend backend;
 } AgFs;
 typedef struct { wchar_t key[16], value[2000]; } AgField;
 typedef struct { AgField fields[10]; int count; } AgJson;
@@ -110,6 +113,8 @@ static inline void ag_plan_evidence(const AgFs *fs, wchar_t *out, int cap) {
     const wchar_t *body = a->kind == AG_INVENTORY ? L"реальный перечень после переносов" : a->kind == AG_MOVE_DIR ? L"каталог целиком, с вложенными файлами и пустыми папками, без перезаписи" : content[0] ? content : L"пусто/не требуется";
     swprintf(out + wcslen(out), cap - wcslen(out), L"%ls: %ls%ls%ls; содержимое=%ls%ls\n", names[a->kind], a->src, a->src[0] ? L" -> " : L"", a->dst,
       body, a->kind == AG_MOVE_DIR ? L"" : wcslen(a->text) > 512 ? L" [сокращено]" : L"");
+    if (a->kind == AG_EXCEL && a->table && wcslen(out) + 180 < (size_t)cap)
+      wcscat(out, L"XlsxWriter mode=table: первая строка — жирная цветная шапка, автофильтр, закрепление шапки, ширины столбцов; значения — текст.\n");
   }
 }
 static BOOL ag_json(const wchar_t *p, AgJson *j) {
@@ -798,6 +803,18 @@ static int ag_tool(AgFs *fs, const wchar_t *json, wchar_t *out, int cap) {
     if (status != AG_PARENT_FOUND) { swprintf(out, cap, L"Родитель @parent не найден: %ls. Код проверил указанный путь. Если родитель не назван в просьбе, передай полный путь или @desktop. План не изменён.", path); return -1; }
   } else if (!ag_path(fs, in, path)) { ag_explain_path(fs, in, out, cap); return -1; }
   int saved = fs->count;
+  if (!wcscmp(tool, L"filesystem")) {
+    const wchar_t *mode = ag_get(&j, L"mode");
+    if (!mode[0]) mode = L"list";
+    if (wcscmp(mode, L"list") && wcscmp(mode, L"info") && wcscmp(mode, L"read")) {
+      lstrcpynW(out, L"Filesystem MCP разрешает только mode=list/info/read. Изменения добавляй в обычный план, который ждёт Применить.", cap); return -1;
+    }
+    const wchar_t *offset = ag_get(&j, L"offset"); wchar_t *end = NULL;
+    long number = offset[0] ? wcstol(offset, &end, 10) : 0;
+    if (number < 0 || number > 1000000 || (end && *end)) goto fail;
+    if (!fs->backend) { lstrcpynW(out, L"Filesystem MCP недоступен в этом запуске. Используй native list/read для чтения.", cap); return -1; }
+    return fs->backend(L"filesystem", path, L"", L"", L"", mode, offset, fs->cancel, out, cap) ? 0 : -1;
+  }
   if (!wcscmp(tool, L"new_folder")) {
     wchar_t required[MAX_PATH];
     AgParentStatus named = ag_named_parent(fs, required);
@@ -856,6 +873,10 @@ static int ag_tool(AgFs *fs, const wchar_t *json, wchar_t *out, int cap) {
     if (!ag_fresh_destination(fs, path, out, cap)) return -1;
     const wchar_t *name = wcsrchr(path, L'\\'); wchar_t parent[MAX_PATH], source[MAX_PATH] = L"";
     BOOL formulas = !wcscmp(ag_get(&j, L"mode"), L"formulas");
+    BOOL table = !wcscmp(ag_get(&j, L"mode"), L"table");
+    const wchar_t *mode = ag_get(&j, L"mode");
+    if (mode[0] && wcscmp(mode, L"text") && !formulas && !table) goto fail;
+    if (table && !fs->backend) { lstrcpynW(out, L"Для mode=table требуется локальный комплект XlsxWriter.", cap); return -1; }
     int r, c, nr, nc; const wchar_t *cell = ag_get(&j, L"cell"); if (!cell[0]) cell = L"A1";
     if (!ag_get(&j, L"text")[0]) { lstrcpynW(out, L"excel_write отклонён: отсутствует text с данными. Для суммы 12 и 3 передай text=\"=12\\t=3\\t=SUM(A1:B1)\", mode=formulas. Все ячейки передаются ОДНИМ вызовом, без предварительного write. План не изменён.", cap); return -1; }
     if (!name || !ag_name(name + 1) || !of_excel(path) || !of_cell(cell, &r, &c) ||
@@ -864,6 +885,14 @@ static int ag_tool(AgFs *fs, const wchar_t *json, wchar_t *out, int cap) {
     }
     if (ag_get(&j, L"src")[0] && (!ag_path(fs, ag_get(&j, L"src"), source) || !of_excel(source) || GetFileAttributesW(source) == INVALID_FILE_ATTRIBUTES)) goto fail;
     if (source[0] && formulas) { lstrcpynW(out, L"Формулы разрешены только в новой книге без src. Копию существующей книги можно заполнять текстовыми значениями. Исходник не меняется.", cap); return -1; }
+    if (source[0] && table) { lstrcpynW(out, L"XlsxWriter оформляет только НОВЫЕ книги без src. Для копии используй mode=text через Excel.", cap); return -1; }
+    if (!source[0] && !formulas && fs->backend) {
+      const wchar_t *sheet = ag_get(&j, L"sheet"); size_t len = wcslen(sheet);
+      if (r + nr - 1 > 1048576 || c + nc - 1 > 16384 || len > 31 || wcspbrk(sheet, L"[]:*?/\\") ||
+          (len && (sheet[0] == L'\'' || sheet[len - 1] == L'\''))) {
+        lstrcpynW(out, L"XlsxWriter: блок выходит за границы листа либо имя листа недопустимо (до 31 символа, без []:*?/\\ и крайних апострофов). План не изменён.", cap); return -1;
+      }
+    }
     lstrcpynW(parent, path, MAX_PATH); *wcsrchr(parent, L'\\') = 0;
     wchar_t explicitRoot[MAX_PATH];
     if (ag_document_root(fs, explicitRoot) && !ag_under(parent, explicitRoot)) goto fail;
@@ -876,7 +905,7 @@ static int ag_tool(AgFs *fs, const wchar_t *json, wchar_t *out, int cap) {
       if (!ag_mkdir(fs, parent) || !ag_target(fs, parent, name + 1, dst) || !ag_add(fs, AG_EXCEL, source, dst)) goto fail;
       a = &fs->plan[fs->count - 1];
     } else lstrcpynW(dst, a->dst, MAX_PATH);
-    lstrcpynW(a->text, ag_get(&j, L"text"), 2000); lstrcpynW(a->sheet, ag_get(&j, L"sheet"), 128); lstrcpynW(a->cell, cell, 16); a->formulas = formulas;
+    lstrcpynW(a->text, ag_get(&j, L"text"), 2000); lstrcpynW(a->sheet, ag_get(&j, L"sheet"), 128); lstrcpynW(a->cell, cell, 16); a->formulas = formulas; a->table = table;
     swprintf(out, cap, L"В план добавлена новая %ls Excel: %ls; блок %d × %d от %ls; формулы %ls. Исходник не изменится.", source[0] ? L"копия" : L"книга", dst, nr, nc, cell, formulas ? L"включены с проверкой Excel" : L"выключены"); return 0;
   }
   if (!wcscmp(tool, L"write")) {
@@ -920,6 +949,12 @@ static int ag_tool(AgFs *fs, const wchar_t *json, wchar_t *out, int cap) {
       if (a == INVALID_FILE_ATTRIBUTES) swprintf(out, cap, L"Папка не существует или недоступна: %ls. Ошибка Windows %lu. Это проверка диска, не вопрос пользователю. План не изменён.", path, e);
       else swprintf(out, cap, L"Это не папка: %ls. План не изменён.", path);
       return -1;
+    }
+    if (fs->backend) {
+      const wchar_t *offset = ag_get(&j, L"offset"); wchar_t *end = NULL;
+      long value = offset[0] ? wcstol(offset, &end, 10) : 0;
+      if (value < 0 || value > 100000 || (end && *end)) goto fail;
+      return fs->backend(L"filesystem", path, L"", L"", L"", L"list", offset, fs->cancel, out, cap) ? 0 : -1;
     }
     wchar_t mask[MAX_PATH];
     if (wcslen(path) + 3 >= MAX_PATH) goto fail;
@@ -1082,6 +1117,11 @@ static BOOL ag_apply(AgFs *fs, wchar_t *out, int cap) {
       wchar_t actual[MAX_PATH]; int rows = 0;
       ok = ag_path(fs, a->text, actual) && ag_inventory_write(fs, a, &rows);
       if (ok) { reports++; listed += rows; }
+    }
+    else if ((a->kind == AG_XLSX || (a->kind == AG_EXCEL && !a->src[0] && !a->formulas)) && fs->backend) {
+      wchar_t detail[6000] = L"";
+      ok = fs->backend(L"xlsx", a->dst, a->text, a->sheet, a->cell, a->table ? L"table" : L"text", L"", fs->cancel, detail, 6000);
+      if (!ok) { swprintf(out, cap, L"Остановлено после %d из %d действий. %ls Выполненные действия сохранены.", i, fs->count, detail); return FALSE; }
     }
     else if (a->kind == AG_DOCX || a->kind == AG_PLAIN || a->kind == AG_XLSX) ok = ag_write_new(a->dst, a->text, a->kind);
     else if (a->kind == AG_EXCEL) {

@@ -7,7 +7,7 @@ name: Релиз
 on:
   push:
     branches: [main]
-    paths: [public/CursorPad.bin, public/CursorPad.zip, public/version.txt, 'public/CursorPad-paw-*.zip', .github/workflows/release.yml]
+    paths: [public/CursorPad.bin, public/CursorPad.zip, public/version.txt, 'public/CursorPad-paw-*.zip', 'public/CursorPad-tools-*.zip', .github/workflows/release.yml]
   workflow_dispatch:
 
 permissions:
@@ -29,9 +29,9 @@ jobs:
           awk 'NF==0{exit} /^== /{next} {print}' native/whatsnew.txt > notes.md
           printf '\nСкачайте CursorPad.zip (программа и инструкция) или только CursorPad.exe.\nУстанавливать не нужно: распакуйте и запустите CursorPad.exe.\n' >> notes.md
           if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" public/CursorPad.zip public/CursorPad.exe public/CursorPad-paw-*.zip --clobber
+            gh release upload "$tag" public/CursorPad.zip public/CursorPad.exe public/CursorPad-paw-*.zip public/CursorPad-tools-*.zip --clobber
             gh release edit "$tag" --notes-file notes.md --latest
           else
-            gh release create "$tag" public/CursorPad.zip public/CursorPad.exe public/CursorPad-paw-*.zip \
+            gh release create "$tag" public/CursorPad.zip public/CursorPad.exe public/CursorPad-paw-*.zip public/CursorPad-tools-*.zip \
               --title "CursorPad $ver" --notes-file notes.md --target "$GITHUB_SHA" --latest
           fi

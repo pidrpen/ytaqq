@@ -7,6 +7,8 @@
    Ответ приходит сообщением WM_AI_CHAT с AiResult*. Беседа живёт в памяти окна. */
 
 /* GUID форматов WIC: без библиотеки wincodecsdk их нет в ссылке */
+#include <richedit.h>
+#include "ai_chat_format.h"
 static const GUID kAcPngFormat = {0x1b7cfaf4, 0x713f, 0x473c, {0xbb, 0xcd, 0x61, 0x37, 0x42, 0x5f, 0xae, 0xaf}};
 static const GUID kAcBgra = {0x6fddc324, 0x4e03, 0x4bfe, {0xb1, 0x85, 0x3d, 0x77, 0x76, 0x8d, 0xc9, 0x0f}};
 #define WM_AI_CHAT (WM_APP + 72) /* lParam — AiResult*, освободить ai_result_free */
@@ -32,13 +34,14 @@ static const GUID kAcBgra = {0x6fddc324, 0x4e03, 0x4bfe, {0xb1, 0x85, 0x3d, 0x77
 #define AC_SYS                                                                                                           \
   L"Ты мини-ИИ в программе CursorPad на этом компьютере (модель Qwen, без интернета). "                                  \
   L"Отвечай по-русски, коротко и по делу. Числа, граммовки, пути и номера ГОСТ не выдумывай. "                           \
+  L"Разделяй ответ на короткие абзацы. Каждый пункт списка и каждый этап начинай с новой строки; не склеивай пункты. Заголовки можно выделять **жирным**, пути — обратными кавычками. " \
   L"Если ниже есть блок «Выучено» — отвечай по нему и не противоречь ему.\r\n"                                           \
   L"CursorPad: этот чат открывают «Мини-ИИ» и «Ещё → Спросить ИИ». Поиск PLM — это Союз, «Файлы» — имена в архиве. "      \
   L"«Распознать чертёж» читает штамп ГОСТ 2.104. Фразы про файлы (создать папку, скопировать, переместить, переименовать, разложить сканы) понимаются сами, без галочки. "     \
   L"Копирование и перенос не меняют диск, пока не нажали «Применить». "                                                     \
   L"Ты сам диск не видишь и папки не создаёшь. Никогда не пиши, что папка создана, проверена или уже есть: это скажет программа. " \
   L"Не выдавай списки из истории чата за текущее содержимое другой папки. Без результата инструмента по текущей папке нельзя утверждать, какие файлы в ней лежат.\r\n" \
-  L"«запомни: …» пишет факт в тетрадь на этом компьютере. Уровни модели: Слабый Qwen2.5 1.5B, Средний Qwen3 4B, "        \
+  L"«запомни: …» пишет факт в тетрадь на этом компьютере. Уровни модели: Слабый Qwen2.5 1.5B, Средний Qwen3.5 4B Q4_K_M, " \
   L"Мощный Qwen2.5 7B, С картинками Qwen3-VL 4B."
 
 typedef struct {
@@ -90,9 +93,10 @@ static int g_acMkWait;                 /* 1 ждём имя, 2 ждём путь
 static wchar_t g_acCmdText[2000];
 static wchar_t g_acSortDst[MAX_PATH];
 static BOOL g_acSortMove;
-static WNDPROC g_acEditOld;
+static WNDPROC g_acEditOld, g_acLogOld;
+static BOOL g_acRich;
 static AcTurn *g_acTurns;
-static int g_acN, g_acCap;
+static int g_acN, g_acCap, g_acRendered;
 static int g_acId; /* запрос в пути, 0 — нет */
 
 static void ac_push(int assistant, const wchar_t *text) {
@@ -136,10 +140,46 @@ static void ac_clear_turns(void) {
     free(g_acTurns[i].text);
     free(g_acTurns[i].png);
   }
-  g_acN = 0;
+  g_acN = g_acRendered = 0;
 }
 
+typedef struct { const char *text; size_t size, offset; } AcStream;
+static DWORD CALLBACK ac_stream(DWORD_PTR cookie, LPBYTE buffer, LONG cap, LONG *read) {
+  AcStream *s = (AcStream *)cookie;
+  size_t n = s->size - s->offset; if (n > (size_t)cap) n = (size_t)cap;
+  memcpy(buffer, s->text + s->offset, n); s->offset += n; *read = (LONG)n; return 0;
+}
 static void ac_redraw(void) {
+  if (g_acRich) {
+    AcRtf rtf = {0}; ac_rtf_begin(&rtf);
+    for (int i = 0; i < g_acN; i++) ac_rtf_message(&rtf, g_acTurns[i].text, g_acTurns[i].assistant, g_acTurns[i].png != NULL);
+    ac_rtf_add(&rtf, "}");
+    if (!rtf.failed) {
+      SCROLLINFO si = {0}; si.cbSize = sizeof(si); si.fMask = SIF_RANGE | SIF_POS | SIF_PAGE;
+      GetScrollInfo(g_acLog, SB_VERT, &si);
+      BOOL bottom = si.nPos + (int)si.nPage >= si.nMax - 2;
+      if (!g_acRendered || (g_acN > g_acRendered && !g_acTurns[g_acN - 1].assistant)) bottom = TRUE;
+      POINT position = {0}; CHARRANGE selection;
+      SendMessageW(g_acLog, EM_GETSCROLLPOS, 0, (LPARAM)&position);
+      SendMessageW(g_acLog, EM_EXGETSEL, 0, (LPARAM)&selection);
+      SendMessageW(g_acLog, WM_SETREDRAW, FALSE, 0);
+      AcStream source = {rtf.text, rtf.size, 0};
+      EDITSTREAM stream = {(DWORD_PTR)&source, 0, ac_stream};
+      SendMessageW(g_acLog, EM_STREAMIN, SF_RTF, (LPARAM)&stream);
+      SendMessageW(g_acLog, WM_SETREDRAW, TRUE, 0);
+      if (bottom) {
+        int end = GetWindowTextLengthW(g_acLog);
+        SendMessageW(g_acLog, EM_SETSEL, end, end); SendMessageW(g_acLog, EM_SCROLLCARET, 0, 0);
+        SendMessageW(g_acLog, WM_VSCROLL, SB_BOTTOM, 0);
+      }
+      else {
+        SendMessageW(g_acLog, EM_EXSETSEL, 0, (LPARAM)&selection);
+        SendMessageW(g_acLog, EM_SETSCROLLPOS, 0, (LPARAM)&position);
+      }
+      g_acRendered = g_acN; InvalidateRect(g_acLog, NULL, TRUE);
+    }
+    free(rtf.text); return;
+  }
   size_t cap = 64;
   for (int i = 0; i < g_acN; i++) cap += wcslen(g_acTurns[i].text) + 32;
   wchar_t *s = (wchar_t *)malloc(cap * sizeof(wchar_t));
@@ -1352,12 +1392,13 @@ static LRESULT CALLBACK AcEditProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
     ShowWindow(g_acWnd, SW_HIDE);
     return 0;
   }
-  return CallWindowProcW(g_acEditOld, hwnd, msg, wParam, lParam);
+  return CallWindowProcW(hwnd == g_acLog ? g_acLogOld : g_acEditOld, hwnd, msg, wParam, lParam);
 }
 
 static void ac_layout(int W, int H) {
-  int pad = 12, gap = 8, btnH = 30, inH = 72, statH = 20;
-  int btnY = H - pad - btnH;
+  int pad = 12, gap = 8, btnH = 32, inH = 88, statH = 20;
+  BOOL narrow = W < 680;
+  int btnY = H - pad - btnH * (narrow ? 2 : 1) - (narrow ? gap : 0);
   int inY = btnY - gap - inH;
   int thumbH = g_acImg ? 84 : 0;
   int cmdY = inY - 4 - 22 - thumbH;
@@ -1381,15 +1422,29 @@ static void ac_layout(int W, int H) {
   ShowWindow(g_acThumb, g_acImg ? SW_SHOW : SW_HIDE);
   MoveWindow(g_acIn, pad, inY, W - 2 * pad, inH, TRUE);
   HWND row[6] = {g_acSend, g_acStop, g_acClear, g_acCopy, g_acLearn, g_acSet};
-  int bw = (W - 2 * pad - 5 * gap) / 6;
-  if (bw < 64) bw = 64;
-  for (int i = 0; i < 6; i++) MoveWindow(row[i], pad + i * (bw + gap), btnY, bw, btnH, TRUE);
+  int columns = narrow ? 3 : 6;
+  int bw = (W - 2 * pad - (columns - 1) * gap) / columns;
+  for (int i = 0; i < 6; i++) MoveWindow(row[i], pad + (i % columns) * (bw + gap), btnY + (i / columns) * (btnH + gap), bw, btnH, TRUE);
+  if (g_acRich) {
+    RECT bounds; GetClientRect(g_acLog, &bounds); InflateRect(&bounds, -12, -8);
+    SendMessageW(g_acLog, EM_SETRECT, 0, (LPARAM)&bounds);
+  }
 }
 
 static LRESULT CALLBACK AcProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
   switch (msg) {
+  case WM_GETMINMAXINFO: {
+    MINMAXINFO *info = (MINMAXINFO *)lParam;
+    info->ptMinTrackSize.x = 500; info->ptMinTrackSize.y = 560;
+    return 0;
+  }
   case WM_NCHITTEST:
-    return panel_hittest(hwnd, lParam);
+    {
+      LRESULT hit = panel_hittest(hwnd, lParam);
+      POINT point = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)}; ScreenToClient(hwnd, &point);
+      if (hit == HTCLIENT && point.y >= 0 && point.y < 38 && ChildWindowFromPoint(hwnd, point) == g_acTitle) return HTCAPTION;
+      return hit;
+    }
   case WM_DRAWITEM:
     draw_pad_button((const DRAWITEMSTRUCT *)lParam);
     return TRUE;
@@ -1489,22 +1544,32 @@ static void ac_create(void) {
   RegisterClassExW(&wc);
   RECT wa;
   SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0);
-  int w = 760, h = 640;
+  int w = 900, h = 760;
+#ifdef CHAT_PREVIEW_NARROW
+  w = 540;
+#endif
   if (w > wa.right - wa.left - 40) w = wa.right - wa.left - 40;
   if (h > wa.bottom - wa.top - 40) h = wa.bottom - wa.top - 40;
   g_acWnd = CreateWindowExW(WS_EX_APPWINDOW | WS_EX_TOPMOST, L"CursorPadAiChat", L"Спросить ИИ — CursorPad",
-                            WS_POPUP | WS_THICKFRAME | WS_CLIPCHILDREN | WS_SYSMENU | WS_MINIMIZEBOX,
+                            WS_POPUP | WS_THICKFRAME | WS_CLIPCHILDREN | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX,
                             wa.left + (wa.right - wa.left - w) / 2, wa.top + (wa.bottom - wa.top - h) / 2, w, h,
                             NULL, NULL, g_inst, NULL);
   if (!g_acWnd) return;
   round_corners(g_acWnd);
   mk_btn(g_acWnd, L"×", ID_PANEL_CLOSE);
   mk_btn(g_acWnd, L"–", ID_PANEL_MIN);
-  g_acTitle = CreateWindowExW(0, L"STATIC", L"Спросить ИИ · всё на этом компьютере, без интернета", WS_CHILD | WS_VISIBLE | SS_LEFT,
+  g_acTitle = CreateWindowExW(0, L"STATIC", L"Мини-ИИ · на этом компьютере", WS_CHILD | WS_VISIBLE | SS_LEFT,
                               0, 0, 10, 10, g_acWnd, (HMENU)(INT_PTR)ID_AC_TITLE, g_inst, NULL);
-  g_acLog = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
-                            WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY,
+  g_acRich = LoadLibraryW(L"Msftedit.dll") != NULL;
+  g_acLog = CreateWindowExW(WS_EX_CLIENTEDGE, g_acRich ? L"RICHEDIT50W" : L"EDIT", L"",
+                            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY,
                             0, 0, 10, 10, g_acWnd, (HMENU)(INT_PTR)ID_AC_LOG, g_inst, NULL);
+  if (g_acRich && !g_acLog) {
+    g_acRich = FALSE;
+    g_acLog = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY,
+                             0, 0, 10, 10, g_acWnd, (HMENU)(INT_PTR)ID_AC_LOG, g_inst, NULL);
+  }
+  if (g_acRich) { SendMessageW(g_acLog, EM_EXLIMITTEXT, 0, 16000000); SendMessageW(g_acLog, EM_SETBKGNDCOLOR, 0, RGB(255,255,255)); }
   g_acIn = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
                            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN,
                            0, 0, 10, 10, g_acWnd, (HMENU)(INT_PTR)ID_AC_IN, g_inst, NULL);
@@ -1530,7 +1595,8 @@ static void ac_create(void) {
   SendMessageW(g_acLog, WM_SETFONT, (WPARAM)g_fontBody, TRUE);
   SendMessageW(g_acIn, WM_SETFONT, (WPARAM)g_fontBody, TRUE);
   g_acEditOld = (WNDPROC)SetWindowLongPtrW(g_acIn, GWLP_WNDPROC, (LONG_PTR)AcEditProc);
-  SetWindowLongPtrW(g_acLog, GWLP_WNDPROC, (LONG_PTR)AcEditProc);
+  g_acLogOld = (WNDPROC)SetWindowLongPtrW(g_acLog, GWLP_WNDPROC, (LONG_PTR)AcEditProc);
+  SendMessageW(g_acIn, EM_SETCUEBANNER, FALSE, (LPARAM)L"Напишите задачу. Enter — отправить, Shift+Enter — новая строка");
   RECT rc;
   GetClientRect(g_acWnd, &rc);
   ac_layout(rc.right, rc.bottom);
@@ -1545,7 +1611,7 @@ static void aichat_show(void) {
   SetFocus(g_acIn);
   if (!g_acId) {
     if (!ai_ready()) ac_status(ai_status_text(g_aiOn ? AI_NO_MODEL : AI_OFF));
-    else ac_status(L"Enter — отправить, Shift+Enter — новая строка. «запомни: …» пишет в тетрадь.");
+    else ac_status(L"Enter — отправить · Shift+Enter — новая строка");
   }
 }
 

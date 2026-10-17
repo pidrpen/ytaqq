@@ -12,7 +12,7 @@ static const AgCapability kAgCapabilities[] = {
 static int ag_app_call(const AgJson *j, wchar_t *out, int cap) {
   const wchar_t *name = ag_get(j, L"name");
   if (!wcscmp(name, L"capabilities")) {
-    lstrcpynW(out, L"Доступны office_read (.docx/.xlsx), excel_write (новая книга или копия), compare_materials (ВСЕ строки двух локальных .xlsx, одна может быть выгрузкой СОЮЗ).\r\napp name=plm_status — только состояние реально загруженной выгрузки.\r\n", cap);
+    lstrcpynW(out, L"Доступны filesystem (локальный Filesystem MCP, только list/info/read), excel_write (XlsxWriter для новой книги, mode=table для шапки/фильтра; формулы и копии через установленный Excel), office_read (.docx/.xlsx через Office), compare_materials (ВСЕ строки двух локальных .xlsx, одна может быть выгрузкой СОЮЗ).\r\napp name=plm_status — только состояние реально загруженной выгрузки.\r\n", cap);
     for (size_t i = 0; i < sizeof(kAgCapabilities) / sizeof(kAgCapabilities[0]); i++)
       swprintf(out + wcslen(out), cap - wcslen(out), L"app name=%ls — %ls.\r\n", kAgCapabilities[i].name, kAgCapabilities[i].description);
     wcscat(out, L"Открытие окна не означает выполнение расчёта или сравнения. Прямой доступ к химическому составу материалов СОЮЗ ещё не настроен.\r\n");

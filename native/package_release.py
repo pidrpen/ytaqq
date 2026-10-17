@@ -22,6 +22,7 @@ with zipfile.ZipFile(pub / 'CursorPad.zip', 'w', zipfile.ZIP_DEFLATED) as archiv
     for source, name in [(pub / 'CursorPad.exe', 'CursorPad.exe'),
                          (native / 'cursorpad.manifest', 'CursorPad.exe.manifest'),
                          (native / 'README.txt', 'README.txt'), (native / 'AI_TOOLS.md', 'AI_TOOLS.md'),
+                         (native / 'QWEN35.md', 'QWEN35.md'),
                          (native / 'ocr.ps1', 'ocr.ps1')]:
         entry = zipfile.ZipInfo(name, date)
         entry.compress_type = zipfile.ZIP_DEFLATED
@@ -38,6 +39,14 @@ with zipfile.ZipFile(pub / 'CursorPad.zip', 'w', zipfile.ZIP_DEFLATED) as archiv
     entry.external_attr = 0o644 << 16
     archive.writestr(entry, agent_pack.read_bytes())
 sha = hashlib.sha256((pub / 'CursorPad.bin').read_bytes()).hexdigest()
+tools_lock = json.loads((native / 'addons_pack.json').read_text(encoding='utf-8'))
+tools_pack = native.parent / 'public' / tools_lock['file']
+if hashlib.sha256(tools_pack.read_bytes()).hexdigest() != tools_lock['sha256']:
+    raise RuntimeError('Tools companion hash mismatch')
+if tools_pack.parent.resolve() != pub.resolve():
+    shutil.copyfile(tools_pack, pub / tools_lock['file'])
+# Separate release asset: embedding both companions exceeds GitHub's 100 MiB
+# per-file limit. The EXE prepares tools automatically from the pinned asset.
 notes = (native / 'whatsnew.txt').read_text(encoding='utf-8').rstrip()
 (pub / 'version.txt').write_text('\n'.join(version + ['sha256 ' + sha, notes]) + '\n', encoding='utf-8')
 print(f'CursorPad {version[1]} sha256 {sha}')

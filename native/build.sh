@@ -51,6 +51,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 cd "$HERE"
 "$PY" "$HERE/build_agent_pack.py"
+"$PY" "$HERE/build_addons_pack.py"
 # помощник распознавания зашит в exe ресурсом, поэтому собирается первым
 $CC $CFLAGS -o CursorPadOcr.exe ocr_module.c -lole32 -lruntimeobject -luser32 -municode -s -Wl,--no-insert-timestamp $LDX
 $RC cursorpad.rc -O coff -o "$TMP/cursorpad.res"

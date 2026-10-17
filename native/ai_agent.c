@@ -1,6 +1,7 @@
 /* Observe -> choose tool -> observe -> review. This is application code shipped
    in CursorPad.exe, independent of downloaded GGUF files and llama.cpp. */
 #include <wctype.h>
+#include "ai_addons.c"
 #include "ai_agent_fs.c"
 #include "ai_app_tools.c"
 static AgFs g_agFs;
@@ -114,6 +115,7 @@ static BOOL ag_start(const wchar_t *text) {
     lstrcpynW(goal, text, 4000);
   }
   ag_fs_init(&g_agFs, g_dataDir, g_acLastDir);
+  g_agFs.backend = at_call;
   lstrcpynW(g_agFs.goal, goal, 4000);
   g_agNotes[0] = g_agReadout[0] = 0; g_agSteps = g_agErrors = 0;
   g_agObservation[0] = 0; g_agLastState = 0;
@@ -134,6 +136,7 @@ static void ag_preview(void) {
     swprintf(out + wcslen(out), cap - wcslen(out), L"%ls: %ls%ls%ls\r\n", verb, a->src, a->src[0] ? L" → " : L"", a->dst);
     if (a->kind == AG_INVENTORY) swprintf(out + wcslen(out), cap - wcslen(out), L"Источник перечня: %ls. Ожидается элементов: %ls. Будут перечислены реальные имена, типы, расширения, размеры, пути и даты ПОСЛЕ переносов; без самой книги, без обхода подпапок.\r\n", a->text, a->cell);
     if (a->kind == AG_EXCEL || a->kind == AG_DOCX || a->kind == AG_PLAIN) {
+      if (a->kind == AG_EXCEL && !a->src[0] && !a->formulas) wcscat(out, a->table ? L"XlsxWriter: шапка, фильтр, закреплённая строка; значения — текст.\r\n" : L"XlsxWriter: новая книга; значения — текст.\r\n");
       swprintf(out + wcslen(out), cap - wcslen(out), L"%ls%ls%ls\r\nСодержимое: %ls\r\n", a->kind == AG_EXCEL ? L"Лист: " : L"", a->sheet, a->formulas ? L"; ФОРМУЛЫ ВКЛЮЧЕНЫ" : L"", a->text[0] ? a->text : L"(пусто)");
     }
   }
@@ -162,7 +165,7 @@ static void ag_tool_ready(void *result) {
   AgJson parsed;
   if (state == 0 && ag_json(job->json, &parsed)) {
     const wchar_t *tool = ag_get(&parsed, L"tool");
-    if (!wcscmp(tool, L"list") || !wcscmp(tool, L"find") || !wcscmp(tool, L"read") || !wcscmp(tool, L"office_read") || !wcscmp(tool, L"compare_materials") || !wcscmp(tool, L"app")) {
+    if (!wcscmp(tool, L"filesystem") || !wcscmp(tool, L"list") || !wcscmp(tool, L"find") || !wcscmp(tool, L"read") || !wcscmp(tool, L"office_read") || !wcscmp(tool, L"compare_materials") || !wcscmp(tool, L"app")) {
       wchar_t actual[MAX_PATH];
       const wchar_t *input = ag_get(&parsed, L"path"); if (!input[0]) input = ag_get(&parsed, L"src");
       if (ag_path(&g_agFs, input, actual) && ag_dir(actual)) {
@@ -266,6 +269,14 @@ static int ag_lab(HINSTANCE inst, const wchar_t *scratch) {
   g_fontUi = CreateFontW(-16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, 0, 0, 0, 0, L"Segoe UI");
   g_fontBody = g_fontUi;
   aichat_show();
+#ifdef CHAT_PREVIEW
+  SetWindowTextW(g_acWnd, L"CursorPad — проверка нового чата");
+  ac_push(0, L"Создай Excel с материалами в C:\\Работа\\Отчёты и покажи план.");
+  ac_push(1, L"## План действий\n\n1. **Создать папку** — C:\\Работа\\Отчёты.\n2. **Создать книгу** — Материалы.xlsx.\n\n**Содержимое книги:**\n- Материал: Сталь 40Х.\n- Обозначение: РНЕ.20.02.\n- Идентификатор: 00123.\n\nЗначения останутся текстом. Для записи нажмите «Применить».\n\nПуть: `C:\\Работа\\Отчёты\\Материалы.xlsx`\nРазмеры 12.5 × 3.2; версия 2026.10.17.5; скобки {данные}.");
+  ac_push(0, L"А если ответ пришёл одной строкой?");
+  ac_push(1, L"1. **Подготовка** — проверить исходные данные.2. **Проверка** — сверить имена и количество.3. **Результат** — показать полный план.\n\nЭто демонстрационный текст оформления, файлы не создавались.");
+  ac_redraw();
+#endif
   MSG msg;
   while (GetMessageW(&msg, NULL, 0, 0) > 0) { TranslateMessage(&msg); DispatchMessageW(&msg); }
   return 0;

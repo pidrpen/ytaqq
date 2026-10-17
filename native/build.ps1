@@ -19,6 +19,8 @@ Push-Location $PSScriptRoot
 try {
   & $python build_agent_pack.py
   if ($LASTEXITCODE -ne 0) { throw 'Agent pack verification failed' }
+  & $python build_addons_pack.py
+  if ($LASTEXITCODE -ne 0) { throw 'Tools pack verification failed' }
   & $compiler @flags -o CursorPadOcr.exe ocr_module.c -lole32 -lruntimeobject -luser32 -municode -s -static '-Wl,--no-insert-timestamp'
   if ($LASTEXITCODE -ne 0) { throw 'OCR helper compilation failed' }
   & $resourceCompiler cursorpad.rc -O coff -o $resourceObject

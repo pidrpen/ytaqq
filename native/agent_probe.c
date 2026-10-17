@@ -12,10 +12,12 @@
 #include <string.h>
 #include <wchar.h>
 #include <wctype.h>
+#ifndef CURSORPAD_EMBEDDED_PROBE
 #include "ai_agent_fs.c"
 #include "ai_agent_prompt.h"
 #include "ai_agent_schema.h"
 #include "ai_agent_route.h"
+#endif
 static AgFs fs;
 static void json_string(const wchar_t *s) {
   putchar('"');
@@ -29,12 +31,22 @@ static void json_string(const wchar_t *s) {
   }
   putchar('"');
 }
+#ifdef CURSORPAD_EMBEDDED_PROBE
+static int ag_probe_main(int argc, wchar_t **argv) {
+#else
 int wmain(int argc, wchar_t **argv) {
+#endif
   if (argc == 2 && !wcscmp(argv[1], L"--system")) { json_string(kAgSystem); return 0; }
   if (argc == 2 && !wcscmp(argv[1], L"--schema")) { printf("{%s}\n", kAiAgentSchema + 1); return 0; }
   if (argc == 3 && !wcscmp(argv[1], L"--route")) { printf("%d\n", ag_file_intent(argv[2]) ? 1 : 0); return 0; }
   if (argc != 2) return 2;
   ag_fs_init(&fs, L"C:\\protected-cursorpad", L"");
+#ifdef CURSORPAD_EMBEDDED_PROBE
+  fs.backend = at_call;
+  /* Same prepared profile as the application; tool scopes below are scratch. */
+  SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, SHGFP_TYPE_CURRENT, g_dataDir);
+  wcscat(g_dataDir, L"\\CursorPad");
+#endif
   if (!GetFullPathNameW(argv[1], MAX_PATH, fs.desktop, NULL) || !ag_dir(fs.desktop)) return 2;
   swprintf(fs.downloads, MAX_PATH, L"%ls\\Downloads", fs.desktop);
   swprintf(fs.documents, MAX_PATH, L"%ls\\Documents", fs.desktop);
