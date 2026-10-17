@@ -4767,7 +4767,13 @@ static void enable_dpi(void) {
 #ifdef VISUAL_TEST
 #include "visual_test.c"
 #endif
+#ifdef QWEN_TEST
+#include "qwen_test.c"
+#endif
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
+#ifdef QWEN_TEST
+  return aq_test();
+#endif
 #ifdef VISUAL_TEST
   { int n; LPWSTR *args = CommandLineToArgvW(GetCommandLineW(), &n);
     if (args && n == 3 && !wcscmp(args[1], L"--render")) { int code = visual_test(args[2]); LocalFree(args); return code; }
@@ -4836,6 +4842,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
     return 0;
   }
   enable_dpi();
+  aq_warm_start(); /* Prepare update-delivered agent/skills without blocking UI. */
 
   INITCOMMONCONTROLSEX icc;
   icc.dwSize = sizeof(icc);

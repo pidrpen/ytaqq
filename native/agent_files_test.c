@@ -134,6 +134,9 @@ int wmain(int argc, wchar_t **argv) {
   CHECK(!exists(L"OfficeTest")); CHECK(run(L"{\"tool\":\"done\"}") < 0);
   CHECK(run(L"{\"tool\":\"write\",\"path\":\"@desktop\\\\OfficeTest\\\\Документ.docx\",\"text\":\"\"}") == 0);
   CHECK(run(L"{\"tool\":\"done\"}") == 1);
+  wchar_t evidence[6000]; ag_plan_evidence(&fs, evidence, 6000);
+  CHECK(wcsstr(evidence, L"Создать Word: 1") && wcsstr(evidence, L"Создать пустой Excel: 1"));
+  CHECK(wcsstr(evidence, L"ещё не выполнен") && wcsstr(evidence, L"Документ.docx"));
   CHECK(ag_apply(&fs, result, 6000)); CHECK(exists(L"OfficeTest\\Книга.xlsx"));
   reset();
   CHECK(run(L"{\"tool\":\"write\",\"path\":\"@desktop\\\\OfficeTest\\\\Книга.xlsx\"}") == 0);
@@ -149,6 +152,7 @@ int wmain(int argc, wchar_t **argv) {
   CHECK(run(L"{\"tool\":\"excel_write\",\"path\":\"@desktop\\\\Формула.xlsx\",\"text\":\"=WEBSERVICE(A1)\",\"mode\":\"formulas\"}") < 0);
   CHECK(run(L"{\"tool\":\"excel_write\",\"path\":\"@desktop\\\\Формула.xlsx\",\"text\":\"=12\\t=3\\t=SUM(A1:B1)\",\"mode\":\"formulas\"}") == 0);
   CHECK(fs.count == 1 && fs.plan[0].kind == AG_EXCEL); /* upgrade same plan entry */
+  ag_plan_evidence(&fs, evidence, 6000); CHECK(wcsstr(evidence, L"=SUM(A1:B1)"));
   CHECK(run(L"{\"tool\":\"done\"}") == 1);
   CHECK(run(L"{\"tool\":\"excel_write\",\"path\":\"@desktop\\\\Формула.xlsx\",\"text\":\"=1\",\"mode\":\"formulas\"}") < 0);
   CHECK(fs.count == 1); CHECK(!exists(L"Формула.xlsx")); /* preview still changes no files */
@@ -157,6 +161,9 @@ int wmain(int argc, wchar_t **argv) {
   CHECK(!ag_glob(L"@excel", L"a.xlsx.txt")); CHECK(!ag_glob(L"@excel", L"a.xls.backup"));
   CHECK(ag_needs_inventory(L"на рабочем столе создай папку и закинь туда ексели, и создай в нем ексель с перечислением того что в папке"));
   CHECK(!ag_needs_inventory(L"Создай Excel со списком сотрудников в папке Офис"));
+  reset();
+  CHECK(run(L"{\"tool\":\"new_folder\",\"path\":\"@desktop\\\\MissingParent\"}") < 0);
+  CHECK(fs.count == 0); /* parent and child must never be silently confused */
   lstrcpynW(fs.goal, L"на рабочем столе создай папку и закинь туда ексели, и создай в нем ексель с перечислением того что в папке", 4000);
   swprintf(fs.last, MAX_PATH, L"%ls\\Модели", scratch);
   CHECK(run(L"{\"tool\":\"move\",\"src\":\"@desktop\",\"dst\":\"@last\",\"pattern\":\"@excel\"}") < 0);

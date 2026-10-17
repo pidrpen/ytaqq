@@ -81,6 +81,27 @@ static BOOL ag_string(const wchar_t **p, wchar_t *out, int cap) {
   out[n] = 0;
   return TRUE;
 }
+
+/* The UI and model regression driver use the same native plan evidence.
+   It describes staged actions, never claims that files already changed. */
+static inline void ag_plan_evidence(const AgFs *fs, wchar_t *out, int cap) {
+  out[0] = 0;
+  if (!fs->count || cap < 1000) return;
+  const wchar_t *names[] = {L"Создать папку", L"Копировать файлы", L"Переместить файлы", L"Переименовать", L"Открыть", L"Создать Word", L"Создать текст", L"Создать пустой Excel", L"Заполнить Excel", L"Заполнить перечень папки после переносов"};
+  lstrcpynW(out, L"Текущий подтверждённый кодом ПЛАН, ещё не выполнен:\n", cap);
+  for (int kind = 0; kind <= AG_INVENTORY; kind++) {
+    int count = 0;
+    for (int i = 0; i < fs->count; i++) if ((int)fs->plan[i].kind == kind) count++;
+    if (count && wcslen(out) + 100 < (size_t)cap) swprintf(out + wcslen(out), cap - wcslen(out), L"%ls: %d действий.\n", names[kind], count);
+  }
+  for (int i = 0; i < fs->count; i++) {
+    const AgAction *a = &fs->plan[i];
+    if (wcslen(out) + wcslen(a->src) + wcslen(a->dst) + 800 >= (size_t)cap) { wcscat(out, L"Подробности сокращены; количества выше относятся ко всему плану.\n"); break; }
+    wchar_t content[513]; lstrcpynW(content, a->text, 513);
+    swprintf(out + wcslen(out), cap - wcslen(out), L"%ls: %ls%ls%ls; содержимое=%ls%ls\n", names[a->kind], a->src, a->src[0] ? L" -> " : L"", a->dst,
+      a->kind == AG_INVENTORY ? L"реальный перечень после переносов" : content[0] ? content : L"пусто/не требуется", wcslen(a->text) > 512 ? L" [сокращено]" : L"");
+  }
+}
 static BOOL ag_json(const wchar_t *p, AgJson *j) {
   j->count = 0;
   ag_ws(&p);
@@ -453,6 +474,7 @@ static int ag_tool(AgFs *fs, const wchar_t *json, wchar_t *out, int cap) {
   }
   int saved = fs->count;
   if (!wcscmp(tool, L"new_folder")) {
+    if (!ag_planned_dir(fs, path)) { lstrcpynW(out, L"new_folder: path — СУЩЕСТВУЮЩАЯ родительская папка, не путь создаваемой папки. Например path=@desktop name=Результат. Для точного полного пути используй mkdir path=полный_путь. Действия не добавлены.", cap); return -1; }
     wchar_t goal[4000]; lstrcpynW(goal, fs->goal, 4000); CharLowerBuffW(goal, (DWORD)wcslen(goal));
     if (ag_needs_fresh_folder(fs->goal) && wcsstr(goal, L"рабоч") && _wcsicmp(path, fs->desktop)) { lstrcpynW(out, L"Новая папка нужна НА РАБОЧЕМ СТОЛЕ. Вызови new_folder path=@desktop, не @last и не внутри Модели.", cap); return -1; }
     const wchar_t *name = ag_get(&j, L"name"); if (!name[0] || ag_needs_fresh_folder(fs->goal)) name = L"Новая папка";

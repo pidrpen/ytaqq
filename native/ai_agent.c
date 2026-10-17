@@ -5,6 +5,7 @@
 #include "ai_app_tools.c"
 static AgFs g_agFs;
 static int g_agSteps, g_agErrors;
+static int g_agLastState;
 static wchar_t g_agNotes[AG_TEXT], g_agObservation[6000];
 static wchar_t g_agReadout[100000];
 typedef struct {
@@ -57,9 +58,9 @@ static BOOL ag_request(void) {
     af_say(L"Достигнут предел 16 шагов. Ничего не изменено. Уточните или сократите задачу.");
     return FALSE;
   }
-  int budget = ai_chat_budget() - (int)wcslen(kAgSystem) - 1000;
+  int budget = ai_agent_budget() - (int)wcslen(kAgSystem) - 6000;
   if (budget < 1500) {
-    ag_stop(); af_say(L"Для составных задач установите контекст 16384 на вкладке ИИ."); return FALSE;
+    ag_stop(); af_say(L"Инструкции задачи не помещаются в контекст модели."); return FALSE;
   }
   int cap = 24000;
   wchar_t *prompt = (wchar_t *)calloc(cap, sizeof(wchar_t));
@@ -68,12 +69,18 @@ static BOOL ag_request(void) {
     L"Задача пользователя: %ls\nПапки: @desktop=%ls; @downloads=%ls; @documents=%ls; @last=%ls; @new=%ls.\n"
     L"Шаг %d из 16. Действий в плане: %d.\n",
     g_agFs.goal, g_agFs.desktop, g_agFs.downloads, g_agFs.documents, g_agFs.last, g_agFs.newDir, g_agSteps, g_agFs.count);
-  for (int i = 0; i < g_agFs.count && i < 12 && wcslen(prompt) + MAX_PATH * 2 + 80 < (size_t)cap; i++) {
+  /* Leave most available context for observations. Do not fill it with the
+     first dozen individual files when a group contains hundreds. */
+  int planLimit = budget / 4;
+  int shown = 0;
+  for (int i = 0; i < g_agFs.count && i < 12 &&
+       wcslen(prompt) + MAX_PATH * 2 + 80 < (size_t)planLimit; i++) {
     AgAction *a = &g_agFs.plan[i];
     swprintf(prompt + wcslen(prompt), cap - wcslen(prompt), L"В плане: %ls %ls -> %ls\n",
       a->kind == AG_DIR ? L"mkdir" : a->kind == AG_COPY ? L"copy" : a->kind == AG_MOVE ? L"move" : a->kind == AG_OPEN ? L"open" : a->kind == AG_INVENTORY ? L"inventory" : a->kind == AG_EXCEL ? L"excel_write" : (a->kind == AG_DOCX || a->kind == AG_PLAIN || a->kind == AG_XLSX) ? L"write" : L"rename", a->src, a->dst);
+    shown++;
   }
-  if (g_agFs.count > 12) wcscat(prompt, L"Остальные действия той же группы скрыты для экономии контекста; ориентируйся на результаты инструментов.\n");
+  if (g_agFs.count > shown) wcscat(prompt, L"Остальные действия скрыты для экономии контекста; ориентируйся на результаты инструментов.\n");
   /* Keep the newest observations within the selected model's context. */
   int room = budget - (int)wcslen(prompt);
   if (room > cap - (int)wcslen(prompt) - 1) room = cap - (int)wcslen(prompt) - 1;
@@ -83,12 +90,14 @@ static BOOL ag_request(void) {
     wcsncat(prompt, start, room);
   }
   AiTurn turn = {0, prompt, NULL, 0};
+  wchar_t evidence[6000]; ag_plan_evidence(&g_agFs, evidence, 6000);
   ai_out_cap(512);
-  g_acId = ai_ask_files_async(kAgSystem, &turn, 1, g_acWnd, WM_AI_CHAT);
+  g_acId = ai_ask_files_async(kAgSystem, &turn, 1, g_acWnd, WM_AI_CHAT, g_agGeneration, g_agFs.goal, evidence,
+                             g_agObservation, g_agLastState);
   ai_out_cap(0); free(prompt);
   if (!g_acId) { ag_stop(); ac_busy(FALSE); af_say(L"Не удалось запустить следующий шаг ИИ. Диск не изменён."); return FALSE; }
   ac_busy(TRUE);
-  wchar_t status[160]; swprintf(status, 160, L"Проверяю файлы и составляю план · шаг %d из 16 · Стоп — отменить", g_agSteps);
+  wchar_t status[160]; swprintf(status, 160, L"QwenPaw · подготовка навыков и плана · шаг %d из 16 · Стоп — отменить", g_agSteps);
   ac_status(status); return TRUE;
 }
 
@@ -106,6 +115,7 @@ static BOOL ag_start(const wchar_t *text) {
   ag_fs_init(&g_agFs, g_dataDir, g_acLastDir);
   lstrcpynW(g_agFs.goal, goal, 4000);
   g_agNotes[0] = g_agReadout[0] = 0; g_agSteps = g_agErrors = 0;
+  g_agObservation[0] = 0; g_agLastState = 0;
   g_agGeneration++;
   g_agPending = g_agReview = FALSE; g_agActive = TRUE;
   ac_push(0, text); ac_redraw();
@@ -145,6 +155,7 @@ static void ag_tool_ready(void *result) {
   }
   g_agFs = job->fs; g_agFs.cancel = NULL;
   int state = job->state;
+  g_agLastState = state;
   lstrcpynW(g_agObservation, job->observation, 6000);
   ag_note(job->json, job->observation);
   AgJson parsed;
@@ -190,11 +201,13 @@ static void ag_result(AiResult *r) {
   g_acId = 0;
   if (r->status != AI_OK) {
     ag_stop(); ac_busy(FALSE);
-    af_say(r->status == AI_CANCELLED ? L"Остановлено. Диск не изменён." : ai_status_text(r->status)); return;
+    af_say(r->status == AI_CANCELLED ? L"Остановлено. Диск не изменён." :
+      (r->text && r->text[0] ? r->text : ai_status_text(r->status))); return;
   }
   AgJson appJson;
   if (ag_json(r->text, &appJson) && !wcscmp(ag_get(&appJson, L"tool"), L"app")) {
     int state = ag_app_call(&appJson, g_agObservation, 6000);
+    g_agLastState = state;
     ag_note(r->text, g_agObservation);
     if (state == 0 && wcslen(g_agReadout) + wcslen(g_agObservation) + 4 < 100000) {
       wcscat(g_agReadout, g_agObservation); wcscat(g_agReadout, L"\r\n\r\n");

@@ -16,14 +16,15 @@ int wmain(int argc, wchar_t **argv) {
   if (!GetFullPathNameW(argv[1], MAX_PATH, root, NULL) || !CreateDirectoryW(root, NULL)) return 2;
   if (!of_formula(L"=SUM(A1:B1)") || of_formula(L"=WEBSERVICE(A1)") || of_formula(L"=CMD|'x'!A1") || of_formula(L"=[book.xlsx]Sheet1!A1")) return 3;
   swprintf(dst, MAX_PATH, L"%ls\\Формулы.xlsx", root);
-  BOOL ok = of_write_excel(L"", dst, L"", L"A1", L"=12\t=3\t=SUM(A1:B1)\n00123\t=ROUND(C1/2,1)\t=IF(C1>10,1,0)", TRUE, out, 6000); print(out);
+  BOOL ok = of_write_excel(L"", dst, L"", L"A1", L"12\t3\t=SUM(A1:B1)\n00123\t=ROUND(C1/2,1)\t=IF(C1>10,1,0)\n-2.5\t+3.75\t=SUM(A3:B3)\n1234567890123456\t1,5\t=3", TRUE, out, 6000); print(out);
   if (!ok) return 4;
   if (!of_read(dst, L"", 0, 0, out, 6000)) { print(out); return 5; } print(out);
   if (!wcsstr(out, L"C1: 15") || !wcsstr(out, L"A2: 00123") || !wcsstr(out, L"B2: 7.5")) return 6;
+  if (!wcsstr(out, L"C3: 1.25") || !wcsstr(out, L"A4: 1234567890123456") || !wcsstr(out, L"B4: 1,5")) return 20;
   if (of_write_excel(L"", dst, L"", L"A1", L"overwrite", FALSE, out, 6000)) return 7;
   wchar_t copy[MAX_PATH]; swprintf(copy, MAX_PATH, L"%ls\\Копия.xlsx", root);
-  if (!of_write_excel(dst, copy, L"Лист1", L"A3", L"Материал\t38ХС", FALSE, out, 6000)) { print(out); return 8; }
-  if (!of_read(dst, L"", 0, 0, out, 6000) || wcsstr(out, L"A3:")) return 9;
+  if (!of_write_excel(dst, copy, L"Лист1", L"A5", L"Материал\t38ХС", FALSE, out, 6000)) { print(out); return 8; }
+  if (!of_read(dst, L"", 0, 0, out, 6000) || wcsstr(out, L"A5:")) return 9;
   swprintf(copy, MAX_PATH, L"%ls\\Ошибка.xlsx", root);
   if (of_write_excel(L"", copy, L"", L"A1", L"=1/0", TRUE, out, 6000) || GetFileAttributesW(copy) != INVALID_FILE_ATTRIBUTES) return 10;
   wchar_t source[MAX_PATH], reference[MAX_PATH];

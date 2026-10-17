@@ -6,6 +6,21 @@
 static VARIANT of_int(long x) { VARIANT v; VariantInit(&v); v.vt = VT_I4; v.lVal = x; return v; }
 static VARIANT of_bool(BOOL x) { VARIANT v; VariantInit(&v); v.vt = VT_BOOL; v.boolVal = x ? VARIANT_TRUE : VARIANT_FALSE; return v; }
 static VARIANT of_str(const wchar_t *s) { VARIANT v; VariantInit(&v); v.vt = VT_BSTR; v.bstrVal = SysAllocString(s); return v; }
+/* Formula mode accepts canonical decimal literals as real numbers, independent
+   of Windows/Excel locale. Leading-zero IDs and >15-digit values remain text. */
+static BOOL of_decimal(const wchar_t *s, double *out) {
+  BOOL negative = *s == L'-';
+  if (*s == L'-' || *s == L'+') s++;
+  if (*s < L'0' || *s > L'9' || (*s == L'0' && s[1] >= L'0' && s[1] <= L'9')) return FALSE;
+  double value = 0, scale = 1; int digits = 0;
+  while (*s >= L'0' && *s <= L'9') { if (++digits > 15) return FALSE; value = value * 10 + *s++ - L'0'; }
+  if (*s == L'.') {
+    s++; if (*s < L'0' || *s > L'9') return FALSE;
+    while (*s >= L'0' && *s <= L'9') { if (++digits > 15) return FALSE; scale *= 10; value += (*s++ - L'0') / scale; }
+  }
+  if (*s) return FALSE;
+  *out = negative ? -value : value; return TRUE;
+}
 /* Takes ownership of the input variants. */
 static HRESULT of_call(IDispatch *d, const wchar_t *name, WORD flags, VARIANT *out, int n, VARIANT *args) {
   DISPID id, put = DISPID_PROPERTYPUT; LPOLESTR nm = (LPOLESTR)name;
@@ -239,8 +254,14 @@ static BOOL of_write_excel(const wchar_t *src, const wchar_t *dst, const wchar_t
     lstrcpynW(value, start, len + 1); of_col(col + cc, column); swprintf(target, 32, L"%ls%d", column, row + rr);
     a = of_str(target); IDispatch *cell = of_obj(sh, L"Range", 1, &a);
     BOOL formula = formulas && value[0] == L'=';
-    HRESULT hr = of_put(cell, L"NumberFormat", of_str(formula ? L"General" : L"@"));
-    if (SUCCEEDED(hr)) hr = of_put(cell, formula ? L"Formula" : L"Value2", of_str(value));
+    double number = 0; BOOL numeric = formulas && !formula && of_decimal(value, &number);
+    HRESULT hr = of_put(cell, L"NumberFormat", of_str(formula || numeric ? L"General" : L"@"));
+    if (SUCCEEDED(hr)) {
+      VARIANT content;
+      if (numeric) { VariantInit(&content); content.vt = VT_R8; content.dblVal = number; }
+      else content = of_str(value);
+      hr = of_put(cell, formula ? L"Formula" : L"Value2", content);
+    }
     of_release(cell);
     if (FAILED(hr)) { swprintf(out, cap, L"Excel отклонил ячейку %ls: 0x%08lx. Новая книга не сохранена.", target, (unsigned long)hr); goto done; }
     if (!*p) break;

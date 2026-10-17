@@ -647,10 +647,10 @@ static void ai_short_path(wchar_t *p) {
 }
 
 /* поднять сервер, если он не идёт. Ждёт загрузки модели до deadline. */
-static int ai_server_ensure(DWORD deadline, volatile LONG *cancel) {
+static int ai_server_ensure(DWORD deadline, volatile LONG *cancel, int minimumContext) {
   if (ai_ext()) return AI_OK;
   AcquireSRWLockExclusive(&g_aiSrvLock);
-  if (g_aiProc && WaitForSingleObject(g_aiProc, 0) == WAIT_TIMEOUT && g_aiPort) {
+  if (g_aiProc && WaitForSingleObject(g_aiProc, 0) == WAIT_TIMEOUT && g_aiPort && g_aiSlotCtx >= minimumContext) {
     ReleaseSRWLockExclusive(&g_aiSrvLock);
     return AI_OK;
   }
@@ -701,6 +701,7 @@ static int ai_server_ensure(DWORD deadline, volatile LONG *cancel) {
   g_aiSrvNote[0] = g_aiRunNote[0] = 0;
   /* если модель не влезла, пробуем проще: без видеокарты, затем с малым контекстом */
   int ngl = gpu ? 99 : 0, ctx = g_aiCtx * 2, np = 2, fail = -1;
+  if (minimumContext) { ctx = g_aiCtx > minimumContext ? g_aiCtx : minimumContext; np = 1; }
   {
     int av, tot;
     ai_mem_mb(&av, &tot);
@@ -788,7 +789,7 @@ static int ai_server_ensure(DWORD deadline, volatile LONG *cancel) {
           ngl = 0;
           lstrcpynW(g_aiRunNote, L"видеокарте не хватило памяти, модель идёт на процессоре", 200);
           ai_log(L"Повтор без видеокарты (-ngl 0)");
-        } else if (ctx > 2048) {
+        } else if (ctx > 2048 && !minimumContext) {
           ctx = 2048;
           np = 1;
           lstrcpynW(g_aiRunNote, L"памяти мало, контекст урезан до 2048", 200);
@@ -846,19 +847,23 @@ static int ai_server_ensure(DWORD deadline, volatile LONG *cancel) {
   return rc;
 }
 
+static void aq_warm_cancel(void);
 void ai_shutdown(void) {
+  aq_warm_cancel();
   ai_server_stop();
 }
 
 /* --- запросы ------------------------------------------------------------------ */
 typedef struct AiJob {
   int id;
+  LONG agentTask;
   char *body;
   DWORD timeout;
   HWND notify;
   UINT msg;
   void *user;
   volatile LONG cancel;
+  volatile LONG *externalCancel;
   void *volatile req; /* открытый запрос — закрыть, чтобы оборвать */
   int status;
   wchar_t *text;
@@ -923,16 +928,21 @@ static wchar_t *ai_sse_text(const char *s) {
   return acc;
 }
 
+#include "ai_qwen.c"
+
 static void ai_job_run(AiJob *j) {
   DWORD t0 = GetTickCount(), deadline = t0 + j->timeout;
   InterlockedIncrement(&g_aiActive);
-  int st = ai_server_ensure(deadline, &j->cancel);
+  int st = ai_server_ensure(deadline, &j->cancel, j->agentTask ? 16384 : 0);
   if (st == AI_NO_SERVER || st == AI_NO_MODEL) {
     AcquireSRWLockShared(&g_aiSrvLock);
     j->text = _wcsdup(g_aiSrvNote[0] ? g_aiSrvNote : ai_status_text(st));
     ReleaseSRWLockShared(&g_aiSrvLock);
   }
-  if (st == AI_OK) {
+  if (st == AI_OK && j->agentTask) {
+    st = aq_run(j, deadline, ai_ext() ? g_aiExtPort : g_aiPort);
+    g_aiLastUse = GetTickCount();
+  } else if (st == AI_OK) {
     DWORD left = deadline - GetTickCount();
     if ((LONG)left < 1000) left = 1000;
     char *resp = NULL;
@@ -1183,6 +1193,7 @@ static char *ai_body_chat(const wchar_t *instruction, const AiTurn *t, int n, BO
 }
 
 int ai_chat_budget(void) { return ((g_aiSlotCtx ? g_aiSlotCtx : g_aiCtx) - 1024 - 300) * 2; } /* ≈ 2 символа на токен: запас для русского */
+int ai_agent_budget(void) { return (16384 - 1024 - 300) * 2; }
 int ai_ctx_size(void) { return g_aiCtx; }
 
 static int ai_ask_chat_kind(const wchar_t *instruction, const AiTurn *turns, int n, DWORD timeoutMs, HWND notify,
@@ -1210,8 +1221,26 @@ int ai_ask_chat_async(const wchar_t *instruction, const AiTurn *turns, int n, DW
   return ai_ask_chat_kind(instruction, turns, n, timeoutMs, notify, msg, user, FALSE);
 }
 
-int ai_ask_files_async(const wchar_t *instruction, const AiTurn *turns, int n, HWND notify, UINT msg) {
-  return ai_ask_chat_kind(instruction, turns, n, 180000, notify, msg, NULL, TRUE);
+int ai_ask_files_async(const wchar_t *instruction, const AiTurn *turns, int n, HWND notify, UINT msg,
+                       LONG task, const wchar_t *goal, const wchar_t *plan,
+                       const wchar_t *observation, int observationState) {
+  if (ai_precheck() != AI_OK || !notify || n != 1 || !turns || !turns[0].text || task <= 0) return 0;
+  char *body = ai_body_chat(instruction, turns, n, TRUE), *g = ai_json_str(goal), *p = ai_json_str(plan);
+  char *o = ai_json_str(observation);
+  if (!body || !g || !p || !o) { free(body); free(g); free(p); free(o); return 0; }
+  size_t size = strlen(body) + strlen(g) + strlen(p) + strlen(o) + 160;
+  char *wire = (char *)malloc(size);
+  if (wire) snprintf(wire, size, "{\"cursorpad\":{\"goal\":%s,\"plan\":%s,\"observation\":%s,\"observation_state\":%d},%s", g, p, o, observationState, body + 1);
+  free(body); free(g); free(p); free(o);
+  AiAsync *a = (AiAsync *)calloc(1, sizeof(AiAsync));
+  AiJob *j = a && wire ? ai_job_new(wire, 600000) : NULL;
+  if (!j) { if (!a || !wire) free(wire); free(a); return 0; }
+  j->agentTask = task;
+  a->j = j; a->id = j->id; a->notify = notify; a->msg = msg;
+  int id = j->id;
+  HANDLE th = CreateThread(NULL, 0, ai_async_thread, a, 0, NULL);
+  if (!th) { ai_job_release(j); free(a); return 0; }
+  CloseHandle(th); return id;
 }
 
 static int ai_ask_body(char *body, DWORD timeoutMs, HWND notify, UINT msg, void *user) {
@@ -1841,8 +1870,19 @@ static DWORD WINAPI ai_dl_thread(LPVOID p) {
               L"github.com/ggml-org/llama.cpp/releases и укажите его кнопкой «llama.cpp…»", t->model);
     goto out;
   }
+  ai_dl_say(L"Модель сохранена. Подготавливаю QwenPaw и навыки…");
+  {
+    AiJob job = {0}; job.externalCancel = &g_aiDl.cancel;
+    wchar_t root[MAX_PATH];
+    int status = aq_prepare(&job, GetTickCount() + 600000, root);
+    if (status != AI_OK) {
+      ai_dl_say(L"Модель сохранена, но комплект QwenPaw ещё не готов. %s", job.text ? job.text : L"Повторите скачивание при подключённом интернете.");
+      free(job.text); goto out;
+    }
+    free(job.text);
+  }
   g_aiDl.failed = FALSE;
-  ai_dl_say(L"Готово: %s скачана. Включите ИИ и нажмите «Проверить».", t->model);
+  ai_dl_say(L"Готово: %s, QwenPaw и навыки подготовлены. Включите ИИ и нажмите «Проверить».", t->model);
 out:
   if (ses) WinHttpCloseHandle(ses);
   if (g_aiDl.cancel) ai_dl_say(L"Скачивание остановлено. Скачанное сохранено — продолжится с того же места.");

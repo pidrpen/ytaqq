@@ -1,5 +1,6 @@
 """Shared deterministic packaging for build.sh and build.ps1. No dependencies."""
 import hashlib
+import json
 from pathlib import Path
 import re
 import shutil
@@ -26,6 +27,16 @@ with zipfile.ZipFile(pub / 'CursorPad.zip', 'w', zipfile.ZIP_DEFLATED) as archiv
         entry.compress_type = zipfile.ZIP_DEFLATED
         entry.external_attr = 0o644 << 16
         archive.writestr(entry, source.read_bytes())
+    lock = json.loads((native / 'agent_pack.json').read_text(encoding='utf-8'))
+    agent_pack = native.parent / 'public' / lock['file']
+    if hashlib.sha256(agent_pack.read_bytes()).hexdigest() != lock['sha256']:
+        raise RuntimeError('Agent pack hash mismatch')
+    if agent_pack.parent.resolve() != pub.resolve():
+        shutil.copyfile(agent_pack, pub / lock['file'])
+    entry = zipfile.ZipInfo(lock['file'], date)
+    entry.compress_type = zipfile.ZIP_STORED
+    entry.external_attr = 0o644 << 16
+    archive.writestr(entry, agent_pack.read_bytes())
 sha = hashlib.sha256((pub / 'CursorPad.bin').read_bytes()).hexdigest()
 notes = (native / 'whatsnew.txt').read_text(encoding='utf-8').rstrip()
 (pub / 'version.txt').write_text('\n'.join(version + ['sha256 ' + sha, notes]) + '\n', encoding='utf-8')

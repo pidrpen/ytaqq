@@ -55,6 +55,8 @@ int wmain(int argc, wchar_t **argv) {
       } else state = ag_tool(&fs, w, out, 6000);
     }
     printf("{\"state\":%d,\"count\":%d,\"observation\":", state, fs.count); json_string(out);
+    wchar_t evidence[6000]; ag_plan_evidence(&fs, evidence, 6000);
+    printf(",\"evidence\":"); json_string(evidence);
     printf(",\"plan\":[");
     for (int i = 0; i < fs.count; i++) {
       AgAction *a = &fs.plan[i];
