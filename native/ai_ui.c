@@ -14,8 +14,9 @@
 #define ID_AI_REPORT 513 /* «Скопировать отчёт» */
 #define ID_AI_LLAMA 514  /* «llama.cpp…» — указать скачанный руками архив */
 #define ID_AI_CTX 515    /* «Контекст…» — окно контекста модели: 2048…16384 по кругу */
+#define ID_AI_OFF 516    /* выключить и сразу выгрузить модель */
 
-static HWND g_aiBtnReport, g_aiBtnLlama, g_aiBtnCtx;
+static HWND g_aiBtnReport, g_aiBtnLlama, g_aiBtnCtx, g_aiBtnOff;
 static HWND g_aiChkOn, g_aiBtnTier[AI_TIERS], g_aiChkGpu, g_aiStat, g_aiBar, g_aiBtnDl, g_aiBtnTest, g_aiBtnDir,
     g_aiPathEdit, g_aiBtnBrowse;
 static int g_aiTestId;          /* идёт «Проверить» */
@@ -24,6 +25,7 @@ static wchar_t g_aiTestMsg[300]; /* чем кончилась проверка *
 static void ai_ui_refresh(void) {
   if (!g_aiChkOn) return;
   SendMessageW(g_aiChkOn, BM_SETCHECK, g_aiOn ? BST_CHECKED : BST_UNCHECKED, 0);
+  EnableWindow(g_aiBtnOff, g_aiOn || g_aiProc != NULL);
   SendMessageW(g_aiChkGpu, BM_SETCHECK, g_aiGpu ? BST_CHECKED : BST_UNCHECKED, 0);
   for (int i = 0; i < AI_TIERS; i++) set_mark(g_aiBtnTier[i], g_aiTier == i && !g_aiModel[0], kAiTiers[i].button);
   wchar_t cx[80];
@@ -53,7 +55,7 @@ static void ai_ui_refresh(void) {
       name = name ? name + 1 : g_aiModel;
     }
     const wchar_t *state = !haveModel ? L"не скачана" : !haveSrv ? L"нет llama.cpp — нажмите «Скачать»"
-                           : g_aiOn   ? L"включена"
+                           : g_aiOn   ? (g_aiProc ? L"сервер запущен" : L"модель выгружена")
                                       : L"скачана, ИИ выключен";
     if (g_aiTestMsg[0]) _snwprintf(s, 420, L"%s — %s\r\n%s", name, state, g_aiTestMsg);
     else if (g_aiDl.msg[0]) _snwprintf(s, 420, L"%s — %s\r\n%s", name, state, g_aiDl.msg);
@@ -118,9 +120,10 @@ static int ai_mt_rank(const wchar_t *des, const wchar_t *name, MtAiCand *cand, i
 static void ai_ui_create(HWND p) {
   ai_load();
   mt_set_ai_ranker(ai_mt_rank);
-  g_aiChkOn = CreateWindowExW(0, L"BUTTON", L"Включить ИИ (без интернета)",
+  g_aiChkOn = CreateWindowExW(0, L"BUTTON", L"Включить ИИ",
                               WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 0, 0, 240, 26, p, (HMENU)(INT_PTR)ID_AI_ON,
                               NULL, NULL);
+  g_aiBtnOff = mk_btn(p, L"Выключить и выгрузить", ID_AI_OFF);
   for (int i = 0; i < AI_TIERS; i++) g_aiBtnTier[i] = mk_btn(p, kAiTiers[i].button, ID_AI_TIER + i);
   g_aiBtnCtx = mk_btn(p, L"", ID_AI_CTX);
   g_aiChkGpu = CreateWindowExW(0, L"BUTTON", L"Считать на видеокарте (если в ней от 4 ГБ)",
@@ -140,7 +143,7 @@ static void ai_ui_create(HWND p) {
   g_aiPathEdit = CreateWindowExW(0, L"EDIT", g_aiModel, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 0, 0, 200, 26, p,
                                  (HMENU)(INT_PTR)ID_AI_PATH, NULL, NULL);
   g_aiBtnBrowse = mk_btn(p, L"Обзор…", ID_AI_BROWSE);
-  HWND f[] = {g_aiChkOn, g_aiChkGpu, g_aiBtnDl, g_aiBtnTest, g_aiBtnDir, g_aiBtnBrowse};
+  HWND f[] = {g_aiChkOn, g_aiBtnOff, g_aiChkGpu, g_aiBtnDl, g_aiBtnTest, g_aiBtnDir, g_aiBtnBrowse};
   for (int i = 0; i < (int)(sizeof(f) / sizeof(f[0])); i++) SendMessageW(f[i], WM_SETFONT, (WPARAM)g_fontUi, TRUE);
   for (int i = 0; i < AI_TIERS; i++) SendMessageW(g_aiBtnTier[i], WM_SETFONT, (WPARAM)g_fontUi, TRUE);
   SendMessageW(g_aiStat, WM_SETFONT, (WPARAM)g_fontSmall, TRUE);
@@ -151,7 +154,9 @@ static void ai_ui_create(HWND p) {
 
 /* раскладка вкладки; возвращает новый y */
 static int ai_ui_layout(int pad, int y, int fullW, int cw, int btnH, int gap, int lab, int browseW) {
-  set_place(g_aiChkOn, pad, y, fullW, btnH);
+  int halfOn = (fullW - gap) / 2;
+  set_place(g_aiChkOn, pad, y, halfOn, btnH);
+  set_place(g_aiBtnOff, pad + halfOn + gap, y, fullW - halfOn - gap, btnH);
   y += btnH + gap + lab;
   y += set_grid(g_aiBtnTier, AI_TIERS, 2, pad, y, fullW, btnH, gap);
   set_place(g_aiChkGpu, pad, y, fullW, btnH);
@@ -361,9 +366,19 @@ static BOOL ai_ui_command(HWND hwnd, int id, int code) {
   }
   if (id == ID_AI_ON && code == BN_CLICKED) {
     g_aiOn = SendMessageW(g_aiChkOn, BM_GETCHECK, 0, 0) == BST_CHECKED;
-    if (!g_aiOn) ai_server_stop();
+    if (!g_aiOn) ai_disable();
+    if (!g_aiOn) g_aiTestId = 0;
     ai_save();
     g_aiTestMsg[0] = 0;
+    ai_ui_refresh();
+    return TRUE;
+  }
+  if (id == ID_AI_OFF && code == BN_CLICKED) {
+    ai_disable();
+    g_aiTestId = 0;
+    ai_save();
+    lstrcpynW(g_aiTestMsg, ai_ext() ? L"ИИ выключен. Внешний сервер управляется отдельно."
+                                  : L"ИИ выключен, модель выгружена из памяти. Без отключения выгружается после 10 минут простоя.", 300);
     ai_ui_refresh();
     return TRUE;
   }
