@@ -13,7 +13,7 @@ static void ag_le32(BYTE *p, DWORD v) { for (int i = 0; i < 4; i++) p[i] = (BYTE
 static BOOL ag_bytes(HANDLE h, const void *p, DWORD n) {
   DWORD written = 0; return !n || (WriteFile(h, p, n, &written, NULL) && written == n);
 }
-static BOOL ag_write_new(const wchar_t *path, const wchar_t *text, AgKind kind) {
+static BOOL ag_write_document(const wchar_t *path, const wchar_t *text, AgKind kind, const char *sheetXml) {
   BOOL docx = kind == AG_DOCX, xlsx = kind == AG_XLSX;
   if (xlsx && text[0]) { SetLastError(ERROR_NOT_SUPPORTED); return FALSE; }
   char utf8[8001], xml[18000];
@@ -52,7 +52,7 @@ static BOOL ag_write_new(const wchar_t *path, const wchar_t *text, AgKind kind) 
       data[1] = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"xl/workbook.xml\"/></Relationships>";
       data[2] = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><sheets><sheet name=\"Лист1\" sheetId=\"1\" r:id=\"rId1\"/></sheets></workbook>";
       data[3] = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" Target=\"worksheets/sheet1.xml\"/></Relationships>";
-      data[4] = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><sheetData/></worksheet>";
+      data[4] = sheetXml ? sheetXml : "<?xml version=\"1.0\" encoding=\"UTF-8\"?><worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><sheetData/></worksheet>";
     }
     DWORD offsets[5], crcs[5], pos = 0;
     for (int i = 0; i < count && ok; i++) {
@@ -76,4 +76,7 @@ static BOOL ag_write_new(const wchar_t *path, const wchar_t *text, AgKind kind) 
   DWORD error = GetLastError(); CloseHandle(h);
   if (!ok) { DeleteFileW(path); SetLastError(error); }
   return ok;
+}
+static BOOL ag_write_new(const wchar_t *path, const wchar_t *text, AgKind kind) {
+  return ag_write_document(path, text, kind, NULL);
 }

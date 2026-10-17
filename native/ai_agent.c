@@ -65,13 +65,13 @@ static BOOL ag_request(void) {
   wchar_t *prompt = (wchar_t *)calloc(cap, sizeof(wchar_t));
   if (!prompt) { ag_stop(); return FALSE; }
   swprintf(prompt, cap,
-    L"Задача пользователя: %ls\nПапки: @desktop=%ls; @downloads=%ls; @documents=%ls; @last=%ls.\n"
+    L"Задача пользователя: %ls\nПапки: @desktop=%ls; @downloads=%ls; @documents=%ls; @last=%ls; @new=%ls.\n"
     L"Шаг %d из 16. Действий в плане: %d.\n",
-    g_agFs.goal, g_agFs.desktop, g_agFs.downloads, g_agFs.documents, g_agFs.last, g_agSteps, g_agFs.count);
+    g_agFs.goal, g_agFs.desktop, g_agFs.downloads, g_agFs.documents, g_agFs.last, g_agFs.newDir, g_agSteps, g_agFs.count);
   for (int i = 0; i < g_agFs.count && i < 12 && wcslen(prompt) + MAX_PATH * 2 + 80 < (size_t)cap; i++) {
     AgAction *a = &g_agFs.plan[i];
     swprintf(prompt + wcslen(prompt), cap - wcslen(prompt), L"В плане: %ls %ls -> %ls\n",
-      a->kind == AG_DIR ? L"mkdir" : a->kind == AG_COPY ? L"copy" : a->kind == AG_MOVE ? L"move" : a->kind == AG_OPEN ? L"open" : a->kind == AG_EXCEL ? L"excel_write" : (a->kind == AG_DOCX || a->kind == AG_PLAIN || a->kind == AG_XLSX) ? L"write" : L"rename", a->src, a->dst);
+      a->kind == AG_DIR ? L"mkdir" : a->kind == AG_COPY ? L"copy" : a->kind == AG_MOVE ? L"move" : a->kind == AG_OPEN ? L"open" : a->kind == AG_INVENTORY ? L"inventory" : a->kind == AG_EXCEL ? L"excel_write" : (a->kind == AG_DOCX || a->kind == AG_PLAIN || a->kind == AG_XLSX) ? L"write" : L"rename", a->src, a->dst);
   }
   if (g_agFs.count > 12) wcscat(prompt, L"Остальные действия той же группы скрыты для экономии контекста; ориентируйся на результаты инструментов.\n");
   /* Keep the newest observations within the selected model's context. */
@@ -119,8 +119,9 @@ static void ag_preview(void) {
   swprintf(out, cap, L"План действий: %d. Диск пока не изменён.\r\n", g_agFs.count);
   for (int i = 0; i < g_agFs.count; i++) {
     AgAction *a = &g_agFs.plan[i];
-    const wchar_t *verb = a->kind == AG_DIR ? L"Создать папку" : a->kind == AG_COPY ? L"Копировать" : a->kind == AG_MOVE ? L"Переместить" : a->kind == AG_OPEN ? L"Открыть в проводнике" : a->kind == AG_DOCX ? L"Создать Word-документ" : a->kind == AG_XLSX ? L"Создать пустую книгу Excel" : a->kind == AG_EXCEL ? L"Заполнить новую книгу/копию Excel" : a->kind == AG_PLAIN ? L"Создать текстовый файл" : L"Переименовать";
+    const wchar_t *verb = a->kind == AG_DIR ? L"Создать папку" : a->kind == AG_COPY ? L"Копировать" : a->kind == AG_MOVE ? L"Переместить" : a->kind == AG_OPEN ? L"Открыть в проводнике" : a->kind == AG_DOCX ? L"Создать Word-документ" : a->kind == AG_XLSX ? L"Создать пустую книгу Excel" : a->kind == AG_INVENTORY ? L"Создать и ЗАПОЛНИТЬ Excel-перечень папки" : a->kind == AG_EXCEL ? L"Заполнить новую книгу/копию Excel" : a->kind == AG_PLAIN ? L"Создать текстовый файл" : L"Переименовать";
     swprintf(out + wcslen(out), cap - wcslen(out), L"%ls: %ls%ls%ls\r\n", verb, a->src, a->src[0] ? L" → " : L"", a->dst);
+    if (a->kind == AG_INVENTORY) swprintf(out + wcslen(out), cap - wcslen(out), L"Источник перечня: %ls. Ожидается элементов: %ls. Будут перечислены реальные имена, типы, расширения, размеры, пути и даты ПОСЛЕ переносов; без самой книги, без обхода подпапок.\r\n", a->text, a->cell);
     if (a->kind == AG_EXCEL || a->kind == AG_DOCX || a->kind == AG_PLAIN) {
       swprintf(out + wcslen(out), cap - wcslen(out), L"%ls%ls%ls\r\nСодержимое: %ls\r\n", a->kind == AG_EXCEL ? L"Лист: " : L"", a->sheet, a->formulas ? L"; ФОРМУЛЫ ВКЛЮЧЕНЫ" : L"", a->text[0] ? a->text : L"(пусто)");
     }

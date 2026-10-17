@@ -2,7 +2,7 @@
    All mutations are staged; the UI applies the complete reviewed plan. */
 #define AG_MAX 512
 #define AG_TEXT 12000
-typedef enum { AG_DIR, AG_COPY, AG_MOVE, AG_RENAME, AG_OPEN, AG_DOCX, AG_PLAIN, AG_XLSX, AG_EXCEL } AgKind;
+typedef enum { AG_DIR, AG_COPY, AG_MOVE, AG_RENAME, AG_OPEN, AG_DOCX, AG_PLAIN, AG_XLSX, AG_EXCEL, AG_INVENTORY } AgKind;
 typedef struct {
   AgKind kind;
   wchar_t src[MAX_PATH], dst[MAX_PATH];
@@ -14,6 +14,7 @@ typedef struct {
 typedef struct {
   wchar_t desktop[MAX_PATH], downloads[MAX_PATH], documents[MAX_PATH], last[MAX_PATH];
   wchar_t protectedDir[MAX_PATH], goal[4000];
+  wchar_t newDir[MAX_PATH], newBase[MAX_PATH];
   AgAction plan[AG_MAX];
   int count;
   volatile LONG *cancel;
@@ -132,9 +133,9 @@ static BOOL ag_redirect(const WIN32_FIND_DATAW *fd) {
 static BOOL ag_path(AgFs *fs, const wchar_t *in, wchar_t *out) {
   wchar_t buf[MAX_PATH];
   const wchar_t *root = NULL, *tail = in;
-  static const wchar_t *const aliases[] = {L"@desktop", L"@downloads", L"@documents", L"@last"};
-  const wchar_t *roots[] = {fs->desktop, fs->downloads, fs->documents, fs->last};
-  for (int i = 0; i < 4; i++) {
+  static const wchar_t *const aliases[] = {L"@desktop", L"@downloads", L"@documents", L"@last", L"@new"};
+  const wchar_t *roots[] = {fs->desktop, fs->downloads, fs->documents, fs->last, fs->newDir};
+  for (int i = 0; i < 5; i++) {
     size_t n = wcslen(aliases[i]);
     if (!_wcsnicmp(in, aliases[i], n) && (!in[n] || in[n] == L'\\' || in[n] == L'/')) {
       root = roots[i]; tail = in + n; break;
@@ -161,7 +162,7 @@ static BOOL ag_path(AgFs *fs, const wchar_t *in, wchar_t *out) {
   for (int i = 0; i < 3; i++)
     if (GetEnvironmentVariableW(envs[i], sys, MAX_PATH) && ag_under(out, sys)) return FALSE;
   BOOL scoped = FALSE;
-  for (int i = 0; i < 4; i++) if (ag_under(out, roots[i])) scoped = TRUE;
+  for (int i = 0; i < 5; i++) if (ag_under(out, roots[i])) scoped = TRUE;
   /* An explicitly supplied absolute path grants that folder and its children.
      Match at a path boundary, never accept a partial directory name. */
   for (const wchar_t *p = fs->goal; *p && !scoped; p++) {
@@ -237,6 +238,10 @@ static BOOL ag_mkdir(AgFs *fs, const wchar_t *path) {
 /* Simple case-insensitive glob; unlike substring matching *.stl excludes
    part.stl.txt and folder names. Any extension is supported. */
 static BOOL ag_glob(const wchar_t *pat, const wchar_t *name) {
+  if (!_wcsicmp(pat, L"@excel")) {
+    const wchar_t *ext = wcsrchr(name, L'.');
+    return ext && (!_wcsicmp(ext, L".xlsx") || !_wcsicmp(ext, L".xls") || !_wcsicmp(ext, L".xlsm") || !_wcsicmp(ext, L".xlsb") || !_wcsicmp(ext, L".xltx") || !_wcsicmp(ext, L".xltm") || !_wcsicmp(ext, L".xlt"));
+  }
   const wchar_t *star = NULL, *back = NULL;
   while (*name) {
     if (*pat == L'?' || (*pat && CompareStringOrdinal(pat, 1, name, 1, TRUE) == CSTR_EQUAL)) { pat++; name++; }
@@ -303,6 +308,63 @@ static BOOL ag_target(const AgFs *fs, const wchar_t *dir, const wchar_t *name, w
 #include "ai_agent_write.c"
 #include "ai_office.c"
 #include "ai_compare.c"
+#include "ai_inventory.c"
+static BOOL ag_needs_inventory(const wchar_t *raw) {
+  wchar_t s[4000]; lstrcpynW(s, raw, 4000); CharLowerBuffW(s, (DWORD)wcslen(s));
+  BOOL excel = wcsstr(s, L"ексел") || wcsstr(s, L"эксел") || wcsstr(s, L"excel") || wcsstr(s, L"xlsx");
+  BOOL listing = wcsstr(s, L"спис") || wcsstr(s, L"переч") || wcsstr(s, L"реестр");
+  return excel && listing && (wcsstr(s, L"файл") || wcsstr(s, L"содержим") || wcsstr(s, L"что в ") || wcsstr(s, L"что лежит") || wcsstr(s, L"что находится"));
+}
+/* High-confidence unnamed-folder request. Named destinations keep their normal
+   meaning; a generic new folder must not silently reuse @last or a sample name. */
+static BOOL ag_needs_fresh_folder(const wchar_t *raw) {
+  wchar_t s[4000]; lstrcpynW(s, raw, 4000); CharLowerBuffW(s, (DWORD)wcslen(s));
+  const wchar_t *folder = wcsstr(s, L"папку");
+  if (!folder) return FALSE;
+  BOOL create = FALSE;
+  for (const wchar_t *p = s; p < folder; p++) if (!wcsncmp(p, L"созда", 5) && folder - p < 70) create = TRUE;
+  if (!create) return FALSE;
+  const wchar_t *tail = folder + 5; while (*tail == L' ') tail++;
+  const wchar_t *words[] = {L"и", L"на", L"для", L"с", L"чтобы", L"затем"};
+  if (!*tail || *tail == L',' || *tail == L'.') return TRUE;
+  for (size_t i = 0; i < sizeof(words) / sizeof(words[0]); i++) {
+    size_t n = wcslen(words[i]);
+    if (!wcsncmp(tail, words[i], n) && (!tail[n] || tail[n] == L' ' || tail[n] == L',')) return TRUE;
+  }
+  return FALSE;
+}
+static BOOL ag_fresh_destination(AgFs *fs, const wchar_t *path, wchar_t *out, int cap) {
+  if (!ag_needs_fresh_folder(fs->goal)) return TRUE;
+  if (fs->newDir[0] && ag_under(path, fs->newDir)) return TRUE;
+  lstrcpynW(out, L"Пользователь попросил НОВУЮ папку без имени. Сначала new_folder path=@desktop (или указанный родитель), затем используй @new для переноса и отчёта. Существующая Модели и @last не заменяют новую папку. План не изменён.", cap); return FALSE;
+}
+static BOOL ag_check_inventory_transfers(AgFs *fs, wchar_t *out, int cap) {
+  if (!ag_needs_inventory(fs->goal)) return TRUE;
+  wchar_t goal[4000]; lstrcpynW(goal, fs->goal, 4000); CharLowerBuffW(goal, (DWORD)wcslen(goal));
+  BOOL copy = wcsstr(goal, L"скопир") || wcsstr(goal, L"копир");
+  BOOL transfer = copy || wcsstr(goal, L"закин") || wcsstr(goal, L"засун") || wcsstr(goal, L"перенес") || wcsstr(goal, L"перенёс") || wcsstr(goal, L"перемест") || wcsstr(goal, L"полож") || wcsstr(goal, L"слож");
+  if (!transfer) return TRUE;
+  const wchar_t *source = NULL, *target = fs->newDir;
+  if (wcsstr(goal, L"загруз")) source = fs->downloads;
+  else if (wcsstr(goal, L"рабоч")) source = fs->desktop;
+  if (!source) return TRUE; /* Other explicit paths remain the model's responsibility. */
+  for (int i = 0; !target[0] && i < fs->count; i++) if (fs->plan[i].kind == AG_INVENTORY) target = fs->plan[i].text;
+  if (!target[0]) { lstrcpynW(out, L"Сначала выбери папку назначения и запланируй перенос Excel-файлов. Создание одного перечня не выполняет просьбу перенести файлы.", cap); return FALSE; }
+  AgFind *f = (AgFind *)calloc(1, sizeof(*f));
+  if (!f) return FALSE;
+  f->pattern = L"@excel"; f->exclude = target; f->protectedDir = fs->protectedDir; f->cancel = fs->cancel;
+  ag_find(f, source, 0);
+  if (f->overflow) { free(f); lstrcpynW(out, L"Не удалось полностью проверить исходные Excel-файлы. Частичный план не готов к применению.", cap); return FALSE; }
+  int missing = 0;
+  for (int k = 0; k < f->count; k++) {
+    BOOL found = FALSE;
+    for (int i = 0; i < fs->count; i++) if (fs->plan[i].kind == (copy ? AG_COPY : AG_MOVE) && !_wcsicmp(fs->plan[i].src, f->hits[k]) && ag_direct_child(fs->plan[i].dst, target)) found = TRUE;
+    if (!found) missing++;
+  }
+  int total = f->count; free(f);
+  if (missing) { swprintf(out, cap, L"План НЕПОЛОН: пользователь просил %ls Excel-файлы, а не только создать перечень. Источник %ls: всего %d, не запланировано %d. Следующий инструмент %ls src=%ls dst=%ls pattern=@excel recursive=no. После этого done; inventory уже будет пересчитан автоматически.", copy ? L"скопировать" : L"переместить", source, total, missing, copy ? L"copy" : L"move", source, fs->newDir[0] ? L"@new" : target); return FALSE; }
+  return TRUE;
+}
 static BOOL ag_needs_document(const wchar_t *raw, BOOL excel) {
   wchar_t goal[4000]; lstrcpynW(goal, raw, 4000); CharLowerBuffW(goal, (DWORD)wcslen(goal));
   const wchar_t *word = wcsstr(goal, excel ? L"ексел" : L"ворд");
@@ -349,6 +411,13 @@ static int ag_tool(AgFs *fs, const wchar_t *json, wchar_t *out, int cap) {
   if (!ag_json(json, &j)) return -1;
   const wchar_t *tool = ag_get(&j, L"tool");
   if (!wcscmp(tool, L"done")) {
+    if (ag_needs_fresh_folder(fs->goal) && !fs->newDir[0]) { lstrcpynW(out, L"План неполон: нужна новая папка. Вызови new_folder, затем используй @new. Нельзя подменять её существующей папкой.", cap); return -1; }
+    if (!ag_check_inventory_transfers(fs, out, cap)) return -1;
+    if (ag_needs_inventory(fs->goal)) {
+      BOOL found = FALSE;
+      for (int i = 0; i < fs->count; i++) if (fs->plan[i].kind == AG_INVENTORY) found = TRUE;
+      if (!found) { lstrcpynW(out, L"План неполон: нужен Excel с ПЕРЕЧНЕМ РЕАЛЬНЫХ ФАЙЛОВ. Пустой write и выдуманный text не подходят. Вызови inventory path=папка name=Список_файлов.xlsx. Код заполнит книгу после всех переносов.", cap); return -1; }
+    }
     if (ag_needs_word(fs->goal)) {
       BOOL found = FALSE;
       for (int i = 0; i < fs->count; i++) if (fs->plan[i].kind == AG_DOCX) found = TRUE;
@@ -356,15 +425,19 @@ static int ag_tool(AgFs *fs, const wchar_t *json, wchar_t *out, int cap) {
     }
     if (ag_needs_document(fs->goal, TRUE)) {
       BOOL found = FALSE;
-      for (int i = 0; i < fs->count; i++) if (fs->plan[i].kind == AG_XLSX || fs->plan[i].kind == AG_EXCEL) found = TRUE;
+      for (int i = 0; i < fs->count; i++) if (fs->plan[i].kind == AG_XLSX || fs->plan[i].kind == AG_EXCEL || fs->plan[i].kind == AG_INVENTORY) found = TRUE;
       if (!found) { lstrcpynW(out, L"План неполон: пользователь просил создать Excel. Добавь write с путём .xlsx. Иначе ask; done запрещён.", cap); return -1; }
       wchar_t goal[4000]; lstrcpynW(goal, fs->goal, 4000); CharLowerBuffW(goal, (DWORD)wcslen(goal));
       if (wcsstr(goal, L"формул") || wcsstr(goal, L"заполни") || wcsstr(goal, L"запиши")) {
         BOOL content = FALSE;
-        for (int i = 0; i < fs->count; i++) if (fs->plan[i].kind == AG_EXCEL && fs->plan[i].text[0] && (!wcsstr(goal, L"формул") || fs->plan[i].formulas)) content = TRUE;
+        for (int i = 0; i < fs->count; i++) {
+          if (fs->plan[i].kind == AG_EXCEL && fs->plan[i].text[0] && (!wcsstr(goal, L"формул") || fs->plan[i].formulas)) content = TRUE;
+          if (fs->plan[i].kind == AG_INVENTORY && ag_needs_inventory(fs->goal) && !wcsstr(goal, L"формул")) content = TRUE;
+        }
         if (!content) { lstrcpynW(out, L"План неполон: требовались данные/формулы, а не пустой Excel. Нужен ОДИН excel_write с непустым text и mode=formulas для формул. Пустая книга не выполняет просьбу. Иначе ask.", cap); return -1; }
       }
     }
+    if (!ag_order_inventories(fs) || !ag_inventory_preview_counts(fs)) { lstrcpynW(out, L"Не удалось проверить полный будущий перечень папки. План не готов к применению.", cap); return -1; }
     lstrcpynW(out, L"План готов к проверке.", cap); return 1;
   }
   if (!wcscmp(tool, L"ask")) {
@@ -379,6 +452,40 @@ static int ag_tool(AgFs *fs, const wchar_t *json, wchar_t *out, int cap) {
     return -1;
   }
   int saved = fs->count;
+  if (!wcscmp(tool, L"new_folder")) {
+    wchar_t goal[4000]; lstrcpynW(goal, fs->goal, 4000); CharLowerBuffW(goal, (DWORD)wcslen(goal));
+    if (ag_needs_fresh_folder(fs->goal) && wcsstr(goal, L"рабоч") && _wcsicmp(path, fs->desktop)) { lstrcpynW(out, L"Новая папка нужна НА РАБОЧЕМ СТОЛЕ. Вызови new_folder path=@desktop, не @last и не внутри Модели.", cap); return -1; }
+    const wchar_t *name = ag_get(&j, L"name"); if (!name[0] || ag_needs_fresh_folder(fs->goal)) name = L"Новая папка";
+    if (!ag_name(name) || wcslen(path) + wcslen(name) + 18 >= MAX_PATH) goto fail;
+    wchar_t base[MAX_PATH]; swprintf(base, MAX_PATH, L"%ls\\%ls", path, name);
+    if (fs->newDir[0] && !_wcsicmp(base, fs->newBase)) { swprintf(out, cap, L"Новая папка УЖЕ запланирована: %ls. Используй @new. Не повторяй new_folder.", fs->newDir); return 0; }
+    lstrcpynW(dst, base, MAX_PATH);
+    for (int n = 2; ag_used(fs, dst); n++) { if (n > 10000) goto fail; swprintf(dst, MAX_PATH, L"%ls (%d)", base, n); }
+    if (!ag_mkdir(fs, dst)) goto fail;
+    lstrcpynW(fs->newDir, dst, MAX_PATH); lstrcpynW(fs->newBase, base, MAX_PATH);
+    swprintf(out, cap, L"Новая папка добавлена в план: %ls. @new=%ls. Используй @new для файлов и inventory. Диск не изменён.", dst, dst); return 0;
+  }
+  if (!wcscmp(tool, L"inventory")) {
+    if (!ag_fresh_destination(fs, path, out, cap)) return -1;
+    if (!ag_planned_dir(fs, path)) goto fail;
+    const wchar_t *name = ag_get(&j, L"name"); if (!name[0]) name = L"Список_файлов.xlsx";
+    if (!ag_name(name) || !of_excel(name) || !ag_target(fs, path, name, dst)) goto fail;
+    for (int i = 0; i < fs->count; i++) if (fs->plan[i].kind == AG_INVENTORY && !_wcsicmp(fs->plan[i].text, path)) {
+      swprintf(out, cap, L"Перечень этой папки уже запланирован: %ls. Он заполнится автоматически после переносов. Если других действий нет, done.", fs->plan[i].dst); return 0;
+    }
+    /* Replace an already staged empty book with an actual inventory. */
+    AgAction *a = NULL;
+    for (int i = 0; i < fs->count; i++) if (fs->plan[i].kind == AG_XLSX && ag_direct_child(fs->plan[i].dst, path)) { a = &fs->plan[i]; lstrcpynW(dst, a->dst, MAX_PATH); break; }
+    AgInvEntry *items; int n;
+    if (!ag_inv_entries(fs, path, dst, TRUE, &items, &n)) { lstrcpynW(out, L"Не удалось получить полный будущий перечень папки; отчёт не добавлен. Лимит 10000 элементов. Уточните папку.", cap); return -1; }
+    if (!a) { if (!ag_add(fs, AG_INVENTORY, L"", dst)) { free(items); goto fail; } a = &fs->plan[fs->count - 1]; }
+    a->kind = AG_INVENTORY; lstrcpynW(a->text, path, 2000); swprintf(a->cell, 16, L"%d", n);
+    swprintf(out, cap, L"Заполненный Excel-перечень добавлен в план: %ls. Папка: %ls. По плану элементов: %d (без самой книги). Будет создан ПОСЛЕ ВСЕХ переносов, по реальному содержимому.\n", dst, path, n);
+    for (int i = 0; i < n && i < 20 && wcslen(out) + wcslen(items[i].name) + 120 < (size_t)cap; i++) swprintf(out + wcslen(out), cap - wcslen(out), L"%ls\n", items[i].name);
+    if (n > 20) wcsncat(out, L"Превью сокращено, книга будет содержать ВСЕ элементы.\n", cap - wcslen(out) - 1);
+    wcsncat(out, L"Не нужен write/excel_write и не нужно читать ещё не созданную книгу. Если остальной план готов — done.", cap - wcslen(out) - 1);
+    free(items); return 0;
+  }
   if (!wcscmp(tool, L"compare_materials")) {
     wchar_t ref[MAX_PATH]; const wchar_t *raw = ag_get(&j, L"offset"); wchar_t *end = NULL;
     long offset = raw[0] ? wcstol(raw, &end, 10) : 0;
@@ -395,6 +502,7 @@ static int ag_tool(AgFs *fs, const wchar_t *json, wchar_t *out, int cap) {
     return of_read(path, ag_get(&j, L"sheet"), (int)offset, col - 1, out, cap) ? 0 : -1;
   }
   if (!wcscmp(tool, L"excel_write")) {
+    if (!ag_fresh_destination(fs, path, out, cap)) return -1;
     const wchar_t *name = wcsrchr(path, L'\\'); wchar_t parent[MAX_PATH], source[MAX_PATH] = L"";
     BOOL formulas = !wcscmp(ag_get(&j, L"mode"), L"formulas");
     int r, c, nr, nc; const wchar_t *cell = ag_get(&j, L"cell"); if (!cell[0]) cell = L"A1";
@@ -421,11 +529,13 @@ static int ag_tool(AgFs *fs, const wchar_t *json, wchar_t *out, int cap) {
     swprintf(out, cap, L"В план добавлена новая %ls Excel: %ls; блок %d × %d от %ls; формулы %ls. Исходник не изменится.", source[0] ? L"копия" : L"книга", dst, nr, nc, cell, formulas ? L"включены с проверкой Excel" : L"выключены"); return 0;
   }
   if (!wcscmp(tool, L"write")) {
+    if (!ag_fresh_destination(fs, path, out, cap)) return -1;
     const wchar_t *name = wcsrchr(path, L'\\');
     const wchar_t *ext = wcsrchr(path, L'.');
     if (!name || !ext || !ag_name(name + 1)) goto fail;
     BOOL docx = !_wcsicmp(ext, L".docx");
     BOOL xlsx = !_wcsicmp(ext, L".xlsx");
+    if (xlsx && ag_needs_inventory(fs->goal)) { lstrcpynW(out, L"Пустая книга не заменяет перечень папки. Используй inventory path=папка name=Список_файлов.xlsx; код сам перечислит реальные файлы после переносов.", cap); return -1; }
     if (xlsx && ag_get(&j, L"text")[0]) {
       lstrcpynW(out, L"write .xlsx создаёт только пустую книгу с одним листом; данные и формулы ещё не поддерживаются. Не подменяй их пустым файлом: объясни ограничение через ask.", cap); return -1;
     }
@@ -444,6 +554,7 @@ static int ag_tool(AgFs *fs, const wchar_t *json, wchar_t *out, int cap) {
     return 0;
   }
   if (!wcscmp(tool, L"mkdir")) {
+    if (!ag_fresh_destination(fs, path, out, cap)) return -1;
     if (!ag_mkdir(fs, path)) goto fail;
     if (fs->count == saved) { lstrcpynW(out, L"Папка уже существует или УЖЕ ЕСТЬ В ПЛАНЕ. mkdir ничего не добавил; НЕ ПОВТОРЯЙ его. Если нужный документ уже в плане — done. Иначе выполни недостающий write/excel_write или другое запрошенное действие.", cap); return -1; }
     swprintf(out, cap, L"Папка запланирована (на диске пока не создавалась): %ls", path); return 0;
@@ -504,6 +615,7 @@ static int ag_tool(AgFs *fs, const wchar_t *json, wchar_t *out, int cap) {
       swprintf(out, cap, L"Исходная папка не существует: %ls. Проверь src по тексту задачи, не подставляй другой источник из примера. Исправь свой путь или ask, если пользователь его не указал.", path); return -1;
     }
     if (!find && (!ag_path(fs, ag_get(&j, L"dst"), dst) || !_wcsicmp(path, dst))) goto fail;
+    if (!find && !ag_fresh_destination(fs, dst, out, cap)) return -1;
     AgFind *f = (AgFind *)calloc(1, sizeof(AgFind));
     if (!f) goto fail;
     f->pattern = pattern; f->recursive = !wcscmp(ag_get(&j, L"recursive"), L"yes");
@@ -519,18 +631,23 @@ static int ag_tool(AgFs *fs, const wchar_t *json, wchar_t *out, int cap) {
       free(f); return 0;
     }
     if (!n) { free(f); lstrcpynW(out, L"Не найдено ни одного файла по маске. Ничего не добавлено в план. Уточни источник или маску.", cap); return -1; }
-    BOOL ok = ag_mkdir(fs, dst);
+    BOOL ok = ag_mkdir(fs, dst); int added = 0;
     for (int i = 0; i < n && ok; i++) {
+      BOOL already = FALSE;
+      if (ag_needs_inventory(fs->goal)) for (int k = 0; k < fs->count; k++)
+        if (fs->plan[k].kind == (!wcscmp(tool, L"copy") ? AG_COPY : AG_MOVE) && !_wcsicmp(fs->plan[k].src, f->hits[i]) && ag_direct_child(fs->plan[k].dst, dst)) already = TRUE;
+      if (already) continue;
       /* One source cannot be moved twice or renamed before another staged use. */
       for (int k = 0; k < fs->count; k++)
         if (!_wcsicmp(f->hits[i], fs->plan[k].src) && fs->plan[k].kind != AG_COPY) ok = FALSE;
       wchar_t target[MAX_PATH];
       const wchar_t *name = wcsrchr(f->hits[i], L'\\') + 1;
       ok = ok && ag_name(name) && ag_target(fs, dst, name, target) && ag_add(fs, !wcscmp(tool, L"copy") ? AG_COPY : AG_MOVE, f->hits[i], target);
+      if (ok) added++;
     }
     free(f);
     if (!ok) goto fail;
-    swprintf(out, cap, L"Добавлено в план файлов: %d. Из %ls в %ls; маска %ls; подпапки %ls. Пока не выполнено.", n, path, dst, pattern, !wcscmp(ag_get(&j, L"recursive"), L"yes") ? L"да" : L"нет");
+    swprintf(out, cap, L"Добавлено в план файлов: %d. Из %ls в %ls; маска %ls; подпапки %ls. Уже запланированные в ту же папку не повторяются. Пока не выполнено.", added, path, dst, pattern, !wcscmp(ag_get(&j, L"recursive"), L"yes") ? L"да" : L"нет");
     return 0;
   }
   if (!wcscmp(tool, L"rename")) {
@@ -558,6 +675,7 @@ static BOOL ag_preflight(AgFs *fs) {
     AgAction *a = &fs->plan[i]; wchar_t p[MAX_PATH];
     if (!ag_path(fs, a->dst, p) || _wcsicmp(p, a->dst)) return FALSE;
     if (a->kind == AG_OPEN && !ag_planned_dir(fs, a->dst)) return FALSE;
+    if (a->kind == AG_INVENTORY && (!ag_path(fs, a->text, p) || !ag_planned_dir(fs, p))) return FALSE;
     if (a->kind != AG_OPEN && GetFileAttributesW(a->dst) != INVALID_FILE_ATTRIBUTES) return FALSE;
     if (a->src[0]) {
       WIN32_FILE_ATTRIBUTE_DATA now;
@@ -569,8 +687,10 @@ static BOOL ag_preflight(AgFs *fs) {
   return TRUE;
 }
 static BOOL ag_apply(AgFs *fs, wchar_t *out, int cap) {
+  if (!ag_check_inventory_transfers(fs, out, cap)) return FALSE;
+  if (!ag_order_inventories(fs)) { lstrcpynW(out, L"Не хватило памяти для порядка отчётов. Ничего не выполнено.", cap); return FALSE; }
   if (!ag_preflight(fs)) { lstrcpynW(out, L"Файлы или пути изменились после предпросмотра. Ничего не выполнено; запросите новый план.", cap); return FALSE; }
-  int files = 0, dirs = 0, created = 0;
+  int files = 0, dirs = 0, created = 0, reports = 0, listed = 0;
   for (int i = 0; i < fs->count; i++) {
     AgAction *a = &fs->plan[i]; BOOL ok;
     if (fs->cancel && InterlockedCompareExchange(fs->cancel, 0, 0)) {
@@ -578,6 +698,11 @@ static BOOL ag_apply(AgFs *fs, wchar_t *out, int cap) {
       return FALSE;
     }
     if (a->kind == AG_DIR) ok = CreateDirectoryW(a->dst, NULL);
+    else if (a->kind == AG_INVENTORY) {
+      wchar_t actual[MAX_PATH]; int rows = 0;
+      ok = ag_path(fs, a->text, actual) && ag_inventory_write(fs, a, &rows);
+      if (ok) { reports++; listed += rows; }
+    }
     else if (a->kind == AG_DOCX || a->kind == AG_PLAIN || a->kind == AG_XLSX) ok = ag_write_new(a->dst, a->text, a->kind);
     else if (a->kind == AG_EXCEL) {
       wchar_t detail[6000]; ok = of_write_excel(a->src, a->dst, a->sheet, a->cell, a->text, a->formulas, detail, 6000);
@@ -596,7 +721,7 @@ static BOOL ag_apply(AgFs *fs, wchar_t *out, int cap) {
       return FALSE;
     }
     if (a->kind == AG_DIR) dirs++; else if (a->kind != AG_OPEN) files++;
-    if (a->kind == AG_DOCX || a->kind == AG_PLAIN || a->kind == AG_XLSX || a->kind == AG_EXCEL) created++;
+    if (a->kind == AG_DOCX || a->kind == AG_PLAIN || a->kind == AG_XLSX || a->kind == AG_EXCEL || a->kind == AG_INVENTORY) created++;
   }
   if (fs->count) {
     AgAction *last = &fs->plan[fs->count - 1];
@@ -607,5 +732,6 @@ static BOOL ag_apply(AgFs *fs, wchar_t *out, int cap) {
     }
   }
   swprintf(out, cap, L"Готово. Обработано файлов: %d, из них создано новых: %d. Создано папок: %d.", files, created, dirs);
+  if (reports) swprintf(out + wcslen(out), cap - wcslen(out), L" Excel-перечней заполнено: %d. Элементов в них: %d (без самих книг).", reports, listed);
   return TRUE;
 }

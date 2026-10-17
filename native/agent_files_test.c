@@ -118,7 +118,7 @@ int wmain(int argc, wchar_t **argv) {
   CHECK(run(L"{\"tool\":\"move\",\"src\":\"@desktop\",\"dst\":\"@desktop\\\\TooMany\",\"pattern\":\"*.test\"}") < 0);
   CHECK(fs.count == 0); CHECK(!exists(L"TooMany")); CHECK(exists(L"limit-512.test"));
   reset();
-  lstrcpynW(fs.goal, L"Создай папку и в ней ворд файл и туда STL", 4000);
+  lstrcpynW(fs.goal, L"Создай папку WordTest и в ней ворд файл и туда STL", 4000);
   CHECK(run(L"{\"tool\":\"done\"}") < 0);
   CHECK(run(L"{\"tool\":\"write\",\"path\":\"@desktop\\\\WordTest\\\\Документ.docx\",\"text\":\"Текст & <проверка>\\nВторая строка\"}") == 0);
   CHECK(!exists(L"WordTest")); CHECK(run(L"{\"tool\":\"done\"}") == 1);
@@ -152,6 +152,29 @@ int wmain(int argc, wchar_t **argv) {
   CHECK(run(L"{\"tool\":\"done\"}") == 1);
   CHECK(run(L"{\"tool\":\"excel_write\",\"path\":\"@desktop\\\\Формула.xlsx\",\"text\":\"=1\",\"mode\":\"formulas\"}") < 0);
   CHECK(fs.count == 1); CHECK(!exists(L"Формула.xlsx")); /* preview still changes no files */
+  reset();
+  CHECK(ag_glob(L"@excel", L"a.XLSX")); CHECK(ag_glob(L"@excel", L"a.xlsm"));
+  CHECK(!ag_glob(L"@excel", L"a.xlsx.txt")); CHECK(!ag_glob(L"@excel", L"a.xls.backup"));
+  CHECK(ag_needs_inventory(L"на рабочем столе создай папку и закинь туда ексели, и создай в нем ексель с перечислением того что в папке"));
+  CHECK(!ag_needs_inventory(L"Создай Excel со списком сотрудников в папке Офис"));
+  lstrcpynW(fs.goal, L"на рабочем столе создай папку и закинь туда ексели, и создай в нем ексель с перечислением того что в папке", 4000);
+  swprintf(fs.last, MAX_PATH, L"%ls\\Модели", scratch);
+  CHECK(run(L"{\"tool\":\"move\",\"src\":\"@desktop\",\"dst\":\"@last\",\"pattern\":\"@excel\"}") < 0);
+  CHECK(fs.count == 0); CHECK(run(L"{\"tool\":\"new_folder\",\"path\":\"@last\"}") < 0);
+  CHECK(run(L"{\"tool\":\"new_folder\",\"path\":\"@desktop\"}") == 0);
+  CHECK(fs.count == 1); CHECK(!exists(L"Новая папка"));
+  CHECK(run(L"{\"tool\":\"write\",\"path\":\"@new\\\\Список_файлов.xlsx\",\"text\":\"\"}") < 0);
+  CHECK(run(L"{\"tool\":\"done\"}") < 0); /* inventory cannot be replaced with an empty book */
+  touch(L"a&b.xlsx", "opaque XLSX test payload"); touch(L"UP.XLSM", "opaque XLSM test payload");
+  touch(L"=1+1.xlsx", "filename is data, never a formula"); touch(L"not.xlsx.txt", "keep");
+  CHECK(run(L"{\"tool\":\"inventory\",\"path\":\"@new\"}") == 0); /* deliberately before move */
+  CHECK(run(L"{\"tool\":\"move\",\"src\":\"@desktop\",\"dst\":\"@new\",\"pattern\":\"@excel\"}") == 0);
+  CHECK(run(L"{\"tool\":\"done\"}") == 1); CHECK(fs.plan[fs.count - 1].kind == AG_INVENTORY);
+  CHECK(!wcscmp(fs.plan[fs.count - 1].cell, L"3"));
+  CHECK(!exists(L"Новая папка")); CHECK(ag_apply(&fs, result, 6000));
+  CHECK(exists(L"Новая папка\\Список_файлов.xlsx")); CHECK(exists(L"Новая папка\\a&b.xlsx"));
+  CHECK(exists(L"Новая папка\\UP.XLSM")); CHECK(exists(L"not.xlsx.txt"));
+  CHECK(wcsstr(result, L"Элементов в них: 3"));
   reset();
   CHECK(run(L"{\"tool\":\"list\",\"path\":\"@desktop\"}") == 0); CHECK(wcsstr(result, L"НЕПОЛНЫЙ"));
   CHECK(run(L"{\"tool\":\"list\",\"path\":\"@desktop\",\"offset\":\"-1\"}") < 0);

@@ -79,7 +79,7 @@ def main():
                 prompt = (f'Задача пользователя: {goal}\nПапки: @desktop={root}; '
                           f'@downloads={root}\\Downloads; @documents={root}\\Documents; @last={root}.\n'
                           f'Шаг {step} из 16. Действий в плане: {len(plan)}.\n')
-                kinds = ['mkdir', 'copy', 'move', 'rename', 'open', 'write', 'write', 'write', 'excel_write']
+                kinds = ['mkdir', 'copy', 'move', 'rename', 'open', 'write', 'write', 'write', 'excel_write', 'inventory']
                 for action in plan[:12]:
                     prompt += f'В плане: {kinds[action["kind"]]} {action["src"]} -> {action["dst"]}\n'
                 prompt += notes[-12000:]
