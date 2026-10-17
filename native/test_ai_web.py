@@ -18,6 +18,22 @@ def main():
             f.write_text(content, encoding='utf-8')
             p = subprocess.run([probe, mode, str(f), query], capture_output=True, encoding='utf-8', check=False)
             return p.returncode, p.stdout
+        def urls(query):
+            return subprocess.run([probe, '--urls', query], capture_output=True, encoding='utf-8', check=True).stdout
+        assert urls('привет') == 'count 0\n'
+        assert urls('что по ссылке «https://www.ozon.ru/product/item-123/?x=1&y=2»') == 'count 1\nhttps://www.ozon.ru/product/item-123/?x=1&y=2\n'
+        assert urls('[товар](https://example.org/a).') == 'count 1\nhttps://example.org/a\n'
+        assert urls('https://example.org/a https://example.org/a').startswith('count 1\n')
+        assert urls('https://example.org/a https://example.org/b').startswith('count 2\n')
+        assert urls('https://example.org/a https://example.org/b https://example.org/b').startswith('count 2\n')
+        assert urls('https://example.org/a https://example.org/b https://example.org/c') == 'count -1\n'
+        assert urls('https://example.org/' + 'a'*3300) == 'count -1\n'
+        assert urls('HTTP://example.org/').startswith('count 1\n')
+        # Explicit private/unsupported URLs must fail in direct mode, never search.
+        for url in ('https://localhost/', 'http://example.org/'):
+            p = subprocess.run([probe, url], capture_output=True, encoding='utf-8')
+            assert p.returncode == 1 and 'Прямая ссылка:' in p.stdout and 'Общий поиск не выполнялся' in p.stdout
+            assert 'Tavily' not in p.stdout
         rss = ('<rss><channel><link>https://not-a-result.example/</link>'
                '<item><title>Python документация</title><link>https://docs.python.org/?a=1&amp;b=2</link>'
                '<description>hashlib и SHA-256</description></item></channel></rss>')

@@ -13,7 +13,39 @@ static int aq_test(void) {
   int status, testedSlot = 0;
   int testedOff = 0, testedStopped = 0, testedQueue = -1;
   wchar_t testedWeb[AC_WEB_CAP] = L"", testedNote[360] = L"";
-  if (port == -3 && argc == 7 && job.body) {
+  if (port == -11 && argc == 7 && job.body) {
+    ac_push(0, L"https://www.ozon.ru/product/test-123/ что по ссылке");
+    ac_push(1, L"Подшипник 999. https://unrelated.example/wrong цена 1499");
+    ac_push(0, L"какие характеристики у этого подшипника");
+    wchar_t *resolved = ac_web_question(ac_last_role(0));
+    BOOL ok = resolved && wcsstr(resolved, L"https://www.ozon.ru/product/test-123/") && !wcsstr(resolved, L"unrelated") && !wcsstr(resolved, L"1499");
+    free(resolved);
+    ac_push(1, L"Ответ"); ac_push(0, L"а размеры у него");
+    resolved = ac_web_question(ac_last_role(0));
+    ok = ok && resolved && wcsstr(resolved, L"https://www.ozon.ru/product/test-123/"); free(resolved);
+    resolved = ac_web_question(L"новости Петербурга");
+    ok = ok && resolved && !wcsstr(resolved, L"https://"); free(resolved);
+    resolved = ac_web_question(L"а у этого https://docs.python.org/3/");
+    ok = ok && resolved && !wcsstr(resolved, L"ozon"); free(resolved);
+    ac_push(0, L"расскажи про погоду"); ac_push(1, L"Ответ"); ac_push(0, L"а какая у него температура");
+    resolved = ac_web_question(ac_last_role(0));
+    ok = ok && resolved && !wcsstr(resolved, L"ozon"); free(resolved);
+    status = ok ? AI_OK : AI_ERROR;
+    job.text = _wcsdup(ok ? L"PASS: user-link follow-ups, assistant ignored, new topic/new link isolated" : L"FAIL");
+    ac_clear_turns();
+  } else if (port == -10 && argc == 7 && job.body) {
+    /* Real link failure -> actual chat handler, with no model or user profile. */
+    wchar_t *question = ai_wide(job.body, -1); AcWebInfo info = {0};
+    if (question && !ac_web_find(question, testedWeb, AC_WEB_CAP, &info) && !wcsncmp(info.note, L"Прямая ссылка:", 14)) {
+      ac_push(0, question);
+      ac_finish_ask(_wcsdup(testedWeb), info.note);
+      const wchar_t *answer = ac_last_role(1);
+      if (answer) job.text = _wcsdup(answer);
+      status = answer && wcsstr(answer, L"Не удалось прочитать") && !g_acId && !g_aiProc ? AI_OK : AI_ERROR;
+      ac_clear_turns();
+    } else status = AI_ERROR;
+    lstrcpynW(testedNote, info.note, 360); free(question);
+  } else if (port == -3 && argc == 7 && job.body) {
     AgFs *fs = (AgFs *)calloc(1, sizeof(AgFs));
     wchar_t *action = ai_wide(job.body, -1), observation[6000] = L"";
     if (!fs || !action) { free(fs); free(action); LocalFree(argv); free(job.body); return 3; }

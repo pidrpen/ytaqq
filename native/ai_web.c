@@ -448,12 +448,38 @@ static BOOL acw_tavily_parse(const char *json, DWORD length, const wchar_t *quer
   return TRUE;
 }
 
+static BOOL acw_direct(const wchar_t *query, wchar_t *out, int cap, AcWebInfo *info);
+
+/* Explicit links are reads, never search queries. -1 means too long/many. */
+static int acw_urls(const wchar_t *query, wchar_t urls[2][3300]) {
+  int count = 0;
+  for (const wchar_t *p = query; *p; p++) {
+    if (_wcsnicmp(p, L"https://", 8) && _wcsnicmp(p, L"http://", 7)) continue;
+    const wchar_t *end = p;
+    while (*end && !iswspace(*end) && !wcschr(L"\"<>«»", *end)) end++;
+    while (end > p && wcschr(L".,;!)\u005d}", end[-1])) end--;
+    size_t n = (size_t)(end - p);
+    if (n >= 3300) return -1;
+    wchar_t url[3300]; memcpy(url, p, n * sizeof(wchar_t)); url[n] = 0;
+    BOOL duplicate = FALSE;
+    for (int i = 0; i < count; i++) if (!wcscmp(urls[i], url)) duplicate = TRUE;
+    if (!duplicate) {
+      if (count == 2) return -1;
+      wcscpy(urls[count++], url);
+    }
+    p += n ? n - 1 : 0;
+  }
+  return count;
+}
+
 /* No browser scraping, repeated Brave requests or encyclopedia substitution. */
 static BOOL ac_web_find(const wchar_t *query, wchar_t *out, int cap, AcWebInfo *info) {
   out[0] = 0;
   info->note[0] = 0; info->status = info->error = 0; info->page = info->prepared = FALSE;
   if (!info->deadline) info->deadline = GetTickCount() + 30000;
   if (!query || !query[0] || cap < 200) return FALSE;
+  wchar_t urls[2][3300];
+  if (acw_urls(query, urls)) return acw_direct(query, out, cap, info);
   size_t len = wcslen(query), cap8 = len * 4 + 1;
   char *utf8 = (char *)malloc(cap8), *body = (char *)malloc(cap8 * 2 + 200);
   if (!utf8 || !body || !WideCharToMultiByte(CP_UTF8, 0, query, -1, utf8, (int)cap8, NULL, NULL)) { free(utf8); free(body); return FALSE; }
@@ -584,12 +610,47 @@ static BOOL acw_read_page(const wchar_t *url, char **text, AcWebInfo *info) {
     } else {
       acw_plain(html, decoded, 180000); acw_unescape(decoded, clean, 180000); ok = TRUE;
     }
-    if (ok && (strlen(clean) < 100 || acw_ci(clean, clean + strlen(clean), "verify you are human") ||
-               acw_ci(clean, clean + strlen(clean), "enable javascript"))) ok = FALSE;
+    const char *blocked[] = {"verify you are human", "enable javascript", "access denied", "captcha", "доступ ограничен", "подтвердите, что вы не робот", "проверка браузера"};
+    if (ok && strlen(clean) < 100) ok = FALSE;
+    for (int i = 0; ok && i < 7; i++) if (acw_ci(clean, clean + strlen(clean), blocked[i])) ok = FALSE;
   }
   free(html); free(decoded);
   if (ok) *text = clean; else free(clean);
   return ok;
+}
+
+static BOOL acw_direct(const wchar_t *query, wchar_t *out, int cap, AcWebInfo *info) {
+  wchar_t urls[2][3300]; int count = acw_urls(query, urls), used = 0, read = 0;
+  info->prepared = TRUE; out[0] = 0;
+  if (count < 0) {
+    lstrcpynW(info->note, L"Прямая ссылка: укажите не больше двух ссылок длиной до 3299 символов. Общий поиск не выполнялся.", 360);
+    return FALSE;
+  }
+  wchar_t *question = _wcsdup(query);
+  if (!question) { lstrcpynW(info->note, L"Прямая ссылка: недостаточно памяти. Общий поиск не выполнялся.", 360); return FALSE; }
+  for (int i = 0; i < count; i++) {
+    wchar_t *p;
+    while ((p = wcsstr(question, urls[i]))) for (size_t j = 0; j < wcslen(urls[i]); j++) p[j] = L' ';
+  }
+  int passageCap = cap - 1;
+  for (int i = 0; i < count; i++) passageCap -= (int)wcslen(urls[i]) + 200;
+  passageCap /= count ? count : 1;
+  if (passageCap > 2801) passageCap = 2801;
+  if (passageCap < 100) { free(question); lstrcpynW(info->note, L"Прямая ссылка: адреса слишком длинные для контекста. Общий поиск не выполнялся.", 360); return FALSE; }
+  for (int i = 0; i < count; i++) {
+    char *text = NULL; wchar_t passage[2801] = L"";
+    BOOL ok = acw_read_page(urls[i], &text, info) && acw_passage(question, text, passage, passageCap);
+    free(text);
+    int n = _snwprintf(out + used, cap - used, L"Источник: %s\r\n%s\r\n%s\r\n\r\n", urls[i],
+      ok ? L"Напрямую прочитан текст указанной страницы (фрагмент):" : L"Содержимое указанной страницы недоступно. Не делай выводов из адреса ссылки.", passage);
+    if (n < 0 || n >= cap - used) { out[0] = 0; break; }
+    used += n; if (ok) read++;
+  }
+  free(question);
+  _snwprintf(info->note, 360, L"Прямая ссылка: прочитано страниц %d/%d. HTTP %lu; ошибка Windows %lu. Общий поиск не выполнялся. Редирект, защита сайта или вход могут мешать чтению.", read, count, info->status, info->error);
+  info->note[359] = 0;
+  if (!read) out[0] = 0;
+  return read > 0;
 }
 
 /* Read at most two actual pages, then choose bounded passages for the model.
@@ -639,6 +700,12 @@ static void ac_web_read_pages(const wchar_t *query, wchar_t *web, int cap, AcWeb
 int wmain(int argc, wchar_t **argv) {
   wchar_t out[AC_WEB_CAP];
   AcWebInfo info = {0};
+  if (argc > 2 && !wcscmp(argv[1], L"--urls")) {
+    wchar_t urls[2][3300]; int n = acw_urls(argv[2], urls);
+    printf("count %d\n", n);
+    for (int i = 0; i < n; i++) { char u[14000]; WideCharToMultiByte(CP_UTF8, 0, urls[i], -1, u, sizeof(u), NULL, NULL); puts(u); }
+    return 0;
+  }
   if (argc > 2 && !wcscmp(argv[1], L"--page")) {
     char *text = NULL; info.deadline = GetTickCount() + 15000;
     BOOL ok = acw_read_page(argv[2], &text, &info);
@@ -671,7 +738,10 @@ int wmain(int argc, wchar_t **argv) {
   const wchar_t *q = argc > 1 ? argv[1] : L"сталь 45 закалка";
   BOOL ok = ac_web_find(q, out, AC_WEB_CAP, &info);
   if (ok) ac_web_read_pages(q, out, AC_WEB_CAP, &info);
-  wprintf(L"ok %d\n%s\n%s\n", ok ? 1 : 0, info.note, out);
+  char utf8[AC_WEB_CAP * 4], note[1600];
+  WideCharToMultiByte(CP_UTF8, 0, out, -1, utf8, sizeof(utf8), NULL, NULL);
+  WideCharToMultiByte(CP_UTF8, 0, info.note, -1, note, sizeof(note), NULL, NULL);
+  printf("ok %d\n%s\n%s\n", ok ? 1 : 0, note, utf8);
   return ok ? 0 : 1;
 }
 #endif
