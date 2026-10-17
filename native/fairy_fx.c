@@ -87,9 +87,9 @@
 #define FX_INK_FRAMES 42
 #define FX_VENOM_DROPS 12 /* «Яд» Скорпиона: капли и ещё 4 пузыря */
 #define FX_VENOM_FRAMES 42
-#define FX_CAVIAR_DROPS 11 /* «Икра»: мелкие брызги приготовленной мякоти */
-#define FX_CAVIAR_LEAVES 3 /* крупные плевки, расплющиваются на экране */
-#define FX_CAVIAR_FRAMES 78
+#define FX_CAVIAR_DROPS 11 /* «Пятна»: мелкие белые пятна */
+#define FX_CAVIAR_LEAVES 3 /* крупные белые пятна */
+#define FX_CAVIAR_FRAMES 52
 #define FX_INF_DUST 16   /* «Бесконечность» Годжо: пылинки, застывающие у барьера */
 #define FX_INF_FRAMES 52
 #define FX_MAXP 16      /* больше всех частиц у конфетти */
@@ -926,45 +926,26 @@ static void fx_venom_paint(FxWin *f) {
   }
 }
 
-/* «Икра»: фиолетовая мякоть брызжет из точки нажатия, капли блестят и падают,
-   зелёные чашелистики разлетаются и планируют */
+/* «Пятна»: белые пятна выскакивают из точки нажатия и гаснут.
+   Серый ободок нужен, чтобы пятно было видно и на белом фоне. */
 static void fx_caviar_paint(FxWin *f) {
   float sc = g_fxScale;
-  int fr = f->frame;
   for (int i = 0; i < f->n; i++) {
     const FxPart *p = &f->p[i];
-    int age = fr - p->delay;
+    int age = f->frame - p->delay;
     if (age < 0 || age >= p->life) continue;
-    float t = (float)age / p->life, grow = fx_clamp01((age + 1) / 7.0f);
-    float a = t < 0.62f ? 0.94f : 0.94f * (1 - (t - 0.62f) / 0.38f);
-    float radius = p->sz * sc * (0.35f + 0.65f * grow);
-    float rx = radius * (p->spr ? 1.25f : 0.9f), ry = radius * (p->spr ? 0.8f : 1.2f);
-    int sx = (int)(rx * 1.3f + 2), sy = (int)(ry * 1.3f + 2);
-    for (int y = (int)p->y - sy; y <= (int)p->y + sy; y++)
-      for (int x = (int)p->x - sx; x <= (int)p->x + sx; x++) {
-        float dx = (x + 0.5f - p->x) / rx, dy = (y + 0.5f - p->y) / ry;
-        float angle = atan2f(dy, dx), dist = hypotf(dx, dy);
-        float edge = 1 + 0.13f * sinf(5 * angle + p->tw) + 0.07f * sinf(9 * angle - p->tw);
-        float coverage = fx_clamp01((edge - dist) * radius + 0.5f);
-        if (coverage <= 0) continue;
-        unsigned hash = (unsigned)(x * 173 + y * 927 + i * 53); hash ^= hash << 13; hash *= 1274126177u;
-        float texture = (hash % 31) / 30.0f, border = fx_clamp01((edge - dist) * 6);
-        float red = (130 + 48 * texture - dy * 12) * (0.6f + 0.4f * border);
-        float green = (57 + 38 * texture - dy * 8) * (0.6f + 0.4f * border);
-        float blue = (24 + 20 * texture) * (0.6f + 0.4f * border);
-        if (hash % 101 < 4) red *= 0.55f, green *= 0.55f, blue *= 0.55f;
-        float shine = expf(-((dx + 0.35f) * (dx + 0.35f) * 25 + (dy + 0.4f) * (dy + 0.4f) * 80));
-        fx_put(f, x, y, red + 55 * shine, green + 52 * shine, blue + 30 * shine, a * coverage);
+    float t = (float)age / p->life, grow = fx_clamp01((age + 1) / 5.0f);
+    float a = t < 0.55f ? 0.92f : 0.92f * (1.0f - (t - 0.55f) / 0.45f);
+    float radius = p->sz * sc * (0.5f + 0.5f * grow);
+    int span = (int)(radius + 2.5f);
+    for (int y = (int)p->y - span; y <= (int)p->y + span; y++)
+      for (int x = (int)p->x - span; x <= (int)p->x + span; x++) {
+        float d = hypotf(x + 0.5f - p->x, y + 0.5f - p->y);
+        float cover = fx_clamp01(radius + 0.6f - d);
+        if (cover <= 0) continue;
+        float core = fx_clamp01((radius - d) / 1.6f);
+        fx_put(f, x, y, 214.0f + 41.0f * core, 214.0f + 41.0f * core, 222.0f + 33.0f * core, a * cover);
       }
-    /* Sticky cooked pulp runs down the glass, rather than floating like sparks. */
-    if (p->spr && age > 10) {
-      float length = fx_clamp01((age - 10) / 35.0f) * 22 * sc;
-      for (int y = 0; y < (int)length; y++) {
-        float width = (1.8f - y / (length + 1)) * sc;
-        for (int x = -(int)width - 1; x <= (int)width + 1; x++)
-          fx_put(f, (int)(p->x + rx * 0.3f) + x, (int)(p->y + ry * 0.6f) + y, 141, 76, 32, a * fx_clamp01(width + 0.5f - fabsf((float)x)));
-      }
-    }
   }
 }
 
@@ -1119,32 +1100,21 @@ static void fx_seed_new(FxWin *f, int kind, int S) {
         p->life = 12 + (int)(fx_rand() * 8);
       }
     }
-  } else if (kind == 15) { /* «Икра»: капли мякоти и чашелистики */
+  } else if (kind == 15) { /* «Пятна»: белые пятна из точки нажатия */
     f->n = FX_CAVIAR_DROPS + FX_CAVIAR_LEAVES;
     f->frames = FX_CAVIAR_FRAMES;
     for (int i = 0; i < f->n; i++) {
       FxPart *p = &f->p[i];
       memset(p, 0, sizeof(*p));
       float a = fx_rand() * 6.2832f;
+      float v = (1.6f + fx_rand() * 2.4f) * g_fxScale;
       p->x = c;
       p->y = c;
-      p->delay = (int)(fx_rand() * 3);
-      if (i < FX_CAVIAR_DROPS) {
-        float v = (4.0f + fx_rand() * 4.0f) * g_fxScale;
-        p->vx = cosf(a) * v;
-        p->vy = sinf(a) * v - 1.5f * g_fxScale;
-        p->sz = 2.0f + fx_rand() * 2.0f;
-        p->life = FX_CAVIAR_FRAMES - p->delay;
-      } else {
-        float v = (6.0f + fx_rand() * 5.0f) * g_fxScale;
-        p->spr = 1;
-        p->vx = cosf(a) * v;
-        p->vy = sinf(a) * v - 0.5f * g_fxScale;
-        p->sz = 12.0f + fx_rand() * 7.0f;
-        p->tw = a;
-        p->rev = (fx_rand() - 0.5f) * 0.28f;
-        p->life = FX_CAVIAR_FRAMES - p->delay;
-      }
+      p->vx = cosf(a) * v;
+      p->vy = sinf(a) * v;
+      p->sz = i < FX_CAVIAR_DROPS ? 3.2f + fx_rand() * 2.4f : 7.0f + fx_rand() * 3.0f;
+      p->delay = (int)(fx_rand() * 4);
+      p->life = FX_CAVIAR_FRAMES - p->delay;
     }
   } else { /* сердечки всплывают, покачиваясь */
     static const BYTE pal[][3] = {{255, 77, 130}, {255, 120, 170}, {230, 30, 80}, {255, 150, 190}, {244, 63, 94}};
@@ -1241,13 +1211,8 @@ static void fx_step_new(FxWin *f) {
     } else if (f->kind == 15) {
       p->x += p->vx;
       p->y += p->vy;
-      if (p->spr) {
-        p->vx *= 0.62f;
-        p->vy *= 0.62f;
-      } else {
-        p->vx *= 0.78f;
-        p->vy *= 0.78f;
-      }
+      p->vx *= 0.72f;
+      p->vy *= 0.72f;
     } else if (f->kind == 8) {
       p->x += sinf(age * 0.18f + p->tw) * 0.7f * g_fxScale;
       p->y += p->vy;
@@ -1471,7 +1436,7 @@ static BOOL fx_prepare_wh(FxWin *f, int W, int H) {
    5 кольца, 6 конфетти, 7 молния, 8 сердечки. Если эффект выбран отдельно
    (pick >= 0), он важнее курсора; иначе — свой у курсора: фея со звёздочками,
    дракон с пламенем, кот с царапинами, у новых стилей (styles.c) — свои,
-   у «Баклажана» — «Икра» */
+   у «Баклажана» — белые пятна */
 static int fx_kind_for(int skin, int pick) {
   if (pick >= 0) return pick;
   if (skin == 3) return g_sparkle ? 1 : 0;
@@ -1483,7 +1448,7 @@ static int fx_kind_for(int skin, int pick) {
   if (skin == 10) return 4;  /* Разрез — разрез */
   if (skin == 11) return 9;  /* Сукуна — своё «Рассечение» */
   if (skin == 12) return 14; /* Годжо — своя «Бесконечность» */
-  if (skin == 13) return 15; /* Баклажан — своя «Икра» */
+  if (skin == 13) return 15; /* Баклажан — белые пятна */
   return 0;
 }
 

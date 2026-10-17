@@ -118,7 +118,7 @@ static int ai_mt_rank(const wchar_t *des, const wchar_t *name, MtAiCand *cand, i
 static void ai_ui_create(HWND p) {
   ai_load();
   mt_set_ai_ranker(ai_mt_rank);
-  g_aiChkOn = CreateWindowExW(0, L"BUTTON", L"Включить ИИ (без интернета)",
+  g_aiChkOn = CreateWindowExW(0, L"BUTTON", L"Включить локальную модель ИИ",
                               WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 0, 0, 240, 26, p, (HMENU)(INT_PTR)ID_AI_ON,
                               NULL, NULL);
   for (int i = 0; i < AI_TIERS; i++) g_aiBtnTier[i] = mk_btn(p, kAiTiers[i].button, ID_AI_TIER + i);

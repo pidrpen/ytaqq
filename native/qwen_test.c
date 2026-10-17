@@ -11,6 +11,7 @@ static int aq_test(void) {
   wchar_t root[MAX_PATH];
   int port = _wtoi(argv[4]);
   int status, testedSlot = 0;
+  wchar_t testedWeb[4200] = L"", testedNote[360] = L"";
   if (port == -3 && argc == 7 && job.body) {
     AgFs *fs = (AgFs *)calloc(1, sizeof(AgFs));
     wchar_t *action = ai_wide(job.body, -1), observation[6000] = L"";
@@ -24,6 +25,29 @@ static int aq_test(void) {
     if (result) { sprintf(result, "{\"state\":%d,\"count\":%d,\"observation\":%s}", state, fs->count, observed ? observed : "null"); aq_write(argv[3], result); }
     free(result); free(observed); free(fs); free(action); free(job.body); LocalFree(argv);
     return state >= 0 ? 0 : 1;
+  } else if (port == -6 && argc == 7 && job.body) {
+    /* Actual native HTTP search -> production system prompt -> local Qwen. */
+    g_aiOn = TRUE; g_aiCtx = 4096; g_aiGpu = TRUE; ai_out_cap(300);
+    lstrcpynW(g_aiModel, argv[5], MAX_PATH); lstrcpynW(g_aiSrvExe, argv[6], MAX_PATH);
+    job.agentTask = 0; job.timeout = 180000;
+    wchar_t *question = ai_wide(job.body, -1), sys[14000]; AcWebInfo info = {0};
+    if (question && ac_web_find(question, testedWeb, 4200, &info)) {
+      ac_web_read_pages(question, testedWeb, 4200, &info);
+      ac_sys_build(question, testedWeb, sys, 14000);
+      AiTurn turn = {0}; turn.text = question;
+      char *body = ai_body_chat(sys, &turn, 1, FALSE);
+      free(job.body); job.body = body;
+      if (body) { ai_job_run(&job); status = job.status; testedSlot = g_aiSlotCtx; }
+      else status = AI_ERROR;
+    } else status = AI_ERROR;
+    lstrcpynW(testedNote, info.note, 360);
+    if (status == AI_OK && job.text) {
+      ac_web_foot(testedWeb, testedNote); ac_push_with_foot(job.text);
+      wchar_t *shown = _wcsdup(ac_last_role(1));
+      if (shown) { free(job.text); job.text = shown; }
+      ac_clear_turns();
+    }
+    free(question); ai_shutdown();
   } else if (port == -4 && argc == 7 && job.body) {
     /* Real chat image body + managed tier selection + production launcher.
        The caller supplies an isolated profile containing model hard links. */
@@ -57,11 +81,12 @@ static int aq_test(void) {
   } else status = !port ? aq_prepare(&job, GetTickCount() + 600000, root) :
     job.body ? aq_run(&job, GetTickCount() + 600000, port) : AI_ERROR;
   char *text = ai_json_str(job.text ? job.text : ai_status_text(status));
-  char *result = (char *)malloc((text ? strlen(text) : 0) + 100);
+  char *web = ai_json_str(testedWeb), *note = ai_json_str(testedNote);
+  char *result = (char *)malloc((text ? strlen(text) : 0) + (web ? strlen(web) : 0) + (note ? strlen(note) : 0) + 200);
   if (result) {
-    sprintf(result, "{\"status\":%d,\"configured_context\":%d,\"slot_context\":%d,\"text\":%s}", status, g_aiCtx, testedSlot ? testedSlot : g_aiSlotCtx, text ? text : "null");
+    sprintf(result, "{\"status\":%d,\"configured_context\":%d,\"slot_context\":%d,\"text\":%s,\"web\":%s,\"search_note\":%s}", status, g_aiCtx, testedSlot ? testedSlot : g_aiSlotCtx, text ? text : "null", web ? web : "null", note ? note : "null");
     aq_write(argv[3], result);
   }
-  free(result); free(text); free(job.body); free(job.text); LocalFree(argv);
+  free(result); free(web); free(note); free(text); free(job.body); free(job.text); LocalFree(argv);
   return status == AI_OK ? 0 : 1;
 }

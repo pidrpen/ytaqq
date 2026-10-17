@@ -12,7 +12,9 @@
 #include "ai.h"
 
 #define AI_IDLE_STOP_MS (10 * 60 * 1000)
+#ifndef AI_PORT0 /* isolated native integration tests may choose another port */
 #define AI_PORT0 39281
+#endif
 #define WM_AI_UI (WM_APP + 70)   /* в окно Настроек: обновить вкладку «ИИ» */
 #define WM_AI_TEST (WM_APP + 71) /* в окно Настроек: ответ кнопки «Проверить» */
 
