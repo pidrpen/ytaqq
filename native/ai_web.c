@@ -450,6 +450,24 @@ static BOOL acw_tavily_parse(const char *json, DWORD length, const wchar_t *quer
 
 static BOOL acw_direct(const wchar_t *query, wchar_t *out, int cap, AcWebInfo *info);
 
+/* Small talk and input shorter than the search API minimum stay local. */
+static BOOL acw_local_query(const wchar_t *query) {
+  wchar_t text[160]; size_t len = wcslen(query);
+  if (len >= 160) return FALSE;
+  lstrcpynW(text, query, 160); CharLowerBuffW(text, (DWORD)len);
+  wchar_t *start = text;
+  while (*start && (iswspace(*start) || wcschr(L".,!?:;\"«»", *start))) start++;
+  wchar_t *end = start + wcslen(start);
+  while (end > start && (iswspace(end[-1]) || wcschr(L".,!?:;\"«»", end[-1]))) *--end = 0;
+  if (end - start < 2) return TRUE;
+  BOOL word = FALSE;
+  for (const wchar_t *p = start; *p; p++) if (acw_word(*p)) word = TRUE;
+  if (!word) return TRUE;
+  const wchar_t *local[] = {L"привет", L"здравствуй", L"здравствуйте", L"доброе утро", L"добрый день", L"добрый вечер", L"спасибо", L"благодарю", L"ок", L"окей", L"да", L"нет", L"понятно", L"хорошо", L"hello", L"hi", L"thanks"};
+  for (int i = 0; i < (int)(sizeof(local) / sizeof(local[0])); i++) if (!wcscmp(start, local[i])) return TRUE;
+  return FALSE;
+}
+
 /* Explicit links are reads, never search queries. -1 means too long/many. */
 static int acw_urls(const wchar_t *query, wchar_t urls[2][3300]) {
   int count = 0;
@@ -480,6 +498,10 @@ static BOOL ac_web_find(const wchar_t *query, wchar_t *out, int cap, AcWebInfo *
   if (!query || !query[0] || cap < 200) return FALSE;
   wchar_t urls[2][3300];
   if (acw_urls(query, urls)) return acw_direct(query, out, cap, info);
+  if (acw_local_query(query)) {
+    lstrcpynW(info->note, L"Локально: короткая реплика, поиск не требуется.", 360);
+    info->prepared = TRUE; return FALSE;
+  }
   size_t len = wcslen(query), cap8 = len * 4 + 1;
   char *utf8 = (char *)malloc(cap8), *body = (char *)malloc(cap8 * 2 + 200);
   if (!utf8 || !body || !WideCharToMultiByte(CP_UTF8, 0, query, -1, utf8, (int)cap8, NULL, NULL)) { free(utf8); free(body); return FALSE; }
@@ -700,6 +722,11 @@ static void ac_web_read_pages(const wchar_t *query, wchar_t *web, int cap, AcWeb
 int wmain(int argc, wchar_t **argv) {
   wchar_t out[AC_WEB_CAP];
   AcWebInfo info = {0};
+  if (argc > 1 && !wcscmp(argv[1], L"--local-tests")) {
+    BOOL ok = acw_local_query(L"?") && acw_local_query(L"ы") && acw_local_query(L"Привет!!!") &&
+      acw_local_query(L"😀") && !acw_local_query(L"привет, какая погода завтра") && !acw_local_query(L"материал стали 40Х");
+    puts(ok ? "PASS: local-query routing" : "FAIL"); return ok ? 0 : 1;
+  }
   if (argc > 2 && !wcscmp(argv[1], L"--urls")) {
     wchar_t urls[2][3300]; int n = acw_urls(argv[2], urls);
     printf("count %d\n", n);

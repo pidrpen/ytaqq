@@ -1,6 +1,18 @@
 /* Test-only entry: no hooks, startup, updater, settings or user model changes. */
 #define CURSORPAD_EMBEDDED_PROBE
 #include "agent_probe.c"
+static LRESULT CALLBACK aq_hidden_chat(HWND h, UINT msg, WPARAM w, LPARAM l) {
+  if (msg == WM_AI_CHAT) {
+    AiResult *r = (AiResult *)l;
+    if (g_acReviewStage == 1 && r && r->text) {
+      wchar_t path[MAX_PATH]; _snwprintf(path, MAX_PATH, L"%s\\draft.txt", g_dataDir);
+      char *text = ai_utf8(r->text); if (text) aq_write(path, text); free(text);
+    }
+    ac_result(r); return 0;
+  }
+  if (msg == WM_AC_WEB) { ac_web_ready((AcWebDone *)l); return 0; }
+  return DefWindowProcW(h, msg, w, l);
+}
 static int aq_test(void) {
   int argc = 0; LPWSTR *argv = CommandLineToArgvW(GetCommandLineW(), &argc);
   if (argv && argc == 2) { int code = ag_probe_main(argc, argv); LocalFree(argv); return code; }
@@ -13,7 +25,48 @@ static int aq_test(void) {
   int status, testedSlot = 0;
   int testedOff = 0, testedStopped = 0, testedQueue = -1;
   wchar_t testedWeb[AC_WEB_CAP] = L"", testedNote[360] = L"";
-  if (port == -11 && argc == 7 && job.body) {
+  if (port == -15 && argc == 7 && job.body) {
+    wchar_t query[500];
+    BOOL ok = ac_review_query(L"MATERIAL: 40Х\nCHECK_WEB: обработка стали 40Х шлифование\nЧерновик", query);
+    ok = ok && !ac_review_query(L"MATERIAL: UNKNOWN\nCHECK_WEB: обработка UNKNOWN\nЧерновик", query);
+    ok = ok && !ac_review_query(L"MATERIAL: unknown\nCHECK_WEB: обработка unknown\nЧерновик", query);
+    ok = ok && !ac_review_query(L"MATERIAL: 40Х\nCHECK_WEB: HTTPS://example.org/40Х\nЧерновик", query);
+    ok = ok && !ac_review_query(L"MATERIAL: 40Х\nCHECK_WEB: обработка стали 45\nЧерновик", query);
+    ok = ok && !ac_review_query(L"MATERIAL: 40Х\nCHECK_WEB: NONE\nЧерновик", query);
+    ac_push(0, L"Вопрос"); g_acReviewStage = 3; g_acReviewDraft = _wcsdup(L"draft");
+    ac_review_finish(L"{\"material\":\"40Х\",\"requirements\":\"не разобраны\",\"operations\":[\"Точение\",\"Фрезерование\",\"Контроль\"],\"unknown\":\"https://invented.example/stock и HTTP://invented.example/price\"}");
+    const wchar_t *answer = ac_last_role(1);
+    ok = ok && answer && !wcsstr(answer, L"invented") && !g_acReviewStage && !g_acReviewDraft;
+    wchar_t formatted[9000];
+    ok = ok && !ac_review_format(L"обрыв ответа", formatted);
+    ok = ok && !ac_review_format(L"{\"material\":\"40Х\",\"requirements\":\"?\",\"operations\":[\"Точение\",\"Точение\"],\"unknown\":\"?\"}", formatted);
+    ac_clear_turns(); g_acReviewStage = 2; g_acReviewDraft = _wcsdup(L"draft"); ac_web_cancel();
+    ok = ok && !g_acReviewStage && !g_acReviewDraft && !g_acWebOn;
+    status = ok ? AI_OK : AI_ERROR;
+    job.text = _wcsdup(ok ? L"PASS: bounded review protocol, unknown/mismatched material and model URLs rejected, output links removed, cancel reset" : L"FAIL");
+  } else if (port == -12 && argc == 7 && job.body) {
+    BOOL ok = !ac_web_use(L"ы", FALSE) && !ac_web_use(L"Привет!", FALSE) && !ac_web_use(L"спасибо", FALSE);
+    ok = ok && ac_web_use(L"какая погода завтра в спб", FALSE);
+    ok = ok && ac_web_use(L"привет, какая погода завтра", FALSE);
+    ok = ok && !ac_web_use(L"напиши тех процесс, и че тут за материал", TRUE);
+    ok = ok && ac_web_use(L"найди в интернете режим для этого материала", TRUE);
+    ok = ok && ac_web_use(L"https://docs.python.org/3/ сравни с картинкой", TRUE);
+    ok = ok && !ac_web_use(L"без интернета напиши техпроцесс", TRUE) && !ac_web_use(L"не ищи в интернете, объясни формулу", FALSE);
+    ac_push(0, L"разбери чертёж");
+    BYTE *pixel = (BYTE *)malloc(1); if (pixel) pixel[0] = 0;
+    if (g_acN) { g_acTurns[g_acN - 1].png = pixel; g_acTurns[g_acN - 1].pngLen = 1; }
+    ok = ok && ac_picture_context(L"разбери чертёж");
+    ac_push(1, L"Ответ"); ac_push(0, L"а размеры у этого вала");
+    ok = ok && ac_picture_context(L"а размеры у этого вала") && !ac_picture_context(L"погода завтра");
+    AiTurn image = {0}; image.text = L"напиши тех процесс, и че тут за материал"; image.png = pixel; image.pngLen = 1;
+    wchar_t sys[14000]; ac_sys_build(image.text, NULL, sys, 14000);
+    char *body = ai_body_chat(sys, &image, 1, FALSE);
+    ok = ok && body && strstr(body, "image_url") && strstr(body, "data:image/png;base64,");
+    ok = ok && wcsstr(sys, L"предварительный маршрут") && wcsstr(sys, L"не удалось разобрать");
+    free(body); ac_clear_turns();
+    status = ok ? AI_OK : AI_ERROR;
+    job.text = _wcsdup(ok ? L"PASS: short-chat local; image default local; explicit web allowed; image context and image payload preserved; drawing prompt" : L"FAIL");
+  } else if (port == -11 && argc == 7 && job.body) {
     ac_push(0, L"https://www.ozon.ru/product/test-123/ что по ссылке");
     ac_push(1, L"Подшипник 999. https://unrelated.example/wrong цена 1499");
     ac_push(0, L"какие характеристики у этого подшипника");
@@ -92,22 +145,57 @@ static int aq_test(void) {
       if (queued) { ai_job_run(queued); testedQueue = queued->status; ai_job_release(queued); }
     }
     free(question); ai_shutdown();
-  } else if (port == -4 && argc == 7 && job.body) {
+  } else if ((port == -4 || port == -13 || port == -14 || port == -16) && argc == 7 && job.body) {
     /* Real chat image body + managed tier selection + production launcher.
        The caller supplies an isolated profile containing model hard links. */
     g_aiOn = TRUE; g_aiTier = 1; g_aiCtx = 4096; g_aiGpu = TRUE; ai_out_cap(200);
+    if (port == -13 || port == -14 || port == -16) { ai_model_file(1, 0, g_aiModel); ai_out_cap(700); }
+    if (port == -14 || port == -16) g_aiCtx = 8192;
     lstrcpynW(g_aiSrvExe, argv[6], MAX_PATH);
     job.agentTask = 0; job.timeout = 180000;
     wchar_t model[MAX_PATH], mm[MAX_PATH];
     if (!ai_pick_model(model, mm) || !ai_vision_ready()) status = AI_NO_VISION;
     else {
-      char *raw = aq_read(argv[5]);
+      DWORD imageSize = (DWORD)ai_file_size(argv[5]);
+      char *raw = imageSize && imageSize <= 16 * 1024 * 1024 ? (char *)malloc(imageSize) : NULL;
+      FILE *imageFile = raw ? _wfopen(argv[5], L"rb") : NULL;
+      if (!imageFile || fread(raw, 1, imageSize, imageFile) != imageSize) { free(raw); raw = NULL; }
+      if (imageFile) fclose(imageFile);
       wchar_t *question = ai_wide(job.body, -1);
       if (!raw || !question) status = AI_ERROR;
+      else if (port == -14 || port == -16) {
+        WNDCLASSW wc = {0}; wc.lpfnWndProc = aq_hidden_chat; wc.hInstance = GetModuleHandleW(NULL); wc.lpszClassName = L"CursorPadHiddenReviewTest";
+        RegisterClassW(&wc);
+        g_acWnd = CreateWindowExW(0, wc.lpszClassName, L"", 0, 0, 0, 0, 0, HWND_MESSAGE, NULL, wc.hInstance, NULL);
+        ac_push(0, question);
+        if (g_acN) { g_acTurns[g_acN - 1].png = (BYTE *)raw; g_acTurns[g_acN - 1].pngLen = imageSize; raw = NULL; }
+        g_acReviewStage = 1;
+        if (port == -16) {
+          AiResult *draft = (AiResult *)calloc(1, sizeof(AiResult));
+          if (draft) {
+            g_acId = draft->id = 123; draft->status = AI_OK;
+            draft->text = _wcsdup(L"MATERIAL: 40Х\nCHECK_WEB: механическая обработка стали 40Х вал точение шлифование\nЧерновик: материал 40Х. Ошибочное предположение: масса 12,5 является диаметром. Нужна справочная проверка выбора обработки; режимы не подтверждены.");
+            ac_result(draft);
+          }
+        } else ac_finish_ask(NULL, NULL);
+        DWORD deadline = GetTickCount() + 360000;
+        while ((g_acId || g_acWebOn) && (LONG)(deadline - GetTickCount()) > 0) {
+          MSG message;
+          while (PeekMessageW(&message, NULL, 0, 0, PM_REMOVE)) DispatchMessageW(&message);
+          Sleep(10);
+        }
+        const wchar_t *answer = ac_last_role(1);
+        if (answer) job.text = _wcsdup(answer);
+        status = answer && !g_acId && !g_acWebOn ? AI_OK : AI_ERROR;
+        if (g_acId) ai_cancel(g_acId);
+        ac_web_cancel(); ac_clear_turns(); DestroyWindow(g_acWnd); g_acWnd = NULL;
+      }
       else {
         AiTurn turn = {0}; turn.text = question;
         turn.png = (BYTE *)raw; turn.pngLen = (DWORD)ai_file_size(argv[5]);
-        char *body = ai_body_chat(L"Ответь на вопрос по приложенной картинке. Кратко, по-русски.", &turn, 1, FALSE);
+        wchar_t sys[14000];
+        if (port == -13) ac_sys_build(question, NULL, sys, 14000);
+        char *body = ai_body_chat(port == -13 ? sys : L"Ответь на вопрос по приложенной картинке. Кратко, по-русски.", &turn, 1, FALSE);
         free(job.body); job.body = body;
         if (body) { ai_job_run(&job); status = job.status; testedSlot = g_aiSlotCtx; }
         else status = AI_ERROR;
