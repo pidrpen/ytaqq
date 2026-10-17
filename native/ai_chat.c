@@ -463,7 +463,9 @@ static void ac_sys_build(const wchar_t *q, const wchar_t *web, wchar_t *out, int
   const wchar_t *card = mini_ai_card(q, &title);
   wchar_t lessons[1500];
   ac_learn_recall(q, lessons, 1500);
-  _snwprintf(out, cap, L"%s%s%s%s%s%s%s%s%s", AC_SYS, card ? L"\r\nВыучено (карточка «" : L"",
+  SYSTEMTIME now; GetLocalTime(&now); wchar_t date[500];
+  _snwprintf(date, 500, L"\r\nДата на компьютере: %04u-%02u-%02u. Для новостей, погоды и других свежих сведений проверяй дату источника: месячный климат не является прогнозом на завтра. Если данные не подходят по дате, прямо скажи об этом. Статус нового поиска бери из текущего блока, не из старых ошибок в истории.\r\n", now.wYear, now.wMonth, now.wDay);
+  _snwprintf(out, cap, L"%s%s%s%s%s%s%s%s%s%s", AC_SYS, date, card ? L"\r\nВыучено (карточка «" : L"",
              card && title ? title : L"", card ? L"», числа не менять):\r\n" : L"", card ? card : L"",
              lessons[0] ? L"\r\nВыучено (тетрадь):\r\n" : L"", lessons,
              web && web[0] ? L"\r\nИнтернет (поиск и фрагменты страниц; статус чтения указан у каждого источника; ссылки не менять):\r\n" : L"",
@@ -1045,7 +1047,9 @@ static void ac_web_foot(const wchar_t *web, const wchar_t *note) {
   if (!web) web = L"";
   int used = 0, nurl = 0;
   const wchar_t *p = web;
+  BOOL marked = wcsstr(web, L"Источник: ") != NULL;
   while (nurl < 4 && (p = wcsstr(p, L"https://"))) {
+    if (marked && (p - web < 10 || wcsncmp(p - 10, L"Источник: ", 10))) { p += 8; continue; }
     const wchar_t *e = p;
     while (*e && *e != L' ' && *e != L'\r' && *e != L'\n' && *e != L'\t') e++;
     int n = (int)(e - p);
@@ -1173,12 +1177,12 @@ static void ac_finish_ask(wchar_t *web, const wchar_t *note) {
 
 static DWORD WINAPI ac_web_thread(LPVOID param) {
   AcWebJob *job = (AcWebJob *)param;
-  wchar_t *web = (wchar_t *)malloc(4200 * sizeof(wchar_t));
+  wchar_t *web = (wchar_t *)malloc(AC_WEB_CAP * sizeof(wchar_t));
   AcWebInfo info = {0};
   info.generation = &g_acWebGen; info.expected = job->gen;
   if (web) {
     web[0] = 0;
-    if (ac_web_find(job->q, web, 4200, &info)) ac_web_read_pages(job->q, web, 4200, &info);
+    if (ac_web_find(job->q, web, AC_WEB_CAP, &info)) ac_web_read_pages(job->q, web, AC_WEB_CAP, &info);
   }
   ai_log(L"Интернет: %s", info.note[0] ? info.note : L"не удалось подготовить запрос");
   AcWebDone *done = (AcWebDone *)malloc(sizeof(AcWebDone));

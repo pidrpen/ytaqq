@@ -1,9 +1,10 @@
-/* Поиск страниц для чата Qwen. Старый DuckDuckGo-путь мини-ИИ не используется. */
+/* Official Tavily search API -> bounded page excerpts -> local Qwen. */
 #include <stdio.h>
 #include <windows.h>
 #include <winhttp.h>
 #include <wctype.h>
 #include <windns.h>
+#define AC_WEB_CAP 8000
 
 typedef struct {
   wchar_t note[360];
@@ -12,6 +13,7 @@ typedef struct {
   volatile LONG *generation;
   LONG expected;
   BOOL page;
+  BOOL prepared;
 } AcWebInfo;
 
 static BOOL acw_stopped(const AcWebInfo *info) {
@@ -19,14 +21,13 @@ static BOOL acw_stopped(const AcWebInfo *info) {
          (info->deadline && (LONG)(GetTickCount() - info->deadline) >= 0);
 }
 
-static void url_encode_utf8(const wchar_t *src, char *out, int cap);
-
 static int acw_hex(char c) {
   if (c >= '0' && c <= '9') return c - '0';
   if (c >= 'a' && c <= 'f') return c - 'a' + 10;
   if (c >= 'A' && c <= 'F') return c - 'A' + 10;
   return -1;
 }
+#include "ai_web_json.h"
 
 static void acw_unescape(const char *in, char *out, int cap) {
   int o = 0;
@@ -86,6 +87,7 @@ static void acw_unescape(const char *in, char *out, int cap) {
   out[o] = 0;
 }
 
+#ifdef AC_WEB_TEST
 static void acw_text(const char *in, const char *end, char *out, int cap) {
   int o = 0, skip = 0;
   for (const char *p = in; p < end && o + 1 < cap; p++) {
@@ -107,24 +109,24 @@ static void acw_text(const char *in, const char *end, char *out, int cap) {
   while (o && out[o - 1] == ' ') o--;
   out[o] = 0;
 }
+#endif
 
-static BOOL acw_get(const wchar_t *host, const wchar_t *path, char **out, DWORD *outlen, AcWebInfo *info) {
+static BOOL acw_request(const wchar_t *host, const wchar_t *path, const char *body, char **out, DWORD *outlen, AcWebInfo *info) {
   *out = NULL;
   *outlen = 0;
   info->status = info->error = 0;
   if (acw_stopped(info)) { info->error = ERROR_CANCELLED; return FALSE; }
-  HINTERNET ses = WinHttpOpen(L"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                              L"(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+  HINTERNET ses = WinHttpOpen(L"CursorPad/2026.10 local-Qwen-search",
                               WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
   if (!ses) { info->error = GetLastError(); return FALSE; }
-  WinHttpSetTimeouts(ses, 2000, 2000, 3000, 3000);
+  WinHttpSetTimeouts(ses, 2000, 3000, body ? 12000 : 3000, body ? 15000 : 3000);
   HINTERNET con = WinHttpConnect(ses, host, INTERNET_DEFAULT_HTTPS_PORT, 0);
   if (!con) {
     info->error = GetLastError();
     WinHttpCloseHandle(ses);
     return FALSE;
   }
-  HINTERNET req = WinHttpOpenRequest(con, L"GET", path, NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
+  HINTERNET req = WinHttpOpenRequest(con, body ? L"POST" : L"GET", path, NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
                                      WINHTTP_FLAG_SECURE);
   if (!req) {
     info->error = GetLastError();
@@ -140,7 +142,7 @@ static BOOL acw_get(const wchar_t *host, const wchar_t *path, char **out, DWORD 
     WinHttpSetOption(req, WINHTTP_OPTION_DECOMPRESSION, &decomp, sizeof(decomp));
   }
 #endif
-  WinHttpAddRequestHeaders(req,
+  if (!body) WinHttpAddRequestHeaders(req,
                            L"Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\r\n"
                            L"Accept-Language: ru-RU,ru;q=0.9,en;q=0.8\r\n"
                            L"Upgrade-Insecure-Requests: 1\r\n"
@@ -149,7 +151,9 @@ static BOOL acw_get(const wchar_t *host, const wchar_t *path, char **out, DWORD 
                            L"Sec-Fetch-Site: none\r\n"
                            L"Sec-Fetch-User: ?1\r\n",
                            (ULONG)-1L, WINHTTP_ADDREQ_FLAG_ADD);
-  BOOL ok = WinHttpSendRequest(req, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0);
+  const wchar_t *headers = body ? L"Content-Type: application/json\r\nAccept: application/json\r\nX-Tavily-Access-Mode: keyless\r\n" : NULL;
+  DWORD bytes = body ? (DWORD)strlen(body) : 0;
+  BOOL ok = WinHttpSendRequest(req, headers, headers ? (DWORD)-1L : 0, (LPVOID)body, bytes, bytes, 0);
   if (ok) ok = WinHttpReceiveResponse(req, NULL);
   if (ok) {
     DWORD status = 0, sl = sizeof(status);
@@ -179,9 +183,10 @@ static BOOL acw_get(const wchar_t *host, const wchar_t *path, char **out, DWORD 
     DWORD avail = 0, got = 0;
     if (!WinHttpQueryDataAvailable(req, &avail)) { info->error = GetLastError(); ok = FALSE; break; }
     if (!avail) break;
+    if (avail > 1048575 - n) { info->error = ERROR_INSUFFICIENT_BUFFER; ok = FALSE; break; }
     if (n + avail + 1 > cap) {
       DWORD nc = n + avail + 4096;
-      if (nc > 500000) nc = 500000;
+      if (nc > 1048576) nc = 1048576;
       char *nb = (char *)realloc(buf, nc);
       if (!nb) { info->error = ERROR_NOT_ENOUGH_MEMORY; ok = FALSE; break; }
       buf = nb;
@@ -189,11 +194,10 @@ static BOOL acw_get(const wchar_t *host, const wchar_t *path, char **out, DWORD 
     }
     DWORD room = cap - n - 1;
     if (avail > room) avail = room;
-    if (!avail) break;
+    if (!avail) { ok = FALSE; info->error = ERROR_INSUFFICIENT_BUFFER; break; }
     if (!WinHttpReadData(req, buf + n, avail, &got)) { info->error = GetLastError(); ok = FALSE; break; }
     if (!got) break;
     n += got;
-    if (n >= 480000) break;
   }
   WinHttpCloseHandle(req);
   WinHttpCloseHandle(con);
@@ -207,6 +211,9 @@ static BOOL acw_get(const wchar_t *host, const wchar_t *path, char **out, DWORD 
   *outlen = n;
   return TRUE;
 }
+static BOOL acw_get(const wchar_t *host, const wchar_t *path, char **out, DWORD *outlen, AcWebInfo *info) {
+  return acw_request(host, path, NULL, out, outlen, info);
+}
 
 static BOOL acw_has(const char *s, int n, const char *needle) {
   int m = (int)strlen(needle);
@@ -218,11 +225,12 @@ static BOOL acw_has(const char *s, int n, const char *needle) {
 
 static BOOL acw_skip_url(const char *url, int n) {
   if (n < 12 || strncmp(url, "https://", 8) != 0) return TRUE;
-  if (acw_has(url, n, "brave.com") || acw_has(url, n, "bing.com") || acw_has(url, n, "google.com/search"))
+  if (acw_has(url, n, "search.brave.com/search") || acw_has(url, n, "bing.com/search") || acw_has(url, n, "google.com/search"))
     return TRUE;
   return FALSE;
 }
 
+#ifdef AC_WEB_TEST
 static void acw_snip(const char *html, const char *end, char *out, int cap) {
   out[0] = 0;
   const char *g = strstr(html, "generic-snippet");
@@ -301,6 +309,7 @@ static BOOL ac_web_parse(const char *html, DWORD n, wchar_t *out, int cap) {
   lstrcpynW(out, wide, cap);
   return out[0] != 0;
 }
+#endif
 
 /* The RSS endpoint sometimes returns unrelated pages. Require a meaningful
    query token in a result; this is only a filter, not a proof of relevance. */
@@ -328,6 +337,7 @@ static int acw_score(const wchar_t *query, const wchar_t *text) {
   return score;
 }
 
+#ifdef AC_WEB_TEST
 static BOOL acw_append(const char *title, const char *snip, const char *url,
                        const wchar_t *query, wchar_t *out, int cap) {
   if (acw_skip_url(url, (int)strlen(url))) return FALSE;
@@ -385,39 +395,84 @@ static BOOL acw_wiki(const char *xml, wchar_t *out, int cap) {
   }
   return hits != 0;
 }
+#endif
 
-/* Actual search excerpts; HTTP failures are preserved for the chat and log. */
+static BOOL acw_passage(const wchar_t *query, const char *text, wchar_t *out, int cap) {
+  size_t size = strlen(text) + 1;
+  wchar_t *full = (wchar_t *)malloc(size * sizeof(wchar_t)); if (!full) return FALSE;
+  BOOL ok = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text, -1, full, (int)size) != 0;
+  int best = -1;
+  if (ok) for (size_t offset = 0, len = wcslen(full); offset < len; offset += (size_t)cap / 2) {
+    wchar_t window[2801]; lstrcpynW(window, full + offset, cap < 2801 ? cap : 2801);
+    int score = acw_score(query, window);
+    if (score > best) { best = score; lstrcpynW(out, window, cap); }
+  }
+  free(full); return ok && out[0];
+}
+
+static BOOL acw_tavily_parse(const char *json, DWORD length, const wchar_t *query, wchar_t *out, int cap, AcWebInfo *info) {
+  out[0] = 0; info->prepared = FALSE;
+  AcJson document = {json, json + length};
+  if (!acj_skip(&document, 0)) return FALSE;
+  acj_ws(&document); if (document.p != document.end) return FALSE;
+  const char *p, *end;
+  if (!acj_field(json, json + length, "results", &p, &end) || *p != '[') return FALSE;
+  AcJson items = {p + 1, end}; int count = 0, read = 0, used = 0;
+  char first[800] = "";
+  while (count < 2) {
+    acj_ws(&items); if (items.p >= end || *items.p == ']') break;
+    const char *start = items.p; if (!acj_skip(&items, 0)) return FALSE;
+    const char *stop = items.p; char url[800], title[600]; title[0] = 0;
+    if (acj_text(start, stop, "url", url, sizeof(url)) && !acw_skip_url(url, (int)strlen(url)) && strcmp(url, first)) {
+      char *content = (char *)malloc((size_t)(stop - start) + 1);
+      wchar_t passage[2801] = L"", wideUrl[800] = L"", wideTitle[600] = L"";
+      BOOL actual = content && acj_text(start, stop, "raw_content", content, (size_t)(stop - start) + 1) && strlen(content) >= 100;
+      BOOL have = actual || (content && acj_text(start, stop, "content", content, (size_t)(stop - start) + 1));
+      have = have && acw_passage(query, content, passage, 2801);
+      acj_text(start, stop, "title", title, sizeof(title));
+      MultiByteToWideChar(CP_UTF8, 0, url, -1, wideUrl, 800); MultiByteToWideChar(CP_UTF8, 0, title, -1, wideTitle, 600);
+      if (have && wideUrl[0]) {
+        int n = _snwprintf(out + used, cap - used, L"Источник: %s\r\n%s\r\n%s\r\n%s\r\n\r\n", wideUrl, wideTitle,
+          actual ? L"Прочитан текст страницы через Tavily (выбранный фрагмент):" : L"Только поисковая выдержка; текст страницы не получен:", passage);
+        if (n < 0 || n >= cap - used) { out[used] = 0; free(content); break; }
+        used += n; count++; if (actual) read++; if (!first[0]) strcpy(first, url);
+      }
+      free(content);
+    }
+    acj_ws(&items); if (items.p >= end || *items.p == ']') break;
+    if (*items.p++ != ',') return FALSE;
+  }
+  if (!count) return FALSE;
+  info->prepared = TRUE;
+  _snwprintf(info->note, 360, L"Поиск: Tavily. Прочитано страниц: %d/%d; модели переданы фрагменты до 2800 символов на источник.", read, count);
+  return TRUE;
+}
+
+/* No browser scraping, repeated Brave requests or encyclopedia substitution. */
 static BOOL ac_web_find(const wchar_t *query, wchar_t *out, int cap, AcWebInfo *info) {
   out[0] = 0;
-  info->note[0] = 0; info->status = info->error = 0; info->page = FALSE;
-  if (!info->deadline) info->deadline = GetTickCount() + 25000;
+  info->note[0] = 0; info->status = info->error = 0; info->page = info->prepared = FALSE;
+  if (!info->deadline) info->deadline = GetTickCount() + 30000;
   if (!query || !query[0] || cap < 200) return FALSE;
-  char enc[1800];
-  url_encode_utf8(query, enc, (int)sizeof(enc));
-  if (!enc[0]) return FALSE;
-  wchar_t wenc[1800], path[2100];
-  MultiByteToWideChar(CP_UTF8, 0, enc, -1, wenc, 1800);
-  _snwprintf(path, 2100, L"/search?q=%s&source=web", wenc);
-  char *html = NULL;
-  DWORD n = 0;
-  BOOL got = acw_get(L"search.brave.com", path, &html, &n, info);
-  BOOL ok = got && ac_web_parse(html, n, out, cap); free(html); html = NULL;
-  if (ok) { lstrcpynW(info->note, L"Поиск: Brave; выдержки поисковой выдачи.", 360); return TRUE; }
-  wchar_t reason[80];
-  if (info->status && info->status != 200) _snwprintf(reason, 80, L"Brave: HTTP %lu", info->status);
-  else if (info->error) _snwprintf(reason, 80, L"Brave: ошибка Windows %lu", info->error);
-  else lstrcpynW(reason, L"Brave: нет читаемой выдачи", 80);
-  _snwprintf(path, 2100, L"/search?q=%s&format=rss", wenc);
-  got = acw_get(L"www.bing.com", path, &html, &n, info);
-  ok = got && acw_rss(html, query, out, cap); free(html); html = NULL;
-  if (ok) { _snwprintf(info->note, 360, L"%s. Резервный поиск: Bing RSS; соответствие вопросу нужно проверить.", reason); return TRUE; }
-  _snwprintf(path, 2100, L"/w/api.php?action=query&list=search&srlimit=3&format=xml&srsearch=%s", wenc);
-  got = acw_get(L"ru.wikipedia.org", path, &html, &n, info);
-  ok = got && acw_wiki(html, out, cap); free(html);
-  _snwprintf(info->note, 360, ok ? L"%s. Резерв: поиск по Википедии; общий поиск по сайтам недоступен."
-                               : L"%s. Резервные источники не дали данных; ответ без интернета.", reason);
-  info->note[359] = 0;
-  return ok;
+  size_t len = wcslen(query), cap8 = len * 4 + 1;
+  char *utf8 = (char *)malloc(cap8), *body = (char *)malloc(cap8 * 2 + 200);
+  if (!utf8 || !body || !WideCharToMultiByte(CP_UTF8, 0, query, -1, utf8, (int)cap8, NULL, NULL)) { free(utf8); free(body); return FALSE; }
+  size_t used = (size_t)sprintf(body, "{\"query\":\"");
+  for (const unsigned char *p = (const unsigned char *)utf8; *p; p++) {
+    if (*p == '"' || *p == '\\') body[used++] = '\\';
+    body[used++] = *p < 32 ? ' ' : (char)*p;
+  }
+  strcpy(body + used, "\",\"max_results\":2,\"search_depth\":\"basic\",\"include_raw_content\":\"text\",\"include_answer\":false}");
+  char *json = NULL; DWORD n = 0;
+  BOOL got = acw_request(L"api.tavily.com", L"/search", body, &json, &n, info);
+  free(body); free(utf8);
+  BOOL ok = got && acw_tavily_parse(json, n, query, out, cap, info); free(json);
+  if (ok) return TRUE;
+  if (info->status == 429) lstrcpynW(info->note, L"Tavily: исчерпан лимит поиска без ключа. Сетевых данных нет; повторять запросы сейчас бесполезно.", 360);
+  else if (info->status && info->status != 200) _snwprintf(info->note, 360, L"Поиск Tavily недоступен: HTTP %lu. Ответ без сетевых данных.", info->status);
+  else if (info->error) _snwprintf(info->note, 360, L"Поиск Tavily недоступен: ошибка Windows %lu. Ответ без сетевых данных.", info->error);
+  else lstrcpynW(info->note, L"Tavily не вернул пригодных результатов. Ответ без сетевых данных.", 360);
+  info->note[359] = 0; return FALSE;
 }
 
 static const char *acw_ci(const char *s, const char *end, const char *word) {
@@ -540,6 +595,7 @@ static BOOL acw_read_page(const wchar_t *url, char **text, AcWebInfo *info) {
 /* Read at most two actual pages, then choose bounded passages for the model.
    Failed downloads remain labelled snippets. No redirects or private hosts. */
 static void ac_web_read_pages(const wchar_t *query, wchar_t *web, int cap, AcWebInfo *info) {
+  if (info->prepared) return; /* Tavily already returned extracted page text. */
   wchar_t *joined = (wchar_t *)calloc((size_t)cap, sizeof(wchar_t)); if (!joined) return;
   const wchar_t *p = web, *block = web; int read = 0, tried = 0, used = 0;
   wchar_t first[600] = L"";
@@ -580,33 +636,8 @@ static void ac_web_read_pages(const wchar_t *query, wchar_t *web, int cap, AcWeb
 }
 
 #ifdef AC_WEB_TEST
-static void url_encode_utf8(const wchar_t *src, char *out, int cap) {
-  char utf8[2400];
-  int n = WideCharToMultiByte(CP_UTF8, 0, src, -1, utf8, (int)sizeof(utf8) - 1, NULL, NULL);
-  if (n <= 0) {
-    out[0] = 0;
-    return;
-  }
-  int o = 0;
-  for (int i = 0; utf8[i] && o + 4 < cap; i++) {
-    unsigned char c = (unsigned char)utf8[i];
-    if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_' ||
-        c == '.' || c == '~')
-      out[o++] = (char)c;
-    else if (c == ' ')
-      out[o++] = '+';
-    else {
-      static const char *hex = "0123456789ABCDEF";
-      out[o++] = '%';
-      out[o++] = hex[c >> 4];
-      out[o++] = hex[c & 15];
-    }
-  }
-  out[o] = 0;
-}
-
 int wmain(int argc, wchar_t **argv) {
-  wchar_t out[4000];
+  wchar_t out[AC_WEB_CAP];
   AcWebInfo info = {0};
   if (argc > 2 && !wcscmp(argv[1], L"--page")) {
     char *text = NULL; info.deadline = GetTickCount() + 15000;
@@ -614,7 +645,7 @@ int wmain(int argc, wchar_t **argv) {
     printf("ok %d HTTP %lu error %lu\n%s\n", ok ? 1 : 0, info.status, info.error, text ? text : "");
     free(text); return ok ? 0 : 1;
   }
-  if ((argc > 1 && argv[1][0] == L'@') || (argc > 2 && (!wcscmp(argv[1], L"--rss") || !wcscmp(argv[1], L"--wiki") || !wcscmp(argv[1], L"--plain")))) {
+  if ((argc > 1 && argv[1][0] == L'@') || (argc > 2 && (!wcscmp(argv[1], L"--rss") || !wcscmp(argv[1], L"--wiki") || !wcscmp(argv[1], L"--plain") || !wcscmp(argv[1], L"--tavily")))) {
     FILE *f = _wfopen(argc > 2 ? argv[2] : argv[1] + 1, L"rb");
     if (!f) return 2;
     fseek(f, 0, SEEK_END);
@@ -628,17 +659,18 @@ int wmain(int argc, wchar_t **argv) {
     if (argc > 2 && !wcscmp(argv[1], L"--plain")) {
       char plain[8000]; acw_plain(html, plain, 8000); free(html); printf("%s\n", plain); return 0;
     }
-    BOOL ok = argc > 2 && !wcscmp(argv[1], L"--rss") ? acw_rss(html, argc > 3 ? argv[3] : L"Python", out, 4000)
+    BOOL ok = argc > 2 && !wcscmp(argv[1], L"--tavily") ? acw_tavily_parse(html, (DWORD)sz, argc > 3 ? argv[3] : L"Python", out, AC_WEB_CAP, &info)
+              : argc > 2 && !wcscmp(argv[1], L"--rss") ? acw_rss(html, argc > 3 ? argv[3] : L"Python", out, 4000)
               : argc > 2 && !wcscmp(argv[1], L"--wiki") ? acw_wiki(html, out, 4000)
               : ac_web_parse(html, (DWORD)sz, out, 4000);
     free(html);
-    char utf8[16000]; WideCharToMultiByte(CP_UTF8, 0, out, -1, utf8, 16000, NULL, NULL);
+    char utf8[AC_WEB_CAP * 4]; WideCharToMultiByte(CP_UTF8, 0, out, -1, utf8, sizeof(utf8), NULL, NULL);
     printf("ok %d\n%s\n", ok ? 1 : 0, utf8);
     return ok ? 0 : 1;
   }
   const wchar_t *q = argc > 1 ? argv[1] : L"сталь 45 закалка";
-  BOOL ok = ac_web_find(q, out, 4000, &info);
-  if (ok) ac_web_read_pages(q, out, 4000, &info);
+  BOOL ok = ac_web_find(q, out, AC_WEB_CAP, &info);
+  if (ok) ac_web_read_pages(q, out, AC_WEB_CAP, &info);
   wprintf(L"ok %d\n%s\n%s\n", ok ? 1 : 0, info.note, out);
   return ok ? 0 : 1;
 }

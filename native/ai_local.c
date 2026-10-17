@@ -67,7 +67,7 @@ static const AiTier kAiTiers[AI_TIERS] = {
 };
 
 /* --- настройки ------------------------------------------------------------ */
-static BOOL g_aiOn;                  /* по умолчанию выключен */
+static volatile LONG g_aiOn;         /* по умолчанию выключен; виден рабочим потокам */
 static int g_aiTier = 1;             /* «Средний» */
 static int g_aiCtx = 8192;           /* окно контекста модели, токенов; на каждую из двух ячеек сервера — половина */
 static BOOL g_aiGpu;                 /* llama.cpp со сборкой Vulkan и слоями на видеокарте */
@@ -657,8 +657,12 @@ static void ai_short_path(wchar_t *p) {
 
 /* поднять сервер, если он не идёт. Ждёт загрузки модели до deadline. */
 static int ai_server_ensure(DWORD deadline, volatile LONG *cancel, int minimumContext) {
+  if (!g_aiOn) return AI_OFF;
   if (ai_ext()) return AI_OK;
   AcquireSRWLockExclusive(&g_aiSrvLock);
+  if (!g_aiOn || (cancel && *cancel)) {
+    ReleaseSRWLockExclusive(&g_aiSrvLock); return !g_aiOn ? AI_OFF : AI_CANCELLED;
+  }
   if (g_aiProc && WaitForSingleObject(g_aiProc, 0) == WAIT_TIMEOUT && g_aiPort && g_aiSlotCtx >= minimumContext) {
     ReleaseSRWLockExclusive(&g_aiSrvLock);
     return AI_OK;
@@ -817,8 +821,8 @@ static int ai_server_ensure(DWORD deadline, volatile LONG *cancel, int minimumCo
         }
         break;
       }
-      if ((cancel && *cancel) || (LONG)(GetTickCount() - deadline) >= 0) {
-        rc = cancel && *cancel ? AI_CANCELLED : AI_TIMEOUT;
+      if (!g_aiOn || (cancel && *cancel) || (LONG)(GetTickCount() - deadline) >= 0) {
+        rc = !g_aiOn ? AI_OFF : cancel && *cancel ? AI_CANCELLED : AI_TIMEOUT;
         if (rc == AI_TIMEOUT) lstrcpynW(g_aiSrvNote, L"модель грузится слишком долго", 200);
         ai_server_stop_locked();
         attempt = 99;
@@ -867,8 +871,7 @@ static int ai_server_ensure(DWORD deadline, volatile LONG *cancel, int minimumCo
 
 static void aq_warm_cancel(void);
 void ai_shutdown(void) {
-  aq_warm_cancel();
-  ai_server_stop();
+  ai_disable();
 }
 
 /* --- запросы ------------------------------------------------------------------ */
@@ -1059,6 +1062,19 @@ void ai_cancel(int id) {
       if (h) WinHttpCloseHandle(h);
     }
   ReleaseSRWLockExclusive(&g_aiJobLock);
+}
+
+void ai_disable(void) {
+  InterlockedExchange(&g_aiOn, FALSE);
+  aq_warm_cancel();
+  AcquireSRWLockExclusive(&g_aiJobLock);
+  for (AiJob *j = g_aiJobs; j; j = j->next) {
+    InterlockedExchange(&j->cancel, 1);
+    HINTERNET h = InterlockedExchangePointer(&j->req, NULL);
+    if (h) WinHttpCloseHandle(h);
+  }
+  ReleaseSRWLockExclusive(&g_aiJobLock);
+  ai_server_stop(); /* only our owned process; external servers are untouched */
 }
 
 /* запустить ходящий поток и ждать: ответа, отмены (j->cancel или ext) или срока.

@@ -97,5 +97,6 @@ BOOL ai_refine_field(const wchar_t *field, const wchar_t *raw, const wchar_t *co
 int ai_rank_candidates(const wchar_t *query, const wchar_t *const *cand, int n, int *order, DWORD timeoutMs);
 
 void ai_shutdown(void); /* при выходе: погасить llama-server */
+void ai_disable(void); /* выключить ИИ, отменить запросы и выгрузить собственную модель */
 
 #endif

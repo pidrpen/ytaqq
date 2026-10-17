@@ -3,6 +3,7 @@ import argparse
 from pathlib import Path
 import subprocess
 import tempfile
+import json
 
 
 def main():
@@ -44,7 +45,23 @@ def main():
         assert code == 0 and 'Документ' in text and 'Факты' in text and 'wrong-' not in text
         for url in ('https://127.0.0.1/', 'https://localhost/', 'https://192.168.1.1/', 'http://example.org/', 'https://user:password@example.org/'):
             assert subprocess.run([probe, '--page', url], capture_output=True).returncode == 1
-    print('PASS: RSS/Wikipedia parsing, relevance, HTML cleanup, private hosts/credentials/HTTP rejected')
+        response = {'answer': 'ignored', 'results': [
+            {'title': 'Погода 🌦', 'url': 'https://example.org/weather', 'content': 'Короткая выдержка',
+             'raw_content': 'Прогноз на завтра. '+('Температура +5. ' * 30)},
+            {'title': 'Новости', 'url': 'https://example.org/news', 'content': 'Короткая выдержка',
+             'raw_content': 'Свежие события. '+('Подробности новости. ' * 30)}]}
+        code, text = run('--tavily', json.dumps(response), 'погода завтра')
+        assert code == 0 and 'Погода 🌦' in text and 'Новости' in text
+        assert text.count('Прочитан текст страницы') == 2
+        assert 'https://example.org/weather' in text and 'ignored' not in text
+        response['results'][0]['raw_content'] = None
+        code, text = run('--tavily', json.dumps(response), 'погода завтра')
+        assert code == 0 and text.count('Прочитан текст страницы') == 1 and 'Только поисковая выдержка' in text
+        assert run('--tavily', '{"results":[]}')[0] == 1
+        assert run('--tavily', '{"error":"rate limit"}')[0] == 1
+        assert run('--tavily', '{"results":[{"url":"https://example.org/"}')[0] == 1
+        assert run('--tavily', '['*30+'0'+']'*30)[0] == 1
+    print('PASS: Tavily JSON/Unicode/raw-vs-snippet/errors/depth + HTML/URL regressions')
 
 
 if __name__ == '__main__':
