@@ -27,7 +27,7 @@ static BOOL ag_write_document(const wchar_t *path, const wchar_t *text, AgKind k
       if (utf8[i] == '&') escaped = "&amp;";
       else if (utf8[i] == '<') escaped = "&lt;";
       else if (utf8[i] == '>') escaped = "&gt;";
-      else if (utf8[i] == '\n') escaped = "</w:t><w:br/><w:t xml:space=\"preserve\">";
+      else if (utf8[i] == '\n') escaped = "</w:t></w:r></w:p><w:p><w:r><w:t xml:space=\"preserve\">";
       else if (utf8[i] == '\t') escaped = "</w:t><w:tab/><w:t xml:space=\"preserve\">";
       else if ((BYTE)utf8[i] < 32) continue;
       size_t len = escaped ? strlen(escaped) : 1;

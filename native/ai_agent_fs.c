@@ -6,7 +6,7 @@
    no overwrite, and a report when a cross-volume move stops halfway. */
 #define AG_MAX 512
 #define AG_TEXT 12000
-typedef enum { AG_DIR, AG_COPY, AG_MOVE, AG_RENAME, AG_OPEN, AG_DOCX, AG_PLAIN, AG_XLSX, AG_EXCEL, AG_INVENTORY, AG_MOVE_DIR } AgKind;
+typedef enum { AG_DIR, AG_COPY, AG_MOVE, AG_RENAME, AG_OPEN, AG_DOCX, AG_PLAIN, AG_XLSX, AG_EXCEL, AG_INVENTORY, AG_MOVE_DIR, AG_WORD_FORMAT } AgKind;
 typedef struct {
   AgKind kind;
   wchar_t src[MAX_PATH], dst[MAX_PATH];
@@ -17,14 +17,17 @@ typedef struct {
 } AgAction;
 typedef BOOL (*AgBackend)(const wchar_t *, const wchar_t *, const wchar_t *, const wchar_t *, const wchar_t *,
                          const wchar_t *, const wchar_t *, volatile LONG *, wchar_t *, int);
+typedef BOOL (*AgAuthor)(const wchar_t *, const wchar_t *, wchar_t *, int, volatile LONG *, wchar_t *, int);
 typedef struct {
   wchar_t desktop[MAX_PATH], downloads[MAX_PATH], documents[MAX_PATH], last[MAX_PATH];
   wchar_t protectedDir[MAX_PATH], goal[4000];
+  wchar_t lastDoc[MAX_PATH];
   wchar_t newDir[MAX_PATH], newBase[MAX_PATH];
   AgAction plan[AG_MAX];
   int count;
   volatile LONG *cancel;
   AgBackend backend;
+  AgAuthor author;
 } AgFs;
 typedef struct { wchar_t key[16], value[2000]; } AgField;
 typedef struct { AgField fields[10]; int count; } AgJson;
@@ -96,12 +99,12 @@ static BOOL ag_string(const wchar_t **p, wchar_t *out, int cap) {
 static inline void ag_plan_evidence(const AgFs *fs, wchar_t *out, int cap) {
   out[0] = 0;
   if (!fs->count || cap < 1000) return;
-  const wchar_t *names[] = {L"Создать папку", L"Копировать файлы", L"Переместить файлы", L"Переименовать", L"Открыть", L"Создать Word", L"Создать текст", L"Создать пустой Excel", L"Заполнить Excel", L"Создать новый Excel и заполнить перечнем папки после переносов", L"Переместить каталог"};
+  const wchar_t *names[] = {L"Создать папку", L"Копировать файлы", L"Переместить файлы", L"Переименовать", L"Открыть", L"Создать Word", L"Создать текст", L"Создать пустой Excel", L"Заполнить Excel", L"Создать новый Excel и заполнить перечнем папки после переносов", L"Переместить каталог", L"Изменить выравнивание Word"};
   lstrcpynW(out, L"Текущий подтверждённый кодом ПЛАН, ещё не выполнен:\n", cap);
   if (fs->newDir[0] && cap > 1200) {
     swprintf(out + wcslen(out), cap - wcslen(out), L"НОВАЯ ПАПКА ТЕКУЩЕЙ ЗАДАЧИ: %ls. @new означает именно её. Рабочий стол пользователя: %ls (@desktop).\n", fs->newDir, fs->desktop);
   }
-  for (int kind = 0; kind <= AG_MOVE_DIR; kind++) {
+  for (int kind = 0; kind <= AG_WORD_FORMAT; kind++) {
     int count = 0;
     for (int i = 0; i < fs->count; i++) if ((int)fs->plan[i].kind == kind) count++;
     if (count && wcslen(out) + 100 < (size_t)cap) swprintf(out + wcslen(out), cap - wcslen(out), L"%ls: %d действий.\n", names[kind], count);
@@ -169,9 +172,9 @@ static BOOL ag_redirect(const WIN32_FIND_DATAW *fd) {
 static BOOL ag_path(AgFs *fs, const wchar_t *in, wchar_t *out) {
   wchar_t buf[MAX_PATH];
   const wchar_t *root = NULL, *tail = in;
-  static const wchar_t *const aliases[] = {L"@desktop", L"@downloads", L"@documents", L"@last", L"@new"};
-  const wchar_t *roots[] = {fs->desktop, fs->downloads, fs->documents, fs->last, fs->newDir};
-  for (int i = 0; i < 5; i++) {
+  static const wchar_t *const aliases[] = {L"@desktop", L"@downloads", L"@documents", L"@last", L"@new", L"@document"};
+  const wchar_t *roots[] = {fs->desktop, fs->downloads, fs->documents, fs->last, fs->newDir, fs->lastDoc};
+  for (int i = 0; i < 6; i++) {
     size_t n = wcslen(aliases[i]);
     if (!_wcsnicmp(in, aliases[i], n) && (!in[n] || in[n] == L'\\' || in[n] == L'/')) {
       root = roots[i]; tail = in + n; break;
@@ -198,7 +201,7 @@ static BOOL ag_path(AgFs *fs, const wchar_t *in, wchar_t *out) {
   for (int i = 0; i < 3; i++)
     if (GetEnvironmentVariableW(envs[i], sys, MAX_PATH) && ag_under(out, sys)) return FALSE;
   BOOL scoped = FALSE;
-  for (int i = 0; i < 5; i++) if (ag_under(out, roots[i])) scoped = TRUE;
+  for (int i = 0; i < 6; i++) if (ag_under(out, roots[i])) scoped = TRUE;
   /* An explicitly supplied absolute path grants that folder and its children.
      Match at a path boundary, never accept a partial directory name. */
   for (const wchar_t *p = fs->goal; *p && !scoped; p++) {
@@ -325,7 +328,7 @@ static void ag_find(AgFind *f, const wchar_t *dir, int depth) {
 
 static BOOL ag_used(const AgFs *fs, const wchar_t *path) {
   if (GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES) return TRUE;
-  for (int i = 0; i < fs->count; i++) if (!_wcsicmp(path, fs->plan[i].dst)) return TRUE;
+  for (int i = 0; i < fs->count; i++) if (!_wcsicmp(path, fs->plan[i].dst) || (fs->plan[i].kind == AG_WORD_FORMAT && !_wcsicmp(path, fs->plan[i].text))) return TRUE;
   return FALSE;
 }
 static BOOL ag_target(const AgFs *fs, const wchar_t *dir, const wchar_t *name, wchar_t *out) {
@@ -343,6 +346,7 @@ static BOOL ag_target(const AgFs *fs, const wchar_t *dir, const wchar_t *name, w
 
 #include "ai_agent_write.c"
 #include "ai_office.c"
+#include "ai_word_format.c"
 #include "ai_compare.c"
 #include "ai_inventory.c"
 static BOOL ag_needs_inventory(const wchar_t *raw) {
@@ -757,6 +761,11 @@ static int ag_tool(AgFs *fs, const wchar_t *json, wchar_t *out, int cap) {
   if (!ag_json(json, &j)) return -1;
   const wchar_t *tool = ag_get(&j, L"tool");
   if (!wcscmp(tool, L"done")) {
+    if (ag_format_mode(fs->goal)) {
+      BOOL formatted = FALSE;
+      for (int i = 0; i < fs->count; i++) if (fs->plan[i].kind == AG_WORD_FORMAT) formatted = TRUE;
+      if (!formatted) { lstrcpynW(out, L"План неполон: запрошено реальное выравнивание Word. Добавь word_format существующего .docx или ask об отсутствии пути. write и текстовое обещание не подходят.", cap); return -1; }
+    }
     if (ag_needs_fresh_folder(fs->goal) && !fs->newDir[0]) { ag_fresh_destination(fs, L"", out, cap); return -1; }
     if (!ag_check_inventory_transfers(fs, out, cap)) return -1;
     if (ag_needs_inventory(fs->goal)) {
@@ -803,6 +812,21 @@ static int ag_tool(AgFs *fs, const wchar_t *json, wchar_t *out, int cap) {
     if (status != AG_PARENT_FOUND) { swprintf(out, cap, L"Родитель @parent не найден: %ls. Код проверил указанный путь. Если родитель не назван в просьбе, передай полный путь или @desktop. План не изменён.", path); return -1; }
   } else if (!ag_path(fs, in, path)) { ag_explain_path(fs, in, out, cap); return -1; }
   int saved = fs->count;
+  if (!wcscmp(tool, L"word_format")) {
+    const wchar_t *mode = ag_get(&j, L"mode"), *wanted = ag_format_mode(fs->goal);
+    if (!of_docx(path) || !wanted || wcscmp(mode, wanted)) {
+      lstrcpynW(out, L"word_format меняет выравнивание существующего .docx по явной просьбе: mode=center/left/right/justify. Режим должен совпадать с просьбой.", cap); return -1;
+    }
+    for (int i = 0; i < fs->count; i++) if (!_wcsicmp(fs->plan[i].src, path) || !_wcsicmp(fs->plan[i].dst, path)) {
+      lstrcpynW(out, L"Документ уже затронут планом; не повторяй форматирование. Используй done или отдельную задачу.", cap); return -1;
+    }
+    wchar_t hash[65], parent[MAX_PATH], backup[MAX_PATH];
+    if (!ag_word_hash(path, hash)) { swprintf(out, cap, L"Не удалось прочитать существующий Word: %ls. Ошибка Windows %lu.", path, GetLastError()); return -1; }
+    lstrcpynW(parent, path, MAX_PATH); wchar_t *slash = wcsrchr(parent, L'\\'); if (!slash) goto fail; *slash = 0;
+    if (!ag_target(fs, parent, L"До_форматирования.docx", backup) || !ag_add(fs, AG_WORD_FORMAT, path, path)) goto fail;
+    AgAction *a = &fs->plan[fs->count - 1]; lstrcpynW(a->sheet, hash, 128); lstrcpynW(a->cell, mode, 16); lstrcpynW(a->text, backup, 2000);
+    swprintf(out, cap, L"Изменение выравнивания Word добавлено в план: %ls; mode=%ls. Текст сохраняется. Резервная копия: %ls. Диск пока не изменён.", path, mode, backup); return 0;
+  }
   if (!wcscmp(tool, L"filesystem")) {
     const wchar_t *mode = ag_get(&j, L"mode");
     if (!mode[0]) mode = L"list";
@@ -909,6 +933,7 @@ static int ag_tool(AgFs *fs, const wchar_t *json, wchar_t *out, int cap) {
     swprintf(out, cap, L"В план добавлена новая %ls Excel: %ls; блок %d × %d от %ls; формулы %ls. Исходник не изменится.", source[0] ? L"копия" : L"книга", dst, nr, nc, cell, formulas ? L"включены с проверкой Excel" : L"выключены"); return 0;
   }
   if (!wcscmp(tool, L"write")) {
+    if (of_docx(path) && ag_format_mode(fs->goal)) { lstrcpynW(out, L"Пользователь просил выравнивание существующего Word. write не форматирует его. Используй word_format path=@document mode=center/left/right/justify; не добавляй инструкцию о выравнивании в text.", cap); return -1; }
     if (!ag_fresh_destination(fs, path, out, cap)) return -1;
     const wchar_t *name = wcsrchr(path, L'\\');
     const wchar_t *ext = wcsrchr(path, L'.');
@@ -928,8 +953,10 @@ static int ag_tool(AgFs *fs, const wchar_t *json, wchar_t *out, int cap) {
     if (ag_document_root(fs, explicitRoot) && !ag_under(parent, explicitRoot)) {
       swprintf(out, cap, L"Ошибка папки назначения: пользователь указал %ls. Создай документ внутри неё через write, не в @last или другой папке. Исходный файл не нужен.", explicitRoot); return -1;
     }
+    wchar_t reviewed[2000]; lstrcpynW(reviewed, ag_get(&j, L"text"), 2000);
+    if (docx && reviewed[0] && fs->author && !fs->author(fs->goal, reviewed, reviewed, 2000, fs->cancel, out, cap)) return -1;
     if (!ag_mkdir(fs, parent) || !ag_target(fs, parent, name + 1, dst) || !ag_add(fs, docx ? AG_DOCX : xlsx ? AG_XLSX : AG_PLAIN, L"", dst)) goto fail;
-    lstrcpynW(fs->plan[fs->count - 1].text, ag_get(&j, L"text"), 2000);
+    lstrcpynW(fs->plan[fs->count - 1].text, reviewed, 2000);
     swprintf(out, cap, L"Создание %ls добавлено в план: %ls. Родительские папки УЖЕ добавлены автоматически: mkdir не нужен. Эта часть задачи запланирована полностью. Если других действий не просили, следующий вызов done. Диск пока не изменён.", docx ? L"Word-документа" : xlsx ? L"пустой книги Excel" : L"текстового файла", dst);
     return 0;
   }
@@ -1076,7 +1103,16 @@ static BOOL ag_preflight(AgFs *fs, wchar_t *why, int whyCap) {
     if (!ag_path(fs, a->dst, p) || _wcsicmp(p, a->dst)) { lstrcpynW(why, L"Файлы или пути изменились после предпросмотра. Ничего не выполнено; запросите новый план.", whyCap); return FALSE; }
     if (a->kind == AG_OPEN && !ag_planned_dir(fs, a->dst)) { lstrcpynW(why, L"Папка для открытия больше не запланирована. Ничего не выполнено.", whyCap); return FALSE; }
     if (a->kind == AG_INVENTORY && (!ag_path(fs, a->text, p) || !ag_planned_dir(fs, p))) { lstrcpynW(why, L"Папка перечня изменилась после предпросмотра. Ничего не выполнено.", whyCap); return FALSE; }
-    if (a->kind != AG_OPEN && GetFileAttributesW(a->dst) != INVALID_FILE_ATTRIBUTES) { swprintf(why, whyCap, L"Назначение уже появилось после предпросмотра: %ls. Перезапись запрещена. Ничего не выполнено.", a->dst); return FALSE; }
+    if (a->kind != AG_OPEN && a->kind != AG_WORD_FORMAT && GetFileAttributesW(a->dst) != INVALID_FILE_ATTRIBUTES) { swprintf(why, whyCap, L"Назначение уже появилось после предпросмотра: %ls. Перезапись запрещена. Ничего не выполнено.", a->dst); return FALSE; }
+    if (a->kind == AG_WORD_FORMAT) {
+      wchar_t hash[65];
+      for (int k = 0; k < fs->count; k++) if (k != i && (!_wcsicmp(fs->plan[k].src, a->src) || !_wcsicmp(fs->plan[k].dst, a->src) || !_wcsicmp(fs->plan[k].dst, a->text))) {
+        lstrcpynW(why, L"План содержит пересекающиеся изменения Word. Разделите их на отдельные задачи.", whyCap); return FALSE;
+      }
+      if (!ag_path(fs, a->text, p) || GetFileAttributesW(a->text) != INVALID_FILE_ATTRIBUTES || !ag_word_hash(a->src, hash) || wcscmp(hash, a->sheet)) {
+        lstrcpynW(why, L"Word или резервный путь изменился после предпросмотра. Ничего не выполнено.", whyCap); return FALSE;
+      }
+    }
     if (a->src[0]) {
       WIN32_FILE_ATTRIBUTE_DATA now;
       if (!ag_path(fs, a->src, p) || !GetFileAttributesExW(p, GetFileExInfoStandard, &now) ||
@@ -1105,7 +1141,7 @@ static BOOL ag_apply(AgFs *fs, wchar_t *out, int cap) {
   if (!ag_order_inventories(fs)) { lstrcpynW(out, L"Не хватило памяти для порядка отчётов. Ничего не выполнено.", cap); return FALSE; }
   wchar_t why[800];
   if (!ag_preflight(fs, why, 800)) { lstrcpynW(out, why[0] ? why : L"Файлы или пути изменились после предпросмотра. Ничего не выполнено; запросите новый план.", cap); return FALSE; }
-  int files = 0, dirs = 0, created = 0, reports = 0, listed = 0, movedDirs = 0;
+  int files = 0, dirs = 0, created = 0, reports = 0, listed = 0, movedDirs = 0, formatted = 0;
   for (int i = 0; i < fs->count; i++) {
     AgAction *a = &fs->plan[i]; BOOL ok;
     if (fs->cancel && InterlockedCompareExchange(fs->cancel, 0, 0)) {
@@ -1124,6 +1160,11 @@ static BOOL ag_apply(AgFs *fs, wchar_t *out, int cap) {
       if (!ok) { swprintf(out, cap, L"Остановлено после %d из %d действий. %ls Выполненные действия сохранены.", i, fs->count, detail); return FALSE; }
     }
     else if (a->kind == AG_DOCX || a->kind == AG_PLAIN || a->kind == AG_XLSX) ok = ag_write_new(a->dst, a->text, a->kind);
+    else if (a->kind == AG_WORD_FORMAT) {
+      wchar_t detail[1600]; ok = ag_word_apply(fs, a, detail, 1600);
+      if (!ok) { lstrcpynW(out, detail, cap); return FALSE; }
+      formatted++;
+    }
     else if (a->kind == AG_EXCEL) {
       wchar_t detail[6000]; ok = of_write_excel(a->src, a->dst, a->sheet, a->cell, a->text, a->formulas, detail, 6000);
       if (!ok) { swprintf(out, cap, L"Остановлено после %d из %d действий. %ls Выполненные действия сохранены.", i, fs->count, detail); return FALSE; }
@@ -1149,6 +1190,7 @@ static BOOL ag_apply(AgFs *fs, wchar_t *out, int cap) {
     }
     if (a->kind == AG_DIR) dirs++; else if (a->kind != AG_OPEN && a->kind != AG_MOVE_DIR) files++;
     if (a->kind == AG_DOCX || a->kind == AG_PLAIN || a->kind == AG_XLSX || a->kind == AG_EXCEL || a->kind == AG_INVENTORY) created++;
+    if (a->kind == AG_DOCX || a->kind == AG_WORD_FORMAT) lstrcpynW(fs->lastDoc, a->dst, MAX_PATH);
   }
   if (fs->count) {
     AgAction *last = &fs->plan[fs->count - 1];
@@ -1160,6 +1202,7 @@ static BOOL ag_apply(AgFs *fs, wchar_t *out, int cap) {
   }
   swprintf(out, cap, L"Готово. Обработано файлов: %d, из них создано новых: %d. Создано папок: %d.", files, created, dirs);
   if (movedDirs) swprintf(out + wcslen(out), cap - wcslen(out), L" Перенесено каталогов целиком: %d.", movedDirs);
+  if (formatted) swprintf(out + wcslen(out), cap - wcslen(out), L" Изменено выравнивание Word-документов: %d. Исходники сохранены резервными копиями, указанными в плане.", formatted);
   if (reports) swprintf(out + wcslen(out), cap - wcslen(out), L" Excel-перечней заполнено: %d. Элементов в них: %d (без самих книг).", reports, listed);
   return TRUE;
 }

@@ -463,7 +463,7 @@ static BOOL acw_local_query(const wchar_t *query) {
   BOOL word = FALSE;
   for (const wchar_t *p = start; *p; p++) if (acw_word(*p)) word = TRUE;
   if (!word) return TRUE;
-  const wchar_t *local[] = {L"привет", L"здравствуй", L"здравствуйте", L"доброе утро", L"добрый день", L"добрый вечер", L"спасибо", L"благодарю", L"ок", L"окей", L"да", L"нет", L"понятно", L"хорошо", L"hello", L"hi", L"thanks"};
+  const wchar_t *local[] = {L"привет", L"здравствуй", L"здравствуйте", L"доброе утро", L"добрый день", L"добрый вечер", L"спасибо", L"благодарю", L"ок", L"окей", L"да", L"нет", L"понятно", L"хорошо", L"hello", L"hi", L"thanks", L"предположи", L"постарайся", L"попробуй", L"уточни", L"вот"};
   for (int i = 0; i < (int)(sizeof(local) / sizeof(local[0])); i++) if (!wcscmp(start, local[i])) return TRUE;
   return FALSE;
 }

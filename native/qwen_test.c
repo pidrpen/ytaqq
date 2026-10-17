@@ -25,7 +25,47 @@ static int aq_test(void) {
   int status, testedSlot = 0;
   int testedOff = 0, testedStopped = 0, testedQueue = -1;
   wchar_t testedWeb[AC_WEB_CAP] = L"", testedNote[360] = L"";
-  if (port == -15 && argc == 7 && job.body) {
+  if (port == -20 && argc == 7 && job.body) {
+    wchar_t *goal = ai_wide(job.body, -1), before[65], after[65];
+    lstrcpynW(g_agLastDoc, argv[5], MAX_PATH);
+    BOOL ok = goal && ag_word_hash(argv[5], before) && ag_start(goal);
+    ok = ok && g_agReview && g_acPlanOn && g_agFs.count == 1 && g_agFs.plan[0].kind == AG_WORD_FORMAT && !g_acId;
+    ok = ok && ag_word_hash(argv[5], after) && !wcscmp(before, after);
+    ag_stop(); g_acPlanOn = FALSE; ac_clear_turns(); free(goal);
+    status = ok ? AI_OK : AI_ERROR;
+    job.text = _wcsdup(ok ? L"PASS: actual edit request -> native format plan for last Word, no model/search, original unchanged" : L"FAIL");
+  } else if (port == -19 && argc == 7 && job.body) {
+    wchar_t *text = ai_wide(job.body, -1); status = AI_ERROR;
+    if (text) {
+      ag_author_layout(text); wchar_t path[MAX_PATH]; swprintf(path, MAX_PATH, L"%ls\\Authored.docx", g_dataDir);
+      if (ag_write_new(path, text, AG_DOCX)) { job.text = _wcsdup(text); status = AI_OK; }
+      free(text);
+    }
+  } else if (port == -17 && argc == 7 && job.body) {
+    g_aiOn = TRUE; g_aiCtx = 4096; g_aiGpu = TRUE;
+    lstrcpynW(g_aiModel, argv[5], MAX_PATH); lstrcpynW(g_aiSrvExe, argv[6], MAX_PATH);
+    wchar_t *goal = ai_wide(job.body, -1), content[2000], error[1000];
+    BOOL ok = goal && ag_author(goal, L"1. Токарная обработка\n2. Гравировка\n3. Фрезерование\n4. Установка патронов\n5. Измерение размеров", content, 2000, &job.cancel, error, 1000);
+    job.text = _wcsdup(ok ? content : error); status = ok ? AI_OK : AI_ERROR;
+    if (ok) {
+      wchar_t path[MAX_PATH]; swprintf(path, MAX_PATH, L"%ls\\Authored.docx", g_dataDir);
+      if (!ag_write_new(path, content, AG_DOCX)) status = AI_ERROR;
+    }
+    free(goal); ai_shutdown();
+  } else if (port == -18 && argc == 7 && job.body) {
+    BOOL ok = !ag_file_intent(L"какой вес\\рост") && !ag_file_intent(L"предположи") && !ag_file_intent(L"это по картинке ранее вопрос уточняющий");
+    ac_push(0, L"как бы ты описал этого человека");
+    BYTE *pixel = (BYTE *)malloc(1); if (pixel) pixel[0] = 0;
+    if (g_acN) { g_acTurns[g_acN - 1].png = pixel; g_acTurns[g_acN - 1].pngLen = 1; }
+    ac_push(1, L"Описание"); ac_push(0, L"какой вес\\рост");
+    ok = ok && ac_picture_context(L"какой вес\\рост") && !ac_web_use(L"какой вес\\рост", TRUE);
+    ac_push(1, L"Нет масштаба"); ac_push(0, L"предположи");
+    ok = ok && ac_picture_context(L"предположи") && !ac_web_use(L"предположи", TRUE);
+    ac_push(1, L"Ответ"); ac_push(0, L"постарайся");
+    ok = ok && ac_picture_context(L"постарайся") && !ac_web_use(L"постарайся", TRUE) && !ac_picture_context(L"погода завтра");
+    ac_clear_turns(); status = ok ? AI_OK : AI_ERROR;
+    job.text = _wcsdup(ok ? L"PASS: weight/backslash not a path; photo follow-ups keep picture and skip search; new topic isolated" : L"FAIL");
+  } else if (port == -15 && argc == 7 && job.body) {
     wchar_t query[500];
     BOOL ok = ac_review_query(L"MATERIAL: 40Х\nCHECK_WEB: обработка стали 40Х шлифование\nЧерновик", query);
     ok = ok && !ac_review_query(L"MATERIAL: UNKNOWN\nCHECK_WEB: обработка UNKNOWN\nЧерновик", query);

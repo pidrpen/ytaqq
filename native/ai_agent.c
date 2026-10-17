@@ -5,6 +5,18 @@
 #include "ai_agent_fs.c"
 #include "ai_app_tools.c"
 static AgFs g_agFs;
+static wchar_t g_agLastDoc[MAX_PATH];
+static void ag_preview(void);
+#include "ai_document_author.c"
+static void ag_doc_context(BOOL save) {
+  wchar_t path[MAX_PATH]; _snwprintf(path, MAX_PATH, L"%s\\ai_last_document.txt", g_dataDir);
+  if (save) { char *s = ai_utf8(g_agLastDoc); if (s) aq_write(path, s); free(s); }
+  else if (!g_agLastDoc[0]) {
+    char *s = aq_read(path); wchar_t *w = s ? ai_wide(s, -1) : NULL;
+    if (w && wcslen(w) < MAX_PATH && of_docx(w) && GetFileAttributesW(w) != INVALID_FILE_ATTRIBUTES) lstrcpynW(g_agLastDoc, w, MAX_PATH);
+    free(w); free(s);
+  }
+}
 static int g_agSteps, g_agErrors;
 static int g_agLastState;
 static wchar_t g_agNotes[AG_TEXT], g_agObservation[6000];
@@ -25,6 +37,7 @@ static BOOL g_agApplying;
 
 #include "ai_agent_route.h"
 static BOOL ag_wants(const wchar_t *text) {
+  if (ag_format_mode(text)) return TRUE;
   if (g_acLastDir[0]) {
     wchar_t q[400]; lstrcpynW(q, text, 400); CharLowerBuffW(q, (DWORD)wcslen(q));
     if (wcsstr(q, L"что там") || wcsstr(q, L"что в ней") || wcsstr(q, L"а там") || wcsstr(q, L"сколько там")) return TRUE;
@@ -70,6 +83,7 @@ static BOOL ag_request(void) {
     L"Задача пользователя: %ls\nПапки: @desktop=%ls; @downloads=%ls; @documents=%ls; @last=%ls; @new=%ls.\n"
     L"Шаг %d из 16. Действий в плане: %d.\n",
     g_agFs.goal, g_agFs.desktop, g_agFs.downloads, g_agFs.documents, g_agFs.last, g_agFs.newDir, g_agSteps, g_agFs.count);
+  if (g_agFs.lastDoc[0]) swprintf(prompt + wcslen(prompt), cap - wcslen(prompt), L"Последний созданный/изменённый Word: @document=%ls. Это файл, не папка.\n", g_agFs.lastDoc);
   /* Leave most available context for observations. Do not fill it with the
      first dozen individual files when a group contains hundreds. */
   int planLimit = budget / 4;
@@ -78,7 +92,7 @@ static BOOL ag_request(void) {
        wcslen(prompt) + MAX_PATH * 2 + 80 < (size_t)planLimit; i++) {
     AgAction *a = &g_agFs.plan[i];
     swprintf(prompt + wcslen(prompt), cap - wcslen(prompt), L"В плане: %ls %ls -> %ls\n",
-      a->kind == AG_DIR ? L"mkdir" : a->kind == AG_COPY ? L"copy" : a->kind == AG_MOVE ? L"move" : a->kind == AG_MOVE_DIR ? L"move каталог" : a->kind == AG_OPEN ? L"open" : a->kind == AG_INVENTORY ? L"inventory" : a->kind == AG_EXCEL ? L"excel_write" : (a->kind == AG_DOCX || a->kind == AG_PLAIN || a->kind == AG_XLSX) ? L"write" : L"rename", a->src, a->dst);
+      a->kind == AG_DIR ? L"mkdir" : a->kind == AG_COPY ? L"copy" : a->kind == AG_MOVE ? L"move" : a->kind == AG_MOVE_DIR ? L"move каталог" : a->kind == AG_OPEN ? L"open" : a->kind == AG_INVENTORY ? L"inventory" : a->kind == AG_WORD_FORMAT ? L"word_format" : a->kind == AG_EXCEL ? L"excel_write" : (a->kind == AG_DOCX || a->kind == AG_PLAIN || a->kind == AG_XLSX) ? L"write" : L"rename", a->src, a->dst);
     shown++;
   }
   if (g_agFs.count > shown) wcscat(prompt, L"Остальные действия скрыты для экономии контекста; ориентируйся на результаты инструментов.\n");
@@ -105,6 +119,7 @@ static BOOL ag_request(void) {
 
 static BOOL ag_start(const wchar_t *text) {
   wchar_t goal[4000];
+  if (ag_format_mode(text)) g_agPending = FALSE;
   if (g_agPending) {
     if (wcslen(g_agFs.goal) + wcslen(text) + 40 >= 4000) {
       ag_stop(); af_say(L"Уточнений слишком много. Напишите задачу заново одним сообщением."); return TRUE;
@@ -116,12 +131,24 @@ static BOOL ag_start(const wchar_t *text) {
   }
   ag_fs_init(&g_agFs, g_dataDir, g_acLastDir);
   g_agFs.backend = at_call;
+  g_agFs.author = ag_author;
+  ag_doc_context(FALSE); lstrcpynW(g_agFs.lastDoc, g_agLastDoc, MAX_PATH);
   lstrcpynW(g_agFs.goal, goal, 4000);
   g_agNotes[0] = g_agReadout[0] = 0; g_agSteps = g_agErrors = 0;
   g_agObservation[0] = 0; g_agLastState = 0;
   g_agGeneration++;
   g_agPending = g_agReview = FALSE; g_agActive = TRUE;
   ac_push(0, text); ac_redraw();
+  const wchar_t *format = ag_format_mode(text);
+  wchar_t formatText[4000]; lstrcpynW(formatText, text, 4000); CharLowerBuffW(formatText, (DWORD)wcslen(formatText));
+  BOOL sameDoc = wcsstr(formatText, L"тот файл") || wcsstr(formatText, L"этот файл") || wcsstr(formatText, L"тот документ") || wcsstr(formatText, L"этот документ") || (!wcsstr(formatText, L"файл") && !wcsstr(formatText, L"документ"));
+  if (format && g_agFs.lastDoc[0] && sameDoc && !ag_has_path(text) && !wcsstr(formatText, L".doc")) {
+    wchar_t json[256], observation[6000];
+    swprintf(json, 256, L"{\"tool\":\"word_format\",\"path\":\"@document\",\"mode\":\"%ls\"}", format);
+    if (ag_tool(&g_agFs, json, observation, 6000) == 0) { g_agActive = FALSE; ag_preview(); }
+    else { ag_stop(); af_say(observation); }
+    return TRUE;
+  }
   ag_request(); return TRUE;
 }
 
@@ -132,8 +159,9 @@ static void ag_preview(void) {
   swprintf(out, cap, L"План действий: %d. Диск пока не изменён.\r\n", g_agFs.count);
   for (int i = 0; i < g_agFs.count; i++) {
     AgAction *a = &g_agFs.plan[i];
-    const wchar_t *verb = a->kind == AG_DIR ? L"Создать папку" : a->kind == AG_COPY ? L"Копировать" : a->kind == AG_MOVE ? L"Переместить" : a->kind == AG_MOVE_DIR ? L"Переместить каталог целиком" : a->kind == AG_OPEN ? L"Открыть в проводнике" : a->kind == AG_DOCX ? L"Создать Word-документ" : a->kind == AG_XLSX ? L"Создать пустую книгу Excel" : a->kind == AG_INVENTORY ? L"Создать и ЗАПОЛНИТЬ Excel-перечень папки" : a->kind == AG_EXCEL ? L"Заполнить новую книгу/копию Excel" : a->kind == AG_PLAIN ? L"Создать текстовый файл" : L"Переименовать";
+    const wchar_t *verb = a->kind == AG_DIR ? L"Создать папку" : a->kind == AG_COPY ? L"Копировать" : a->kind == AG_MOVE ? L"Переместить" : a->kind == AG_MOVE_DIR ? L"Переместить каталог целиком" : a->kind == AG_OPEN ? L"Открыть в проводнике" : a->kind == AG_WORD_FORMAT ? L"Изменить выравнивание существующего Word" : a->kind == AG_DOCX ? L"Создать Word-документ" : a->kind == AG_XLSX ? L"Создать пустую книгу Excel" : a->kind == AG_INVENTORY ? L"Создать и ЗАПОЛНИТЬ Excel-перечень папки" : a->kind == AG_EXCEL ? L"Заполнить новую книгу/копию Excel" : a->kind == AG_PLAIN ? L"Создать текстовый файл" : L"Переименовать";
     swprintf(out + wcslen(out), cap - wcslen(out), L"%ls: %ls%ls%ls\r\n", verb, a->src, a->src[0] ? L" → " : L"", a->dst);
+    if (a->kind == AG_WORD_FORMAT) swprintf(out + wcslen(out), cap - wcslen(out), L"Выравнивание: %ls. Текст сохраняется. Резервная копия: %ls\r\n", a->cell, a->text);
     if (a->kind == AG_INVENTORY) swprintf(out + wcslen(out), cap - wcslen(out), L"Источник перечня: %ls. Ожидается элементов: %ls. Будут перечислены реальные имена, типы, расширения, размеры, пути и даты ПОСЛЕ переносов; без самой книги, без обхода подпапок.\r\n", a->text, a->cell);
     if (a->kind == AG_EXCEL || a->kind == AG_DOCX || a->kind == AG_PLAIN) {
       if (a->kind == AG_EXCEL && !a->src[0] && !a->formulas) wcscat(out, a->table ? L"XlsxWriter: шапка, фильтр, закреплённая строка; значения — текст.\r\n" : L"XlsxWriter: новая книга; значения — текст.\r\n");
@@ -152,6 +180,7 @@ static void ag_tool_ready(void *result) {
   if (job->applying) {
     if (job->state == 1 && job->fs.count) {
       af_set_last(job->fs.last);
+      if (job->fs.lastDoc[0]) { lstrcpynW(g_agLastDoc, job->fs.lastDoc, MAX_PATH); ag_doc_context(TRUE); }
     }
     lstrcpynW(g_agObservation, job->observation, 6000);
     free(job); g_agApplying = FALSE;

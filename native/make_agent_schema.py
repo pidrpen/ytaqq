@@ -7,10 +7,10 @@ import json
 from pathlib import Path
 
 names = ['filesystem', 'list', 'find', 'read', 'office_read', 'compare_materials', 'app', 'new_folder', 'inventory',
-         'mkdir', 'write', 'copy', 'move', 'rename', 'open', 'ask', 'done']
+         'mkdir', 'write', 'word_format', 'copy', 'move', 'rename', 'open', 'ask', 'done']
 fields = {name: {'type': 'string'} for name in
           ['path', 'src', 'dst', 'pattern', 'name', 'sheet', 'cell', 'text', 'mode', 'offset', 'recursive']}
-fields['mode']['enum'] = ['text', 'formulas', 'table', 'list', 'info', 'read']
+fields['mode']['enum'] = ['text', 'formulas', 'table', 'list', 'info', 'read', 'center', 'left', 'right', 'justify']
 fields['recursive']['enum'] = ['yes', 'no']
 
 normal = {'type': 'object', 'properties': {'tool': {'type': 'string', 'enum': names}, **fields},

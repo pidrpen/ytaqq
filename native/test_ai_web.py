@@ -35,7 +35,7 @@ def main():
             assert p.returncode == 1 and 'Прямая ссылка:' in p.stdout and 'Общий поиск не выполнялся' in p.stdout
             assert 'Tavily' not in p.stdout
         assert subprocess.run([probe, '--local-tests'], capture_output=True).returncode == 0
-        for query in ('ы', ' а ', 'Привет!!!', 'спасибо', 'ОК'):
+        for query in ('ы', ' а ', 'Привет!!!', 'спасибо', 'ОК', 'предположи', 'постарайся'):
             p = subprocess.run([probe, query], capture_output=True, encoding='utf-8')
             assert p.returncode == 1 and 'Локально:' in p.stdout and 'HTTP 400' not in p.stdout
         rss = ('<rss><channel><link>https://not-a-result.example/</link>'
