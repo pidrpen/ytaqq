@@ -1,8 +1,12 @@
 /* Bounded filesystem tools for the local model. No shell, network or model weights.
-   All mutations are staged; the UI applies the complete reviewed plan. */
+   All mutations are staged; the UI applies the complete reviewed plan.
+   Do not point an MCP filesystem server at write, move or delete. Those calls
+   run immediately and would bypass «Применить». Read-only MCP listings would
+   still not replace the checks below: scope, junctions, the plan snapshot,
+   no overwrite, and a report when a cross-volume move stops halfway. */
 #define AG_MAX 512
 #define AG_TEXT 12000
-typedef enum { AG_DIR, AG_COPY, AG_MOVE, AG_RENAME, AG_OPEN, AG_DOCX, AG_PLAIN, AG_XLSX, AG_EXCEL, AG_INVENTORY } AgKind;
+typedef enum { AG_DIR, AG_COPY, AG_MOVE, AG_RENAME, AG_OPEN, AG_DOCX, AG_PLAIN, AG_XLSX, AG_EXCEL, AG_INVENTORY, AG_MOVE_DIR } AgKind;
 typedef struct {
   AgKind kind;
   wchar_t src[MAX_PATH], dst[MAX_PATH];
@@ -23,8 +27,10 @@ typedef struct { wchar_t key[16], value[2000]; } AgField;
 typedef struct { AgField fields[10]; int count; } AgJson;
 
 static BOOL ag_under(const wchar_t *path, const wchar_t *root) {
-  size_t n = wcslen(root);
-  return n && !_wcsnicmp(path, root, n) && (!path[n] || path[n] == L'\\' || root[n - 1] == L'\\');
+  int n = (int)wcslen(root);
+  if (n <= 0 || (int)wcslen(path) < n) return FALSE;
+  if (CompareStringOrdinal(path, n, root, n, TRUE) != CSTR_EQUAL) return FALSE;
+  return !path[n] || path[n] == L'\\' || root[n - 1] == L'\\';
 }
 
 static void ag_trim(wchar_t *s) {
@@ -87,9 +93,12 @@ static BOOL ag_string(const wchar_t **p, wchar_t *out, int cap) {
 static inline void ag_plan_evidence(const AgFs *fs, wchar_t *out, int cap) {
   out[0] = 0;
   if (!fs->count || cap < 1000) return;
-  const wchar_t *names[] = {L"Создать папку", L"Копировать файлы", L"Переместить файлы", L"Переименовать", L"Открыть", L"Создать Word", L"Создать текст", L"Создать пустой Excel", L"Заполнить Excel", L"Заполнить перечень папки после переносов"};
+  const wchar_t *names[] = {L"Создать папку", L"Копировать файлы", L"Переместить файлы", L"Переименовать", L"Открыть", L"Создать Word", L"Создать текст", L"Создать пустой Excel", L"Заполнить Excel", L"Создать новый Excel и заполнить перечнем папки после переносов", L"Переместить каталог"};
   lstrcpynW(out, L"Текущий подтверждённый кодом ПЛАН, ещё не выполнен:\n", cap);
-  for (int kind = 0; kind <= AG_INVENTORY; kind++) {
+  if (fs->newDir[0] && cap > 1200) {
+    swprintf(out + wcslen(out), cap - wcslen(out), L"НОВАЯ ПАПКА ТЕКУЩЕЙ ЗАДАЧИ: %ls. @new означает именно её. Рабочий стол пользователя: %ls (@desktop).\n", fs->newDir, fs->desktop);
+  }
+  for (int kind = 0; kind <= AG_MOVE_DIR; kind++) {
     int count = 0;
     for (int i = 0; i < fs->count; i++) if ((int)fs->plan[i].kind == kind) count++;
     if (count && wcslen(out) + 100 < (size_t)cap) swprintf(out + wcslen(out), cap - wcslen(out), L"%ls: %d действий.\n", names[kind], count);
@@ -98,8 +107,9 @@ static inline void ag_plan_evidence(const AgFs *fs, wchar_t *out, int cap) {
     const AgAction *a = &fs->plan[i];
     if (wcslen(out) + wcslen(a->src) + wcslen(a->dst) + 800 >= (size_t)cap) { wcscat(out, L"Подробности сокращены; количества выше относятся ко всему плану.\n"); break; }
     wchar_t content[513]; lstrcpynW(content, a->text, 513);
+    const wchar_t *body = a->kind == AG_INVENTORY ? L"реальный перечень после переносов" : a->kind == AG_MOVE_DIR ? L"каталог целиком, с вложенными файлами и пустыми папками, без перезаписи" : content[0] ? content : L"пусто/не требуется";
     swprintf(out + wcslen(out), cap - wcslen(out), L"%ls: %ls%ls%ls; содержимое=%ls%ls\n", names[a->kind], a->src, a->src[0] ? L" -> " : L"", a->dst,
-      a->kind == AG_INVENTORY ? L"реальный перечень после переносов" : content[0] ? content : L"пусто/не требуется", wcslen(a->text) > 512 ? L" [сокращено]" : L"");
+      body, a->kind == AG_MOVE_DIR ? L"" : wcslen(a->text) > 512 ? L" [сокращено]" : L"");
   }
 }
 static BOOL ag_json(const wchar_t *p, AgJson *j) {
@@ -343,10 +353,11 @@ static BOOL ag_needs_fresh_folder(const wchar_t *raw) {
   const wchar_t *folder = wcsstr(s, L"папку");
   if (!folder) return FALSE;
   BOOL create = FALSE;
-  for (const wchar_t *p = s; p < folder; p++) if (!wcsncmp(p, L"созда", 5) && folder - p < 70) create = TRUE;
+  /* 600, not 70: an absolute path between the verb and «папку» is longer than 70. */
+  for (const wchar_t *p = s; p < folder; p++) if (!wcsncmp(p, L"созда", 5) && folder - p < 600) create = TRUE;
   if (!create) return FALSE;
   const wchar_t *tail = folder + 5; while (*tail == L' ') tail++;
-  const wchar_t *words[] = {L"и", L"на", L"для", L"с", L"чтобы", L"затем"};
+  const wchar_t *words[] = {L"и", L"в", L"на", L"для", L"с", L"чтобы", L"затем"};
   if (!*tail || *tail == L',' || *tail == L'.') return TRUE;
   for (size_t i = 0; i < sizeof(words) / sizeof(words[0]); i++) {
     size_t n = wcslen(words[i]);
@@ -354,10 +365,68 @@ static BOOL ag_needs_fresh_folder(const wchar_t *raw) {
   }
   return FALSE;
 }
+/* Unnamed «создай в <существующая папка> папку». The parent is that directory,
+   not the desktop, even when the sentence also says «на рабочем столе».
+   A trailing word after the path («новую») is not part of the path. An ancestor
+   is not used when the named directory itself is missing. */
+typedef enum { AG_PARENT_NONE, AG_PARENT_FOUND, AG_PARENT_MISSING } AgParentStatus;
+static BOOL ag_same_path(const wchar_t *a, const wchar_t *b) {
+  return CompareStringOrdinal(a, -1, b, -1, TRUE) == CSTR_EQUAL;
+}
+static AgParentStatus ag_named_parent(AgFs *fs, wchar_t *out) {
+  out[0] = 0;
+  wchar_t goal[4000]; lstrcpynW(goal, fs->goal, 4000); CharLowerBuffW(goal, (DWORD)wcslen(goal));
+  const wchar_t *verb = wcsstr(goal, L"созда");
+  const wchar_t *folder = verb ? wcsstr(verb, L"папку") : NULL;
+  if (!folder || folder - verb > 600 || !ag_needs_fresh_folder(fs->goal)) return AG_PARENT_NONE;
+  const wchar_t *last = NULL, *end = NULL;
+  for (const wchar_t *p = verb; *p; p++) {
+    if (!wcsncmp(p, L"перен", 5) || !wcsncmp(p, L"скоп", 4) || *p == L'\n') break;
+    if (!((*p >= L'a' && *p <= L'z') && p[1] == L':' && p[2] == L'\\')) continue;
+    const wchar_t *before = p;
+    while (before > verb && (before[-1] == L' ' || before[-1] == L'"' || before[-1] == L'«')) before--;
+    if (before <= verb || before[-1] != L'в' || (before - verb > 1 && before[-2] != L' ')) continue;
+    last = p;
+    if (p < folder) end = folder;
+    else {
+      end = p;
+      while (*end && *end != L'"' && *end != L'»' && *end != L'\n' && *end != L',' && wcsncmp(end, L" и ", 3) && wcsncmp(end, L" затем ", 7)) end++;
+    }
+    break;
+  }
+  if (!last || !end || end <= last || end - last >= MAX_PATH) return AG_PARENT_NONE;
+  wchar_t raw[MAX_PATH]; size_t span = (size_t)(end - last);
+  lstrcpynW(raw, fs->goal + (last - goal), (int)span + 1);
+  while (span && (raw[span - 1] == L' ' || raw[span - 1] == L'"' || raw[span - 1] == L'»' || raw[span - 1] == L'.')) raw[--span] = 0;
+  const wchar_t *adjectives[] = {L" новую", L" пустую"};
+  BOOL trimmed;
+  do {
+    trimmed = FALSE;
+    for (size_t i = 0; i < sizeof(adjectives) / sizeof(adjectives[0]); i++) {
+      size_t n = wcslen(adjectives[i]);
+      if (span > n && CompareStringOrdinal(raw + span - n, (int)n, adjectives[i], (int)n, TRUE) == CSTR_EQUAL) { raw[span -= n] = 0; trimmed = TRUE; }
+    }
+  } while (trimmed);
+  while (span && (raw[span - 1] == L' ' || raw[span - 1] == L'"' || raw[span - 1] == L'»')) raw[--span] = 0;
+  wchar_t full[MAX_PATH];
+  if (ag_path(fs, raw, full) && ag_dir(full)) { lstrcpynW(out, full, MAX_PATH); return AG_PARENT_FOUND; }
+  lstrcpynW(out, raw, MAX_PATH); return AG_PARENT_MISSING;
+}
 static BOOL ag_fresh_destination(AgFs *fs, const wchar_t *path, wchar_t *out, int cap) {
   if (!ag_needs_fresh_folder(fs->goal)) return TRUE;
   if (fs->newDir[0] && ag_under(path, fs->newDir)) return TRUE;
-  lstrcpynW(out, L"Пользователь попросил НОВУЮ папку без имени. Сначала new_folder path=@desktop (или указанный родитель), затем используй @new для переноса и отчёта. Существующая Модели и @last не заменяют новую папку. План не изменён.", cap); return FALSE;
+  wchar_t required[MAX_PATH];
+  if (ag_named_parent(fs, required) == AG_PARENT_FOUND)
+    swprintf(out, cap, L"Родитель уже существует: %ls. Требуется новая папка ВНУТРИ него. Следующий вызов: {\"tool\":\"new_folder\",\"path\":\"@parent\"}. @parent код разрешит в указанный родитель. Не создавай родителя заново. Затем используй @new. План не изменён.", required);
+  else lstrcpynW(out, L"Пользователь попросил НОВУЮ папку без имени. Сначала new_folder path=@desktop (или указанный родитель), затем используй @new для переноса и отчёта. Существующая Модели и @last не заменяют новую папку. План не изменён.", cap);
+  return FALSE;
+}
+static inline void ag_model_goal(AgFs *fs, wchar_t *out, int cap) {
+  lstrcpynW(out, fs->goal, cap);
+  wchar_t parent[MAX_PATH];
+  if (ag_named_parent(fs, parent) == AG_PARENT_FOUND && wcslen(out) + wcslen(parent) + 600 < (size_t)cap) {
+    swprintf(out + wcslen(out), cap - wcslen(out), L"\nПояснение путей от CursorPad: %ls — уже существующая РОДИТЕЛЬСКАЯ папка, её создавать не требуется. Просьба означает создать ОДНУ НОВУЮ папку БЕЗ ИМЕНИ ВНУТРИ этого родителя. Её имя выберет new_folder path=@parent. Последующее «туда» указывает на эту новую вложенную папку, а не на родителя. Исходную просьбу и прочие требования сохраняй полностью.", parent);
+  }
 }
 static BOOL ag_check_inventory_transfers(AgFs *fs, wchar_t *out, int cap) {
   if (!ag_needs_inventory(fs->goal)) return TRUE;
@@ -424,6 +493,257 @@ static BOOL ag_document_root(AgFs *fs, wchar_t *out) {
   if (ext && (!_wcsicmp(ext, L".xlsx") || !_wcsicmp(ext, L".docx"))) return FALSE;
   return ag_path(fs, path, out);
 }
+
+static void ag_explain_path(AgFs *fs, const wchar_t *in, wchar_t *out, int cap) {
+  if (!in || !in[0]) { lstrcpynW(out, L"Путь пуст. Передай src или path из текста задачи. Не спрашивай пользователя, если путь уже написан.", cap); return; }
+  if ((in[0] == L'\\' && in[1] == L'\\') || (in[0] == L'/' && in[1] == L'/')) {
+    swprintf(out, cap, L"Сетевой путь не поддерживается: %ls. Нужен локальный путь с буквой диска. Не спрашивай пользователя, доступен ли сервер. План не изменён.", in); return;
+  }
+  wchar_t full[MAX_PATH];
+  if (wcslen(in) < MAX_PATH) {
+    wchar_t buf[MAX_PATH]; lstrcpynW(buf, in, MAX_PATH);
+    for (wchar_t *p = buf; *p; p++) if (*p == L'/') *p = L'\\';
+    DWORD n = GetFullPathNameW(buf, MAX_PATH, full, NULL);
+    if (n && n < MAX_PATH) {
+      for (wchar_t *p = full + 3; *full && full[1] == L':'; p++) {
+        if (*p && *p != L'\\') continue;
+        wchar_t saved = *p; *p = 0;
+        DWORD a = GetFileAttributesW(full);
+        if (a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_REPARSE_POINT)) {
+          WIN32_FIND_DATAW fd; HANDLE h = FindFirstFileW(full, &fd);
+          if (h != INVALID_HANDLE_VALUE) {
+            FindClose(h);
+            if (ag_redirect(&fd)) { swprintf(out, cap, L"Путь отклонён: это ссылка или junction, не обычная папка: %ls. Обход и перенос ссылок запрещены. Не спрашивай пользователя. План не изменён.", full); return; }
+          }
+        }
+        *p = saved; if (!saved) break;
+      }
+      if (fs->protectedDir[0] && ag_under(full, fs->protectedDir)) { swprintf(out, cap, L"Путь внутри данных CursorPad и закрыт: %ls. План не изменён.", full); return; }
+      wchar_t sys[MAX_PATH]; GetWindowsDirectoryW(sys, MAX_PATH);
+      if (ag_under(full, sys)) { swprintf(out, cap, L"Системная папка Windows недоступна: %ls. План не изменён.", full); return; }
+    }
+  }
+  swprintf(out, cap, L"Путь отклонён: %ls. Допустимы @desktop, @downloads, @documents, @last, @new и полный путь из текста задачи. Не спрашивай, существует ли он: если путь назван, вызови list. План не изменён.", in);
+}
+
+typedef struct {
+  unsigned count, files, hash; unsigned long long bytes; BOOL bad;
+  wchar_t problem[MAX_PATH]; const wchar_t *why; DWORD winerr; volatile LONG *cancel;
+} AgStamp;
+static unsigned ag_mix(unsigned h, unsigned v) { return h * 16777619u ^ v; }
+static void ag_stamp_walk(AgStamp *t, const wchar_t *dir, int depth) {
+  if (t->bad) return;
+  if (t->cancel && InterlockedCompareExchange(t->cancel, 0, 0)) { t->bad = TRUE; t->winerr = ERROR_CANCELLED; t->why = L"Остановлено"; lstrcpynW(t->problem, dir, MAX_PATH); return; }
+  if (depth > 32) { t->bad = TRUE; t->winerr = ERROR_DIRECTORY; t->why = L"Каталог глубже 32 уровней"; lstrcpynW(t->problem, dir, MAX_PATH); return; }
+  if (wcslen(dir) + 3 >= MAX_PATH) { t->bad = TRUE; t->winerr = ERROR_FILENAME_EXCED_RANGE; t->why = L"Слишком длинный путь"; lstrcpynW(t->problem, dir, MAX_PATH); return; }
+  wchar_t mask[MAX_PATH]; swprintf(mask, MAX_PATH, L"%ls\\*", dir);
+  WIN32_FIND_DATAW fd; HANDLE h = FindFirstFileW(mask, &fd);
+  if (h == INVALID_HANDLE_VALUE) {
+    DWORD e = GetLastError();
+    if (e != ERROR_FILE_NOT_FOUND && e != ERROR_NO_MORE_FILES) { t->bad = TRUE; t->winerr = e; t->why = L"Нет доступа к каталогу"; lstrcpynW(t->problem, dir, MAX_PATH); }
+    return;
+  }
+  do {
+    if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..")) continue;
+    if (t->count >= 10000) { t->bad = TRUE; t->winerr = ERROR_MORE_DATA; t->why = L"В каталоге больше 10000 элементов"; lstrcpynW(t->problem, dir, MAX_PATH); break; }
+    wchar_t child[MAX_PATH];
+    if (wcslen(dir) + wcslen(fd.cFileName) + 2 >= MAX_PATH) { t->bad = TRUE; t->winerr = ERROR_FILENAME_EXCED_RANGE; t->why = L"Слишком длинный путь"; lstrcpynW(t->problem, dir, MAX_PATH); break; }
+    swprintf(child, MAX_PATH, L"%ls\\%ls", dir, fd.cFileName);
+    if (ag_redirect(&fd)) { t->bad = TRUE; t->winerr = ERROR_INVALID_REPARSE_DATA; t->why = L"Внутри ссылка или junction"; lstrcpynW(t->problem, child, MAX_PATH); break; }
+    t->count++; t->hash = ag_mix(t->hash, fd.dwFileAttributes); t->hash = ag_mix(t->hash, (unsigned)fd.ftLastWriteTime.dwLowDateTime); t->hash = ag_mix(t->hash, (unsigned)fd.ftLastWriteTime.dwHighDateTime);
+    for (const wchar_t *p = fd.cFileName; *p; p++) t->hash = ag_mix(t->hash, (unsigned)*p);
+    if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ag_stamp_walk(t, child, depth + 1);
+    else { t->files++; t->bytes += ((unsigned long long)fd.nFileSizeHigh << 32) | fd.nFileSizeLow; t->hash = ag_mix(t->hash, fd.nFileSizeLow); t->hash = ag_mix(t->hash, fd.nFileSizeHigh); }
+  } while (!t->bad && FindNextFileW(h, &fd));
+  if (!t->bad && GetLastError() != ERROR_NO_MORE_FILES) { t->bad = TRUE; t->winerr = GetLastError(); t->why = L"Чтение каталога прервалось"; lstrcpynW(t->problem, dir, MAX_PATH); }
+  FindClose(h);
+}
+static BOOL ag_dir_stamp(const wchar_t *dir, volatile LONG *cancel, wchar_t *stamp, int stampCap, wchar_t *err, int errCap) {
+  AgStamp t; memset(&t, 0, sizeof(t)); t.cancel = cancel; t.why = L"Ошибка каталога";
+  ag_stamp_walk(&t, dir, 0);
+  if (t.bad) { swprintf(err, errCap, L"%ls: %ls. Ошибка Windows %lu. Частичный перенос запрещён. Не спрашивай пользователя: это результат проверки. План не изменён.", t.why, t.problem[0] ? t.problem : dir, t.winerr); return FALSE; }
+  swprintf(stamp, stampCap, L"n=%u;f=%u;b=%08lx%08lx;h=%08lx", t.count, t.files, (unsigned long)(t.bytes >> 32), (unsigned long)(t.bytes & 0xffffffffu), (unsigned long)t.hash);
+  return TRUE;
+}
+static BOOL ag_remove_tree(const wchar_t *dir, wchar_t *problem, DWORD *err, int depth) {
+  if (depth > 32) { *err = ERROR_DIRECTORY; lstrcpynW(problem, dir, MAX_PATH); return FALSE; }
+  if (wcslen(dir) + 3 >= MAX_PATH) { *err = ERROR_FILENAME_EXCED_RANGE; lstrcpynW(problem, dir, MAX_PATH); return FALSE; }
+  wchar_t mask[MAX_PATH]; swprintf(mask, MAX_PATH, L"%ls\\*", dir);
+  WIN32_FIND_DATAW fd; HANDLE h = FindFirstFileW(mask, &fd);
+  if (h == INVALID_HANDLE_VALUE) {
+    DWORD e = GetLastError();
+    if (e != ERROR_FILE_NOT_FOUND && e != ERROR_NO_MORE_FILES) { *err = e; lstrcpynW(problem, dir, MAX_PATH); return FALSE; }
+  } else {
+    BOOL ok = TRUE;
+    do {
+      if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..")) continue;
+      wchar_t child[MAX_PATH];
+      if (wcslen(dir) + wcslen(fd.cFileName) + 2 >= MAX_PATH) { ok = FALSE; *err = ERROR_FILENAME_EXCED_RANGE; lstrcpynW(problem, dir, MAX_PATH); break; }
+      swprintf(child, MAX_PATH, L"%ls\\%ls", dir, fd.cFileName);
+      if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && !ag_redirect(&fd)) { if (!ag_remove_tree(child, problem, err, depth + 1)) { ok = FALSE; break; } }
+      else {
+        DWORD attrs = GetFileAttributesW(child);
+        if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_READONLY)) SetFileAttributesW(child, attrs & ~FILE_ATTRIBUTE_READONLY);
+        if (!DeleteFileW(child) && !RemoveDirectoryW(child)) { ok = FALSE; *err = GetLastError(); lstrcpynW(problem, child, MAX_PATH); break; }
+      }
+    } while (FindNextFileW(h, &fd));
+    if (ok && GetLastError() != ERROR_NO_MORE_FILES) { ok = FALSE; *err = GetLastError(); lstrcpynW(problem, dir, MAX_PATH); }
+    FindClose(h); if (!ok) return FALSE;
+  }
+  DWORD attrs = GetFileAttributesW(dir);
+  if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_READONLY)) SetFileAttributesW(dir, attrs & ~FILE_ATTRIBUTE_READONLY);
+  if (!RemoveDirectoryW(dir)) { *err = GetLastError(); lstrcpynW(problem, dir, MAX_PATH); return FALSE; }
+  return TRUE;
+}
+static BOOL ag_copy_tree(const wchar_t *src, const wchar_t *dst, volatile LONG *cancel, wchar_t *problem, DWORD *err, int depth) {
+  if (depth > 32) { *err = ERROR_DIRECTORY; lstrcpynW(problem, src, MAX_PATH); return FALSE; }
+  if (cancel && InterlockedCompareExchange(cancel, 0, 0)) { *err = ERROR_CANCELLED; lstrcpynW(problem, src, MAX_PATH); return FALSE; }
+  if (!CreateDirectoryW(dst, NULL)) { *err = GetLastError(); lstrcpynW(problem, dst, MAX_PATH); return FALSE; }
+  BOOL ok = TRUE;
+  wchar_t mask[MAX_PATH]; swprintf(mask, MAX_PATH, L"%ls\\*", src);
+  WIN32_FIND_DATAW fd; HANDLE h = FindFirstFileW(mask, &fd);
+  if (h == INVALID_HANDLE_VALUE) { DWORD e = GetLastError(); if (e != ERROR_FILE_NOT_FOUND && e != ERROR_NO_MORE_FILES) { ok = FALSE; *err = e; lstrcpynW(problem, src, MAX_PATH); } }
+  else do {
+    if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..")) continue;
+    wchar_t from[MAX_PATH], to[MAX_PATH];
+    if (wcslen(src) + wcslen(fd.cFileName) + 2 >= MAX_PATH || wcslen(dst) + wcslen(fd.cFileName) + 2 >= MAX_PATH) { ok = FALSE; *err = ERROR_FILENAME_EXCED_RANGE; lstrcpynW(problem, src, MAX_PATH); break; }
+    swprintf(from, MAX_PATH, L"%ls\\%ls", src, fd.cFileName); swprintf(to, MAX_PATH, L"%ls\\%ls", dst, fd.cFileName);
+    if (ag_redirect(&fd)) { ok = FALSE; *err = ERROR_INVALID_REPARSE_DATA; lstrcpynW(problem, from, MAX_PATH); break; }
+    if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) { if (!ag_copy_tree(from, to, cancel, problem, err, depth + 1)) { ok = FALSE; break; } }
+    else if (!CopyFileExW(from, to, NULL, NULL, (BOOL *)cancel, COPY_FILE_FAIL_IF_EXISTS)) { ok = FALSE; *err = GetLastError(); lstrcpynW(problem, from, MAX_PATH); break; }
+  } while (ok && FindNextFileW(h, &fd));
+  if (h != INVALID_HANDLE_VALUE) {
+    if (ok && GetLastError() != ERROR_NO_MORE_FILES) { ok = FALSE; *err = GetLastError(); lstrcpynW(problem, src, MAX_PATH); }
+    FindClose(h);
+  }
+  if (!ok) {
+    wchar_t rollback[MAX_PATH]; DWORD rollbackErr = 0;
+    if (!ag_remove_tree(dst, rollback, &rollbackErr, 0)) { lstrcpynW(problem, rollback, MAX_PATH); *err = rollbackErr ? rollbackErr : *err; return FALSE; }
+  }
+  return ok;
+}
+/* Delete only a source file whose complete bytes match the destination while
+   both files are locked against writes/replacement. Never recursively delete a
+   newly discovered source entry without proving that it has a saved copy. */
+static BOOL ag_remove_copied_file(const wchar_t *src, const wchar_t *dst, DWORD *err) {
+  HANDLE source = CreateFileW(src, GENERIC_READ | DELETE, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+  if (source == INVALID_HANDLE_VALUE) { *err = GetLastError(); return FALSE; }
+  HANDLE copy = CreateFileW(dst, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+  BOOL ok = copy != INVALID_HANDLE_VALUE;
+  if (!ok) *err = GetLastError();
+  BY_HANDLE_FILE_INFORMATION a, b; LARGE_INTEGER as, bs;
+  if (ok && (!GetFileInformationByHandle(source, &a) || !GetFileInformationByHandle(copy, &b) ||
+      !GetFileSizeEx(source, &as) || !GetFileSizeEx(copy, &bs))) { *err = GetLastError(); ok = FALSE; }
+  if (ok && ((a.dwFileAttributes | b.dwFileAttributes) & FILE_ATTRIBUTE_DIRECTORY || as.QuadPart != bs.QuadPart ||
+      (a.dwVolumeSerialNumber == b.dwVolumeSerialNumber && a.nFileIndexHigh == b.nFileIndexHigh && a.nFileIndexLow == b.nFileIndexLow))) { *err = ERROR_FILE_INVALID; ok = FALSE; }
+  BYTE *buffers = ok ? (BYTE *)malloc(131072) : NULL;
+  if (ok && !buffers) { *err = ERROR_NOT_ENOUGH_MEMORY; ok = FALSE; }
+  while (ok) {
+    DWORD na, nb;
+    if (!ReadFile(source, buffers, 65536, &na, NULL) || !ReadFile(copy, buffers + 65536, 65536, &nb, NULL)) { *err = GetLastError(); ok = FALSE; break; }
+    if (na != nb || memcmp(buffers, buffers + 65536, na)) { *err = ERROR_FILE_INVALID; ok = FALSE; break; }
+    if (!na) break;
+  }
+  free(buffers);
+  if (ok) {
+    FILE_DISPOSITION_INFO disposition = {TRUE};
+    if (!SetFileInformationByHandle(source, FileDispositionInfo, &disposition, sizeof(disposition))) { *err = GetLastError(); ok = FALSE; }
+  }
+  if (copy != INVALID_HANDLE_VALUE) CloseHandle(copy);
+  CloseHandle(source); return ok;
+}
+static BOOL ag_remove_copied_tree(const wchar_t *src, const wchar_t *dst, volatile LONG *cancel, wchar_t *problem, DWORD *err, int depth) {
+  lstrcpynW(problem, src, MAX_PATH);
+  if (depth > 32 || wcslen(src) + 3 >= MAX_PATH || wcslen(dst) + 3 >= MAX_PATH) { *err = ERROR_FILENAME_EXCED_RANGE; return FALSE; }
+  if (cancel && InterlockedCompareExchange(cancel, 0, 0)) { *err = ERROR_CANCELLED; return FALSE; }
+  WIN32_FIND_DATAW root; HANDLE check = FindFirstFileW(src, &root);
+  if (check == INVALID_HANDLE_VALUE) { *err = GetLastError(); return FALSE; }
+  FindClose(check);
+  if (!(root.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || ag_redirect(&root)) { *err = ERROR_INVALID_REPARSE_DATA; return FALSE; }
+  DWORD copyAttrs = GetFileAttributesW(dst);
+  if (copyAttrs == INVALID_FILE_ATTRIBUTES || !(copyAttrs & FILE_ATTRIBUTE_DIRECTORY) || (copyAttrs & FILE_ATTRIBUTE_REPARSE_POINT)) { *err = ERROR_PATH_NOT_FOUND; return FALSE; }
+  wchar_t mask[MAX_PATH]; swprintf(mask, MAX_PATH, L"%ls\\*", src);
+  WIN32_FIND_DATAW fd; HANDLE h = FindFirstFileW(mask, &fd); BOOL ok = TRUE;
+  if (h == INVALID_HANDLE_VALUE) { DWORD e = GetLastError(); if (e != ERROR_FILE_NOT_FOUND && e != ERROR_NO_MORE_FILES) { *err = e; return FALSE; } }
+  else {
+    do {
+      if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..")) continue;
+      if (cancel && InterlockedCompareExchange(cancel, 0, 0)) { *err = ERROR_CANCELLED; ok = FALSE; break; }
+      if (wcslen(src) + wcslen(fd.cFileName) + 2 >= MAX_PATH || wcslen(dst) + wcslen(fd.cFileName) + 2 >= MAX_PATH) { *err = ERROR_FILENAME_EXCED_RANGE; ok = FALSE; break; }
+      wchar_t from[MAX_PATH], to[MAX_PATH]; swprintf(from, MAX_PATH, L"%ls\\%ls", src, fd.cFileName); swprintf(to, MAX_PATH, L"%ls\\%ls", dst, fd.cFileName);
+      lstrcpynW(problem, from, MAX_PATH);
+      if (ag_redirect(&fd)) { *err = ERROR_INVALID_REPARSE_DATA; ok = FALSE; break; }
+      ok = fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY ? ag_remove_copied_tree(from, to, cancel, problem, err, depth + 1) : ag_remove_copied_file(from, to, err);
+    } while (ok && FindNextFileW(h, &fd));
+    if (ok && GetLastError() != ERROR_NO_MORE_FILES) { *err = GetLastError(); ok = FALSE; }
+    FindClose(h); if (!ok) return FALSE;
+  }
+  lstrcpynW(problem, src, MAX_PATH);
+  if (!RemoveDirectoryW(src)) { *err = GetLastError(); return FALSE; }
+  return TRUE;
+}
+static BOOL ag_same_volume(const wchar_t *a, const wchar_t *b) {
+  wchar_t va[MAX_PATH], vb[MAX_PATH];
+  if (!GetVolumePathNameW(a, va, MAX_PATH) || !GetVolumePathNameW(b, vb, MAX_PATH)) return towlower(a[0]) == towlower(b[0]) && a[1] == L':' && b[1] == L':';
+  return !_wcsicmp(va, vb);
+}
+/* forceCross exercises the copy-and-delete path on one disk. Production passes FALSE. */
+static BOOL ag_move_directory(const wchar_t *src, const wchar_t *dst, BOOL forceCross, volatile LONG *cancel, wchar_t *out, int cap) {
+  if (!forceCross && ag_same_volume(src, dst)) {
+    if (MoveFileExW(src, dst, MOVEFILE_WRITE_THROUGH)) return TRUE;
+    DWORD e = GetLastError();
+    if (e != ERROR_NOT_SAME_DEVICE) { swprintf(out, cap, L"Перенос каталога не выполнен, файлы на прежних местах. Ошибка Windows %lu: %ls → %ls.", e, src, dst); return FALSE; }
+  }
+  wchar_t problem[MAX_PATH] = L""; DWORD err = 0;
+  if (!ag_copy_tree(src, dst, cancel, problem, &err, 0)) {
+    if (err == ERROR_ALREADY_EXISTS) { swprintf(out, cap, L"Назначение уже существует: %ls. Перезапись запрещена. Эта папка и источник %ls не изменены. Ошибка Windows %lu.", dst, src, err); return FALSE; }
+    DWORD left = GetFileAttributesW(dst);
+    if (left == INVALID_FILE_ATTRIBUTES) swprintf(out, cap, L"Перенос между дисками не выполнен. Остановка на %ls, ошибка Windows %lu. Частичная копия удалена, источник %ls не изменён.", problem[0] ? problem : dst, err, src);
+    else swprintf(out, cap, L"Перенос между дисками остановился. Ошибка Windows %lu на %ls. Частичная копия осталась в %ls. Источник %ls не удалён.", err, problem[0] ? problem : dst, dst, src);
+    return FALSE;
+  }
+  if (!ag_remove_copied_tree(src, dst, cancel, problem, &err, 0)) { swprintf(out, cap, L"Копия создана в %ls, но перенос исходного %ls не завершён. Новый, изменённый или заблокированный файл сохраняется в источнике; часть уже проверенных файлов могла быть перенесена. Ошибка Windows %lu на %ls. Сверьте обе папки, повторно старый план не применяйте.", dst, src, err, problem); return FALSE; }
+  return TRUE;
+}
+static BOOL ag_profile_root(const AgFs *fs, const wchar_t *path) {
+  return wcslen(path) <= 3 || ag_under(fs->desktop, path) || ag_under(fs->downloads, path) || ag_under(fs->documents, path) || ag_under(fs->protectedDir, path);
+}
+static int ag_stage_dir_move(AgFs *fs, const wchar_t *src, const wchar_t *dstRaw, wchar_t *out, int cap) {
+  DWORD attrs = GetFileAttributesW(src);
+  if (attrs == INVALID_FILE_ATTRIBUTES) {
+    DWORD e = GetLastError();
+    if (e == ERROR_FILE_NOT_FOUND || e == ERROR_PATH_NOT_FOUND)
+      swprintf(out, cap, L"Исходный каталог не существует: %ls. Код проверил диск, ошибка Windows %lu. Не спрашивай пользователя, есть ли папка. Если в задаче другой путь — исправь src. План не изменён.", src, e);
+    else swprintf(out, cap, L"Исходный каталог недоступен: %ls. Код проверил диск, ошибка Windows %lu. Это не вопрос пользователю. План не изменён.", src, e);
+    return -1;
+  }
+  if (!(attrs & FILE_ATTRIBUTE_DIRECTORY)) { swprintf(out, cap, L"move с пустой маской переносит каталог целиком, а это файл: %ls. Для файлов укажи pattern, например *.txt. План не изменён.", src); return -1; }
+  if (ag_profile_root(fs, src)) { swprintf(out, cap, L"Нельзя переносить целиком корень диска, рабочий стол, Загрузки или Документы: %ls. Укажи конкретный каталог. План не изменён.", src); return -1; }
+  if (!dstRaw[0]) { lstrcpynW(out, L"move каталога отклонён: не указан dst. dst — существующая или уже запланированная родительская папка, не новое имя каталога. План не изменён.", cap); return -1; }
+  wchar_t parent[MAX_PATH];
+  if (!ag_path(fs, dstRaw, parent)) { ag_explain_path(fs, dstRaw, out, cap); return -1; }
+  if (!ag_fresh_destination(fs, parent, out, cap)) return -1;
+  if (!ag_planned_dir(fs, parent)) { swprintf(out, cap, L"Папка назначения не существует и не запланирована: %ls. Сначала new_folder или mkdir этого родителя. Не спрашивай пользователя. План не изменён.", parent); return -1; }
+  if (ag_same_path(parent, src) || ag_under(parent, src)) { swprintf(out, cap, L"Нельзя перенести каталог внутрь самого себя: %ls → %ls. План не изменён.", src, parent); return -1; }
+  const wchar_t *base = wcsrchr(src, L'\\');
+  if (!base || !ag_name(base + 1)) { swprintf(out, cap, L"Имя каталога недопустимо для переноса: %ls. План не изменён.", src); return -1; }
+  if (wcslen(parent) + wcslen(base + 1) + 16 >= MAX_PATH) { lstrcpynW(out, L"Путь назначения слишком длинный. План не изменён.", cap); return -1; }
+  wchar_t final[MAX_PATH]; swprintf(final, MAX_PATH, L"%ls\\%ls", parent, base + 1);
+  if (ag_same_path(final, src)) { swprintf(out, cap, L"Каталог уже лежит в папке назначения: %ls. Перенос не нужен, перезапись не делается. План не изменён.", src); return -1; }
+  if (ag_under(final, src)) { swprintf(out, cap, L"Нельзя перенести каталог внутрь самого себя: %ls → %ls. План не изменён.", src, final); return -1; }
+  BOOL renamed = FALSE;
+  for (int n = 2; ag_used(fs, final); n++) {
+    if (n > 10000) { lstrcpynW(out, L"Не нашлось свободного имени без перезаписи. План не изменён.", cap); return -1; }
+    swprintf(final, MAX_PATH, L"%ls\\%ls (%d)", parent, base + 1, n); renamed = TRUE;
+  }
+  wchar_t stamp[200], err[800];
+  if (!ag_dir_stamp(src, fs->cancel, stamp, 200, err, 800)) { lstrcpynW(out, err, cap); return -1; }
+  if (!ag_add(fs, AG_MOVE_DIR, src, final)) { lstrcpynW(out, L"Не удалось добавить перенос каталога в план. План не изменён.", cap); return -1; }
+  lstrcpynW(fs->plan[fs->count - 1].text, stamp, 2000);
+  swprintf(out, cap, L"В план добавлен перенос каталога целиком: %ls → %ls. Пустые папки и вложенные файлы едут вместе с каталогом.%ls Диск не изменён, ждёт Применить.", src, final, renamed ? L" Имя занято, перезапись запрещена, выбрано свободное имя с (2). Существующая папка не изменится." : L"");
+  return 0;
+}
+
 /* Returns 0 observation, 1 done, 2 clarification, -1 rejected. On rejection
    roll back this tool's staged changes, never leave a partial bulk transfer. */
 static int ag_tool(AgFs *fs, const wchar_t *json, wchar_t *out, int cap) {
@@ -432,7 +752,7 @@ static int ag_tool(AgFs *fs, const wchar_t *json, wchar_t *out, int cap) {
   if (!ag_json(json, &j)) return -1;
   const wchar_t *tool = ag_get(&j, L"tool");
   if (!wcscmp(tool, L"done")) {
-    if (ag_needs_fresh_folder(fs->goal) && !fs->newDir[0]) { lstrcpynW(out, L"План неполон: нужна новая папка. Вызови new_folder, затем используй @new. Нельзя подменять её существующей папкой.", cap); return -1; }
+    if (ag_needs_fresh_folder(fs->goal) && !fs->newDir[0]) { ag_fresh_destination(fs, L"", out, cap); return -1; }
     if (!ag_check_inventory_transfers(fs, out, cap)) return -1;
     if (ag_needs_inventory(fs->goal)) {
       BOOL found = FALSE;
@@ -463,20 +783,29 @@ static int ag_tool(AgFs *fs, const wchar_t *json, wchar_t *out, int cap) {
   }
   if (!wcscmp(tool, L"ask")) {
     if (!ag_get(&j, L"text")[0]) return -1;
+    /* The native host already knows the source and complete Excel mask for
+       this request. Return missing actions rather than ask the user for facts
+       that this existing completeness check can read from disk. */
+    if (fs->count && !ag_check_inventory_transfers(fs, out, cap)) return -1;
     lstrcpynW(out, ag_get(&j, L"text"), cap); return 2;
   }
   wchar_t path[MAX_PATH], dst[MAX_PATH];
   const wchar_t *in = ag_get(&j, L"path");
   if (!in[0]) in = ag_get(&j, L"src");
-  if (!ag_path(fs, in, path)) {
-    lstrcpynW(out, L"Ошибка пути: укажи @desktop, @downloads, @documents, @last или полный путь пользователя. Системные папки, данные CursorPad и ссылки недоступны.", cap);
-    return -1;
-  }
+  BOOL parentAlias = !wcscmp(tool, L"new_folder") && !wcscmp(in, L"@parent");
+  if (parentAlias) {
+    AgParentStatus status = ag_named_parent(fs, path);
+    if (status != AG_PARENT_FOUND) { swprintf(out, cap, L"Родитель @parent не найден: %ls. Код проверил указанный путь. Если родитель не назван в просьбе, передай полный путь или @desktop. План не изменён.", path); return -1; }
+  } else if (!ag_path(fs, in, path)) { ag_explain_path(fs, in, out, cap); return -1; }
   int saved = fs->count;
   if (!wcscmp(tool, L"new_folder")) {
+    wchar_t required[MAX_PATH];
+    AgParentStatus named = ag_named_parent(fs, required);
+    if (named == AG_PARENT_MISSING) { swprintf(out, cap, L"Указанная родительская папка не существует или недоступна: %ls. Код проверил диск. Не спрашивай пользователя и не подменяй её @desktop. План не изменён.", required); return -1; }
+    if (named == AG_PARENT_FOUND && !ag_same_path(path, required)) { ag_fresh_destination(fs, L"", out, cap); return -1; }
     if (!ag_planned_dir(fs, path)) { lstrcpynW(out, L"new_folder: path — СУЩЕСТВУЮЩАЯ родительская папка, не путь создаваемой папки. Например path=@desktop name=Результат. Для точного полного пути используй mkdir path=полный_путь. Действия не добавлены.", cap); return -1; }
     wchar_t goal[4000]; lstrcpynW(goal, fs->goal, 4000); CharLowerBuffW(goal, (DWORD)wcslen(goal));
-    if (ag_needs_fresh_folder(fs->goal) && wcsstr(goal, L"рабоч") && _wcsicmp(path, fs->desktop)) { lstrcpynW(out, L"Новая папка нужна НА РАБОЧЕМ СТОЛЕ. Вызови new_folder path=@desktop, не @last и не внутри Модели.", cap); return -1; }
+    if (named == AG_PARENT_NONE && ag_needs_fresh_folder(fs->goal) && wcsstr(goal, L"рабоч") && _wcsicmp(path, fs->desktop)) { lstrcpynW(out, L"Новая папка нужна НА РАБОЧЕМ СТОЛЕ. Вызови new_folder path=@desktop, не @last и не внутри Модели.", cap); return -1; }
     const wchar_t *name = ag_get(&j, L"name"); if (!name[0] || ag_needs_fresh_folder(fs->goal)) name = L"Новая папка";
     if (!ag_name(name) || wcslen(path) + wcslen(name) + 18 >= MAX_PATH) goto fail;
     wchar_t base[MAX_PATH]; swprintf(base, MAX_PATH, L"%ls\\%ls", path, name);
@@ -586,7 +915,12 @@ static int ag_tool(AgFs *fs, const wchar_t *json, wchar_t *out, int cap) {
     lstrcpynW(out, L"Открытие папки в проводнике добавлено в план.", cap); return 0;
   }
   if (!wcscmp(tool, L"list")) {
-    if (!ag_dir(path)) goto fail;
+    if (!ag_dir(path)) {
+      DWORD a = GetFileAttributesW(path), e = GetLastError();
+      if (a == INVALID_FILE_ATTRIBUTES) swprintf(out, cap, L"Папка не существует или недоступна: %ls. Ошибка Windows %lu. Это проверка диска, не вопрос пользователю. План не изменён.", path, e);
+      else swprintf(out, cap, L"Это не папка: %ls. План не изменён.", path);
+      return -1;
+    }
     wchar_t mask[MAX_PATH];
     if (wcslen(path) + 3 >= MAX_PATH) goto fail;
     swprintf(mask, MAX_PATH, L"%ls\\*", path);
@@ -632,9 +966,12 @@ static int ag_tool(AgFs *fs, const wchar_t *json, wchar_t *out, int cap) {
   if (!wcscmp(tool, L"find") || !wcscmp(tool, L"copy") || !wcscmp(tool, L"move")) {
     BOOL find = !wcscmp(tool, L"find");
     const wchar_t *pattern = ag_get(&j, L"pattern");
-    if (!pattern[0] || wcspbrk(pattern, L"\\/:\"<>|" )) goto fail;
+    if (!wcscmp(tool, L"move") && !pattern[0]) return ag_stage_dir_move(fs, path, ag_get(&j, L"dst"), out, cap);
+    if (!pattern[0]) { swprintf(out, cap, L"%ls отклонён: маска pattern пуста. Для файлов нужна маска, например *.pdf или @excel. Это не проверка существования. Перенос каталога целиком — move с пустым pattern, src=каталог, dst=родитель. План не изменён.", tool); return -1; }
+    if (wcspbrk(pattern, L"\\/:\"<>|")) { swprintf(out, cap, L"Маска pattern содержит недопустимый символ: %ls. Маска — это имя, не путь. План не изменён.", pattern); return -1; }
     if (!ag_dir(path)) {
-      swprintf(out, cap, L"Исходная папка не существует: %ls. Проверь src по тексту задачи, не подставляй другой источник из примера. Исправь свой путь или ask, если пользователь его не указал.", path); return -1;
+      DWORD e = GetLastError();
+      swprintf(out, cap, L"Исходная папка не существует или недоступна: %ls. Код проверил диск, ошибка Windows %lu. Не спрашивай пользователя. Исправь src по тексту задачи. План не изменён.", path, e); return -1;
     }
     if (!find && (!ag_path(fs, ag_get(&j, L"dst"), dst) || !_wcsicmp(path, dst))) goto fail;
     if (!find && !ag_fresh_destination(fs, dst, out, cap)) return -1;
@@ -675,7 +1012,12 @@ static int ag_tool(AgFs *fs, const wchar_t *json, wchar_t *out, int cap) {
   if (!wcscmp(tool, L"rename")) {
     const wchar_t *name = ag_get(&j, L"name");
     WIN32_FILE_ATTRIBUTE_DATA info;
-    if (!ag_name(name) || !GetFileAttributesExW(path, GetFileExInfoStandard, &info) || (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) goto fail;
+    if (!ag_name(name) || !GetFileAttributesExW(path, GetFileExInfoStandard, &info) || (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+      DWORD a = GetFileAttributesW(path);
+      if (a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY)) swprintf(out, cap, L"rename меняет имя файла в той же папке, а это каталог: %ls. Для переноса каталога целиком вызови move с пустым pattern и dst=родитель. План не изменён.", path);
+      else swprintf(out, cap, L"Переименование отклонено: нет файла %ls или новое имя недопустимо. Код проверил диск. Не спрашивай пользователя. План не изменён.", path);
+      return -1;
+    }
     lstrcpynW(dst, path, MAX_PATH); wchar_t *p = wcsrchr(dst, L'\\');
     if (!p || (size_t)(p - dst) + wcslen(name) + 2 >= MAX_PATH) goto fail;
     wcscpy(p + 1, name);
@@ -686,24 +1028,39 @@ static int ag_tool(AgFs *fs, const wchar_t *json, wchar_t *out, int cap) {
   }
 fail:
   fs->count = saved;
-  lstrcpynW(out, L"Ошибка инструмента: проверь существование и доступ к папке/файлу, маску, новое имя и зависимости плана. Не повторяй тот же вызов. При неясности задай ask.", cap);
+  lstrcpynW(out, L"Действие отклонено, этот вызов убран из плана. Не повторяй его с теми же полями. Не спрашивай пользователя, существует ли путь: вызови list с этим путём или исправь src, dst, pattern и name по тексту задачи. ask — только когда пути в задаче нет.", cap);
   return -1;
 }
 
 /* Revalidate every path and source before touching disk. No replacement flags.
    Stop at first OS error and report completed operations accurately. */
-static BOOL ag_preflight(AgFs *fs) {
+static BOOL ag_preflight(AgFs *fs, wchar_t *why, int whyCap) {
+  why[0] = 0;
   for (int i = 0; i < fs->count; i++) {
     AgAction *a = &fs->plan[i]; wchar_t p[MAX_PATH];
-    if (!ag_path(fs, a->dst, p) || _wcsicmp(p, a->dst)) return FALSE;
-    if (a->kind == AG_OPEN && !ag_planned_dir(fs, a->dst)) return FALSE;
-    if (a->kind == AG_INVENTORY && (!ag_path(fs, a->text, p) || !ag_planned_dir(fs, p))) return FALSE;
-    if (a->kind != AG_OPEN && GetFileAttributesW(a->dst) != INVALID_FILE_ATTRIBUTES) return FALSE;
+    if (!ag_path(fs, a->dst, p) || _wcsicmp(p, a->dst)) { lstrcpynW(why, L"Файлы или пути изменились после предпросмотра. Ничего не выполнено; запросите новый план.", whyCap); return FALSE; }
+    if (a->kind == AG_OPEN && !ag_planned_dir(fs, a->dst)) { lstrcpynW(why, L"Папка для открытия больше не запланирована. Ничего не выполнено.", whyCap); return FALSE; }
+    if (a->kind == AG_INVENTORY && (!ag_path(fs, a->text, p) || !ag_planned_dir(fs, p))) { lstrcpynW(why, L"Папка перечня изменилась после предпросмотра. Ничего не выполнено.", whyCap); return FALSE; }
+    if (a->kind != AG_OPEN && GetFileAttributesW(a->dst) != INVALID_FILE_ATTRIBUTES) { swprintf(why, whyCap, L"Назначение уже появилось после предпросмотра: %ls. Перезапись запрещена. Ничего не выполнено.", a->dst); return FALSE; }
     if (a->src[0]) {
       WIN32_FILE_ATTRIBUTE_DATA now;
       if (!ag_path(fs, a->src, p) || !GetFileAttributesExW(p, GetFileExInfoStandard, &now) ||
           now.nFileSizeHigh != a->before.nFileSizeHigh || now.nFileSizeLow != a->before.nFileSizeLow ||
-          CompareFileTime(&now.ftLastWriteTime, &a->before.ftLastWriteTime) || now.dwFileAttributes != a->before.dwFileAttributes) return FALSE;
+          CompareFileTime(&now.ftLastWriteTime, &a->before.ftLastWriteTime) || now.dwFileAttributes != a->before.dwFileAttributes) {
+        swprintf(why, whyCap, L"Источник изменился после предпросмотра: %ls. Ничего не выполнено; запросите новый план.", a->src); return FALSE;
+      }
+    }
+    if (a->kind == AG_MOVE_DIR) {
+      for (int k = 0; k < fs->count; k++) if (k != i) {
+        const AgAction *other = &fs->plan[k];
+        if ((other->src[0] && (ag_under(other->src, a->src) || ag_under(a->src, other->src))) ||
+            ag_under(other->dst, a->src) || ag_under(other->dst, a->dst)) {
+          swprintf(why, whyCap, L"План содержит пересекающиеся операции с переносимым каталогом %ls. Разделите их на отдельные задачи. Ничего не выполнено.", a->src); return FALSE;
+        }
+      }
+      wchar_t stamp[200], detail[800];
+      if (!ag_dir_stamp(a->src, fs->cancel, stamp, 200, detail, 800)) { lstrcpynW(why, detail, whyCap); return FALSE; }
+      if (wcscmp(stamp, a->text)) { swprintf(why, whyCap, L"Источник изменился после предпросмотра: %ls. Ничего не выполнено; запросите новый план.", a->src); return FALSE; }
     }
   }
   return TRUE;
@@ -711,8 +1068,9 @@ static BOOL ag_preflight(AgFs *fs) {
 static BOOL ag_apply(AgFs *fs, wchar_t *out, int cap) {
   if (!ag_check_inventory_transfers(fs, out, cap)) return FALSE;
   if (!ag_order_inventories(fs)) { lstrcpynW(out, L"Не хватило памяти для порядка отчётов. Ничего не выполнено.", cap); return FALSE; }
-  if (!ag_preflight(fs)) { lstrcpynW(out, L"Файлы или пути изменились после предпросмотра. Ничего не выполнено; запросите новый план.", cap); return FALSE; }
-  int files = 0, dirs = 0, created = 0, reports = 0, listed = 0;
+  wchar_t why[800];
+  if (!ag_preflight(fs, why, 800)) { lstrcpynW(out, why[0] ? why : L"Файлы или пути изменились после предпросмотра. Ничего не выполнено; запросите новый план.", cap); return FALSE; }
+  int files = 0, dirs = 0, created = 0, reports = 0, listed = 0, movedDirs = 0;
   for (int i = 0; i < fs->count; i++) {
     AgAction *a = &fs->plan[i]; BOOL ok;
     if (fs->cancel && InterlockedCompareExchange(fs->cancel, 0, 0)) {
@@ -731,6 +1089,13 @@ static BOOL ag_apply(AgFs *fs, wchar_t *out, int cap) {
       if (!ok) { swprintf(out, cap, L"Остановлено после %d из %d действий. %ls Выполненные действия сохранены.", i, fs->count, detail); return FALSE; }
     }
     else if (a->kind == AG_COPY) ok = CopyFileExW(a->src, a->dst, NULL, NULL, (BOOL *)fs->cancel, COPY_FILE_FAIL_IF_EXISTS);
+    else if (a->kind == AG_MOVE_DIR) {
+      wchar_t detail[1500];
+      if (!ag_move_directory(a->src, a->dst, FALSE, fs->cancel, detail, 1500)) {
+        swprintf(out, cap, L"Остановлено. Выполнено действий: %d из %d. %ls Выполненные действия сохранены.", i, fs->count, detail); return FALSE;
+      }
+      ok = TRUE; movedDirs++;
+    }
     else if (a->kind == AG_OPEN) {
       wchar_t exe[MAX_PATH], params[MAX_PATH + 4];
       GetWindowsDirectoryW(exe, MAX_PATH); wcscat(exe, L"\\explorer.exe");
@@ -742,7 +1107,7 @@ static BOOL ag_apply(AgFs *fs, wchar_t *out, int cap) {
       swprintf(out, cap, L"Остановлено. Выполнено действий: %d из %d. Ошибка Windows %lu: %ls. Выполненные действия сохранены.", i, fs->count, GetLastError(), a->dst);
       return FALSE;
     }
-    if (a->kind == AG_DIR) dirs++; else if (a->kind != AG_OPEN) files++;
+    if (a->kind == AG_DIR) dirs++; else if (a->kind != AG_OPEN && a->kind != AG_MOVE_DIR) files++;
     if (a->kind == AG_DOCX || a->kind == AG_PLAIN || a->kind == AG_XLSX || a->kind == AG_EXCEL || a->kind == AG_INVENTORY) created++;
   }
   if (fs->count) {
@@ -754,6 +1119,7 @@ static BOOL ag_apply(AgFs *fs, wchar_t *out, int cap) {
     }
   }
   swprintf(out, cap, L"Готово. Обработано файлов: %d, из них создано новых: %d. Создано папок: %d.", files, created, dirs);
+  if (movedDirs) swprintf(out + wcslen(out), cap - wcslen(out), L" Перенесено каталогов целиком: %d.", movedDirs);
   if (reports) swprintf(out + wcslen(out), cap - wcslen(out), L" Excel-перечней заполнено: %d. Элементов в них: %d (без самих книг).", reports, listed);
   return TRUE;
 }

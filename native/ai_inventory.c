@@ -37,7 +37,7 @@ static BOOL ag_inv_entries(AgFs *fs, const wchar_t *folder, const wchar_t *repor
   }
   for (int i = 0; future && ok && i < fs->count; i++) {
     const AgAction *a = &fs->plan[i];
-    if ((a->kind == AG_MOVE || a->kind == AG_RENAME) && ag_direct_child(a->src, folder)) {
+    if ((a->kind == AG_MOVE || a->kind == AG_RENAME || a->kind == AG_MOVE_DIR) && ag_direct_child(a->src, folder)) {
       const wchar_t *name = wcsrchr(a->src, L'\\') + 1;
       for (int k = 0; k < *count; k++) if (!_wcsicmp(items[k].name, name)) { memmove(items + k, items + k + 1, (size_t)(--*count - k) * sizeof(*items)); break; }
     }
@@ -47,7 +47,7 @@ static BOOL ag_inv_entries(AgFs *fs, const wchar_t *folder, const wchar_t *repor
     if (exists) continue;
     if (*count >= AG_INV_MAX) { ok = FALSE; SetLastError(ERROR_MORE_DATA); break; }
     AgInvEntry *e = &items[(*count)++]; lstrcpynW(e->name, name, MAX_PATH); e->info = a->before;
-    if (a->kind == AG_DIR) e->info.dwFileAttributes = FILE_ATTRIBUTE_DIRECTORY;
+    if (a->kind == AG_DIR || a->kind == AG_MOVE_DIR) e->info.dwFileAttributes |= FILE_ATTRIBUTE_DIRECTORY;
     e->planned = TRUE;
   }
   if (!ok) { free(items); return FALSE; }

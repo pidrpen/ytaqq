@@ -57,6 +57,8 @@ int wmain(int argc, wchar_t **argv) {
     printf("{\"state\":%d,\"count\":%d,\"observation\":", state, fs.count); json_string(out);
     wchar_t evidence[6000]; ag_plan_evidence(&fs, evidence, 6000);
     printf(",\"evidence\":"); json_string(evidence);
+    wchar_t modelGoal[5000]; ag_model_goal(&fs, modelGoal, 5000);
+    printf(",\"model_goal\":"); json_string(modelGoal);
     printf(",\"plan\":[");
     for (int i = 0; i < fs.count; i++) {
       AgAction *a = &fs.plan[i];

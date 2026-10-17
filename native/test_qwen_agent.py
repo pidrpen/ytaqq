@@ -36,13 +36,21 @@ def main():
         ('mixed', 'В папке Результат на рабочем столе создай Word с текстом Привет и пустую книгу Excel, а все файлы .pdf с рабочего стола скопируй туда.',
          {'a.pdf': b'pdf-one', 'b.PDF': b'pdf-two', 'keep.pdf.txt': b'keep'}),
         ('unsupported', 'Удали все файлы на рабочем столе.', {'keep.txt': b'do not delete'}),
+        ('dir-parent', 'создай в {desktop}\\Вайбкокинг папку и перенеси туда папку по пути "{desktop}\\вайбокок2"',
+         {'Вайбкокинг/keep.txt': b'keep', 'вайбокок2/влож/данные.txt': b'nested data'}),
+        ('dir-after', 'Создай папку в "{desktop}\\Вайбкокинг" и перенеси туда папку "{desktop}\\вайбокок2".',
+         {'Вайбкокинг/keep.txt': b'keep', 'вайбокок2/влож/данные.txt': b'nested data'}),
+        ('dir-direct', 'Перенеси папку "{desktop}\\вайбокок2" в "{desktop}\\Вайбкокинг".',
+         {'Вайбкокинг/keep.txt': b'keep', 'вайбокок2/влож/данные.txt': b'nested data'}),
     ]
     report = []
     for label, goal, fixtures in cases:
         if a.case and label not in a.case: continue
         root = (a.scratch / label).resolve(); root.mkdir()
+        goal = goal.replace('{desktop}', str(root))
         for name, data in fixtures.items():
             path = root / name; path.parent.mkdir(parents=True, exist_ok=True); path.write_bytes(data)
+        if label.startswith('dir-'): (root/'вайбокок2/пустая').mkdir()
         process = subprocess.Popen([probe, str(root)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                    text=True, encoding='utf-8')
         def tool(action):
@@ -60,11 +68,11 @@ def main():
                 prompt = (f'Задача пользователя: {goal}\nПапки: @desktop={root}; @downloads={root / "Downloads"}; '
                           f'@documents={root / "Documents"}; @last={root}; @new={new_dir}.\n'
                           f'Шаг {step+1} из 16. Действий в плане: {len(plan)}.\n')
-                kinds = ['mkdir', 'copy', 'move', 'rename', 'open', 'write', 'write', 'write', 'excel_write', 'inventory']
+                kinds = ['mkdir', 'copy', 'move', 'rename', 'open', 'write', 'write', 'write', 'excel_write', 'inventory', 'move каталог']
                 for action in plan[:8]:
                     prompt += f'В плане: {kinds[action["kind"]]} {action["src"]} -> {action["dst"]}\n'
                 prompt += notes[-10000:]
-                request = {'cursorpad': {'goal': goal, 'plan': result['evidence'],
+                request = {'cursorpad': {'goal': result['model_goal'], 'plan': result['evidence'],
                     'observation': result['observation'], 'observation_state': result['state']}, 'model': 'local', **schema,
                            'messages': [{'role': 'system', 'content': system}, {'role': 'user', 'content': prompt}],
                            'temperature': 0.2, 'max_tokens': 512, 'stream': True}
@@ -119,6 +127,14 @@ def main():
                     dest = root/'Результат'
                     assert len(list(dest.glob('*.docx'))) == len(list(dest.glob('*.xlsx'))) == 1
                     for name in ('a.pdf', 'b.PDF'): assert (dest/name).read_bytes() == (root/name).read_bytes()
+                elif label.startswith('dir-'):
+                    assert len([x for x in plan if x['kind'] == 10]) == 1
+                    dest = root/'Вайбкокинг'
+                    if label != 'dir-direct': dest /= 'Новая папка'
+                    dest /= 'вайбокок2'
+                    assert (dest/'влож/данные.txt').read_bytes() == b'nested data'
+                    assert (dest/'пустая').is_dir() and not (root/'вайбокок2').exists()
+                    assert (root/'Вайбкокинг/keep.txt').read_bytes() == b'keep'
             report.append({'case': label, 'pass': True, 'seconds': round(time.monotonic()-started, 2),
                            'requirements': state['requirements'], 'skills': state['skills'], 'steps': log})
         except Exception as error:
