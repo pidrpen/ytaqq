@@ -474,8 +474,49 @@ static BOOL ag_check_inventory_transfers(AgFs *fs, wchar_t *out, int cap) {
   if (missing) { swprintf(out, cap, L"План НЕПОЛОН: пользователь просил %ls Excel-файлы, а не только создать перечень. Источник %ls: всего %d, не запланировано %d. Следующий инструмент %ls src=%ls dst=%ls pattern=@excel recursive=no. После этого done; inventory уже будет пересчитан автоматически.", copy ? L"скопировать" : L"переместить", source, total, missing, copy ? L"copy" : L"move", source, fs->newDir[0] ? L"@new" : target); return FALSE; }
   return TRUE;
 }
+/* Recognise an explicitly named input after «из», including doubled quotes.
+   Input paths must not become requested output types just because a creation
+   verb occurred earlier in the sentence. The model still resolves other forms. */
+static BOOL ag_input_excel(const wchar_t *raw, wchar_t *out) {
+  wchar_t lower[4000]; lstrcpynW(lower, raw, 4000); CharLowerBuffW(lower, (DWORD)wcslen(lower));
+  out[0] = 0;
+  for (const wchar_t *p = lower; *p; p++) {
+    if (wcsncmp(p, L"из ", 3) || (p > lower && iswalnum(p[-1]))) continue;
+    const wchar_t *start = p + 3;
+    while (*start == L' ' || *start == L'"' || *start == L'«') start++;
+    if (!iswalpha(start[0]) || start[1] != L':' || start[2] != L'\\') continue;
+    const wchar_t *end = start;
+    while (*end && *end != L'"' && *end != L'»' && *end != L'\r' && *end != L'\n') {
+      if (!_wcsnicmp(end, L".xlsx", 5) && (!end[5] || wcschr(L" \"»\r\n,;", end[5]))) {
+        size_t n = (size_t)(end + 5 - start);
+        if (n >= MAX_PATH || out[0]) { out[0] = 0; return FALSE; }
+        lstrcpynW(out, raw + (start - lower), (int)n + 1); break;
+      }
+      end++;
+    }
+  }
+  return out[0] != 0;
+}
+static void ag_mask_paths(wchar_t *goal) {
+  for (wchar_t *p = goal; *p; p++) {
+    if (!iswalpha(p[0]) || p[1] != L':' || p[2] != L'\\') continue;
+    BOOL quoted = p > goal && (p[-1] == L'"' || p[-1] == L'«');
+    wchar_t *end = p;
+    while (*end && *end != L'"' && *end != L'»' && *end != L'\r' && *end != L'\n' && (quoted || !iswspace(*end))) end++;
+    while (p < end) *p++ = L' ';
+    if (!*p) break;
+  }
+}
 static BOOL ag_needs_document(const wchar_t *raw, BOOL excel) {
   wchar_t goal[4000]; lstrcpynW(goal, raw, 4000); CharLowerBuffW(goal, (DWORD)wcslen(goal));
+  wchar_t source[MAX_PATH];
+  if (ag_input_excel(goal, source)) {
+    wchar_t *at = wcsstr(goal, source);
+    if (at) for (size_t i = 0; i < wcslen(source); i++) at[i] = L' ';
+  }
+  /* Folder names such as Excel-to-Word are not creation instructions either.
+     Explicit file names alone remain the model/coverage check's responsibility. */
+  ag_mask_paths(goal);
   const wchar_t *word = wcsstr(goal, excel ? L"ексел" : L"ворд");
   if (!word) word = wcsstr(goal, excel ? L"эксел" : L"word");
   if (!word) word = wcsstr(goal, excel ? L"excel" : L"docx");
@@ -489,6 +530,14 @@ static BOOL ag_needs_document(const wchar_t *raw, BOOL excel) {
   return create;
 }
 static BOOL ag_needs_word(const wchar_t *raw) { return ag_needs_document(raw, FALSE); }
+static BOOL ag_word_import(const wchar_t *goal, wchar_t *source) {
+  /* A conservative completeness guard for direct data transfer, not an
+     instruction to replace a requested analysis/summary with a raw export. */
+  wchar_t lower[4000]; lstrcpynW(lower, goal, 4000); CharLowerBuffW(lower, (DWORD)wcslen(lower));
+  ag_mask_paths(lower);
+  if (wcsstr(lower, L"анализ") || wcsstr(lower, L"вывод") || wcsstr(lower, L"кратк") || wcsstr(lower, L"сводк")) return FALSE;
+  return (wcsstr(lower, L"данн") || wcsstr(lower, L"содержим") || wcsstr(lower, L"таблиц")) && ag_needs_word(goal) && ag_input_excel(goal, source);
+}
 /* A leading directory is a destination, e.g. C:\\Работа создай ексель.
    Preserve spaces in paths; stop at the following creation verb or closing quote.
    Other sentence structures remain the model's responsibility. */
@@ -771,6 +820,18 @@ static int ag_tool(AgFs *fs, const wchar_t *json, wchar_t *out, int cap) {
   if (!ag_json(json, &j)) return -1;
   const wchar_t *tool = ag_get(&j, L"tool");
   if (!wcscmp(tool, L"done")) {
+    wchar_t source[MAX_PATH];
+    if (ag_word_import(fs->goal, source)) {
+      BOOL imported = FALSE;
+      for (int i = 0; i < fs->count; i++) {
+        const AgAction *a = &fs->plan[i];
+        if (a->kind == AG_DOCX && ag_same_path(a->src, source) && a->text[0]) imported = TRUE;
+        if (!ag_needs_document(fs->goal, TRUE) && (a->kind == AG_EXCEL || a->kind == AG_XLSX)) {
+          lstrcpynW(out, L"В плане лишний Excel: он указан как источник, а результат нужен в Word. Отмените этот план и составьте новый; такой план применять нельзя.", cap); return -1;
+        }
+      }
+      if (!imported) { swprintf(out, cap, L"План неполон: нужен заполненный Word из исходного Excel. Вызови write path=путь.docx src=%ls. Код сам полностью прочитает значения и заполнит документ. Пустой Word и второй Excel не подходят.", source); return -1; }
+    }
     if (ag_format_mode(fs->goal)) {
       BOOL formatted = FALSE;
       for (int i = 0; i < fs->count; i++) if (fs->plan[i].kind == AG_WORD_FORMAT) formatted = TRUE;
@@ -904,6 +965,10 @@ static int ag_tool(AgFs *fs, const wchar_t *json, wchar_t *out, int cap) {
     return of_read(path, ag_get(&j, L"sheet"), (int)offset, col - 1, out, cap) ? 0 : -1;
   }
   if (!wcscmp(tool, L"excel_write")) {
+    wchar_t input[MAX_PATH];
+    if (of_docx(path) || (ag_word_import(fs->goal, input) && !ag_needs_document(fs->goal, TRUE))) {
+      lstrcpynW(out, L"Нужен Word, а excel_write создаёт Excel. Не меняй расширение результата на .xlsx. Используй write path=путь.docx src=исходный.xlsx: программа сама перенесёт значения. План не изменён.", cap); return -1;
+    }
     if (!ag_fresh_destination(fs, path, out, cap)) return -1;
     const wchar_t *name = wcsrchr(path, L'\\'); wchar_t parent[MAX_PATH], source[MAX_PATH] = L"";
     BOOL formulas = !wcscmp(ag_get(&j, L"mode"), L"formulas");
@@ -950,6 +1015,18 @@ static int ag_tool(AgFs *fs, const wchar_t *json, wchar_t *out, int cap) {
     if (!name || !ext || !ag_name(name + 1)) goto fail;
     BOOL docx = !_wcsicmp(ext, L".docx");
     BOOL xlsx = !_wcsicmp(ext, L".xlsx");
+    wchar_t expected[MAX_PATH] = L"", source[MAX_PATH] = L"", hash[65] = L"";
+    BOOL importing = ag_word_import(fs->goal, expected);
+    if (importing && xlsx && !ag_needs_document(fs->goal, TRUE)) {
+      lstrcpynW(out, L"Excel — источник данных, создавать второй Excel не просили. Нужен write path=путь.docx src=исходный.xlsx.", cap); return -1;
+    }
+    if (docx && importing && !ag_get(&j, L"src")[0]) {
+      swprintf(out, cap, L"Нужен Word с данными исходника, не пустой документ и не пересказ. Вызови write с тем же path и src=%ls; text не требуется, программа сама прочитает и перенесёт все значения в пределах лимита.", expected); return -1;
+    }
+    if (ag_get(&j, L"src")[0] && (!docx || !ag_path(fs, ag_get(&j, L"src"), source) || !of_excel(source) ||
+        (importing && !ag_same_path(source, expected)))) {
+      lstrcpynW(out, L"У write src разрешён только для Word из указанного исходного .xlsx. Не подменяй источник или формат результата.", cap); return -1;
+    }
     if (xlsx && ag_needs_inventory(fs->goal)) { lstrcpynW(out, L"Пустая книга не заменяет перечень папки. Используй inventory path=папка name=Список_файлов.xlsx; код сам перечислит реальные файлы после переносов.", cap); return -1; }
     if (xlsx && ag_get(&j, L"text")[0]) {
       lstrcpynW(out, L"write .xlsx создаёт только пустую книгу. Для данных используй excel_write с text=таблица TSV; для формул mode=formulas. Не подменяй заполненную таблицу пустым файлом.", cap); return -1;
@@ -964,10 +1041,27 @@ static int ag_tool(AgFs *fs, const wchar_t *json, wchar_t *out, int cap) {
       swprintf(out, cap, L"Ошибка папки назначения: пользователь указал %ls. Создай документ внутри неё через write, не в @last или другой папке. Исходный файл не нужен.", explicitRoot); return -1;
     }
     wchar_t reviewed[2000]; lstrcpynW(reviewed, ag_get(&j, L"text"), 2000);
-    if (docx && reviewed[0] && fs->author && !fs->author(fs->goal, reviewed, reviewed, 2000, fs->cancel, out, cap)) return -1;
-    if (!ag_mkdir(fs, parent) || !ag_target(fs, parent, name + 1, dst) || !ag_add(fs, docx ? AG_DOCX : xlsx ? AG_XLSX : AG_PLAIN, L"", dst)) goto fail;
-    lstrcpynW(fs->plan[fs->count - 1].text, reviewed, 2000);
-    swprintf(out, cap, L"Создание %ls добавлено в план: %ls. Родительские папки УЖЕ добавлены автоматически: mkdir не нужен. Эта часть задачи запланирована полностью. Если других действий не просили, следующий вызов done. Диск пока не изменён.", docx ? L"Word-документа" : xlsx ? L"пустой книги Excel" : L"текстового файла", dst);
+    if (source[0]) {
+      wchar_t after[65];
+      if (!ag_word_hash(source, hash)) { swprintf(out, cap, L"Не удалось прочитать исходник %ls. Ошибка Windows %lu. План не изменён.", source, GetLastError()); return -1; }
+      if (!of_excel_word_text(source, reviewed, 2000, out, cap)) return -1;
+      if (!ag_word_hash(source, after) || wcscmp(hash, after)) { lstrcpynW(out, L"Excel изменился во время чтения. Документ не добавлен; повторите чтение актуального источника.", cap); return -1; }
+    } else if (docx && reviewed[0] && fs->author && !fs->author(fs->goal, reviewed, reviewed, 2000, fs->cancel, out, cap)) return -1;
+    AgAction *a = NULL;
+    for (int i = 0; i < fs->count; i++) if (ag_same_path(fs->plan[i].dst, path)) {
+      if (docx && fs->plan[i].kind == AG_DOCX) a = &fs->plan[i];
+      else { lstrcpynW(out, L"Файл уже есть в плане с другим типом; повторная запись отклонена.", cap); return -1; }
+    }
+    if (!a) {
+      if (!ag_mkdir(fs, parent) || !ag_target(fs, parent, name + 1, dst) || !ag_add(fs, docx ? AG_DOCX : xlsx ? AG_XLSX : AG_PLAIN, source, dst)) goto fail;
+      a = &fs->plan[fs->count - 1];
+    } else if (source[0]) {
+      WIN32_FILE_ATTRIBUTE_DATA before;
+      if (!GetFileAttributesExW(source, GetFileExInfoStandard, &before)) goto fail;
+      a->before = before; lstrcpynW(a->src, source, MAX_PATH);
+    } else a->src[0] = 0;
+    lstrcpynW(a->text, reviewed, 2000); lstrcpynW(a->sheet, hash, 128);
+    swprintf(out, cap, L"Создание %ls добавлено в план: %ls. %ls Родительские папки УЖЕ добавлены автоматически: mkdir не нужен. Эта часть задачи запланирована полностью. Если других действий не просили, следующий вызов done. Диск пока не изменён.", docx ? L"Word-документа" : xlsx ? L"пустой книги Excel" : L"текстового файла", a->dst, source[0] ? L"Все листы и сохранённые значения Excel перенесены кодом, без переписывания моделью. Оформление, графики и вычисление формул не переносятся; даты могут быть серийными числами." : L"");
     return 0;
   }
   if (!wcscmp(tool, L"mkdir")) {
@@ -1129,6 +1223,12 @@ static BOOL ag_preflight(AgFs *fs, wchar_t *why, int whyCap) {
           now.nFileSizeHigh != a->before.nFileSizeHigh || now.nFileSizeLow != a->before.nFileSizeLow ||
           CompareFileTime(&now.ftLastWriteTime, &a->before.ftLastWriteTime) || now.dwFileAttributes != a->before.dwFileAttributes) {
         swprintf(why, whyCap, L"Источник изменился после предпросмотра: %ls. Ничего не выполнено; запросите новый план.", a->src); return FALSE;
+      }
+      if (a->kind == AG_DOCX) {
+        wchar_t hash[65];
+        if (!ag_word_hash(a->src, hash) || wcscmp(hash, a->sheet)) {
+          swprintf(why, whyCap, L"Содержимое исходного Excel изменилось после предпросмотра: %ls. Ничего не выполнено.", a->src); return FALSE;
+        }
       }
     }
     if (a->kind == AG_MOVE_DIR) {

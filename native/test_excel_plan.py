@@ -3,7 +3,8 @@ No real Desktop files or application settings are changed. Uses an independent
 server and closes only its own child processes. Inspect report rows for semantics.
 """
 from pathlib import Path
-import json,os,subprocess,time,urllib.request,argparse,socket
+import json,os,subprocess,time,urllib.request,argparse,socket,hashlib,zipfile
+from xml.etree import ElementTree as ET
 import openpyxl
 ap=argparse.ArgumentParser(description='Real local model -> bundled QwenPaw -> native Excel plan -> Apply; isolated fixtures only')
 ap.add_argument('--probe',type=Path,required=True)
@@ -13,6 +14,7 @@ ap.add_argument('--model',type=Path,required=True)
 ap.add_argument('--engine',type=Path,required=True)
 ap.add_argument('--root',type=Path,required=True,help='New output directory')
 ap.add_argument('--port',type=int,default=39407)
+ap.add_argument('--word-source',type=Path,help='Run the Excel -> Word regression instead, on a scratch copy of this workbook')
 args=ap.parse_args()
 root=args.root.resolve();root.mkdir(exist_ok=False,parents=True)
 profile=args.profile.resolve();runtime=args.runtime.resolve();probe=args.probe.resolve()
@@ -37,8 +39,14 @@ try:
         ('literal','Создай на рабочем столе Материалы.xlsx с оформленной таблицей: колонки Материал и Код, строки Сталь 40Х и 00123, Алюминий и 00124. Коды сохрани текстом с нулями.'),
         ('two-lists','создай ексель на рабочем столе и создай таблицу топ причин купить велосипед и топ причин не покупать велосипед'),
     ]
+    if args.word_source: cases=[('excel-to-word','')]
     for label,goal in cases:
         desktop=root/label;desktop.mkdir()
+        before=[];source_hash=None
+        if args.word_source:
+            source=desktop/'Развитие_AI.xlsx';source.write_bytes(args.word_source.read_bytes());before=[source]
+            source_hash=hashlib.sha256(source.read_bytes()).hexdigest()
+            goal=f'ее братан как жизнь, создай мне ворд в "{desktop}" и засунь туда данные из ""{source}""'
         env=os.environ.copy();env['CURSORPAD_TEST_PROFILE']=str(profile)
         p=subprocess.Popen([str(probe),str(desktop)],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,encoding='utf-8',env=env)
         def tool(action):
@@ -58,8 +66,20 @@ try:
                 notes+='\nВызов: '+json.dumps(action,ensure_ascii=False)+'\nРезультат: '+result['observation']+'\n'
                 if result['state'] in [1,2]:break
             assert result['state']==1 and result['count']==1,result
-            assert not list(desktop.iterdir()),'preview mutated desktop'
+            assert list(desktop.iterdir())==before,'preview mutated desktop'
             applied=tool(':apply');assert applied['state']==1,applied
+            if args.word_source:
+                files=list(desktop.glob('*.docx'));assert len(files)==1 and list(desktop.glob('*.xlsx'))==[source]
+                assert hashlib.sha256(source.read_bytes()).hexdigest()==source_hash
+                b=openpyxl.load_workbook(source,data_only=True)
+                expected=''.join('Лист: '+s.title+'\n'+''.join('\t'.join('' if x is None else str(x) for x in r)+'\n' for r in s.values) for s in b)
+                with zipfile.ZipFile(files[0]) as z:body=ET.fromstring(z.read('word/document.xml'))
+                ns='{http://schemas.openxmlformats.org/wordprocessingml/2006/main}'
+                actual='\n'.join(''.join('\t' if e.tag==ns+'tab' else e.text or '' for e in p.iter() if e.tag in [ns+'t',ns+'tab']) for p in body.iter(ns+'p'))
+                assert actual==expected,(actual,expected)
+                report.append(dict(case=label,pass_test=True,steps=steps,file=str(files[0]),source_sha256=source_hash,scope='real local model -> QwenPaw -> native full Excel import -> Apply -> independent OOXML and openpyxl comparison'))
+                print(label,'PASS',flush=True)
+                continue
             files=list(desktop.glob('*.xlsx'));assert len(files)==1
             book=openpyxl.load_workbook(files[0]);sheet=book.active;rows=[list(r) for r in sheet.values]
             if label=='literal':

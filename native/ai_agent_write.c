@@ -16,7 +16,9 @@ static BOOL ag_bytes(HANDLE h, const void *p, DWORD n) {
 static BOOL ag_write_document(const wchar_t *path, const wchar_t *text, AgKind kind, const char *sheetXml) {
   BOOL docx = kind == AG_DOCX, xlsx = kind == AG_XLSX;
   if (xlsx && text[0]) { SetLastError(ERROR_NOT_SUPPORTED); return FALSE; }
-  char utf8[8001], xml[18000];
+  /* A bounded 1999-character draft can expand to ~120 KB when it consists
+     mostly of paragraph/tab elements. Do not fail only after Apply. */
+  char utf8[8001], xml[128000];
   int n = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, text, -1, utf8, sizeof(utf8), NULL, NULL);
   if (!n) return FALSE;
   if (docx) {

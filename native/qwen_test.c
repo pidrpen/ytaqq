@@ -1,9 +1,16 @@
 /* Test-only entry: no hooks, startup, updater, settings or user model changes. */
 #define CURSORPAD_EMBEDDED_PROBE
 #include "agent_probe.c"
+static BOOL g_aqNoExternal;
 static LRESULT CALLBACK aq_hidden_chat(HWND h, UINT msg, WPARAM w, LPARAM l) {
   if (msg == WM_AI_CHAT) {
     AiResult *r = (AiResult *)l;
+    if (g_aqNoExternal && g_acRouting && r) {
+      AcRoute route;
+      if (r->status == AI_OK && ac_route_parse(r->text, &route) && (route.intent == 1 || route.intent == 2)) {
+        g_acId = 0; ac_route_reset(); ai_result_free(r); return 0;
+      }
+    }
     if (g_acReviewStage == 1 && r && r->text) {
       wchar_t path[MAX_PATH]; _snwprintf(path, MAX_PATH, L"%s\\draft.txt", g_dataDir);
       char *text = ai_utf8(r->text); if (text) aq_write(path, text); free(text);
@@ -25,7 +32,45 @@ static int aq_test(void) {
   int status, testedSlot = 0;
   int testedOff = 0, testedStopped = 0, testedQueue = -1;
   wchar_t testedWeb[AC_WEB_CAP] = L"", testedNote[360] = L"";
-  if (port == -27 && argc == 7 && job.body) {
+  if (port == -28 && argc == 7 && job.body) {
+    /* Actual hidden chat event flow; synthetic old task, supplied turns only.
+       No access to user settings, task logs, files, search or UI windows. */
+    g_aiOn = TRUE; g_aiCtx = 8192; g_aiGpu = TRUE;
+    g_aqNoExternal = TRUE;
+    lstrcpynW(g_aiModel, argv[5], MAX_PATH); lstrcpynW(g_aiSrvExe, argv[6], MAX_PATH);
+    WNDCLASSW wc = {0}; wc.lpfnWndProc = aq_hidden_chat; wc.hInstance = GetModuleHandleW(NULL); wc.lpszClassName = L"CursorPadHiddenCancelTest";
+    RegisterClassW(&wc);
+    g_acWnd = CreateWindowExW(0, wc.lpszClassName, L"", 0, 0, 0, 0, 0, HWND_MESSAGE, NULL, wc.hInstance, NULL);
+    g_acIn = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | ES_MULTILINE, 0, 0, 10, 10, g_acWnd, NULL, wc.hInstance, NULL);
+    g_acLog = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | ES_MULTILINE, 0, 0, 10, 10, g_acWnd, NULL, wc.hInstance, NULL);
+    ac_push(0, L"создай Word с данными из Excel");
+    ac_push(1, L"Понял, бро. Уточни, какой Excel и куда сохранять Word."); g_agPending = TRUE;
+    char *cases = _strdup(job.body), *save = NULL, *line = cases ? strtok_r(cases, "\n", &save) : NULL;
+    char *report = (char *)calloc(100000, 1); size_t at = 0; int count = 0; BOOL ok = report != NULL;
+    while (line && ok && count < 12) {
+      wchar_t *q = ai_wide(line, -1); int before = g_acN;
+      if (!q) { ok = FALSE; break; }
+      SetWindowTextW(g_acIn, q); ac_send();
+      DWORD deadline = GetTickCount() + 180000; BOOL work = FALSE;
+      while ((g_acId || g_agActive || g_acWebOn) && (LONG)(deadline - GetTickCount()) > 0) {
+        MSG message; while (PeekMessageW(&message, NULL, 0, 0, PM_REMOVE)) DispatchMessageW(&message);
+        if (g_acWebOn || g_agActive || g_acPlanOn) work = TRUE;
+        Sleep(10);
+      }
+      const wchar_t *answer = ac_last_role(1);
+      BOOL one = !work && !g_acId && !g_acRouting && !g_agPending && !g_acPlanOn && g_acN == before + 2 && answer;
+      char *qt = ai_json_str(q), *rt = ai_json_str(answer ? answer : L"");
+      if (at + strlen(qt) + strlen(rt) + 300 < 100000)
+        at += snprintf(report + at, 100000 - at, "{\"query\":%s,\"answer\":%s,\"pass_flow\":%s,\"context_start\":%d,\"turns\":%d}\n", qt, rt, one ? "true" : "false", g_acContextStart, g_acN);
+      else one = FALSE;
+      ok = ok && one; free(q); free(qt); free(rt); count++; line = strtok_r(NULL, "\n", &save);
+    }
+    wchar_t path[MAX_PATH]; swprintf(path, MAX_PATH, L"%ls\\chat.jsonl", g_dataDir); if (report) aq_write(path, report);
+    if (g_acId) ai_cancel(g_acId);
+    g_acId = 0; ac_route_reset(); ag_stop(); g_acPlanOn = FALSE; ac_clear_turns();
+    DestroyWindow(g_acWnd); g_acWnd = g_acIn = g_acLog = NULL; free(cases); free(report); ai_shutdown(); g_aqNoExternal = FALSE;
+    status = ok && count ? AI_OK : AI_ERROR; job.text = _wcsdup(status == AI_OK ? L"PASS: hidden chat route/answer/cancel flow" : L"FAIL: hidden chat route/answer/cancel flow");
+  } else if (port == -27 && argc == 7 && job.body) {
     /* Exercise managed tier selection and the production server startup,
        with only the explicitly supplied scratch profile and engine. */
     job.agentTask = 0;
@@ -109,6 +154,15 @@ static int aq_test(void) {
     ok = ok && !g_acN && !g_acRouting && !g_acId && !g_agActive;
     g_acIn = CreateWindowExW(0, L"EDIT", L"", WS_POPUP | ES_MULTILINE, 0, 0, 10, 10, NULL, NULL, GetModuleHandleW(NULL), NULL);
     ok = ok && g_acIn;
+    ac_push(0, L"Старая задача Excel"); ac_push(1, L"Укажите путь.");
+    g_agPending = TRUE; g_agFs.count = 1;
+    ac_cancel_task(L"да не надо");
+    ok = ok && !g_agPending && !g_agActive && !g_agFs.count && g_acN == 4 && g_acContextStart == 4;
+    char *routeBody = ac_route_body(L"как дела?");
+    ok = ok && routeBody && !strstr(routeBody, "Укажите путь."); free(routeBody);
+    ok = ok && ac_route_parse(L"{\"intent\":\"cancel\",\"continue_file\":false}", &route) && route.intent == 4;
+    ok = ok && !ac_route_parse(L"{\"intent\":\"cancel\",\"continue_file\":true}", &route);
+    ac_clear_turns();
     const wchar_t *failures[] = {L"ИИ повторяет одно и то же действие. План остановлен.", L"Не удалось составить полный план: таблица"};
     for (int i = 0; i < 2; i++) {
       AgToolJob *failed = (AgToolJob *)calloc(1, sizeof(AgToolJob));
