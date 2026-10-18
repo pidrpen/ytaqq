@@ -25,7 +25,93 @@ static int aq_test(void) {
   int status, testedSlot = 0;
   int testedOff = 0, testedStopped = 0, testedQueue = -1;
   wchar_t testedWeb[AC_WEB_CAP] = L"", testedNote[360] = L"";
-  if (port == -20 && argc == 7 && job.body) {
+  if ((port == -24 || port == -25) && argc == 7 && job.body) {
+    char question[6000], document[2000]; const char *end = job.body + strlen(job.body);
+    wchar_t *q = acj_text(job.body, end, "query", question, sizeof(question)) ? ai_wide(question, -1) : NULL;
+    wchar_t *doc = acj_text(job.body, end, "document", document, sizeof(document)) ? ai_wide(document, -1) : NULL;
+    wchar_t before[65], after[65]; BOOL ok = q && doc && ag_word_hash(doc, before);
+    g_aiOn = TRUE; g_aiCtx = 8192; g_aiGpu = TRUE;
+    lstrcpynW(g_aiModel, argv[5], MAX_PATH); lstrcpynW(g_aiSrvExe, argv[6], MAX_PATH);
+    if (doc) lstrcpynW(g_agLastDoc, doc, MAX_PATH);
+    WNDCLASSW wc = {0}; wc.lpfnWndProc = aq_hidden_chat; wc.hInstance = GetModuleHandleW(NULL); wc.lpszClassName = L"CursorPadHiddenRouteTest";
+    RegisterClassW(&wc);
+    g_acWnd = CreateWindowExW(0, wc.lpszClassName, L"", 0, 0, 0, 0, 0, HWND_MESSAGE, NULL, wc.hInstance, NULL);
+    g_acIn = CreateWindowExW(0, L"EDIT", q ? q : L"", WS_CHILD | ES_MULTILINE, 0, 0, 10, 10, g_acWnd, NULL, wc.hInstance, NULL);
+    g_acLog = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | ES_MULTILINE, 0, 0, 10, 10, g_acWnd, NULL, wc.hInstance, NULL);
+    if (port == -24) { ac_push(0, L"создай документ про обработку вала"); ac_push(1, L"Создан документ. Теперь можно изменить оформление."); }
+    else { ac_push(0, L"привет"); ac_push(1, L"Привет!"); g_agPending = TRUE; }
+    if (ok) ac_send();
+    DWORD deadline = GetTickCount() + 180000; BOOL web = FALSE;
+    while ((g_acId || g_agActive || g_acWebOn) && (LONG)(deadline - GetTickCount()) > 0) {
+      MSG message; while (PeekMessageW(&message, NULL, 0, 0, PM_REMOVE)) DispatchMessageW(&message);
+      if (g_acWebOn) web = TRUE;
+      Sleep(10);
+    }
+    if (port == -24) ok = ok && !web && !g_acId && !g_acRouting && g_acPlanOn && g_agReview && g_agFs.count == 1 && g_agFs.plan[0].kind == AG_WORD_FORMAT;
+    else ok = ok && !web && !g_acId && !g_acRouting && !g_acPlanOn && !g_agPending && ac_last_role(1) && g_acN == 4;
+    if (port == -25 && ac_last_role(1)) job.text = _wcsdup(ac_last_role(1));
+    ok = ok && ag_word_hash(doc, after) && !wcscmp(before, after);
+    if (g_acId) ai_cancel(g_acId);
+    g_acId = 0; ac_route_reset(); ag_stop(); g_acPlanOn = FALSE; ac_clear_turns();
+    DestroyWindow(g_acWnd); g_acWnd = g_acIn = g_acLog = NULL; free(q); free(doc); ai_shutdown();
+    status = ok ? AI_OK : AI_ERROR;
+    if (port == -24) job.text = _wcsdup(ok ? L"PASS: actual text field -> local intent -> existing Word format plan; no search, original unchanged" : L"FAIL: actual route-to-Word plan");
+  } else if (port == -21 && argc == 7 && job.body) {
+    AcRoute route; wchar_t sys[14000];
+    BOOL ok = ac_route_parse(L"{\"intent\":\"answer\",\"continue_file\":false}", &route) && route.intent == 3;
+    ok = ok && ac_route_parse(L"{\"intent\":\"files\",\"continue_file\":true}", &route) && route.intent == 1 && route.continuation;
+    ok = ok && ac_route_parse(L"{\"intent\":\"web\",\"continue_file\":false}", &route) && route.intent == 2;
+    const wchar_t *bad[] = {L"{}", L"{\"intent\":\"files\",\"continue_file\":false", L"{\"intent\":\"answer\",\"answer\":\" \",\"continue_file\":false}", L"{\"intent\":\"files\",\"answer\":\"Готово\",\"continue_file\":false}", L"{\"intent\":\"web\",\"continue_file\":false,\"intent\":\"files\"}", L"{\"intent\":\"execute\",\"continue_file\":false}"};
+    for (int i = 0; i < 6; i++) ok = ok && !ac_route_parse(bad[i], &route);
+    ac_sys_build(L"ты лох понимаешь", NULL, sys, 14000);
+    ok = ok && !wcsstr(sys, L"Технический вопрос:") && !wcsstr(sys, L"CursorPad:") && !wcsstr(sys, L"Интернет:");
+    ac_sys_build(L"как обрабатывают вал из стали 40Х", NULL, sys, 14000);
+    ok = ok && wcsstr(sys, L"Технический вопрос:");
+    ac_sys_build(L"привет", L"Тестовые фрагменты", sys, 14000); ok = ok && wcsstr(sys, L"Интернет:");
+    g_agPending = TRUE; g_acRouting = TRUE; g_acRouteText = _wcsdup(L"ты лох понимаешь"); g_acId = 77;
+    AiResult *reply = (AiResult *)calloc(1, sizeof(AiResult));
+    if (!reply) ok = FALSE;
+    else { reply->id = 77; reply->status = AI_OK; reply->text = _wcsdup(L"{\"intent\":\"answer\",\"continue_file\":false}"); ac_result(reply); }
+    ok = ok && !g_agPending && !g_agActive && !g_acWebOn && !g_acRouting && !g_acId && !g_acN;
+    ac_clear_turns();
+    g_acRouting = TRUE; g_acRouteText = _wcsdup(L"сломанный ответ"); g_acId = 78;
+    reply = (AiResult *)calloc(1, sizeof(AiResult));
+    if (!reply) ok = FALSE;
+    else { reply->id = 78; reply->status = AI_OK; reply->text = _wcsdup(L"{\"intent\":\"files\""); ac_result(reply); }
+    ok = ok && !g_acN && !g_agActive && !g_acWebOn && !g_acId;
+    g_acRouting = TRUE; g_acRouteText = _wcsdup(L"отмена"); g_acId = 79;
+    ac_clear();
+    reply = (AiResult *)calloc(1, sizeof(AiResult));
+    if (reply) { reply->id = 79; reply->status = AI_OK; reply->text = _wcsdup(L"{\"intent\":\"files\",\"continue_file\":false}"); ac_result(reply); } else ok = FALSE;
+    ok = ok && !g_acN && !g_acRouting && !g_acId && !g_agActive;
+    status = ok ? AI_OK : AI_ERROR; job.text = _wcsdup(ok ? L"PASS: intent protocol, scoped prompts, chat after pending file clarification, invalid/stale results do not dispatch" : L"FAIL");
+  } else if (port == -22 && argc == 7 && job.body) {
+    g_aiOn = TRUE; g_aiCtx = 8192; g_aiGpu = TRUE;
+    lstrcpynW(g_aiModel, argv[5], MAX_PATH); lstrcpynW(g_aiSrvExe, argv[6], MAX_PATH);
+    char *cases = _strdup(job.body), *save = NULL, *line = cases ? strtok_r(cases, "\n", &save) : NULL;
+    char *report = (char *)calloc(400000, 1); size_t at = 0; int count = 0; BOOL ok = report != NULL, allValid = TRUE;
+    while (line && ok && count < 50) {
+      char query[9000], previous[9000], answer[9000], pending[10]; const char *end = line + strlen(line);
+      ok = acj_text(line, end, "query", query, sizeof(query));
+      ac_clear_turns(); g_agPending = acj_text(line, end, "pending", pending, sizeof(pending)) && !strcmp(pending, "1");
+      if (acj_text(line, end, "previous_user", previous, sizeof(previous)) && acj_text(line, end, "previous_answer", answer, sizeof(answer))) {
+        wchar_t *u = ai_wide(previous, -1), *a = ai_wide(answer, -1); if (u && a) { ac_push(0, u); ac_push(1, a); } free(u); free(a);
+      }
+      wchar_t *q = ok ? ai_wide(query, -1) : NULL; AiJob one = {0}; one.timeout = 180000;
+      one.body = q ? ac_route_body(q) : NULL; one.id = 900 + count;
+      DWORD start = GetTickCount(); if (one.body) ai_job_run(&one); else one.status = AI_ERROR;
+      AcRoute route; BOOL valid = one.status == AI_OK && ac_route_parse(one.text, &route);
+      char *qt = ai_json_str(q ? q : L""), *rt = ai_json_str(one.text ? one.text : L"");
+      if (at + (qt ? strlen(qt) : 0) + (rt ? strlen(rt) : 0) + 250 >= 400000) ok = FALSE;
+      else at += snprintf(report + at, 400000 - at, "{\"query\":%s,\"raw\":%s,\"valid\":%s,\"intent\":%d,\"milliseconds\":%lu}\n", qt ? qt : "null", rt ? rt : "null", valid ? "true" : "false", valid ? route.intent : 0, GetTickCount() - start);
+      allValid = allValid && valid; free(q); free(qt); free(rt); free(one.body); free(one.text); count++;
+      line = strtok_r(NULL, "\n", &save);
+    }
+    wchar_t path[MAX_PATH]; _snwprintf(path, MAX_PATH, L"%s\\routes.jsonl", g_dataDir);
+    if (report) aq_write(path, report);
+    free(report); free(cases); ac_clear_turns(); g_agPending = FALSE; ai_shutdown();
+    status = ok && allValid && count ? AI_OK : AI_ERROR; wchar_t result[100]; swprintf(result, 100, L"Local model routing cases: %d; JSON valid: %s", count, ok ? L"yes" : L"no"); job.text = _wcsdup(result);
+  } else if (port == -20 && argc == 7 && job.body) {
     wchar_t *goal = ai_wide(job.body, -1), before[65], after[65];
     lstrcpynW(g_agLastDoc, argv[5], MAX_PATH);
     BOOL ok = goal && ag_word_hash(argv[5], before) && ag_start(goal);
@@ -86,8 +172,8 @@ static int aq_test(void) {
     job.text = _wcsdup(ok ? L"PASS: bounded review protocol, unknown/mismatched material and model URLs rejected, output links removed, cancel reset" : L"FAIL");
   } else if (port == -12 && argc == 7 && job.body) {
     BOOL ok = !ac_web_use(L"ы", FALSE) && !ac_web_use(L"Привет!", FALSE) && !ac_web_use(L"спасибо", FALSE);
-    ok = ok && ac_web_use(L"какая погода завтра в спб", FALSE);
-    ok = ok && ac_web_use(L"привет, какая погода завтра", FALSE);
+    ok = ok && !ac_web_use(L"какая погода завтра в спб", FALSE);
+    ok = ok && !ac_web_use(L"привет, какая погода завтра", FALSE);
     ok = ok && !ac_web_use(L"напиши тех процесс, и че тут за материал", TRUE);
     ok = ok && ac_web_use(L"найди в интернете режим для этого материала", TRUE);
     ok = ok && ac_web_use(L"https://docs.python.org/3/ сравни с картинкой", TRUE);
@@ -105,7 +191,7 @@ static int aq_test(void) {
     ok = ok && wcsstr(sys, L"предварительный маршрут") && wcsstr(sys, L"не удалось разобрать");
     free(body); ac_clear_turns();
     status = ok ? AI_OK : AI_ERROR;
-    job.text = _wcsdup(ok ? L"PASS: short-chat local; image default local; explicit web allowed; image context and image payload preserved; drawing prompt" : L"FAIL");
+    job.text = _wcsdup(ok ? L"PASS: explicit search helper; image default local; explicit web allowed; image context and image payload preserved; drawing prompt" : L"FAIL");
   } else if (port == -11 && argc == 7 && job.body) {
     ac_push(0, L"https://www.ozon.ru/product/test-123/ что по ссылке");
     ac_push(1, L"Подшипник 999. https://unrelated.example/wrong цена 1499");
