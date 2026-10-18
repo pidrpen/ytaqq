@@ -92,6 +92,8 @@ static WNDPROC g_acEditOld, g_acLogOld;
 static BOOL g_acRich;
 static AcTurn *g_acTurns;
 static int g_acN, g_acCap, g_acRendered;
+/* The visible log remains intact. Cancelled tasks are outside model context. */
+static int g_acContextStart;
 static int g_acId; /* запрос в пути, 0 — нет */
 static LONG g_acWebGen;
 static BOOL g_acWebOn;
@@ -141,7 +143,7 @@ static void ac_clear_turns(void) {
     free(g_acTurns[i].text);
     free(g_acTurns[i].png);
   }
-  g_acN = g_acRendered = 0;
+  g_acN = g_acRendered = g_acContextStart = 0;
 }
 
 typedef struct { const char *text; size_t size, offset; } AcStream;
@@ -1053,7 +1055,7 @@ static wchar_t *ac_web_question(const wchar_t *q) {
   wchar_t urls[2][3300];
   if (acw_urls(q, urls) || !ac_web_refers(q)) return _wcsdup(q);
   int seen = 0;
-  for (int i = g_acN - 2; i >= 0 && seen < 8; i--) {
+  for (int i = g_acN - 2; i >= g_acContextStart && seen < 8; i--) {
     if (g_acTurns[i].assistant) continue;
     seen++;
     const wchar_t *prior = g_acTurns[i].text;
@@ -1086,12 +1088,12 @@ static BOOL ac_web_use(const wchar_t *q, BOOL picture) {
 }
 
 static BOOL ac_picture_context(const wchar_t *q) {
-  if (g_acN && g_acTurns[g_acN - 1].png) return TRUE;
+  if (g_acN > g_acContextStart && g_acTurns[g_acN - 1].png) return TRUE;
   wchar_t lower[600]; lstrcpynW(lower, q, 600); CharLowerBuffW(lower, (DWORD)wcslen(lower));
   BOOL shortFollow = !wcscmp(lower, L"предположи") || !wcscmp(lower, L"постарайся") || !wcscmp(lower, L"попробуй") || !wcscmp(lower, L"уточни") || !wcscmp(lower, L"а вес") || !wcscmp(lower, L"а рост") || wcsstr(lower, L"по картинке") || wcsstr(lower, L"по фото") || wcsstr(lower, L"вес\\рост") || wcsstr(lower, L"вес/рост") || !wcscmp(lower, L"какой вес и рост");
   if (!ac_web_refers(q) && !shortFollow) return FALSE;
   int seen = 0;
-  for (int i = g_acN - 2; i >= 0 && seen < 8; i--) {
+  for (int i = g_acN - 2; i >= g_acContextStart && seen < 8; i--) {
     if (g_acTurns[i].assistant) continue;
     seen++;
     if (g_acTurns[i].png) return TRUE;
@@ -1348,7 +1350,7 @@ static void ac_finish_ask(wchar_t *web, const wchar_t *note) {
       }
       if (!g_acTurns[g_acN - 1].png) visual.text = follow;
       id = ai_ask_chat_async(sys, &visual, 1, 180000, g_acWnd, WM_AI_CHAT, NULL);
-    } else id = ai_ask_chat_async(sys, t, g_acN, 180000, g_acWnd, WM_AI_CHAT, NULL);
+    } else id = ai_ask_chat_async(sys, t + g_acContextStart, g_acN - g_acContextStart, 180000, g_acWnd, WM_AI_CHAT, NULL);
   }
   free(sys);
   free(t);

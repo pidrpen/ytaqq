@@ -109,6 +109,57 @@ static void of_text(const VARIANT *v, wchar_t *out, int cap) {
   if (SUCCEEDED(VariantChangeTypeEx(&t, (VARIANT *)v, LOCALE_INVARIANT, 0, VT_BSTR))) lstrcpynW(out, t.bstrVal, cap);
   VariantClear(&t);
 }
+/* Import stored cell values into a bounded Word draft without asking the model
+   to retype, invent or rewrite them. All worksheets must fit, otherwise fail
+   before staging anything. Formatting/charts/formula evaluation are not copied. */
+static inline BOOL of_excel_word_text(const wchar_t *path, wchar_t *out, int cap, wchar_t *why, int whyCap) {
+  OfSession s = {0}; BOOL ok = FALSE; out[0] = 0;
+  lstrcpynW(why, L"Не удалось полностью перенести значения Excel в Word. План не изменён.", whyCap);
+  if (!of_excel(path) || !of_begin(&s, TRUE, path)) {
+    swprintf(why, whyCap, L"Не удалось прочитать исходный Excel: %ls; HRESULT 0x%08lx. Word не запланирован.", path, (unsigned long)s.hr);
+    of_end(&s); return FALSE;
+  }
+  IDispatch *sheets = of_obj(s.doc, L"Worksheets", 0, NULL);
+  int ns = (int)of_number(sheets, L"Count");
+  if (ns < 1 || ns > 30) goto done;
+  for (int i = 1; i <= ns; i++) {
+    VARIANT index = of_int(i), name, values; VariantInit(&name); VariantInit(&values);
+    IDispatch *sh = of_obj(sheets, L"Item", 1, &index), *used = of_obj(sh, L"UsedRange", 0, NULL);
+    IDispatch *rs = of_obj(used, L"Rows", 0, NULL), *cs = of_obj(used, L"Columns", 0, NULL);
+    int nr = (int)of_number(rs, L"Count"), nc = (int)of_number(cs, L"Count");
+    BOOL complete = nr > 0 && nc > 0 && nr <= 100 && nc <= 26 && nr * nc <= 500 &&
+      SUCCEEDED(of_call(sh, L"Name", DISPATCH_PROPERTYGET, &name, 0, NULL)) && name.vt == VT_BSTR &&
+      SUCCEEDED(of_call(used, L"Value2", DISPATCH_PROPERTYGET, &values, 0, NULL));
+    if (complete && wcslen(out) + SysStringLen(name.bstrVal) + 12 < (size_t)cap) {
+      wcscat(out, L"Лист: "); wcscat(out, name.bstrVal); wcscat(out, L"\n");
+      for (int r = 1; r <= nr && complete; r++) {
+        for (int c = 1; c <= nc && complete; c++) {
+          VARIANT value, text; VariantInit(&value); VariantInit(&text);
+          HRESULT hr;
+          if (values.vt & VT_ARRAY) { long at[2] = {r, c}; hr = SafeArrayGetElement(values.parray, at, &value); }
+          else hr = VariantCopy(&value, &values);
+          if (SUCCEEDED(hr) && value.vt != VT_EMPTY && value.vt != VT_NULL)
+            hr = VariantChangeTypeEx(&text, &value, LOCALE_INVARIANT, 0, VT_BSTR);
+          const wchar_t *cell = text.vt == VT_BSTR ? text.bstrVal : L"";
+          size_t n = text.vt == VT_BSTR ? SysStringLen(text.bstrVal) : 0;
+          for (size_t k = 0; k < n; k++) if (cell[k] < 32 && cell[k] != L'\t' && cell[k] != L'\n') hr = E_INVALIDARG;
+          if (FAILED(hr) || wcslen(cell) != n || wcslen(out) + n + 2 >= (size_t)cap) complete = FALSE;
+          else { wcscat(out, cell); wcscat(out, c == nc ? L"\n" : L"\t"); }
+          VariantClear(&text); VariantClear(&value);
+        }
+      }
+    } else complete = FALSE;
+    VariantClear(&name); VariantClear(&values);
+    of_release(rs); of_release(cs); of_release(used); of_release(sh);
+    if (!complete) {
+      swprintf(why, whyCap, L"Полный перенос Excel в Word не помещается в текущий лимит: до %d символов на весь документ, до 30 листов, 100 строк, 26 столбцов и 500 ячеек на лист; ошибки ячеек также отклоняются. Частичный документ не создан. Укажите меньший источник.", cap - 1);
+      goto done;
+    }
+  }
+  ok = TRUE;
+done:
+  of_release(sheets); of_end(&s); if (!ok) out[0] = 0; return ok;
+}
 static void of_col(int c, wchar_t *out) {
   wchar_t reverse[8]; int n = 0;
   do { reverse[n++] = (wchar_t)(L'A' + (c - 1) % 26); c = (c - 1) / 26; } while (c > 0 && n < 7);
