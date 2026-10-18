@@ -15,6 +15,13 @@
 #define ID_AI_LLAMA 514  /* «llama.cpp…» — указать скачанный руками архив */
 #define ID_AI_CTX 515    /* «Контекст…» — окно контекста модели: 2048…16384 по кругу */
 #define ID_AI_OFF 516    /* выключить и сразу выгрузить модель */
+#define ID_AI_SOURCE 517
+#define ID_AI_ZMODEL 518
+#define ID_AI_ZKEY 519
+#define ID_AI_ZSAVE 520
+#define ID_AI_ZFORGET 521
+static HWND g_aiSource, g_aiZModel, g_aiZKey, g_aiZSave, g_aiZForget, g_aiZInfo;
+static BOOL ac_provider_change(int provider);
 
 static HWND g_aiBtnReport, g_aiBtnLlama, g_aiBtnCtx, g_aiBtnOff;
 static HWND g_aiChkOn, g_aiBtnTier[AI_TIERS], g_aiChkGpu, g_aiStat, g_aiBar, g_aiBtnDl, g_aiBtnTest, g_aiBtnDir,
@@ -24,6 +31,7 @@ static wchar_t g_aiTestMsg[300]; /* чем кончилась проверка *
 
 static void ai_ui_refresh(void) {
   if (!g_aiChkOn) return;
+  SendMessageW(g_aiSource, CB_SETCURSEL, g_aiProvider, 0);
   SendMessageW(g_aiChkOn, BM_SETCHECK, g_aiOn ? BST_CHECKED : BST_UNCHECKED, 0);
   EnableWindow(g_aiBtnOff, g_aiOn || g_aiProc != NULL);
   SendMessageW(g_aiChkGpu, BM_SETCHECK, g_aiGpu ? BST_CHECKED : BST_UNCHECKED, 0);
@@ -35,7 +43,11 @@ static void ai_ui_refresh(void) {
   ULONGLONG total = 0;
   for (int i = 0; i < t->nf; i++) total += t->f[i].size;
   wchar_t s[420], dl[80];
-  if (g_aiDl.active) {
+  if (g_aiProvider) {
+    wchar_t model[64]; MultiByteToWideChar(CP_UTF8, 0, g_aiZaiModel, -1, model, 64);
+    swprintf(s, 420, L"Z.ai · %ls · %ls\r\n%ls", model, g_aiOn ? L"включён" : L"выключен", g_aiTestMsg[0] ? g_aiTestMsg : ai_zai_has_key() ? L"Ключ сохранён с защитой Windows. Нажмите «Проверить»." : L"Введите API-ключ и нажмите «Сохранить ключ».");
+    ShowWindow(g_aiBar, SW_HIDE); dl[0] = 0;
+  } else if (g_aiDl.active) {
     _snwprintf(dl, 80, L"Отменить скачивание");
     LONGLONG tot = g_aiDl.total, done = g_aiDl.done;
     int pm = tot > 0 ? (int)(done * 1000 / tot) : 0;
@@ -78,6 +90,7 @@ static volatile DWORD g_aiMtPause;
 
 static int ai_mt_rank(const wchar_t *des, const wchar_t *name, MtAiCand *cand, int n, int *order) {
   int all = n;
+  if (g_aiProvider) return 0; /* SOYUZ cloud integration is a separate task. */
   if (!ai_ready() || n < 2) return 0;
   if (g_aiMtFails >= 2) {
     if (GetTickCount() - g_aiMtPause < 10 * 60 * 1000) return 0;
@@ -124,6 +137,19 @@ static void ai_ui_create(HWND p) {
                               WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 0, 0, 240, 26, p, (HMENU)(INT_PTR)ID_AI_ON,
                               NULL, NULL);
   g_aiBtnOff = mk_btn(p, L"Выключить и выгрузить", ID_AI_OFF);
+  g_aiSource = CreateWindowExW(0, L"COMBOBOX", L"", WS_CHILD | CBS_DROPDOWNLIST | WS_TABSTOP, 0, 0, 300, 180, p, (HMENU)(INT_PTR)ID_AI_SOURCE, NULL, NULL);
+  SendMessageW(g_aiSource, CB_ADDSTRING, 0, (LPARAM)L"Локальная модель · без интернета");
+  SendMessageW(g_aiSource, CB_ADDSTRING, 0, (LPARAM)L"Z.ai API · через интернет");
+  g_aiZModel = CreateWindowExW(0, L"COMBOBOX", L"", WS_CHILD | CBS_DROPDOWN | WS_TABSTOP | CBS_AUTOHSCROLL, 0, 0, 300, 200, p, (HMENU)(INT_PTR)ID_AI_ZMODEL, NULL, NULL);
+  const wchar_t *models[] = {L"glm-4.7", L"glm-5.3", L"glm-5.3-flash", L"glm-4.6v"};
+  for (int i = 0; i < 4; i++) SendMessageW(g_aiZModel, CB_ADDSTRING, 0, (LPARAM)models[i]);
+  wchar_t model[64]; MultiByteToWideChar(CP_UTF8, 0, g_aiZaiModel, -1, model, 64); SetWindowTextW(g_aiZModel, model);
+  g_aiZKey = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_TABSTOP | ES_PASSWORD | ES_AUTOHSCROLL, 0, 0, 300, 26, p, (HMENU)(INT_PTR)ID_AI_ZKEY, NULL, NULL);
+  SendMessageW(g_aiZKey, EM_SETLIMITTEXT, 1024, 0);
+  SendMessageW(g_aiZKey, 0x1501, TRUE, (LPARAM)L"Вставьте обычный API-ключ Z.ai");
+  g_aiZSave = mk_btn(p, L"Сохранить ключ", ID_AI_ZSAVE);
+  g_aiZForget = mk_btn(p, L"Удалить ключ", ID_AI_ZFORGET);
+  g_aiZInfo = CreateWindowExW(0, L"STATIC", L"Сообщения, картинки и данные файлов из задач передаются Z.ai. Нужен стандартный API с балансом (не Coding Plan). Одна задача делает несколько запросов. Модели на ПК не нужны. Изменения файлов — после «Применить».", WS_CHILD | SS_LEFT, 0, 0, 300, 100, p, NULL, NULL, NULL);
   for (int i = 0; i < AI_TIERS; i++) g_aiBtnTier[i] = mk_btn(p, kAiTiers[i].button, ID_AI_TIER + i);
   g_aiBtnCtx = mk_btn(p, L"", ID_AI_CTX);
   g_aiChkGpu = CreateWindowExW(0, L"BUTTON", L"Считать на видеокарте (если в ней от 4 ГБ)",
@@ -148,16 +174,36 @@ static void ai_ui_create(HWND p) {
   for (int i = 0; i < AI_TIERS; i++) SendMessageW(g_aiBtnTier[i], WM_SETFONT, (WPARAM)g_fontUi, TRUE);
   SendMessageW(g_aiStat, WM_SETFONT, (WPARAM)g_fontSmall, TRUE);
   SendMessageW(g_aiPathEdit, WM_SETFONT, (WPARAM)g_fontBody, TRUE);
+  HWND cloud[] = {g_aiSource, g_aiZModel, g_aiZKey, g_aiZSave, g_aiZForget, g_aiZInfo};
+  for (int i = 0; i < 6; i++) SendMessageW(cloud[i], WM_SETFONT, (WPARAM)(i == 5 ? g_fontSmall : g_fontUi), TRUE);
   SendMessageW(g_aiPathEdit, 0x1501, TRUE, (LPARAM)L"своя модель .gguf — необязательно");
   ai_ui_refresh();
 }
 
 /* раскладка вкладки; возвращает новый y */
 static int ai_ui_layout(int pad, int y, int fullW, int cw, int btnH, int gap, int lab, int browseW) {
+  HWND cloud[] = {g_aiZModel, g_aiZKey, g_aiZSave, g_aiZForget, g_aiZInfo};
+  HWND local[] = {g_aiBtnTier[0], g_aiBtnTier[1], g_aiBtnTier[2], g_aiBtnTier[3], g_aiChkGpu, g_aiBtnDl, g_aiBtnDir, g_aiBtnLlama, g_aiPathEdit, g_aiBtnBrowse};
+  ShowWindow(g_aiSource, g_layOpen ? SW_SHOW : SW_HIDE);
+  for (int i = 0; i < 5; i++) { ShowWindow(cloud[i], g_layOpen && g_aiProvider ? SW_SHOW : SW_HIDE); if (!g_aiProvider) MoveWindow(cloud[i], 0, -4000, 300, 26, FALSE); }
+  for (int i = 0; i < 10; i++) { ShowWindow(local[i], g_layOpen && !g_aiProvider ? SW_SHOW : SW_HIDE); if (g_aiProvider) MoveWindow(local[i], 0, -4000, 300, 26, FALSE); }
+  if (g_aiProvider) { ShowWindow(g_aiBar, SW_HIDE); MoveWindow(g_aiBar, 0, -4000, 300, 6, FALSE); }
   int halfOn = (fullW - gap) / 2;
   set_place(g_aiChkOn, pad, y, halfOn, btnH);
   set_place(g_aiBtnOff, pad + halfOn + gap, y, fullW - halfOn - gap, btnH);
   y += btnH + gap + lab;
+  set_place(g_aiSource, pad, y, fullW, btnH + 130);
+  y += btnH + gap + lab;
+  if (g_aiProvider) {
+    set_place(g_aiZModel, pad, y, fullW, btnH + 160); y += btnH + gap + lab;
+    set_place(g_aiZKey, pad, y, fullW, btnH); y += btnH + gap;
+    int half = (fullW - gap) / 2;
+    set_place(g_aiZSave, pad, y, half, btnH); set_place(g_aiZForget, pad + half + gap, y, fullW - half - gap, btnH); y += btnH + gap;
+    set_place(g_aiZInfo, pad, y, fullW, 96); y += 96 + gap;
+    set_place(g_aiStat, pad, y, fullW, 56); y += 56 + gap;
+    set_place(g_aiBtnTest, pad, y, half, btnH); set_place(g_aiBtnReport, pad + half + gap, y, fullW - half - gap, btnH); y += btnH + gap;
+    set_place(g_aiBtnCtx, pad, y, fullW, btnH); return y + btnH + gap;
+  }
   y += set_grid(g_aiBtnTier, AI_TIERS, 2, pad, y, fullW, btnH, gap);
   set_place(g_aiChkGpu, pad, y, fullW, btnH);
   y += btnH + gap;
@@ -194,6 +240,11 @@ static void ai_ui_label(HDC hdc, HWND under, const wchar_t *text, RECT rc) {
 
 static void ai_ui_paint(HDC hdc, RECT rc) {
   if (g_tab != SEC_AI) return;
+  ai_ui_label(hdc, g_aiSource, L"источник ИИ", rc);
+  if (g_aiProvider) {
+    ai_ui_label(hdc, g_aiZModel, L"модель Z.ai (можно ввести имя)", rc);
+    ai_ui_label(hdc, g_aiZKey, L"API-ключ (не передаётся в отчёт)", rc); return;
+  }
   ai_ui_label(hdc, g_aiBtnTier[0], L"модель — по силе компьютера", rc);
   ai_ui_label(hdc, g_aiPathEdit, L"или своя модель GGUF", rc);
 }
@@ -354,6 +405,36 @@ static void ai_ui_pick_llama(HWND hwnd) {
 
 /* TRUE — команда наша */
 static BOOL ai_ui_command(HWND hwnd, int id, int code) {
+  if (id == ID_AI_SOURCE && code == CBN_SELCHANGE) {
+    int selected = (int)SendMessageW(g_aiSource, CB_GETCURSEL, 0, 0);
+    if (selected == g_aiProvider) return TRUE;
+    if (g_aiActive || !ac_provider_change(selected)) { lstrcpynW(g_aiTestMsg, L"Дождитесь текущего ответа или нажмите Стоп; закройте ожидающий план.", 300); ai_ui_refresh(); return TRUE; }
+    if (selected == 0 || selected == 1) { ai_server_stop(); g_aiProvider = selected; g_aiTestMsg[0] = g_aiRunNote[0] = 0; ai_save(); ai_ui_refresh(); layout_settings(); }
+    return TRUE;
+  }
+  if (id == ID_AI_ZMODEL && (code == CBN_SELCHANGE || code == CBN_KILLFOCUS)) {
+    if (g_aiActive) {
+      wchar_t current[64]; MultiByteToWideChar(CP_UTF8, 0, g_aiZaiModel, -1, current, 64); SetWindowTextW(g_aiZModel, current);
+      lstrcpynW(g_aiTestMsg, L"Модель можно изменить после текущего ответа.", 300); ai_ui_refresh(); return TRUE;
+    }
+    wchar_t name[64]; char model[64];
+    int selected = (int)SendMessageW(g_aiZModel, CB_GETCURSEL, 0, 0);
+    if (code == CBN_SELCHANGE && selected >= 0) SendMessageW(g_aiZModel, CB_GETLBTEXT, selected, (LPARAM)name);
+    else GetWindowTextW(g_aiZModel, name, 64);
+    if (!WideCharToMultiByte(CP_UTF8, 0, name, -1, model, 64, NULL, NULL) || !ai_zai_model_valid(model)) {
+      lstrcpynW(g_aiTestMsg, L"Имя модели: glm-… (латиница, цифры, точка или дефис).", 300);
+    } else { lstrcpynA(g_aiZaiModel, model, 64); g_aiTestMsg[0] = 0; ai_save(); }
+    ai_ui_refresh(); return TRUE;
+  }
+  if ((id == ID_AI_ZSAVE || id == ID_AI_ZFORGET) && code == BN_CLICKED) {
+    if (g_aiActive || !ac_provider_change(g_aiProvider)) { lstrcpynW(g_aiTestMsg, L"Дождитесь ответа или нажмите Стоп перед изменением ключа.", 300); ai_ui_refresh(); return TRUE; }
+    BOOL ok;
+    if (id == ID_AI_ZSAVE) {
+      wchar_t key[1025]; GetWindowTextW(g_aiZKey, key, 1025); ok = ai_zai_store_key(key); SecureZeroMemory(key, sizeof(key));
+      lstrcpynW(g_aiTestMsg, ok ? L"Ключ сохранён. Нажмите «Проверить»." : L"Не удалось сохранить ключ: проверьте ввод и доступ к папке данных.", 300);
+    } else { wchar_t path[MAX_PATH]; ai_zai_key_path(path); ok = DeleteFileW(path) || GetLastError() == ERROR_FILE_NOT_FOUND; lstrcpynW(g_aiTestMsg, ok ? L"Ключ удалён." : L"Не удалось удалить ключ.", 300); }
+    SetWindowTextW(g_aiZKey, L""); ai_ui_refresh(); return TRUE;
+  }
   if (id == ID_AI_CTX && code == BN_CLICKED) {
     static const int kCtx[] = {2048, 4096, 8192, 16384};
     int i = 0;
@@ -413,11 +494,12 @@ static BOOL ai_ui_command(HWND hwnd, int id, int code) {
       return TRUE;
     }
     if (!g_aiOn) _snwprintf(g_aiTestMsg, 300, L"Сначала включите ИИ галочкой выше");
+    else if (g_aiProvider && !ai_zai_has_key()) lstrcpynW(g_aiTestMsg, L"Сначала сохраните API-ключ Z.ai.", 300);
     else {
       g_aiTestId = ai_ask_async(L"Отвечай кратко, по-русски.",
                                 L"Расшифруй обозначение «Круг 20 ГОСТ 2590-2006» одной строкой.", 180000, hwnd,
                                 WM_AI_TEST, NULL);
-      if (g_aiTestId) _snwprintf(g_aiTestMsg, 300, L"Спрашиваю модель… первый раз она грузится до минуты");
+      if (g_aiTestId) lstrcpynW(g_aiTestMsg, g_aiProvider ? L"Проверяю Z.ai через интернет…" : L"Спрашиваю модель… первый раз она грузится до минуты", 300);
       else {
         wchar_t exe[MAX_PATH], m[MAX_PATH], mm[MAX_PATH];
         if (!ai_server_exe(g_aiGpu, exe) && !ai_server_exe(!g_aiGpu, exe))

@@ -13,9 +13,12 @@ from pathlib import Path
 import re
 import sys
 import urllib.request
+import urllib.error
 import uuid
 
 ROOT = Path(__file__).resolve().parent
+CLOUD = False
+ZAI_ENDPOINT = 'https://api.z.ai/api/paas/v4/chat/completions'
 profile = ROOT / 'workspace'
 if '--state' in sys.argv:
     profile = Path(sys.argv[sys.argv.index('--state') + 1]).resolve().parent.parent / 'paw'
@@ -50,9 +53,63 @@ def strict_json(text):
     return json.loads(text, object_pairs_hook=pairs)
 
 
+def read_protected_key(path):
+    import ctypes
+    from ctypes import wintypes
+    class Blob(ctypes.Structure):
+        _fields_ = [('size', wintypes.DWORD), ('data', ctypes.POINTER(ctypes.c_ubyte))]
+    raw = path.read_bytes()
+    if not 1 <= len(raw) <= 16384:
+        raise ValueError('Z.ai: повреждено хранилище ключа; сохраните ключ заново')
+    data = ctypes.create_string_buffer(raw)
+    salt = ctypes.create_string_buffer(b'CursorPad-ZAI-v1')
+    src = Blob(len(raw), ctypes.cast(data, ctypes.POINTER(ctypes.c_ubyte)))
+    entropy = Blob(len(salt.raw)-1, ctypes.cast(salt, ctypes.POINTER(ctypes.c_ubyte)))
+    result = Blob()
+    crypt = ctypes.WinDLL('crypt32', use_last_error=True)
+    crypt.CryptUnprotectData.argtypes = [ctypes.POINTER(Blob), ctypes.c_void_p, ctypes.POINTER(Blob), ctypes.c_void_p, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(Blob)]
+    crypt.CryptUnprotectData.restype = wintypes.BOOL
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel.LocalFree.argtypes = [ctypes.c_void_p]
+    kernel.LocalFree.restype = ctypes.c_void_p
+    if not crypt.CryptUnprotectData(ctypes.byref(src), None, ctypes.byref(entropy), None, None, 1, ctypes.byref(result)):
+        raise ValueError('Z.ai: Windows не смогла расшифровать ключ; сохраните его в этом профиле заново')
+    try:
+        key = ctypes.string_at(result.data, result.size).decode('ascii')
+        if not re.fullmatch(r'[\x21-\x7e]{1,1024}', key):
+            raise ValueError('Z.ai: недопустимый API-ключ')
+        return key
+    finally:
+        ctypes.memset(result.data, 0, result.size)
+        kernel.LocalFree(result.data)
+
+
+def zai_wire(body):
+    wire = {k: copy.deepcopy(body[k]) for k in ('model', 'messages', 'temperature', 'top_p', 'max_tokens') if k in body}
+    model = wire.get('model', '')
+    if not re.fullmatch(r'glm-[a-z0-9._-]{1,59}', model):
+        raise ValueError('Z.ai: укажите корректное имя модели glm-…')
+    wire['stream'] = False
+    if model in ('glm-5.3', 'glm-5.3-flash'):
+        wire.update(thinking={'type': 'enabled'}, reasoning_effort='low')
+        wire['max_tokens'] = max(8192, wire.get('max_tokens', 1024))
+    else:
+        wire['thinking'] = {'type': 'disabled'}
+    schema = body.get('response_format', {}).get('json_schema', {}).get('schema')
+    if schema:
+        # Z.ai JSON mode does not implement llama.cpp's json_schema grammar.
+        # Give the exact schema in the prompt, then validate it locally.
+        wire['messages'].insert(0, {'role': 'system', 'content': 'Return ONLY one JSON value conforming to this JSON Schema. No markdown or explanatory prose:\n'+json.dumps(schema, ensure_ascii=False)})
+        if model not in ('glm-4.5v', 'glm-4.6v', 'glm-5.3-flash'):
+            wire['response_format'] = {'type': 'json_object'}
+    return wire, schema
+
+
 def local_call(endpoint, key, body, timeout):
     # No proxy, redirects, DNS, cloud credentials, or remote-configurable URLs.
-    if not re.fullmatch(r'http://127\.0\.0\.1:[0-9]{1,5}/v1/chat/completions', endpoint):
+    if CLOUD and (endpoint != ZAI_ENDPOINT or not key):
+        raise ValueError('Z.ai: требуется ключ и официальный HTTPS API')
+    if not CLOUD and not re.fullmatch(r'http://127\.0\.0\.1:[0-9]{1,5}/v1/chat/completions', endpoint):
         raise ValueError('Agent requires a local model at 127.0.0.1')
     class NoRedirect(urllib.request.HTTPRedirectHandler):
         def redirect_request(self, *args, **kwargs):
@@ -61,16 +118,38 @@ def local_call(endpoint, key, body, timeout):
     headers = {'Content-Type': 'application/json'}
     if key:
         headers['Authorization'] = 'Bearer ' + key
-    wire = copy.deepcopy(body)
+    wire, schema = zai_wire(body) if CLOUD else (copy.deepcopy(body), None)
     wire.pop('cursorpad', None)
     wire['stream'] = False
     request = urllib.request.Request(endpoint, data=json.dumps(wire, ensure_ascii=False).encode(), headers=headers)
-    with opener.open(request, timeout=timeout) as response:
-        raw = response.read(262145)
+    try:
+        with opener.open(request, timeout=timeout) as response:
+            raw = response.read(262145)
+    except urllib.error.HTTPError as error:
+        if not CLOUD:
+            raise
+        code = ''
+        try:
+            detail = json.loads(error.read(4096))
+            value = str(detail.get('error', {}).get('code', ''))
+            if re.fullmatch(r'[0-9]{1,12}', value): code = ', код сервиса '+value
+        except (ValueError, TypeError, AttributeError):
+            pass
+        messages = {400: 'проверьте модель, параметры и баланс API', 401: 'неверный API-ключ', 403: 'нет доступа к модели или тарифу', 404: 'модель не найдена', 429: 'лимит запросов или квота; повторите позже'}
+        raise ValueError(f'Z.ai HTTP {error.code}{code}: {messages.get(error.code, "сервис недоступен")}') from None
     if len(raw) > 262144:
         raise ValueError('Model response exceeds limit')
     result = json.loads(raw)
-    return result['choices'][0]['message']['content']
+    choice = result['choices'][0]
+    if CLOUD and choice.get('finish_reason') != 'stop':
+        raise ValueError('Z.ai: ответ прерван или ограничен; план не готов к применению')
+    content = choice['message']['content']
+    if CLOUD and (not isinstance(content, str) or not content.strip()):
+        raise ValueError('Z.ai вернул пустой ответ')
+    if CLOUD: content = content.replace(key, '[ключ скрыт]')
+    if schema:
+        jsonschema.validate(strict_json(content), schema)
+    return content
 
 
 def validate_action(action, schema):
@@ -354,12 +433,16 @@ def choose(request, endpoint, key, timeout, state_path):
 
 
 def main():
+    global CLOUD
     p = argparse.ArgumentParser()
     p.add_argument('--request', type=Path)
     p.add_argument('--response', type=Path)
     p.add_argument('--state', type=Path)
     p.add_argument('--endpoint')
     p.add_argument('--key-file', type=Path)
+    p.add_argument('--provider', choices=['local', 'zai'], default='local')
+    p.add_argument('--protected-key', type=Path)
+    p.add_argument('--chat', action='store_true')
     p.add_argument('--timeout', type=float, default=120)
     p.add_argument('--self-test', action='store_true')
     a = p.parse_args()
@@ -368,14 +451,22 @@ def main():
         print(json.dumps({'backend': 'QwenPaw', 'version': __version__,
                           'skills': skills_for('Excel Word')[0], 'python': sys.version.split()[0]}))
         return
+    key = ''
+    CLOUD = a.provider == 'zai'
     try:
         request = json.loads(a.request.read_text(encoding='utf-8'))
-        key = a.key_file.read_text(encoding='utf-8') if a.key_file else ''
-        action = choose(request, a.endpoint, key, a.timeout, a.state)
-        result = {'ok': True, 'action': json.dumps(action, ensure_ascii=False, separators=(',', ':'))}
+        if CLOUD and (not a.protected_key or a.key_file):
+            raise ValueError('Z.ai требует защищённое Windows хранилище ключа')
+        key = read_protected_key(a.protected_key) if CLOUD else a.key_file.read_text(encoding='utf-8') if a.key_file else ''
+        if a.chat:
+            result = {'ok': True, 'text': local_call(a.endpoint, key, request, a.timeout)}
+        else:
+            action = choose(request, a.endpoint, key, a.timeout, a.state)
+            result = {'ok': True, 'action': json.dumps(action, ensure_ascii=False, separators=(',', ':'))}
     except Exception as error:
         # No silent fallback to the old backend, and no fake completed action.
-        result = {'ok': False, 'error': f'QwenPaw: {type(error).__name__}: {str(error)[:700]}'}
+        message = f'QwenPaw: {type(error).__name__}: {str(error)[:700]}'
+        result = {'ok': False, 'error': message.replace(key, '[ключ скрыт]') if key else message}
     a.response.write_text(json.dumps(result, ensure_ascii=False), encoding='utf-8')
 
 
