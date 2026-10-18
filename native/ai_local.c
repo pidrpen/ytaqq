@@ -1257,14 +1257,14 @@ int ai_ask_chat_async(const wchar_t *instruction, const AiTurn *turns, int n, DW
 
 int ai_ask_files_async(const wchar_t *instruction, const AiTurn *turns, int n, HWND notify, UINT msg,
                        LONG task, const wchar_t *goal, const wchar_t *plan,
-                       const wchar_t *observation, int observationState) {
+                       const wchar_t *observation, int observationState, int planCount) {
   if (ai_precheck() != AI_OK || !notify || n != 1 || !turns || !turns[0].text || task <= 0) return 0;
   char *body = ai_body_chat(instruction, turns, n, TRUE), *g = ai_json_str(goal), *p = ai_json_str(plan);
   char *o = ai_json_str(observation);
   if (!body || !g || !p || !o) { free(body); free(g); free(p); free(o); return 0; }
-  size_t size = strlen(body) + strlen(g) + strlen(p) + strlen(o) + 160;
+  size_t size = strlen(body) + strlen(g) + strlen(p) + strlen(o) + 200;
   char *wire = (char *)malloc(size);
-  if (wire) snprintf(wire, size, "{\"cursorpad\":{\"goal\":%s,\"plan\":%s,\"observation\":%s,\"observation_state\":%d},%s", g, p, o, observationState, body + 1);
+  if (wire) snprintf(wire, size, "{\"cursorpad\":{\"goal\":%s,\"plan\":%s,\"plan_count\":%d,\"observation\":%s,\"observation_state\":%d},%s", g, p, planCount, o, observationState, body + 1);
   free(body); free(g); free(p); free(o);
   AiAsync *a = (AiAsync *)calloc(1, sizeof(AiAsync));
   AiJob *j = a && wire ? ai_job_new(wire, 600000) : NULL;

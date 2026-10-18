@@ -46,6 +46,11 @@ int wmain(int argc, wchar_t **argv) {
   /* Same prepared profile as the application; tool scopes below are scratch. */
   SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, SHGFP_TYPE_CURRENT, g_dataDir);
   wcscat(g_dataDir, L"\\CursorPad");
+#ifdef QWEN_TEST
+  wchar_t isolated[MAX_PATH];
+  DWORD selected = GetEnvironmentVariableW(L"CURSORPAD_TEST_PROFILE", isolated, MAX_PATH);
+  if (selected && selected < MAX_PATH) lstrcpynW(g_dataDir, isolated, MAX_PATH);
+#endif
 #endif
   if (!GetFullPathNameW(argv[1], MAX_PATH, fs.desktop, NULL) || !ag_dir(fs.desktop)) return 2;
   swprintf(fs.downloads, MAX_PATH, L"%ls\\Downloads", fs.desktop);

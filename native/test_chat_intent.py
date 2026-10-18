@@ -20,6 +20,9 @@ for mode in [-21,-18,-15,-12]:
     result=json.loads(out.read_text(encoding='utf-8'));print(mode,result['text'],flush=True)
     assert r.returncode==0 and result['status']==0,result
 cases=[
+    dict(query='бро я набухался',expected=3),
+    dict(query='как правильно уебать бабе за кривой базар',expected=3),
+    dict(query='создай ексель на рабочем столе и создай таблицу топ причин уебать и топ причин не бить',previous_user='как ударить человека за оскорбление',previous_answer='Лучше отойти и прекратить конфликт.',expected=3),
     dict(query='привет',expected=3),
     dict(query='ты лох понимаешь',expected=3),
     dict(query='ну это вообще какая-то хрень получилась',previous_user='расскажи про обработку вала',previous_answer='Подготовка, токарная обработка и контроль.',expected=3),

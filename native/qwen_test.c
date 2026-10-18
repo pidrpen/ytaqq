@@ -84,7 +84,35 @@ static int aq_test(void) {
     reply = (AiResult *)calloc(1, sizeof(AiResult));
     if (reply) { reply->id = 79; reply->status = AI_OK; reply->text = _wcsdup(L"{\"intent\":\"files\",\"continue_file\":false}"); ac_result(reply); } else ok = FALSE;
     ok = ok && !g_acN && !g_acRouting && !g_acId && !g_agActive;
-    status = ok ? AI_OK : AI_ERROR; job.text = _wcsdup(ok ? L"PASS: intent protocol, scoped prompts, chat after pending file clarification, invalid/stale results do not dispatch" : L"FAIL");
+    g_acIn = CreateWindowExW(0, L"EDIT", L"", WS_POPUP | ES_MULTILINE, 0, 0, 10, 10, NULL, NULL, GetModuleHandleW(NULL), NULL);
+    ok = ok && g_acIn;
+    const wchar_t *failures[] = {L"ИИ повторяет одно и то же действие. План остановлен.", L"Не удалось составить полный план: таблица"};
+    for (int i = 0; i < 2; i++) {
+      AgToolJob *failed = (AgToolJob *)calloc(1, sizeof(AgToolJob));
+      if (!failed) { ok = FALSE; break; }
+      SetWindowTextW(g_acIn, L""); g_agActive = TRUE;
+      failed->generation = g_agGeneration; failed->state = 2; failed->fs.count = 1;
+      lstrcpynW(failed->fs.goal, L"Создай Excel с двумя списками", 4000);
+      lstrcpynW(failed->observation, failures[i], 6000);
+      ag_tool_ready(failed);
+      wchar_t restored[100]; GetWindowTextW(g_acIn, restored, 100);
+      ok = ok && !g_agPending && !g_agActive && !g_agFs.count && !wcscmp(restored, L"Создай Excel с двумя списками");
+    }
+    SetWindowTextW(g_acIn, L"Мой новый черновик");
+    ag_plan_failure(L"Тест технической ошибки");
+    wchar_t draft[100]; GetWindowTextW(g_acIn, draft, 100); ok = ok && !wcscmp(draft, L"Мой новый черновик");
+    SetWindowTextW(g_acIn, L""); g_agActive = TRUE;
+    lstrcpynW(g_agFs.goal, L"Исходная задача", 4000); g_agFs.count = 1;
+    AiResult failedResult = {0}; failedResult.status = AI_ERROR; failedResult.text = L"JSONDecodeError: unterminated string";
+    ag_result(&failedResult); GetWindowTextW(g_acIn, draft, 100);
+    ok = ok && !g_agPending && !g_agActive && !g_agFs.count && !wcscmp(draft, L"Исходная задача");
+    SetWindowTextW(g_acIn, L""); g_agActive = TRUE;
+    AgToolJob *clarify = (AgToolJob *)calloc(1, sizeof(AgToolJob));
+    if (!clarify) ok = FALSE;
+    else { clarify->generation = g_agGeneration; clarify->state = 2; lstrcpynW(clarify->observation, L"Как назвать папку?", 6000); ag_tool_ready(clarify); }
+    ok = ok && g_agPending && !g_agActive && !GetWindowTextLengthW(g_acIn);
+    ag_stop(); ac_clear_turns(); DestroyWindow(g_acIn); g_acIn = NULL;
+    status = ok ? AI_OK : AI_ERROR; job.text = _wcsdup(ok ? L"PASS: intent protocol, scoped prompts, pending/late results, technical planning failures restore goal without clarification, genuine ask preserved" : L"FAIL");
   } else if (port == -22 && argc == 7 && job.body) {
     g_aiOn = TRUE; g_aiCtx = 8192; g_aiGpu = TRUE;
     lstrcpynW(g_aiModel, argv[5], MAX_PATH); lstrcpynW(g_aiSrvExe, argv[6], MAX_PATH);

@@ -66,10 +66,17 @@ static void ag_stop(void) {
   g_agFs.count = 0;
 }
 
+/* Internal planning failure is not a request for user clarification. */
+static void ag_plan_failure(const wchar_t *reason) {
+  wchar_t goal[4000]; lstrcpynW(goal, g_agFs.goal, 4000);
+  ag_stop(); ac_busy(FALSE);
+  if (g_acIn && !GetWindowTextLengthW(g_acIn)) SetWindowTextW(g_acIn, goal);
+  af_say(reason); ac_status(L"Технический сбой плана. Исходная задача сохранена, файлы не изменены");
+}
+
 static BOOL ag_request(void) {
   if (++g_agSteps > 16) {
-    ag_stop(); ac_busy(FALSE);
-    af_say(L"Достигнут предел 16 шагов. Ничего не изменено. Уточните или сократите задачу.");
+    ag_plan_failure(L"Модель не смогла завершить план за 16 шагов. Это технический сбой выполнения; файлы не изменены.");
     return FALSE;
   }
   int budget = ai_agent_budget() - (int)wcslen(kAgSystem) - 6000;
@@ -107,9 +114,9 @@ static BOOL ag_request(void) {
   AiTurn turn = {0, prompt, NULL, 0};
   wchar_t evidence[6000]; ag_plan_evidence(&g_agFs, evidence, 6000);
   wchar_t modelGoal[5000]; ag_model_goal(&g_agFs, modelGoal, 5000);
-  ai_out_cap(512);
+  ai_out_cap(1024);
   g_acId = ai_ask_files_async(kAgSystem, &turn, 1, g_acWnd, WM_AI_CHAT, g_agGeneration, modelGoal, evidence,
-                             g_agObservation, g_agLastState);
+                             g_agObservation, g_agLastState, g_agFs.count);
   ai_out_cap(0); free(prompt);
   if (!g_acId) { ag_stop(); ac_busy(FALSE); af_say(L"Не удалось запустить следующий шаг ИИ. Диск не изменён."); return FALSE; }
   ac_busy(TRUE);
@@ -212,11 +219,16 @@ static void ag_tool_ready(void *result) {
     ac_status(L""); return;
   }
   if (state == 2) {
+    if (wcsstr(g_agObservation, L"ИИ повторяет одно и то же действие.") == g_agObservation ||
+        wcsstr(g_agObservation, L"Не удалось составить полный план:") == g_agObservation) {
+      ag_plan_failure(L"Не удалось завершить проверку плана: модель повторяла действие или не подтвердила полноту задачи. Файлы не изменены. Это сбой планировщика, а не требование уточнить понятный запрос.");
+      return;
+    }
     g_agActive = FALSE; g_agPending = TRUE; g_agFs.count = 0;
     af_say(g_agObservation); ac_status(L"Ответьте на уточнение в поле ввода"); return;
   }
   if (state < 0 && ++g_agErrors >= 3) {
-    ag_stop(); af_say(L"ИИ трижды предложил некорректное действие. Диск не изменён. Уточните задачу и папки."); return;
+    ag_plan_failure(L"Модель трижды предложила некорректное действие и не смогла исправить его по результату инструмента. Файлы не изменены."); return;
   }
   ag_request();
 }
@@ -233,9 +245,15 @@ static DWORD WINAPI ag_tool_thread(LPVOID param) {
 static void ag_result(AiResult *r) {
   g_acId = 0;
   if (r->status != AI_OK) {
-    ag_stop(); ac_busy(FALSE);
-    af_say(r->status == AI_CANCELLED ? L"Остановлено. Диск не изменён." :
-      (r->text && r->text[0] ? r->text : ai_status_text(r->status))); return;
+    if (r->status == AI_CANCELLED) {
+      ag_stop(); ac_busy(FALSE); af_say(L"Остановлено. Диск не изменён.");
+    } else {
+      wchar_t reason[1600];
+      swprintf(reason, 1600, L"Технический сбой подготовки плана: %.1200ls\nФайлы не изменены; исходная задача сохранена в поле ввода.",
+        r->text && r->text[0] ? r->text : ai_status_text(r->status));
+      ag_plan_failure(reason);
+    }
+    return;
   }
   AgJson appJson;
   if (ag_json(r->text, &appJson) && !wcscmp(ag_get(&appJson, L"tool"), L"app")) {
