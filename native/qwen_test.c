@@ -25,7 +25,30 @@ static int aq_test(void) {
   int status, testedSlot = 0;
   int testedOff = 0, testedStopped = 0, testedQueue = -1;
   wchar_t testedWeb[AC_WEB_CAP] = L"", testedNote[360] = L"";
-  if ((port == -24 || port == -25) && argc == 7 && job.body) {
+  if (port == -27 && argc == 7 && job.body) {
+    /* Exercise managed tier selection and the production server startup,
+       with only the explicitly supplied scratch profile and engine. */
+    job.agentTask = 0;
+    g_aiOn = TRUE; g_aiCtx = 8192; g_aiGpu = TRUE; g_aiTier = 2;
+    if (_wtoi(argv[5]) == 16384) g_aiCtx = 16384;
+    lstrcpynW(g_aiSrvExe, argv[6], MAX_PATH);
+    wchar_t selected[MAX_PATH], projector[MAX_PATH];
+    BOOL ok = kAiTiers[2].nf == 1 && !kAiTiers[2].vision && ai_pick_model(selected, projector) &&
+      !projector[0] && ai_qwen_thinking(selected) && !ai_qwen35(selected) && wcsstr(selected, L"qwen3-8b");
+    job.timeout = 180000;
+    if (ok) { ai_job_run(&job); status = job.status; testedSlot = g_aiSlotCtx; }
+    else { status = AI_ERROR; job.text = _wcsdup(L"FAIL: managed Qwen3-8B selection"); }
+    ai_shutdown();
+  } else if (port == -26 && argc == 7 && job.body) {
+    /* Explicit model-download harness; does not load/save settings or stop
+       another process. Reuses the supplied known engine, downloads tier 2
+       using the production WinHTTP/resume/SHA path and prepares its tools. */
+    g_aiTier = 2; g_aiGpu = TRUE;
+    lstrcpynW(g_aiSrvExe, argv[6], MAX_PATH);
+    InterlockedExchange(&g_aiDl.active, 1); ai_dl_thread(NULL);
+    status = !g_aiDl.failed && ai_tier_ready(2) ? AI_OK : AI_ERROR;
+    job.text = _wcsdup(g_aiDl.msg);
+  } else if ((port == -24 || port == -25) && argc == 7 && job.body) {
     char question[6000], document[2000]; const char *end = job.body + strlen(job.body);
     wchar_t *q = acj_text(job.body, end, "query", question, sizeof(question)) ? ai_wide(question, -1) : NULL;
     wchar_t *doc = acj_text(job.body, end, "document", document, sizeof(document)) ? ai_wide(document, -1) : NULL;

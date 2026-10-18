@@ -20,7 +20,7 @@ model=args.model.resolve();engine=args.engine.resolve();port=args.port
 assert profile != (Path.home()/'AppData/Local/CursorPad').resolve(),'Use a scratch profile'
 with socket.socket() as available:available.bind(('127.0.0.1',port))
 log=(root/'server.log').open('wb')
-server=subprocess.Popen([str(engine),'-m',str(model),'--host','127.0.0.1','--port',str(port),'-c','16384','--parallel','1','-ngl','99','--chat-template-kwargs','{"enable_thinking":false}'],stdout=log,stderr=subprocess.STDOUT,creationflags=subprocess.CREATE_NO_WINDOW)
+server=subprocess.Popen([str(engine),'-m',str(model),'--host','127.0.0.1','--port',str(port),'-c','16384','--parallel','1','-ngl','99','--jinja','--chat-template-kwargs','{"enable_thinking":false}'],stdout=log,stderr=subprocess.STDOUT,creationflags=subprocess.CREATE_NO_WINDOW)
 report=[]
 try:
     start=time.monotonic()
