@@ -1,4 +1,32 @@
 1 24 "cursorpad.manifest"
+#include <winver.h>
+#include "version.h"
+1 VERSIONINFO
+ FILEVERSION APP_VERSION_PARTS
+ PRODUCTVERSION APP_VERSION_PARTS
+ FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+ FILEFLAGS 0
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_APP
+ FILESUBTYPE 0
+BEGIN
+ BLOCK "StringFileInfo"
+ BEGIN
+  BLOCK "040904B0"
+  BEGIN
+   VALUE "FileDescription", "CursorPad desktop assistant"
+   VALUE "FileVersion", APP_VERSION_A
+   VALUE "InternalName", "CursorPad"
+   VALUE "OriginalFilename", "CursorPad.exe"
+   VALUE "ProductName", "CursorPad"
+   VALUE "ProductVersion", APP_VERSION_A
+  END
+ END
+ BLOCK "VarFileInfo"
+ BEGIN
+  VALUE "Translation", 0x409, 1200
+ END
+END
 200 CURSOR "cursors/k2_static.cur"
 210 CURSOR "cursors/k3_static.cur"
 220 CURSOR "cursors/k2_ibeam.cur"

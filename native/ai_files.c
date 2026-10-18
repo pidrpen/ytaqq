@@ -745,6 +745,7 @@ static void ac_files_run(const wchar_t *j) {
 /* «Применить»: операции по порядку; перезаписи и удаления нет */
 static void ac_files_apply(void) {
   if (!g_acPlanOn) return;
+  if (g_agReview) { ag_apply_review(); return; }
   int ok = 0, bad = 0;
   wchar_t last[MAX_PATH] = L"";
   for (int i = 0; i < g_afN; i++) {
@@ -774,6 +775,7 @@ static void ac_files_apply(void) {
 
 static void ac_files_cancel(void) {
   if (!g_acPlanOn) return;
+  if (g_agReview) ag_stop();
   af_clear();
   ac_plan_ui(FALSE);
   af_say(L"Отменено: ничего не изменено.");

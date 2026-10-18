@@ -47,7 +47,7 @@
 #define ID_CUR_K5 120 /* «Дракон» */
 #define ID_CUR_K6 121 /* «Чёрный кот» */
 #define ID_CUR_K7 136 /* «Риас» */
-#define ID_FX_BASE 400    /* 400..415: эффект при нажатии в Настройках (до 2026.10.14 — 160…) */
+#define ID_FX_BASE 400    /* 400..416: эффект при нажатии в Настройках (до 2026.10.14 — 160…) */
 #define FX_OPTIONS 17    /* сколько вариантов в «Эффект при нажатии» */
 #define ID_CHK_TESS 176   /* точное распознавание (Tesseract) */
 #define ID_SEC_BASE 440   /* 440..445: вкладки Настроек */
@@ -1201,9 +1201,11 @@ static void load_cursor_pref(void) {
   if (ch >= 200 && ch <= 3000) g_cardH = ch;
   if (pt >= 7 && pt <= 22) g_ansPt = pt;
   /* t1…t9 — t4 и t5 (Огонёк, Череп) убраны и становятся Вороном,
-     t1…t3 — Ворон, Осьминог, Скорпион, t6…t8 — Разрез, Сукуна, Годжо, t9 — Баклажан */
+     t1…t3 — Ворон, Осьминог, Скорпион, t6…t8 — Разрез, Сукуна, Годжо, t9 — Баклажан.
+     tb — удалённый курсор, остаётся Баклажан. */
   static const signed char kTSkin[9] = {0, 1, 2, 0, 0, 3, 4, 5, 6};
-  if (skin[0] == 't' && skin[1] >= '1' && skin[1] <= '9') g_skin = ST_SKIN0 + kTSkin[skin[1] - '1'];
+  if (skin[0] == 't' && skin[1] == 'b') g_skin = ST_SKIN0 + 6;
+  else if (skin[0] == 't' && skin[1] >= '1' && skin[1] <= '9') g_skin = ST_SKIN0 + kTSkin[skin[1] - '1'];
   else if (skin[0] == 'k' && skin[1] == '7') g_skin = 6;
   else if (skin[0] == 'k' && skin[1] == '6') g_skin = 5;
   else if (skin[0] == 'k' && skin[1] == '5') g_skin = 4;
@@ -1250,7 +1252,7 @@ static const wchar_t *const kFxNames[FX_OPTIONS] = {L"Как у курсора",
                                                     L"Царапины",      L"Разрез", L"Кольца",    L"Конфетти",
                                                     L"Молния",        L"Сердечки", L"Рассечение", L"Пурпур",
                                                     L"Перья",         L"Чернила",  L"Яд",       L"Бесконечность",
-                                                    L"Икра"};
+                                                    L"Пятна"};
 static const int kFxPick[FX_OPTIONS] = {-1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
 static const wchar_t *const kStyleNames[ST_COUNT] = {L"Ворон", L"Осьминог", L"Скорпион", L"Разрез", L"Сукуна", L"Годжо",
                                                     L"Баклажан"};
@@ -4509,13 +4511,12 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
       send_paste();
     }
     if (wParam == TIMER_CURSOR_KEEP && g_skin > 0) {
-      /* у «Риас» и «Баклажана» курсор анимированный: заново поставленный
-         начинает мультик с первого кадра. Раз в 4 с это видно (блик Баклажана
-         прыгал бы к кончику), раз в минуту — нет. Копия .ani — один кадр,
-         поэтому эти наборы ставятся без CopyCursor. Сброс курсоров самой
-         Windows ловит WM_SETTINGCHANGE — там сразу. */
+      /* у «Риас» курсор анимированный: заново поставленный начинает мультик
+         с первого кадра. Раз в 4 с это видно, раз в минуту — нет. Копия .ani
+         — один кадр, поэтому набор ставится без CopyCursor. Сброс курсоров
+         самой Windows ловит WM_SETTINGCHANGE — там сразу. */
       static int keepTicks;
-      int slow = g_skin == 6 || g_skin == ST_SKIN0 + ST_AUBERGINE;
+      int slow = g_skin == 6;
       if (!slow || ++keepTicks % 15 == 0) apply_scheme_slots();
     }
     if (wParam == TIMER_FILES) files_start_index(FALSE);
@@ -4764,7 +4765,32 @@ static void enable_dpi(void) {
   FreeLibrary(user32);
 }
 
+#ifdef VISUAL_TEST
+#include "visual_test.c"
+#endif
+#ifdef QWEN_TEST
+#include "qwen_test.c"
+#endif
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
+#ifdef QWEN_TEST
+  return aq_test();
+#endif
+#ifdef VISUAL_TEST
+  { int n; LPWSTR *args = CommandLineToArgvW(GetCommandLineW(), &n);
+    if (args && n == 3 && !wcscmp(args[1], L"--render")) { int code = visual_test(args[2]); LocalFree(args); return code; }
+    if (args) LocalFree(args);
+    return 2;
+  }
+#endif
+#ifdef AGENT_LAB
+  {
+    int n = 0; LPWSTR *args = CommandLineToArgvW(GetCommandLineW(), &n);
+    if (args && n >= 3 && !wcscmp(args[1], L"--agent-lab")) {
+      int code = ag_lab(inst, args[2]); LocalFree(args); return code;
+    }
+    if (args) LocalFree(args);
+  }
+#endif
   (void)prev;
   (void)cmd;
   (void)show;
@@ -4817,6 +4843,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
     return 0;
   }
   enable_dpi();
+  aq_warm_start(); /* Prepare update-delivered agent/skills without blocking UI. */
 
   INITCOMMONCONTROLSEX icc;
   icc.dwSize = sizeof(icc);

@@ -52,7 +52,7 @@ int ai_ask_async(const wchar_t *instruction, const wchar_t *text, DWORD timeoutM
 typedef struct AiTurn {
   int assistant;
   const wchar_t *text;
-  const BYTE *png; /* картинка к реплике (PNG); NULL — без картинки, нужна модель «С картинками» */
+  const BYTE *png; /* картинка к реплике (PNG); NULL — без картинки, нужна модель с проектором */
   DWORD pngLen;
 } AiTurn;
 
@@ -61,10 +61,14 @@ typedef struct AiTurn {
    реплика — вопрос; больше ai_chat_budget — возвращает 0. */
 int ai_ask_chat_async(const wchar_t *instruction, const AiTurn *turns, int n, DWORD timeoutMs, HWND notify,
                       UINT msg, void *user);
+int ai_ask_files_async(const wchar_t *instruction, const AiTurn *turns, int n, HWND notify, UINT msg,
+                       LONG task, const wchar_t *goal, const wchar_t *plan,
+                       const wchar_t *observation, int observationState);
 void ai_out_cap(int n); /* сколько токенов просить в ответе; 0 — снова 1024. Для навыка «Файлы» хватает 192 */
 int ai_chat_budget(void); /* символов истории и вопроса, которые уйдут модели */
+int ai_agent_budget(void); /* agent automatically requests a 16384-token slot */
 int ai_ctx_size(void);    /* окно контекста модели, токенов (вкладка «ИИ») */
-BOOL ai_vision_ready(void); /* можно ли присылать картинки: модель «С картинками» скачана или свой сервер */
+BOOL ai_vision_ready(void); /* у выбранной модели есть проектор или используется свой сервер */
 void ai_cancel(int id); /* ответ всё равно придёт — со статусом AI_CANCELLED */
 void ai_result_free(AiResult *r);
 
@@ -73,7 +77,7 @@ void ai_result_free(AiResult *r);
    отмены: стал не 0 — запрос обрывается. */
 int ai_ask_sync(const wchar_t *instruction, const wchar_t *text, DWORD timeoutMs, volatile LONG *cancel,
                 wchar_t **answer);
-/* то же с картинкой (PNG/JPG/BMP-файл); нужна модель уровня «С картинками» */
+/* то же с картинкой (PNG/JPG/BMP-файл); нужна модель с проектором */
 int ai_ask_image_sync(const wchar_t *instruction, const wchar_t *imagePath, DWORD timeoutMs,
                       volatile LONG *cancel, wchar_t **answer);
 
@@ -93,5 +97,6 @@ BOOL ai_refine_field(const wchar_t *field, const wchar_t *raw, const wchar_t *co
 int ai_rank_candidates(const wchar_t *query, const wchar_t *const *cand, int n, int *order, DWORD timeoutMs);
 
 void ai_shutdown(void); /* при выходе: погасить llama-server */
+void ai_disable(void); /* выключить ИИ, отменить запросы и выгрузить собственную модель */
 
 #endif

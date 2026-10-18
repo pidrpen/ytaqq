@@ -12,7 +12,9 @@
 #include "ai.h"
 
 #define AI_IDLE_STOP_MS (10 * 60 * 1000)
+#ifndef AI_PORT0 /* isolated native integration tests may choose another port */
 #define AI_PORT0 39281
+#endif
 #define WM_AI_UI (WM_APP + 70)   /* в окно Настроек: обновить вкладку «ИИ» */
 #define WM_AI_TEST (WM_APP + 71) /* в окно Настроек: ответ кнопки «Проверить» */
 
@@ -41,10 +43,13 @@ static const AiTier kAiTiers[AI_TIERS] = {
      {{L"Qwen/Qwen2.5-1.5B-Instruct-GGUF", L"91cad51170dc346986eccefdc2dd33a9da36ead9",
        L"qwen2.5-1.5b-instruct-q4_k_m.gguf", 1117320736ULL,
        "6a1a2eb6d15622bf3c96857206351ba97e1af16c30d7a74ee38970e434e9407e"}}},
-    {L"Средний", L"Qwen3 4B", L"qwen3-4b", L"16 ГБ памяти, процессор как i5-11400", 1, FALSE,
-     {{L"unsloth/Qwen3-4B-Instruct-2507-GGUF", L"a06e946bb6b655725eafa393f4a9745d460374c9",
-       L"Qwen3-4B-Instruct-2507-Q4_K_M.gguf", 2497281120ULL,
-       "3605803b982cb64aead44f6c1b2ae36e3acdb41d8e46c8a94c6533bc4c67e597"}}},
+    {L"Средний", L"Qwen3.5 4B · текст и картинки", L"qwen3.5-4b", L"16 ГБ памяти; текст и картинки, Vulkan или процессор", 2, TRUE,
+     {{L"unsloth/Qwen3.5-4B-GGUF", L"e87f176479d0855a907a41277aca2f8ee7a09523",
+       L"Qwen3.5-4B-Q4_K_M.gguf", 2740937888ULL,
+       "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4"},
+      {L"unsloth/Qwen3.5-4B-GGUF", L"e87f176479d0855a907a41277aca2f8ee7a09523",
+       L"mmproj-F16.gguf", 672423616ULL,
+       "cd88edcf8d031894960bb0c9c5b9b7e1fea6ebee02b9f7ce925a00d12891f864"}}},
     {L"Мощный", L"Qwen2.5 7B", L"qwen2.5-7b", L"32 ГБ памяти или видеокарта от 8 ГБ", 2, FALSE,
      {{L"Qwen/Qwen2.5-7B-Instruct-GGUF", L"bb5d59e06d9551d752d08b292a50eb208b07ab1f",
        L"qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf", 3993201344ULL,
@@ -62,7 +67,7 @@ static const AiTier kAiTiers[AI_TIERS] = {
 };
 
 /* --- настройки ------------------------------------------------------------ */
-static BOOL g_aiOn;                  /* по умолчанию выключен */
+static volatile LONG g_aiOn;         /* по умолчанию выключен; виден рабочим потокам */
 static int g_aiTier = 1;             /* «Средний» */
 static int g_aiCtx = 8192;           /* окно контекста модели, токенов; на каждую из двух ячеек сервера — половина */
 static BOOL g_aiGpu;                 /* llama.cpp со сборкой Vulkan и слоями на видеокарте */
@@ -202,6 +207,10 @@ static BOOL ai_pick_model(wchar_t *model, wchar_t *mm) {
 }
 
 static BOOL ai_ext(void) { return g_aiExtHost[0] && g_aiExtPort > 0; }
+static BOOL ai_qwen35(const wchar_t *model) {
+  wchar_t lower[MAX_PATH]; lstrcpynW(lower, model, MAX_PATH); CharLowerBuffW(lower, (DWORD)wcslen(lower));
+  return (!g_aiModel[0] && g_aiTier == 1) || wcsstr(lower, L"qwen3.5") || wcsstr(lower, L"qwen3_5");
+}
 
 BOOL ai_ready(void) {
   if (!g_aiOn) return FALSE;
@@ -219,7 +228,7 @@ const wchar_t *ai_status_text(int st) {
   case AI_TIMEOUT: return L"ИИ не успел ответить";
   case AI_CANCELLED: return L"отменено";
   case AI_BUSY: return L"нельзя ждать ИИ в потоке окон";
-  case AI_NO_VISION: return L"нужна модель «С картинками»";
+  case AI_NO_VISION: return L"нужна модель с картинками: «Средний» или «С картинками»";
   default: return L"ошибка ИИ";
   }
 }
@@ -647,10 +656,14 @@ static void ai_short_path(wchar_t *p) {
 }
 
 /* поднять сервер, если он не идёт. Ждёт загрузки модели до deadline. */
-static int ai_server_ensure(DWORD deadline, volatile LONG *cancel) {
+static int ai_server_ensure(DWORD deadline, volatile LONG *cancel, int minimumContext) {
+  if (!g_aiOn) return AI_OFF;
   if (ai_ext()) return AI_OK;
   AcquireSRWLockExclusive(&g_aiSrvLock);
-  if (g_aiProc && WaitForSingleObject(g_aiProc, 0) == WAIT_TIMEOUT && g_aiPort) {
+  if (!g_aiOn || (cancel && *cancel)) {
+    ReleaseSRWLockExclusive(&g_aiSrvLock); return !g_aiOn ? AI_OFF : AI_CANCELLED;
+  }
+  if (g_aiProc && WaitForSingleObject(g_aiProc, 0) == WAIT_TIMEOUT && g_aiPort && g_aiSlotCtx >= minimumContext) {
     ReleaseSRWLockExclusive(&g_aiSrvLock);
     return AI_OK;
   }
@@ -701,6 +714,7 @@ static int ai_server_ensure(DWORD deadline, volatile LONG *cancel) {
   g_aiSrvNote[0] = g_aiRunNote[0] = 0;
   /* если модель не влезла, пробуем проще: без видеокарты, затем с малым контекстом */
   int ngl = gpu ? 99 : 0, ctx = g_aiCtx * 2, np = 2, fail = -1;
+  if (minimumContext) { ctx = g_aiCtx > minimumContext ? g_aiCtx : minimumContext; np = 1; }
   {
     int av, tot;
     ai_mem_mb(&av, &tot);
@@ -714,6 +728,15 @@ static int ai_server_ensure(DWORD deadline, volatile LONG *cancel) {
                        L"\"%s\" -m \"%s\" --host 127.0.0.1 --port %d --api-key %s -c %d -np %d -t %d -ngl %d",
                        exe, model, port, wkey, ctx, np, ai_cores(), ngl);
     if (mm[0] && n > 0) n += _snwprintf(cmd + n, MAX_PATH * 4 + 300 - n, L" --mmproj \"%s\"", mm);
+    /* Qwen3.5 defaults to thinking. Tool JSON has a small output budget, so
+       reasoning must not consume that budget before the action is returned.
+       Server default also covers QwenPaw's auxiliary checklist/audit calls. */
+    if (ai_qwen35(model) && n > 0)
+      n += _snwprintf(cmd + n, MAX_PATH * 4 + 300 - n, L" --jinja --chat-template-kwargs \"{\\\"enable_thinking\\\":false}\"");
+    /* The vision loader recommends at least 1024 image tokens for details.
+       This affects attached images only; text requests keep their budget. */
+    if (ai_qwen35(model) && mm[0] && n > 0)
+      n += _snwprintf(cmd + n, MAX_PATH * 4 + 300 - n, L" --image-min-tokens 1024");
     /* своя модель с дообучением: адаптер LoRA (lora*.gguf) рядом с ней подключается сам —
        так можно взять готовую модель и свой адаптер, обученный на своих документах */
     wchar_t lora[MAX_PATH];
@@ -788,7 +811,7 @@ static int ai_server_ensure(DWORD deadline, volatile LONG *cancel) {
           ngl = 0;
           lstrcpynW(g_aiRunNote, L"видеокарте не хватило памяти, модель идёт на процессоре", 200);
           ai_log(L"Повтор без видеокарты (-ngl 0)");
-        } else if (ctx > 2048) {
+        } else if (ctx > 2048 && !minimumContext) {
           ctx = 2048;
           np = 1;
           lstrcpynW(g_aiRunNote, L"памяти мало, контекст урезан до 2048", 200);
@@ -798,8 +821,8 @@ static int ai_server_ensure(DWORD deadline, volatile LONG *cancel) {
         }
         break;
       }
-      if ((cancel && *cancel) || (LONG)(GetTickCount() - deadline) >= 0) {
-        rc = cancel && *cancel ? AI_CANCELLED : AI_TIMEOUT;
+      if (!g_aiOn || (cancel && *cancel) || (LONG)(GetTickCount() - deadline) >= 0) {
+        rc = !g_aiOn ? AI_OFF : cancel && *cancel ? AI_CANCELLED : AI_TIMEOUT;
         if (rc == AI_TIMEOUT) lstrcpynW(g_aiSrvNote, L"модель грузится слишком долго", 200);
         ai_server_stop_locked();
         attempt = 99;
@@ -846,19 +869,22 @@ static int ai_server_ensure(DWORD deadline, volatile LONG *cancel) {
   return rc;
 }
 
+static void aq_warm_cancel(void);
 void ai_shutdown(void) {
-  ai_server_stop();
+  ai_disable();
 }
 
 /* --- запросы ------------------------------------------------------------------ */
 typedef struct AiJob {
   int id;
+  LONG agentTask;
   char *body;
   DWORD timeout;
   HWND notify;
   UINT msg;
   void *user;
   volatile LONG cancel;
+  volatile LONG *externalCancel;
   void *volatile req; /* открытый запрос — закрыть, чтобы оборвать */
   int status;
   wchar_t *text;
@@ -883,7 +909,7 @@ static char *ai_body(const wchar_t *instruction, const char *userContent, int ma
     snprintf(b, n,
              "{\"model\":\"%s\",\"messages\":[{\"role\":\"system\",\"content\":%s},"
              "{\"role\":\"user\",\"content\":%s}],\"temperature\":0.2,\"max_tokens\":%d,"
-             "\"stream\":true,\"cache_prompt\":true}",
+             "\"stream\":true,\"cache_prompt\":true,\"chat_template_kwargs\":{\"enable_thinking\":false}}",
              g_aiExtModel[0] ? g_aiExtModel : "local", sys, userContent, maxTokens);
   free(sys);
   return b;
@@ -923,16 +949,21 @@ static wchar_t *ai_sse_text(const char *s) {
   return acc;
 }
 
+#include "ai_qwen.c"
+
 static void ai_job_run(AiJob *j) {
   DWORD t0 = GetTickCount(), deadline = t0 + j->timeout;
   InterlockedIncrement(&g_aiActive);
-  int st = ai_server_ensure(deadline, &j->cancel);
+  int st = ai_server_ensure(deadline, &j->cancel, j->agentTask ? 16384 : 0);
   if (st == AI_NO_SERVER || st == AI_NO_MODEL) {
     AcquireSRWLockShared(&g_aiSrvLock);
     j->text = _wcsdup(g_aiSrvNote[0] ? g_aiSrvNote : ai_status_text(st));
     ReleaseSRWLockShared(&g_aiSrvLock);
   }
-  if (st == AI_OK) {
+  if (st == AI_OK && j->agentTask) {
+    st = aq_run(j, deadline, ai_ext() ? g_aiExtPort : g_aiPort);
+    g_aiLastUse = GetTickCount();
+  } else if (st == AI_OK) {
     DWORD left = deadline - GetTickCount();
     if ((LONG)left < 1000) left = 1000;
     char *resp = NULL;
@@ -1031,6 +1062,19 @@ void ai_cancel(int id) {
       if (h) WinHttpCloseHandle(h);
     }
   ReleaseSRWLockExclusive(&g_aiJobLock);
+}
+
+void ai_disable(void) {
+  InterlockedExchange(&g_aiOn, FALSE);
+  aq_warm_cancel();
+  AcquireSRWLockExclusive(&g_aiJobLock);
+  for (AiJob *j = g_aiJobs; j; j = j->next) {
+    InterlockedExchange(&j->cancel, 1);
+    HINTERNET h = InterlockedExchangePointer(&j->req, NULL);
+    if (h) WinHttpCloseHandle(h);
+  }
+  ReleaseSRWLockExclusive(&g_aiJobLock);
+  ai_server_stop(); /* only our owned process; external servers are untouched */
 }
 
 /* запустить ходящий поток и ждать: ответа, отмены (j->cancel или ext) или срока.
@@ -1149,7 +1193,8 @@ BOOL ai_vision_ready(void) {
 /* картинка весит как ~3000 символов истории: модель тратит на неё много контекста */
 static long ai_turn_cost(const AiTurn *t) { return (long)wcslen(t->text) + (t->png ? 3000 : 0); }
 
-static char *ai_body_chat(const wchar_t *instruction, const AiTurn *t, int n) {
+#include "ai_agent_schema.h"
+static char *ai_body_chat(const wchar_t *instruction, const AiTurn *t, int n, BOOL fileTools) {
   char *sys = ai_json_str(instruction);
   char **js = (char **)calloc(n > 0 ? n : 1, sizeof(char *));
   if (!sys || !js) {
@@ -1157,7 +1202,7 @@ static char *ai_body_chat(const wchar_t *instruction, const AiTurn *t, int n) {
     free(js);
     return NULL;
   }
-  size_t total = strlen(sys) + strlen(g_aiExtModel) + 400;
+  size_t total = strlen(sys) + strlen(g_aiExtModel) + 400 + (fileTools ? strlen(kAiAgentSchema) : 0);
   for (int i = 0; i < n; i++) {
     js[i] = t[i].png ? ai_content_img(t[i].text, t[i].png, t[i].pngLen) : ai_json_str(t[i].text);
     if (!js[i]) break;
@@ -1172,7 +1217,8 @@ static char *ai_body_chat(const wchar_t *instruction, const AiTurn *t, int n) {
       k += snprintf(b + k, total - k, ",{\"role\":\"%s\",\"content\":%s}", t[i].assistant ? "assistant" : "user",
                     js[i]);
     snprintf(b + k, total - k,
-             "],\"temperature\":0.2,\"max_tokens\":%d,\"stream\":true,\"cache_prompt\":true}", g_aiOutCap);
+             "],\"temperature\":0.2,\"max_tokens\":%d,\"stream\":true,\"cache_prompt\":true,\"chat_template_kwargs\":{\"enable_thinking\":false}%s}", g_aiOutCap,
+             fileTools ? kAiAgentSchema : "");
   }
   for (int i = 0; i < n; i++) free(js[i]);
   free(js);
@@ -1181,10 +1227,11 @@ static char *ai_body_chat(const wchar_t *instruction, const AiTurn *t, int n) {
 }
 
 int ai_chat_budget(void) { return ((g_aiSlotCtx ? g_aiSlotCtx : g_aiCtx) - 1024 - 300) * 2; } /* ≈ 2 символа на токен: запас для русского */
+int ai_agent_budget(void) { return (16384 - 1024 - 300) * 2; }
 int ai_ctx_size(void) { return g_aiCtx; }
 
-int ai_ask_chat_async(const wchar_t *instruction, const AiTurn *turns, int n, DWORD timeoutMs, HWND notify,
-                      UINT msg, void *user) {
+static int ai_ask_chat_kind(const wchar_t *instruction, const AiTurn *turns, int n, DWORD timeoutMs, HWND notify,
+                            UINT msg, void *user, BOOL fileTools) {
   if (ai_precheck() != AI_OK || !notify || !turns || n < 1 || !turns[n - 1].text) return 0;
   /* роль system не входит в бюджет реплик: длинная тетрадь иначе вытесняет вопрос из окна */
   long budget = ai_chat_budget();
@@ -1198,9 +1245,36 @@ int ai_ask_chat_async(const wchar_t *instruction, const AiTurn *turns, int n, DW
   int s = n - 1;
   while (s > 0 && used + ai_turn_cost(&turns[s - 1]) <= budget) used += ai_turn_cost(&turns[--s]);
   while (s < n - 1 && turns[s].assistant) s++; /* модель начинает с вопроса */
-  char *body = ai_body_chat(instruction, turns + s, n - s);
+  char *body = ai_body_chat(instruction, turns + s, n - s, fileTools);
   if (!body) return 0;
   return ai_ask_body(body, timeoutMs, notify, msg, user);
+}
+
+int ai_ask_chat_async(const wchar_t *instruction, const AiTurn *turns, int n, DWORD timeoutMs, HWND notify,
+                      UINT msg, void *user) {
+  return ai_ask_chat_kind(instruction, turns, n, timeoutMs, notify, msg, user, FALSE);
+}
+
+int ai_ask_files_async(const wchar_t *instruction, const AiTurn *turns, int n, HWND notify, UINT msg,
+                       LONG task, const wchar_t *goal, const wchar_t *plan,
+                       const wchar_t *observation, int observationState) {
+  if (ai_precheck() != AI_OK || !notify || n != 1 || !turns || !turns[0].text || task <= 0) return 0;
+  char *body = ai_body_chat(instruction, turns, n, TRUE), *g = ai_json_str(goal), *p = ai_json_str(plan);
+  char *o = ai_json_str(observation);
+  if (!body || !g || !p || !o) { free(body); free(g); free(p); free(o); return 0; }
+  size_t size = strlen(body) + strlen(g) + strlen(p) + strlen(o) + 160;
+  char *wire = (char *)malloc(size);
+  if (wire) snprintf(wire, size, "{\"cursorpad\":{\"goal\":%s,\"plan\":%s,\"observation\":%s,\"observation_state\":%d},%s", g, p, o, observationState, body + 1);
+  free(body); free(g); free(p); free(o);
+  AiAsync *a = (AiAsync *)calloc(1, sizeof(AiAsync));
+  AiJob *j = a && wire ? ai_job_new(wire, 600000) : NULL;
+  if (!j) { if (!a || !wire) free(wire); free(a); return 0; }
+  j->agentTask = task;
+  a->j = j; a->id = j->id; a->notify = notify; a->msg = msg;
+  int id = j->id;
+  HANDLE th = CreateThread(NULL, 0, ai_async_thread, a, 0, NULL);
+  if (!th) { ai_job_release(j); free(a); return 0; }
+  CloseHandle(th); return id;
 }
 
 static int ai_ask_body(char *body, DWORD timeoutMs, HWND notify, UINT msg, void *user) {
@@ -1798,7 +1872,11 @@ static DWORD WINAPI ai_dl_thread(LPVOID p) {
   /* сначала llama.cpp: он маленький, и если не скачается — видно сразу, а не после 2 ГБ модели */
   {
     wchar_t exe[MAX_PATH];
-    if (!ai_server_exe(gpu, exe)) {
+    /* First download of the new architecture refreshes the managed engine too.
+       An old existing EXE is not evidence that it supports qwen35 / Vulkan GDN.
+       A manually selected engine is retained and tested by normal startup. */
+    if (!ai_server_exe(gpu, exe) || (tier == 1 && (needModel[0] || needModel[1]) && !g_aiSrvExe[0])) {
+      if (!g_aiSrvExe[0]) ai_server_stop(); /* release only our managed engine/DLLs before updating */
       BOOL ok = ai_get_llama(ses, gpu);
       if (!ok && gpu && !g_aiDl.cancel && !ai_server_exe(FALSE, exe)) {
         ai_log(L"Сборка для видеокарты не скачалась — беру сборку для процессора");
@@ -1830,8 +1908,20 @@ static DWORD WINAPI ai_dl_thread(LPVOID p) {
               L"github.com/ggml-org/llama.cpp/releases и укажите его кнопкой «llama.cpp…»", t->model);
     goto out;
   }
+  ai_dl_say(L"Модель сохранена. Подготавливаю QwenPaw, XlsxWriter и Filesystem MCP…");
+  {
+    AiJob job = {0}; job.externalCancel = &g_aiDl.cancel;
+    wchar_t root[MAX_PATH];
+    wchar_t python[MAX_PATH];
+    int status = at_prepare(&job, GetTickCount() + 600000, root, python);
+    if (status != AI_OK) {
+      ai_dl_say(L"Модель сохранена, но локальные инструменты ещё не готовы. %s", job.text ? job.text : L"Повторите скачивание при подключённом интернете.");
+      free(job.text); goto out;
+    }
+    free(job.text);
+  }
   g_aiDl.failed = FALSE;
-  ai_dl_say(L"Готово: %s скачана. Включите ИИ и нажмите «Проверить».", t->model);
+  ai_dl_say(L"Готово: %s, QwenPaw и локальные инструменты подготовлены. Включите ИИ и нажмите «Проверить».", t->model);
 out:
   if (ses) WinHttpCloseHandle(ses);
   if (g_aiDl.cancel) ai_dl_say(L"Скачивание остановлено. Скачанное сохранено — продолжится с того же места.");

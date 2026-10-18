@@ -484,7 +484,7 @@ static BOOL dr_find_stamp(const DrLines *L, double dpi, DrStamp *s, wchar_t *why
   if (ylo < 0) ylo = 0;
   int *len = (int *)malloc(sizeof(int) * (size_t)(by - ylo + 1));
   if (!len) return FALSE;
-  int nl = 0, nhit = 0, maxl = 0;
+  int nl = 0, maxl = 0;
   /* полоса ±r0 строк: остаток перекоса уводит тонкую линию на соседние строки */
 #define DR_HB(yy, xx) dr_hband(L, yy, xx, r0)
   for (int y = by - 2 - r0; y >= ylo; y--) {
@@ -497,7 +497,6 @@ static BOOL dr_find_stamp(const DrLines *L, double dpi, DrStamp *s, wchar_t *why
         break;
       }
     if (lastHit < 0) continue;
-    nhit++;
     for (x = lastHit; x >= 0 && lastHit - x <= gapW; x--)
       if (DR_HB(y, x)) lastHit = x;
     int l = rx - lastHit;
