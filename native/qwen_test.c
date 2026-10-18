@@ -32,7 +32,57 @@ static int aq_test(void) {
   int status, testedSlot = 0;
   int testedOff = 0, testedStopped = 0, testedQueue = -1;
   wchar_t testedWeb[AC_WEB_CAP] = L"", testedNote[360] = L"";
-  if (port == -28 && argc == 7 && job.body) {
+  if (port == -29 && argc == 7 && job.body) {
+    /* All writes are inside the supplied scratch profile; no live API call. */
+    const wchar_t *fake = L"cursorpad-zai-test-only-not-a-real-key";
+    BOOL ok = !ai_zai_model_valid("glm-4.7\r\nheader") && ai_zai_model_valid("glm-4.7");
+    g_aiProvider = 1; g_aiOn = TRUE; ai_save();
+    g_setHwnd = CreateWindowExW(0, L"STATIC", L"", WS_POPUP, 0, 0, 600, 850, NULL, NULL, GetModuleHandleW(NULL), NULL);
+    ai_ui_create(g_setHwnd);
+    ok = ok && g_aiSource && g_aiZKey && (GetWindowLongW(g_aiZKey, GWL_STYLE) & ES_PASSWORD);
+    g_layOpen = TRUE; ai_ui_layout(14, 40, 540, 554, 28, 8, 18, 90);
+    ok = ok && (GetWindowLongW(g_aiZKey, GWL_STYLE) & WS_VISIBLE) && !(GetWindowLongW(g_aiBtnDl, GWL_STYLE) & WS_VISIBLE);
+    g_aiProvider = 0; ai_ui_layout(14, 40, 540, 554, 28, 8, 18, 90);
+    ok = ok && !(GetWindowLongW(g_aiZKey, GWL_STYLE) & WS_VISIBLE) && (GetWindowLongW(g_aiBtnDl, GWL_STYLE) & WS_VISIBLE);
+    g_aiProvider = 1;
+    SetWindowTextW(g_aiZKey, fake); ai_ui_command(g_setHwnd, ID_AI_ZSAVE, BN_CLICKED);
+    ok = ok && ai_zai_has_key() && !GetWindowTextLengthW(g_aiZKey) && ai_ready();
+    wchar_t path[MAX_PATH]; ai_zai_key_path(path);
+    char *sealed = aq_read(path); ok = ok && sealed && !strstr(sealed, "cursorpad-zai-test-only"); free(sealed);
+    swprintf(path, MAX_PATH, L"%ls\\ai.txt", g_dataDir); char *pref = aq_read(path);
+    ok = ok && pref && strstr(pref, "provider 1") && !strstr(pref, "cursorpad-zai-test-only"); free(pref);
+    char *body = ai_body(L"Тест", "\"привет\"", 64); AiJob *one = body ? ai_job_new(body, 1000) : NULL;
+    ok = ok && one && one->provider == 1 && strstr(one->body, "glm-4.7");
+    g_aiProvider = 0; if (one) { ok = ok && one->provider == 1; ai_job_release(one); }
+    ai_load(); ok = ok && g_aiProvider == 1;
+    ai_ui_command(g_setHwnd, ID_AI_ZFORGET, BN_CLICKED); ok = ok && !ai_zai_has_key() && !ai_ready();
+    ok = ok && ai_zai_store_key(fake); /* retained only for the Python DPAPI test */
+    ac_push(0, L"LOCAL_PRIVATE_HISTORY_MARKER"); ac_push(1, L"old reply"); g_agPending = TRUE;
+    ok = ok && ac_provider_change(1) && g_acContextStart == g_acN && !g_agPending;
+    char *routed = ac_route_body(L"привет"); ok = ok && routed && !strstr(routed, "LOCAL_PRIVATE_HISTORY_MARKER"); free(routed); ac_clear_turns();
+    DestroyWindow(g_setHwnd); g_setHwnd = NULL;
+    status = ok ? AI_OK : AI_ERROR; job.text = _wcsdup(ok ? L"PASS: masked UI, encrypted key, delete, settings and provider snapshot; no model/network" : L"FAIL: Z.ai UI/credential protocol");
+  } else if ((port == -30 || port == -31) && argc == 7 && job.body) {
+    /* Test bootstrap is supplied only to this test build; production has no
+       endpoint override. It mocks HTTPS without sending even a fake key. */
+    g_aiProvider = 1; g_aiOn = TRUE; job.provider = 1; job.agentTask = port == -31 ? 1 : 0;
+    g_aqTestBridge = argv[6]; job.timeout = 180000; ai_job_run(&job); status = job.status;
+    if (g_aiProc) status = AI_ERROR;
+    if (port == -31 && status == AI_OK) {
+      AgFs *fs = (AgFs *)calloc(1, sizeof(AgFs)); wchar_t scratch[MAX_PATH], observed[6000];
+      swprintf(scratch, MAX_PATH, L"%ls\\files", g_dataDir);
+      BOOL ok = fs && CreateDirectoryW(scratch, NULL);
+      if (ok) {
+        ag_fs_init(fs, L"C:\\protected-test-runtime", scratch); lstrcpynW(fs->desktop, scratch, MAX_PATH); lstrcpynW(fs->goal, L"Создай Word с текстом API", 4000);
+        ok = ag_tool(fs, job.text, observed, 6000) == 0 && fs->count == 1 && fs->plan[0].kind == AG_DOCX;
+        if (ok) ok = GetFileAttributesW(fs->plan[0].dst) == INVALID_FILE_ATTRIBUTES && ag_apply(fs, observed, 6000);
+      }
+      if (ok) { free(job.text); job.text = _wcsdup(L"PASS: mocked Z.ai -> QwenPaw -> native Word preview -> Apply; no llama process"); }
+      else status = AI_ERROR;
+      free(fs);
+    }
+    g_aqTestBridge = NULL;
+  } else if (port == -28 && argc == 7 && job.body) {
     /* Actual hidden chat event flow; synthetic old task, supplied turns only.
        No access to user settings, task logs, files, search or UI windows. */
     g_aiOn = TRUE; g_aiCtx = 8192; g_aiGpu = TRUE;

@@ -471,6 +471,7 @@ static void ac_sys_build(const wchar_t *q, const wchar_t *web, wchar_t *out, int
              web && web[0] ? AC_SYS_WEB : L"",
              web && web[0] ? L"\r\nИнтернет (фрагменты источников):\r\n" : L"", web && web[0] ? web : L"");
   out[cap - 1] = 0;
+  if (g_aiProvider && wcslen(out) + 140 < (size_t)cap) wcscat(out, L"\r\nСейчас отвечает облачная модель Z.ai по API. Не называй себя локальной Qwen и не утверждай, что этот запрос работает без интернета.\r\n");
 }
 
 /* showUser — вписать реплику в беседу (это был вопрос в поле, а не кнопка) */
@@ -1366,7 +1367,7 @@ static void ac_finish_ask(wchar_t *web, const wchar_t *note) {
   g_acId = id;
   g_acCmdWait = FALSE;
   ac_busy(TRUE);
-  ac_status(have ? L"Qwen отвечает по найденным страницам…" : picture ? L"Qwen разбирает изображение локально…" : !note || !note[0] || wcsstr(note, L"Локально:") == note ? L"Qwen отвечает локально…" : L"Страницы не открылись. Qwen отвечает без них…");
+  ac_status(g_aiProvider ? L"ИИ отвечает через Z.ai…" : have ? L"Qwen отвечает по найденным страницам…" : picture ? L"Qwen разбирает изображение локально…" : !note || !note[0] || wcsstr(note, L"Локально:") == note ? L"Qwen отвечает локально…" : L"Страницы не открылись. Qwen отвечает без них…");
 }
 
 static DWORD WINAPI ac_web_thread(LPVOID param) {
@@ -1416,7 +1417,18 @@ static void ac_web_ready(AcWebDone *d) {
   free(d);
 }
 
+/* A provider/key change is a context boundary. Local history and pending file
+   clarifications must not be uploaded merely by switching to the cloud. */
+static BOOL ac_provider_change(int provider) {
+  if ((provider != 0 && provider != 1) || g_acId || g_agActive || g_acWebOn || g_acRouting || g_acPlanOn) return FALSE;
+  ag_stop(); af_clear(); ac_review_reset();
+  g_acMkWait = g_acTakeWait = 0; g_acCmdWait = FALSE; g_acCmdText[0] = 0;
+  g_acContextStart = g_acN;
+  SetWindowTextW(g_acTitle, provider ? L"Мини-ИИ · Z.ai API" : L"Мини-ИИ · на этом компьютере");
+  return TRUE;
+}
 static void ac_send(void) {
+  SetWindowTextW(g_acTitle, g_aiProvider ? L"Мини-ИИ · Z.ai API" : L"Мини-ИИ · на этом компьютере");
   if (g_acPlanOn) {
     ac_status(L"Сначала «Применить» или «Отмена» для плана");
     return;
@@ -2172,7 +2184,7 @@ static void ac_create(void) {
   round_corners(g_acWnd);
   mk_btn(g_acWnd, L"×", ID_PANEL_CLOSE);
   mk_btn(g_acWnd, L"–", ID_PANEL_MIN);
-  g_acTitle = CreateWindowExW(0, L"STATIC", L"Мини-ИИ · на этом компьютере", WS_CHILD | WS_VISIBLE | SS_LEFT,
+  g_acTitle = CreateWindowExW(0, L"STATIC", g_aiProvider ? L"Мини-ИИ · Z.ai API" : L"Мини-ИИ · на этом компьютере", WS_CHILD | WS_VISIBLE | SS_LEFT,
                               0, 0, 10, 10, g_acWnd, (HMENU)(INT_PTR)ID_AC_TITLE, g_inst, NULL);
   g_acRich = LoadLibraryW(L"Msftedit.dll") != NULL;
   g_acLog = CreateWindowExW(WS_EX_CLIENTEDGE, g_acRich ? L"RICHEDIT50W" : L"EDIT", L"",

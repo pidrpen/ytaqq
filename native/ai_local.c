@@ -74,6 +74,7 @@ static wchar_t g_aiExtHost[64];      /* свой сервер (Ollama…): ад�
 static int g_aiExtPort;
 static char g_aiExtModel[64];        /* имя модели для чужого сервера */
 static DWORD g_aiUiThread;           /* поток интерфейса — синхронные вызовы из него запрещены */
+#include "ai_zai.c"
 
 /* журнал ИИ: что качали, что запускали, чем кончилось — для «Скопировать отчёт» */
 static wchar_t g_aiLog[12000];
@@ -215,6 +216,7 @@ static BOOL ai_qwen_thinking(const wchar_t *model) {
 
 BOOL ai_ready(void) {
   if (!g_aiOn) return FALSE;
+  if (g_aiProvider) return ai_zai_has_key() && ai_zai_model_valid(g_aiZaiModel);
   if (ai_ext()) return TRUE;
   wchar_t exe[MAX_PATH], m[MAX_PATH], mm[MAX_PATH];
   return (ai_server_exe(g_aiGpu, exe) || ai_server_exe(!g_aiGpu, exe)) && ai_pick_model(m, mm);
@@ -224,12 +226,12 @@ const wchar_t *ai_status_text(int st) {
   switch (st) {
   case AI_OK: return L"готово";
   case AI_OFF: return L"ИИ выключен (Настройки → ИИ)";
-  case AI_NO_MODEL: return L"модель не скачана (Настройки → ИИ → Скачать)";
+  case AI_NO_MODEL: return g_aiProvider ? L"Z.ai: добавьте API-ключ в Настройки → ИИ" : L"модель не скачана (Настройки → ИИ → Скачать)";
   case AI_NO_SERVER: return L"llama-server не запустился";
   case AI_TIMEOUT: return L"ИИ не успел ответить";
   case AI_CANCELLED: return L"отменено";
   case AI_BUSY: return L"нельзя ждать ИИ в потоке окон";
-  case AI_NO_VISION: return L"нужна модель с картинками: «Средний» или «С картинками»";
+  case AI_NO_VISION: return g_aiProvider ? L"Для картинок выберите в Z.ai модель с изображениями, например glm-4.6v" : L"нужна модель с картинками: «Средний» или «С картинками»";
   default: return L"ошибка ИИ";
   }
 }
@@ -238,10 +240,11 @@ const wchar_t *ai_status_text(int st) {
 static void ai_save(void) {
   wchar_t p[MAX_PATH];
   _snwprintf(p, MAX_PATH, L"%s\\ai.txt", g_dataDir);
-  char model[MAX_PATH * 3], buf[MAX_PATH * 6 + 300];
+  char model[MAX_PATH * 3], buf[4096];
   WideCharToMultiByte(CP_UTF8, 0, g_aiModel, -1, model, sizeof(model), NULL, NULL);
   int n = snprintf(buf, sizeof(buf), "on %d\r\ntier %d\r\nctx %d\r\ngpu %d\r\nmodel %s\r\n", g_aiOn ? 1 : 0, g_aiTier, g_aiCtx,
                    g_aiGpu ? 1 : 0, model);
+  n += snprintf(buf + n, sizeof(buf) - n, "provider %d\r\nzai_model %s\r\n", g_aiProvider, g_aiZaiModel);
   if (g_aiSrvExe[0]) {
     char se[MAX_PATH * 3];
     WideCharToMultiByte(CP_UTF8, 0, g_aiSrvExe, -1, se, sizeof(se), NULL, NULL);
@@ -273,6 +276,8 @@ static void ai_load(void) {
   for (char *line = strtok(buf, "\r\n"); line; line = strtok(NULL, "\r\n")) {
     int v;
     if (sscanf(line, "on %d", &v) == 1) g_aiOn = v == 1;
+    else if (sscanf(line, "provider %d", &v) == 1 && (v == 0 || v == 1)) g_aiProvider = v;
+    else if (!strncmp(line, "zai_model ", 10) && ai_zai_model_valid(line + 10)) lstrcpynA(g_aiZaiModel, line + 10, 64);
     else if (sscanf(line, "tier %d", &v) == 1 && v >= 0 && v < AI_TIERS) g_aiTier = v;
     else if (sscanf(line, "ctx %d", &v) == 1 && v >= 2048 && v <= 16384) g_aiCtx = v;
     else if (sscanf(line, "gpu %d", &v) == 1) g_aiGpu = v == 1;
@@ -878,6 +883,7 @@ void ai_shutdown(void) {
 /* --- запросы ------------------------------------------------------------------ */
 typedef struct AiJob {
   int id;
+  int provider;
   LONG agentTask;
   char *body;
   DWORD timeout;
@@ -911,7 +917,7 @@ static char *ai_body(const wchar_t *instruction, const char *userContent, int ma
              "{\"model\":\"%s\",\"messages\":[{\"role\":\"system\",\"content\":%s},"
              "{\"role\":\"user\",\"content\":%s}],\"temperature\":0.2,\"max_tokens\":%d,"
              "\"stream\":true,\"cache_prompt\":true,\"chat_template_kwargs\":{\"enable_thinking\":false}}",
-             g_aiExtModel[0] ? g_aiExtModel : "local", sys, userContent, maxTokens);
+             ai_selected_model(), sys, userContent, maxTokens);
   free(sys);
   return b;
 }
@@ -955,14 +961,15 @@ static wchar_t *ai_sse_text(const char *s) {
 static void ai_job_run(AiJob *j) {
   DWORD t0 = GetTickCount(), deadline = t0 + j->timeout;
   InterlockedIncrement(&g_aiActive);
-  int st = ai_server_ensure(deadline, &j->cancel, j->agentTask ? 16384 : 0);
+  int st = j->provider ? (!g_aiOn ? AI_OFF : AI_OK) : ai_server_ensure(deadline, &j->cancel, j->agentTask ? 16384 : 0);
   if (st == AI_NO_SERVER || st == AI_NO_MODEL) {
     AcquireSRWLockShared(&g_aiSrvLock);
     j->text = _wcsdup(g_aiSrvNote[0] ? g_aiSrvNote : ai_status_text(st));
     ReleaseSRWLockShared(&g_aiSrvLock);
   }
-  if (st == AI_OK && j->agentTask) {
+  if (st == AI_OK && (j->agentTask || j->provider)) {
     st = aq_run(j, deadline, ai_ext() ? g_aiExtPort : g_aiPort);
+    if (st == AI_OK && !j->agentTask && j->text) ai_tidy(j->text);
     g_aiLastUse = GetTickCount();
   } else if (st == AI_OK) {
     DWORD left = deadline - GetTickCount();
@@ -1044,6 +1051,7 @@ static AiJob *ai_job_new(char *body, DWORD timeoutMs) {
     return NULL;
   }
   j->id = (int)InterlockedIncrement(&g_aiNextId);
+  j->provider = g_aiProvider;
   j->body = body;
   j->timeout = timeoutMs ? timeoutMs : 120000;
   j->refs = 1; /* ждущий */
@@ -1186,6 +1194,7 @@ static char *ai_content_img(const wchar_t *text, const BYTE *png, DWORD len) {
 }
 
 BOOL ai_vision_ready(void) {
+  if (g_aiProvider) return ai_zai_vision();
   if (ai_ext()) return TRUE;
   wchar_t m[MAX_PATH], mm[MAX_PATH];
   return ai_pick_model(m, mm) && mm[0] != 0;
@@ -1213,7 +1222,7 @@ static char *ai_body_chat(const wchar_t *instruction, const AiTurn *t, int n, BO
   if (js[n - 1]) b = (char *)malloc(total);
   if (b) {
     size_t k = snprintf(b, total, "{\"model\":\"%s\",\"messages\":[{\"role\":\"system\",\"content\":%s}",
-                        g_aiExtModel[0] ? g_aiExtModel : "local", sys);
+                        ai_selected_model(), sys);
     for (int i = 0; i < n; i++)
       k += snprintf(b + k, total - k, ",{\"role\":\"%s\",\"content\":%s}", t[i].assistant ? "assistant" : "user",
                     js[i]);
@@ -1227,7 +1236,7 @@ static char *ai_body_chat(const wchar_t *instruction, const AiTurn *t, int n, BO
   return b;
 }
 
-int ai_chat_budget(void) { return ((g_aiSlotCtx ? g_aiSlotCtx : g_aiCtx) - 1024 - 300) * 2; } /* ≈ 2 символа на токен: запас для русского */
+int ai_chat_budget(void) { return ((g_aiProvider ? g_aiCtx : g_aiSlotCtx ? g_aiSlotCtx : g_aiCtx) - 1024 - 300) * 2; } /* ≈ 2 символа на токен: запас для русского */
 int ai_agent_budget(void) { return (16384 - 1024 - 300) * 2; }
 int ai_ctx_size(void) { return g_aiCtx; }
 

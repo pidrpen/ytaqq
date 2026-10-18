@@ -185,10 +185,13 @@ static int at_prepare(AiJob *j, DWORD deadline, wchar_t root[MAX_PATH], wchar_t 
   return aq_prepare_pack(j, deadline, root, TRUE, py);
 }
 
+#ifdef QWEN_TEST
+static const wchar_t *g_aqTestBridge;
+#endif
 static int aq_run(AiJob *j, DWORD deadline, int port) {
   /* Current product guarantee is offline/local. Do not silently send agent
      context to an external configured host. Ordinary chat keeps its behavior. */
-  if (ai_ext() && wcscmp(g_aiExtHost, L"127.0.0.1") && wcscmp(g_aiExtHost, L"localhost")) {
+  if (!j->provider && ai_ext() && wcscmp(g_aiExtHost, L"127.0.0.1") && wcscmp(g_aiExtHost, L"localhost")) {
     j->text = _wcsdup(L"QwenPaw работает с локальным сервером модели. Выберите скачанную модель или сервер 127.0.0.1."); return AI_ERROR;
   }
   wchar_t root[MAX_PATH] = {0};
@@ -202,13 +205,19 @@ static int aq_run(AiJob *j, DWORD deadline, int port) {
   swprintf(state, MAX_PATH, L"%ls\\%lu-%ld.state.json", work, GetCurrentProcessId(), j->agentTask);
   swprintf(py, MAX_PATH, L"%ls\\python.exe", root);
   swprintf(script, MAX_PATH, L"%ls\\bridge.py", root);
-  if (!aq_write(input, j->body) || !aq_write(key, ai_ext() ? "" : g_aiKey)) { status = AI_ERROR; goto cleanup; }
+#ifdef QWEN_TEST
+  if (g_aqTestBridge) lstrcpynW(script, g_aqTestBridge, MAX_PATH);
+#endif
+  if (!aq_write(input, j->body) || (!j->provider && !aq_write(key, ai_ext() ? "" : g_aiKey))) { status = AI_ERROR; goto cleanup; }
   wchar_t cmd[MAX_PATH * 8];
-  swprintf(cmd, MAX_PATH * 8, L"\"%ls\" -I -B \"%ls\" --request \"%ls\" --response \"%ls\" --state \"%ls\" --key-file \"%ls\" --endpoint http://127.0.0.1:%d/v1/chat/completions --timeout 120", py, script, input, output, state, key, port);
+  if (j->provider) {
+    wchar_t protectedKey[MAX_PATH]; ai_zai_key_path(protectedKey);
+    swprintf(cmd, MAX_PATH * 8, L"\"%ls\" -I -B \"%ls\" --request \"%ls\" --response \"%ls\" --state \"%ls\" --provider zai --protected-key \"%ls\" --endpoint https://api.z.ai/api/paas/v4/chat/completions --timeout 120 %ls", py, script, input, output, state, protectedKey, j->agentTask ? L"" : L"--chat");
+  } else swprintf(cmd, MAX_PATH * 8, L"\"%ls\" -I -B \"%ls\" --request \"%ls\" --response \"%ls\" --state \"%ls\" --key-file \"%ls\" --endpoint http://127.0.0.1:%d/v1/chat/completions --timeout 120", py, script, input, output, state, key, port);
   status = aq_process(py, cmd, root, j, deadline);
   if (status == AI_OK) {
     char *response = aq_read(output);
-    const char *field = response ? json_find_string(response, "action") : NULL;
+    const char *field = response ? json_find_string(response, j->agentTask ? "action" : "text") : NULL;
     if (field) j->text = ai_json_unstr(field);
     else {
       field = response ? json_find_string(response, "error") : NULL;
@@ -218,7 +227,7 @@ static int aq_run(AiJob *j, DWORD deadline, int port) {
     free(response);
     if (!j->text) status = AI_ERROR;
   }
-  if (status == AI_OK) ai_log(L"QwenPaw: инструмент выбран, сессия %ld", j->agentTask);
+  if (status == AI_OK) ai_log(L"%ls: %ls", j->provider ? L"Z.ai" : L"QwenPaw", j->agentTask ? L"инструмент выбран" : L"ответ получен");
 cleanup:
   DeleteFileW(input); DeleteFileW(output); DeleteFileW(key);
   if (status != AI_OK && status != AI_CANCELLED && !j->text)
