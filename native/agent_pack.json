@@ -1,7 +1,7 @@
 {
-  "file": "CursorPad-paw-c0196cdfcae4afd2.zip",
-  "sha256": "c0196cdfcae4afd271642d0cdbe5445c815a8236b93110a091ef5fa49ca631f4",
-  "size": 78425487,
+  "file": "CursorPad-paw-110393b22c9736c6.zip",
+  "sha256": "110393b22c9736c63ef3180c1c77e1167fa61ffff7bad0ba5c63ec7fcaf807bd",
+  "size": 78425679,
   "python": {
     "version": "3.13.16",
     "sha256": "97dae5274cc54867065e8d5a3226e48c35017ed332a0fdb0e27d5b5821961297",
@@ -1671,7 +1671,7 @@
     }
   ],
   "application_sources": {
-    "bridge.py": "888591e270f4b501b4b636ecdc45039f36fc1dd8a62d9ec22a19837113aa9ad1",
+    "bridge.py": "923a4aca373f366dac95ed725bd1f44bfc3b5c1a9493c87a965a286b72fb972d",
     "skills/documents/SKILL.md": "1f8b6db2bc52fcfe46f2001216b0c45ef29c51164e652197ff7e69a9935440e5",
     "skills/files/SKILL.md": "26759b1a34abeb629b6259e3204f7ecf1a4fb161f12c9903c25bd5ada2a0a5f7",
     "skills/spreadsheets/SKILL.md": "e294b92ce7d769d96884dbf54f7588ae11614ec8a992bef7f8e8a3be41e966b9",

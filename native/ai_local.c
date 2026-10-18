@@ -50,13 +50,10 @@ static const AiTier kAiTiers[AI_TIERS] = {
       {L"unsloth/Qwen3.5-4B-GGUF", L"e87f176479d0855a907a41277aca2f8ee7a09523",
        L"mmproj-F16.gguf", 672423616ULL,
        "cd88edcf8d031894960bb0c9c5b9b7e1fea6ebee02b9f7ce925a00d12891f864"}}},
-    {L"Мощный", L"Qwen2.5 7B", L"qwen2.5-7b", L"32 ГБ памяти или видеокарта от 8 ГБ", 2, FALSE,
-     {{L"Qwen/Qwen2.5-7B-Instruct-GGUF", L"bb5d59e06d9551d752d08b292a50eb208b07ab1f",
-       L"qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf", 3993201344ULL,
-       "dfce12e3862a5283ccfb88221b48480e58745165de856439950d0f22590580db"},
-      {L"Qwen/Qwen2.5-7B-Instruct-GGUF", L"bb5d59e06d9551d752d08b292a50eb208b07ab1f",
-       L"qwen2.5-7b-instruct-q4_k_m-00002-of-00002.gguf", 689872288ULL,
-       "539cf93f78e887edea1c04e2d7d8cdaca9d01dae9c9025bcb8accbe29df3d72a"}}},
+    {L"Мощный", L"Qwen3 8B · текст", L"qwen3-8b", L"Только текст; 16–32 ГБ памяти, для полного GPU — от 8 ГБ VRAM", 1, FALSE,
+     {{L"Qwen/Qwen3-8B-GGUF", L"7c41481f57cb95916b40956ab2f0b139b296d974",
+       L"Qwen3-8B-Q4_K_M.gguf", 5027783488ULL,
+       "d98cdcbd03e17ce47681435b5150e34c1417f50b5c0019dd560e4882c5745785"}}},
     {L"С картинками", L"Qwen3-VL 4B", L"qwen3-vl-4b", L"16 ГБ; читает и картинки, медленнее", 2, TRUE,
      {{L"unsloth/Qwen3-VL-4B-Instruct-GGUF", L"00c00da0690c4b14b5539b02c4ea5d7c9102b35e",
        L"Qwen3-VL-4B-Instruct-Q4_K_M.gguf", 2497282336ULL,
@@ -210,6 +207,10 @@ static BOOL ai_ext(void) { return g_aiExtHost[0] && g_aiExtPort > 0; }
 static BOOL ai_qwen35(const wchar_t *model) {
   wchar_t lower[MAX_PATH]; lstrcpynW(lower, model, MAX_PATH); CharLowerBuffW(lower, (DWORD)wcslen(lower));
   return (!g_aiModel[0] && g_aiTier == 1) || wcsstr(lower, L"qwen3.5") || wcsstr(lower, L"qwen3_5");
+}
+static BOOL ai_qwen_thinking(const wchar_t *model) {
+  wchar_t lower[MAX_PATH]; lstrcpynW(lower, model, MAX_PATH); CharLowerBuffW(lower, (DWORD)wcslen(lower));
+  return ai_qwen35(model) || wcsstr(lower, L"qwen3-") || wcsstr(lower, L"qwen3_");
 }
 
 BOOL ai_ready(void) {
@@ -728,10 +729,10 @@ static int ai_server_ensure(DWORD deadline, volatile LONG *cancel, int minimumCo
                        L"\"%s\" -m \"%s\" --host 127.0.0.1 --port %d --api-key %s -c %d -np %d -t %d -ngl %d",
                        exe, model, port, wkey, ctx, np, ai_cores(), ngl);
     if (mm[0] && n > 0) n += _snwprintf(cmd + n, MAX_PATH * 4 + 300 - n, L" --mmproj \"%s\"", mm);
-    /* Qwen3.5 defaults to thinking. Tool JSON has a small output budget, so
+    /* Qwen3 / Qwen3.5 default to thinking. Tool JSON has a small output budget, so
        reasoning must not consume that budget before the action is returned.
        Server default also covers QwenPaw's auxiliary checklist/audit calls. */
-    if (ai_qwen35(model) && n > 0)
+    if (ai_qwen_thinking(model) && n > 0)
       n += _snwprintf(cmd + n, MAX_PATH * 4 + 300 - n, L" --jinja --chat-template-kwargs \"{\\\"enable_thinking\\\":false}\"");
     /* The vision loader recommends at least 1024 image tokens for details.
        This affects attached images only; text requests keep their budget. */
@@ -1872,10 +1873,10 @@ static DWORD WINAPI ai_dl_thread(LPVOID p) {
   /* сначала llama.cpp: он маленький, и если не скачается — видно сразу, а не после 2 ГБ модели */
   {
     wchar_t exe[MAX_PATH];
-    /* First download of the new architecture refreshes the managed engine too.
+    /* First download of a newer architecture refreshes the managed engine too.
        An old existing EXE is not evidence that it supports qwen35 / Vulkan GDN.
        A manually selected engine is retained and tested by normal startup. */
-    if (!ai_server_exe(gpu, exe) || (tier == 1 && (needModel[0] || needModel[1]) && !g_aiSrvExe[0])) {
+    if (!ai_server_exe(gpu, exe) || ((tier == 1 || tier == 2) && (needModel[0] || needModel[1]) && !g_aiSrvExe[0])) {
       if (!g_aiSrvExe[0]) ai_server_stop(); /* release only our managed engine/DLLs before updating */
       BOOL ok = ai_get_llama(ses, gpu);
       if (!ok && gpu && !g_aiDl.cancel && !ai_server_exe(FALSE, exe)) {
