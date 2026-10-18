@@ -169,6 +169,7 @@ int wmain(int argc, wchar_t **argv) {
   CHECK(run(L"{\"tool\":\"excel_write\",\"path\":\"@desktop\\\\Формула.xlsx\",\"text\":\"=12\\t=3\\t=SUM(A1:B1)\",\"mode\":\"formulas\"}") == 0);
   CHECK(fs.count == 1 && fs.plan[0].kind == AG_EXCEL); /* upgrade same plan entry */
   ag_plan_evidence(&fs, evidence, 6000); CHECK(wcsstr(evidence, L"=SUM(A1:B1)"));
+  CHECK(wcsstr(evidence, L"[tool=excel_write]") && wcsstr(evidence, L"создать НОВЫЙ файл Excel И заполнить"));
   CHECK(run(L"{\"tool\":\"done\"}") == 1);
   CHECK(run(L"{\"tool\":\"excel_write\",\"path\":\"@desktop\\\\Формула.xlsx\",\"text\":\"=1\",\"mode\":\"formulas\"}") < 0);
   CHECK(fs.count == 1); CHECK(!exists(L"Формула.xlsx")); /* preview still changes no files */

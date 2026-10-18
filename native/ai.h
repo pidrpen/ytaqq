@@ -63,8 +63,8 @@ int ai_ask_chat_async(const wchar_t *instruction, const AiTurn *turns, int n, DW
                       UINT msg, void *user);
 int ai_ask_files_async(const wchar_t *instruction, const AiTurn *turns, int n, HWND notify, UINT msg,
                        LONG task, const wchar_t *goal, const wchar_t *plan,
-                       const wchar_t *observation, int observationState);
-void ai_out_cap(int n); /* сколько токенов просить в ответе; 0 — снова 1024. Для навыка «Файлы» хватает 192 */
+                       const wchar_t *observation, int observationState, int planCount);
+void ai_out_cap(int n); /* сколько токенов просить в ответе; 0 — снова 1024 */
 int ai_chat_budget(void); /* символов истории и вопроса, которые уйдут модели */
 int ai_agent_budget(void); /* agent automatically requests a 16384-token slot */
 int ai_ctx_size(void);    /* окно контекста модели, токенов (вкладка «ИИ») */

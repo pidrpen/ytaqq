@@ -99,7 +99,8 @@ static BOOL ag_string(const wchar_t **p, wchar_t *out, int cap) {
 static inline void ag_plan_evidence(const AgFs *fs, wchar_t *out, int cap) {
   out[0] = 0;
   if (!fs->count || cap < 1000) return;
-  const wchar_t *names[] = {L"Создать папку", L"Копировать файлы", L"Переместить файлы", L"Переименовать", L"Открыть", L"Создать Word", L"Создать текст", L"Создать пустой Excel", L"Заполнить Excel", L"Создать новый Excel и заполнить перечнем папки после переносов", L"Переместить каталог", L"Изменить выравнивание Word"};
+  const wchar_t *names[] = {L"Создать папку", L"Копировать файлы", L"Переместить файлы", L"Переименовать", L"Открыть", L"Создать Word", L"Создать текст", L"Создать пустой Excel", L"Создать или заполнить Excel", L"Создать новый Excel и заполнить перечнем папки после переносов", L"Переместить каталог", L"Изменить выравнивание Word"};
+  const wchar_t *tools[] = {L"mkdir", L"copy", L"move", L"rename", L"open", L"write .docx", L"write", L"write .xlsx", L"excel_write", L"inventory", L"move", L"word_format"};
   lstrcpynW(out, L"Текущий подтверждённый кодом ПЛАН, ещё не выполнен:\n", cap);
   if (fs->newDir[0] && cap > 1200) {
     swprintf(out + wcslen(out), cap - wcslen(out), L"НОВАЯ ПАПКА ТЕКУЩЕЙ ЗАДАЧИ: %ls. @new означает именно её. Рабочий стол пользователя: %ls (@desktop).\n", fs->newDir, fs->desktop);
@@ -110,14 +111,23 @@ static inline void ag_plan_evidence(const AgFs *fs, wchar_t *out, int cap) {
     if (count && wcslen(out) + 100 < (size_t)cap) swprintf(out + wcslen(out), cap - wcslen(out), L"%ls: %d действий.\n", names[kind], count);
   }
   for (int i = 0; i < fs->count; i++) {
-    const AgAction *a = &fs->plan[i];
-    if (wcslen(out) + wcslen(a->src) + wcslen(a->dst) + 800 >= (size_t)cap) { wcscat(out, L"Подробности сокращены; количества выше относятся ко всему плану.\n"); break; }
-    wchar_t content[513]; lstrcpynW(content, a->text, 513);
-    const wchar_t *body = a->kind == AG_INVENTORY ? L"реальный перечень после переносов" : a->kind == AG_MOVE_DIR ? L"каталог целиком, с вложенными файлами и пустыми папками, без перезаписи" : content[0] ? content : L"пусто/не требуется";
-    swprintf(out + wcslen(out), cap - wcslen(out), L"%ls: %ls%ls%ls; содержимое=%ls%ls\n", names[a->kind], a->src, a->src[0] ? L" -> " : L"", a->dst,
-      body, a->kind == AG_MOVE_DIR ? L"" : wcslen(a->text) > 512 ? L" [сокращено]" : L"");
-    if (a->kind == AG_EXCEL && a->table && wcslen(out) + 180 < (size_t)cap)
-      wcscat(out, L"XlsxWriter mode=table: первая строка — жирная цветная шапка, автофильтр, закрепление шапки, ширины столбцов; значения — текст.\n");
+    const AgAction *a = &fs->plan[i]; wchar_t entry[4500] = L"";
+    if (a->kind == AG_EXCEL) {
+      swprintf(entry, 4500, L"excel_write: %ls; назначение=%ls; лист=%ls; начало=%ls; режим=%ls.\n",
+        a->src[0] ? L"создать новую копию существующей книги и заполнить её" : L"создать НОВЫЙ файл Excel И заполнить его таблицей одним действием; отдельный write пустой книги НЕ нужен",
+        a->dst, a->sheet[0] ? a->sheet : L"Лист1", a->cell[0] ? a->cell : L"A1", a->formulas ? L"formulas" : a->table ? L"table" : L"text");
+    }
+    const wchar_t *body = a->kind == AG_INVENTORY ? L"реальный перечень после переносов" : a->kind == AG_MOVE_DIR ? L"каталог целиком, с вложенными файлами и пустыми папками, без перезаписи" : a->text[0] ? a->text : L"пусто/не требуется";
+    size_t at = wcslen(entry);
+    swprintf(entry + at, 4500 - at, L"%ls [action=%d] [tool=%ls]: %ls%ls%ls; содержимое=%ls\n", names[a->kind], i + 1, tools[a->kind], a->src, a->src[0] ? L" -> " : L"", a->dst, body);
+    entry[4499] = 0;
+    if (a->kind == AG_EXCEL && a->table && wcslen(entry) + 180 < 4500)
+      wcscat(entry, L"XlsxWriter mode=table: первая строка — жирная цветная шапка, автофильтр, закрепление шапки, ширины столбцов; значения — текст.\n");
+    if (wcslen(out) + wcslen(entry) + 110 >= (size_t)cap) {
+      if (wcslen(out) + 100 < (size_t)cap) wcscat(out, L"Подробности сокращены; количества выше относятся ко всему плану.\n");
+      break;
+    }
+    wcscat(out, entry);
   }
 }
 static BOOL ag_json(const wchar_t *p, AgJson *j) {
@@ -942,7 +952,7 @@ static int ag_tool(AgFs *fs, const wchar_t *json, wchar_t *out, int cap) {
     BOOL xlsx = !_wcsicmp(ext, L".xlsx");
     if (xlsx && ag_needs_inventory(fs->goal)) { lstrcpynW(out, L"Пустая книга не заменяет перечень папки. Используй inventory path=папка name=Список_файлов.xlsx; код сам перечислит реальные файлы после переносов.", cap); return -1; }
     if (xlsx && ag_get(&j, L"text")[0]) {
-      lstrcpynW(out, L"write .xlsx создаёт только пустую книгу с одним листом; данные и формулы ещё не поддерживаются. Не подменяй их пустым файлом: объясни ограничение через ask.", cap); return -1;
+      lstrcpynW(out, L"write .xlsx создаёт только пустую книгу. Для данных используй excel_write с text=таблица TSV; для формул mode=formulas. Не подменяй заполненную таблицу пустым файлом.", cap); return -1;
     }
     if (!docx && !xlsx && _wcsicmp(ext, L".txt") && _wcsicmp(ext, L".md") && _wcsicmp(ext, L".csv") &&
         _wcsicmp(ext, L".tsv") && _wcsicmp(ext, L".json") && _wcsicmp(ext, L".xml")) {
