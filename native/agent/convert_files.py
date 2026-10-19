@@ -161,6 +161,10 @@ class Task:
                 self.check()
                 if not temp.is_file() or temp.stat().st_size == 0:
                     raise ValueError('Конвертер не создал содержимое результата')
+                # Capture the identity/hash while the file is still private.
+                # After publication another process may replace or lock it;
+                # never record that replacement as an output owned by us.
+                record = stamp(temp)
                 for number in range(1, 10001):
                     target = wanted if number == 1 else wanted.with_name(f'{wanted.stem} ({number}){wanted.suffix}')
                     # rename on Windows and link on POSIX both refuse replacement.
@@ -171,7 +175,8 @@ class Task:
                             os.link(temp, target)
                             temp.unlink()
                         self.published.append(target)
-                        entry['outputs'].append(stamp(target))
+                        record['path'] = str(target)
+                        entry['outputs'].append(record)
                         break
                     except FileExistsError:
                         continue

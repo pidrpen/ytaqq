@@ -4,12 +4,14 @@ import hashlib
 import json
 from pathlib import Path
 import tempfile
+import sys
 import zipfile
 from PIL import Image
 from pypdf import PdfReader, PdfWriter
 from pypdf.generic import DictionaryObject, NameObject, DecodedStreamObject
 
-spec=importlib.util.spec_from_file_location('convert_files',Path(__file__).with_name('agent')/'convert_files.py')
+module=Path(sys.argv[1]).resolve() if len(sys.argv)>1 else Path(__file__).with_name('agent')/'convert_files.py'
+spec=importlib.util.spec_from_file_location('convert_files',module)
 c=importlib.util.module_from_spec(spec);spec.loader.exec_module(c)
 
 with tempfile.TemporaryDirectory(prefix='cursorpad-batch-test-') as directory:
@@ -104,7 +106,64 @@ with tempfile.TemporaryDirectory(prefix='cursorpad-batch-test-') as directory:
     else:raise AssertionError('History failure hidden')
     finally:c.save_history=previous
     assert set(out.iterdir())==before
+    # A failure reading metadata/hash must happen BEFORE any public output.
+    previous_stamp=c.stamp;before=set(out.iterdir())
+    def bad_stamp(*args):raise OSError('simulated antivirus/read failure')
+    c.stamp=bad_stamp
+    try:run('convert',[a],format='jpg')
+    except OSError:pass
+    else:raise AssertionError('Stamp failure hidden')
+    finally:c.stamp=previous_stamp
+    assert set(out.iterdir())==before
+    # If preparing the second output fails, the first is rolled back too.
+    called=[]
+    def second_stamp(path):
+        called.append(path)
+        if len(called)==2:raise OSError('second stamp failed')
+        return previous_stamp(path)
+    c.stamp=second_stamp;before=set(out.iterdir())
+    try:run('convert',[a,b],format='png')
+    except OSError:pass
+    else:raise AssertionError('Second stamp failure hidden')
+    finally:c.stamp=previous_stamp
+    assert set(out.iterdir())==before
+    # A same-byte replacement immediately after publication is NOT ours.
+    previous_rename=c.os.rename;previous_link=c.os.link;substitutes=[]
+    def substitute(target):
+        target=Path(target);value=target.read_bytes()
+        saved=root/('retained-original-'+str(len(substitutes))+target.suffix)
+        previous_rename(target,saved);target.write_bytes(value);substitutes.append(target)
+    def racing_rename(source,target):
+        previous_rename(source,target)
+        if Path(target).parent==out:substitute(target)
+    def racing_link(source,target):
+        previous_link(source,target)
+        if Path(target).parent==out:substitute(target)
+    c.os.rename=racing_rename;c.os.link=racing_link
+    try:raced=run('convert',[a],format='jpg')
+    finally:c.os.rename=previous_rename;c.os.link=previous_link
+    assert len(substitutes)==1
+    undo_race=run('undo',entry_id=raced['id']);assert substitutes[0].exists()
+    assert entry(raced)['state']=='partial'
+    # Rollback after a history failure also preserves a same-byte replacement.
+    c.os.rename=racing_rename;c.os.link=racing_link;c.save_history=fail
+    try:run('convert',[a],format='jpg')
+    except OSError:pass
+    else:raise AssertionError('History failure hidden during replacement')
+    finally:c.os.rename=previous_rename;c.os.link=previous_link;c.save_history=previous
+    assert len(substitutes)==2 and substitutes[-1].exists()
+    # The documented batch limit is exercised using real files.
+    capfiles=[]
+    for index in range(c.MAX_FILES):
+        path=src/f'cap-{index}.png';path.write_bytes(a.read_bytes());capfiles.append(path)
+    maximum=run('convert',capfiles,format='png');assert len(paths(maximum))==c.MAX_FILES
+    run('undo',entry_id=maximum['id']);assert all(not p.exists() for p in paths(maximum))
+    before=set(out.iterdir())
+    try:run('convert',capfiles+[a],format='png')
+    except ValueError:pass
+    else:raise AssertionError('129 files accepted')
+    assert set(out.iterdir())==before
     for path,digest in source_hash.items():assert hashlib.sha256(path.read_bytes()).hexdigest()==digest
     assert not list(out.glob('.CursorPad-*'))
     listing=run('history');assert listing['history_ids'] and listing['history_labels']
-print('PASS: batches, real image formats/size/byte budget, multipage TIFF, PDF ordering/extract/split/rotate/packet, ZIP duplicates, persisted history, identity/hash undo, cancellation, atomic failure rollback, unchanged sources')
+print('PASS: batches, real image formats/size/byte budget, multipage TIFF, PDF ordering/extract/split/rotate/packet, ZIP duplicates, persisted history, identity/hash undo, cancellation, metadata failure rollback, publication replacement guard, atomic failure rollback, unchanged sources')
