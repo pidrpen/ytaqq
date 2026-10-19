@@ -168,30 +168,54 @@ def local_call(endpoint, key, body, timeout, _repair=False):
     if CLOUD: content = content.replace(key, '[ключ скрыт]')
     if schema:
         try:
-            jsonschema.validate(strict_json(content), schema)
+            parsed = strict_json(content)
+            if body['response_format']['json_schema'].get('name') == 'cursorpad_files':
+                validate_action(parsed, schema)
+            else:
+                jsonschema.validate(parsed, schema)
         except (ValueError, jsonschema.ValidationError) as error:
             # JSON mode is not a grammar: allow ONE format repair, with no tool
             # execution and no coercion/truncation of model-generated arguments.
             if isinstance(error, jsonschema.ValidationError):
                 location = '.'.join(str(part) for part in error.absolute_path)[:160] or 'root'
                 detail = f'{location}: schema rule {error.validator}'
+            elif isinstance(error, NativeArgumentError):
+                detail = str(error)
             else:
                 detail = 'invalid JSON or duplicate field'
             if _repair:
                 raise ValueError('Z.ai: неверный формат ответа после одной попытки исправления ('+detail+'); файлы не изменены') from None
             repaired = copy.deepcopy(body)
+            limits = (' Native tools accept at most 10 fields. Omit unused optional fields. '
+                      'Each value must fit 1999 UTF-16 units and contain no NUL. '
+                      'Never truncate supplied text, omit required facts or shorten a path. '
+                      'If the requested content cannot fit, use ask to explain the limit and request a smaller task.') if body['response_format']['json_schema'].get('name') == 'cursorpad_files' else ''
             repaired['messages'] += [
                 {'role': 'assistant', 'content': content},
-                {'role': 'user', 'content': 'Your last response failed JSON Schema validation: '+detail+'. Return the corrected JSON OBJECT matching the exact schema. Preserve the original task and facts. No prose, no markdown. This is format repair only; do not execute any action.'}]
+                {'role': 'user', 'content': 'Your last response failed JSON Schema validation: '+detail+'. Return the corrected JSON OBJECT matching the exact schema. Preserve the original task and facts. No prose, no markdown. This is format repair only; do not execute any action.'+limits}]
             return local_call(endpoint, key, repaired, timeout, _repair=True)
     return content
 
 
+class NativeArgumentError(ValueError):
+    pass
+
+
 def validate_action(action, schema):
+    if not isinstance(action, dict):
+        raise NativeArgumentError('Инструмент: ожидается один JSON-объект')
+    if len(action) > 10:
+        raise NativeArgumentError(f'Инструмент: полей {len(action)}, максимум 10; уберите неиспользуемые поля')
+    for name, value in action.items():
+        field = safe_text(name, limit=40)
+        if not isinstance(value, str):
+            raise NativeArgumentError(f'Инструмент: поле {field} должно быть строкой')
+        size = len(value.encode('utf-16-le')) // 2
+        if size >= 2000:
+            raise NativeArgumentError(f'Инструмент: поле {field}, длина {size}, максимум 1999 символов UTF-16; текст не обрезан')
+        if '\x00' in value:
+            raise NativeArgumentError(f'Инструмент: поле {field} содержит недопустимый нулевой символ')
     jsonschema.validate(action, schema)
-    if len(action) > 10 or any(not isinstance(v, str) or len(v.encode('utf-16-le')) // 2 >= 2000
-                              or '\x00' in v for v in action.values()):
-        raise ValueError('Native tool argument limit exceeded')
     return action
 
 

@@ -8,16 +8,16 @@ from pathlib import Path
 
 names = ['filesystem', 'list', 'find', 'read', 'office_read', 'compare_materials', 'app', 'new_folder', 'inventory',
          'mkdir', 'write', 'word_format', 'copy', 'move', 'rename', 'open', 'ask', 'done']
-fields = {name: {'type': 'string'} for name in
+fields = {name: {'type': 'string', 'maxLength': 1999} for name in
           ['path', 'src', 'dst', 'pattern', 'name', 'sheet', 'cell', 'text', 'mode', 'offset', 'recursive']}
 fields['mode']['enum'] = ['text', 'formulas', 'table', 'list', 'info', 'read', 'center', 'left', 'right', 'justify']
 fields['recursive']['enum'] = ['yes', 'no']
 
 normal = {'type': 'object', 'properties': {'tool': {'type': 'string', 'enum': names}, **fields},
-          'required': ['tool'], 'additionalProperties': False}
+          'required': ['tool'], 'additionalProperties': False, 'maxProperties': 10}
 excel = {'type': 'object', 'properties': {'tool': {'type': 'string', 'enum': ['excel_write']}, **fields},
-         'required': ['tool', 'path', 'text'], 'additionalProperties': False}
-excel['properties']['text'] = {'type': 'string', 'minLength': 1}
+         'required': ['tool', 'path', 'text'], 'additionalProperties': False, 'maxProperties': 10}
+excel['properties']['text'] = {'type': 'string', 'minLength': 1, 'maxLength': 1999}
 schema = {'response_format': {'type': 'json_schema', 'json_schema': {
     'name': 'cursorpad_files', 'strict': True, 'schema': {'anyOf': [excel, normal]}}}}
 wire = ',' + json.dumps(schema, ensure_ascii=True, separators=(',', ':'))[1:-1]
