@@ -22,7 +22,9 @@ static void cvx_lab_capture(const wchar_t *path) {
   RedrawWindow(g_cvxWnd,NULL,NULL,RDW_INVALIDATE|RDW_UPDATENOW|RDW_ALLCHILDREN);Sleep(80);
   RECT r;GetWindowRect(g_cvxWnd,&r);int w=r.right-r.left,h=r.bottom-r.top;
   HDC screen=GetDC(NULL),dc=CreateCompatibleDC(screen);HBITMAP bitmap=CreateCompatibleBitmap(screen,w,h),old=SelectObject(dc,bitmap);
-  BitBlt(dc,0,0,w,h,screen,r.left,r.top,SRCCOPY);SelectObject(dc,old);
+  /* Render only this test window, even if another app covers the desktop. */
+  if(!PrintWindow(g_cvxWnd,dc,2))SendMessageW(g_cvxWnd,WM_PRINT,(WPARAM)dc,PRF_NONCLIENT|PRF_CLIENT|PRF_CHILDREN|PRF_ERASEBKGND);
+  SelectObject(dc,old);
   BITMAPINFO info={0};info.bmiHeader.biSize=sizeof(BITMAPINFOHEADER);info.bmiHeader.biWidth=w;info.bmiHeader.biHeight=-h;info.bmiHeader.biPlanes=1;info.bmiHeader.biBitCount=32;
   DWORD size=(DWORD)w*h*4;BYTE *pixels=(BYTE*)malloc(size);GetDIBits(dc,bitmap,0,h,pixels,&info,DIB_RGB_COLORS);
   BITMAPFILEHEADER header={0};header.bfType=0x4d42;header.bfOffBits=sizeof(header)+sizeof(info.bmiHeader);header.bfSize=header.bfOffBits+size;
@@ -36,15 +38,46 @@ static int cvx_lab(HINSTANCE instance) {
   WNDCLASSW k={0};k.hInstance=instance;k.lpfnWndProc=cvx_lab_proc;k.lpszClassName=L"CursorPadWorkbenchTest";RegisterClassW(&k);
   g_hwnd=CreateWindowW(k.lpszClassName,L"test",WS_OVERLAPPEDWINDOW,0,0,100,100,NULL,NULL,instance,NULL);
   cv_init();cvx_show();if(!cvx_lab_wait())return 3;
+  if(g_cvxHistoryOpen||IsWindowVisible(g_cvxHistory)||IsWindowEnabled(GetDlgItem(g_cvxWnd,CX_RUN)))return 20;
+  if(IsWindowVisible(g_cvxSize)||IsWindowVisible(g_cvxKb)||IsWindowVisible(g_cvxPages))return 21;
   g_cvxSelection.count=2;swprintf(g_cvxSelection.paths[0],MAX_PATH,L"%ls\\inputs\\one.png",g_dataDir);swprintf(g_cvxSelection.paths[1],MAX_PATH,L"%ls\\inputs\\Фото.png",g_dataDir);cvx_list();
   wchar_t out[MAX_PATH];swprintf(out,MAX_PATH,L"%ls\\out",g_dataDir);SetWindowTextW(g_cvxDir,out);
-  SendMessageW(g_cvxAction,CB_SETCURSEL,1,0);cvx_run();if(!cvx_lab_wait()||!cvx_lab_exists(L"one.jpg")||!cvx_lab_exists(L"Фото.jpg"))return 4;
-  SendMessageW(g_cvxAction,CB_SETCURSEL,8,0);SendMessageW(g_cvxMode,CB_SETCURSEL,1,0);SetWindowTextW(g_cvxSize,L"50");cvx_run();if(!cvx_lab_wait()||!cvx_lab_exists(L"one-размер.png"))return 5;
+  SendMessageW(g_cvxAction,CB_SETCURSEL,1,0);cvx_controls();MSG enter={0};enter.hwnd=g_cvxAction;enter.message=WM_KEYDOWN;enter.wParam=VK_RETURN;if(!IsDialogMessageW(g_cvxWnd,&enter))return 29;if(!cvx_lab_wait()||!cvx_lab_exists(L"one.jpg")||!cvx_lab_exists(L"Фото.jpg"))return 4;
+  SendMessageW(g_cvxAction,CB_SETCURSEL,8,0);cvx_controls();cvx_hint();
+  if(!IsWindowVisible(g_cvxSize)||!IsWindowVisible(g_cvxFormat)||IsWindowVisible(g_cvxKb)||IsWindowVisible(g_cvxPages))return 22;
+  SetWindowTextW(g_cvxSize,L"abc");cvx_run();if(g_cvBusy)return 23;
+  wchar_t message[600];GetWindowTextW(g_cvxStatus,message,600);if(!wcsstr(message,L"ширину"))return 24;
+  SendMessageW(g_cvxMode,CB_SETCURSEL,1,0);SetWindowTextW(g_cvxSize,L"50");cvx_run();if(!cvx_lab_wait()||!cvx_lab_exists(L"one-размер.png"))return 5;
   SendMessageW(g_cvxAction,CB_SETCURSEL,7,0);cvx_run();if(!cvx_lab_wait()||!cvx_lab_exists(L"Пакет для отправки.zip"))return 6;
+  cvx_toggle_history();if(!cvx_lab_wait()||!IsWindowVisible(g_cvxHistory))return 25;
   SendMessageW(g_cvxHistory,LB_SETCURSEL,0,0);cvx_history(16);if(!cvx_lab_wait()||cvx_lab_exists(L"Пакет для отправки.zip"))return 7;
   swprintf(g_cvxSelection.paths[1],MAX_PATH,L"%ls\\inputs\\pages.pdf",g_dataDir);cvx_list();
   SendMessageW(g_cvxAction,CB_SETCURSEL,14,0);cvx_run();if(!cvx_lab_wait()||!cvx_lab_exists(L"Пакет чертежей.pdf"))return 8;
-  wchar_t screenshot[MAX_PATH];swprintf(screenshot,MAX_PATH,L"%ls\\workbench.bmp",g_dataDir);cvx_controls();cvx_lab_capture(screenshot);
+  cvx_toggle_history();if(g_cvxHistoryOpen||IsWindowVisible(g_cvxHistory))return 26;
+  wchar_t screenshot[MAX_PATH];swprintf(screenshot,MAX_PATH,L"%ls\\workbench.bmp",g_dataDir);cvx_controls();cvx_hint();cvx_lab_capture(screenshot);
+  g_cvxSelection.count=1;cvx_list();
+  /* Capture the exact resize scenario from the user's screenshot. */
+  SendMessageW(g_cvxAction,CB_SETCURSEL,8,0);cvx_controls();cvx_hint();
+  swprintf(screenshot,MAX_PATH,L"%ls\\resize.bmp",g_dataDir);cvx_lab_capture(screenshot);
+  for(int action=0;action<15;action++) {
+    SendMessageW(g_cvxAction,CB_SETCURSEL,action,0);cvx_controls();
+    if(IsWindowVisible(g_cvxSize)!=(action==8)||IsWindowVisible(g_cvxKb)!=(action==9)||IsWindowVisible(g_cvxPages)!=(action>=11&&action<=13))return 27;
+  }
+  SendMessageW(g_cvxAction,CB_SETCURSEL,8,0);cvx_controls();
+  RECT window;GetWindowRect(g_cvxWnd,&window);RECT scaled={window.left,window.top,window.left+1175,window.top+700};
+  SendMessageW(g_cvxWnd,WM_DPICHANGED,MAKEWPARAM(120,120),(LPARAM)&scaled);
+  RECT client,button;GetClientRect(g_cvxWnd,&client);GetWindowRect(GetDlgItem(g_cvxWnd,CX_RUN),&button);MapWindowPoints(NULL,g_cvxWnd,(POINT*)&button,2);
+  if(button.bottom>client.bottom||button.right>client.right||g_cvxDpi!=120)return 28;
+  swprintf(screenshot,MAX_PATH,L"%ls\\scale125.bmp",g_dataDir);cvx_lab_capture(screenshot);
+  RECT larger={window.left,window.top,window.left+1410,window.top+840};
+  SendMessageW(g_cvxWnd,WM_DPICHANGED,MAKEWPARAM(144,144),(LPARAM)&larger);cvx_toggle_history();if(!cvx_lab_wait())return 33;
+  GetClientRect(g_cvxWnd,&client);GetWindowRect(g_cvxHistory,&button);MapWindowPoints(NULL,g_cvxWnd,(POINT*)&button,2);if(button.bottom>client.bottom-cx_px(40))return 34;
+  cvx_toggle_history();
+  cx_font(96);SetWindowPos(g_cvxWnd,NULL,window.left,window.top,800,540,SWP_NOZORDER|SWP_NOACTIVATE);cvx_controls();
+  GetClientRect(g_cvxWnd,&client);GetWindowRect(GetDlgItem(g_cvxWnd,CX_RUN),&button);MapWindowPoints(NULL,g_cvxWnd,(POINT*)&button,2);
+  if(button.bottom>client.bottom||button.right>client.right)return 30;
+  g_cvBusy=1;cvx_controls();if(IsWindowEnabled(GetDlgItem(g_cvxWnd,CX_RUN))||IsWindowEnabled(GetDlgItem(g_cvxWnd,CX_ADD))||!IsWindowEnabled(GetDlgItem(g_cvxWnd,CX_CANCEL)))return 31;g_cvBusy=0;cvx_controls();
+  SendMessageW(g_cvxWnd,WM_COMMAND,IDCANCEL,0);if(IsWindowVisible(g_cvxWnd))return 32;
   cv_shutdown();DestroyWindow(g_hwnd);
   swprintf(out,MAX_PATH,L"%ls\\passed.txt",g_dataDir);aq_write(out,"PASS: native controls -> JSON request -> pinned Python helper -> batch JPEG/resize/ZIP/PDF packet -> history -> guarded undo; no API or Office");
   return 0;
