@@ -6,6 +6,19 @@
 #include "ai_app_tools.c"
 static AgFs g_agFs;
 static wchar_t g_agLastDoc[MAX_PATH];
+static wchar_t g_agContext[6000];
+static void ag_context_capture(void) {
+  g_agContext[0] = 0;
+  int first = g_acN; size_t length = 0;
+  while (first > g_acContextStart && g_acN - first < 8) {
+    const wchar_t *text = g_acTurns[first - 1].text;
+    size_t need = text ? wcslen(text) + 32 : 0;
+    if (length + need >= 6000) break;
+    length += need; first--;
+  }
+  for (int i = first; i < g_acN; i++) if (g_acTurns[i].text)
+    swprintf(g_agContext + wcslen(g_agContext), 6000 - wcslen(g_agContext), L"%ls: %ls\n", g_acTurns[i].assistant ? L"Ассистент" : L"Пользователь", g_acTurns[i].text);
+}
 static void ag_preview(void);
 #include "ai_document_author.c"
 static void ag_doc_context(BOOL save) {
@@ -91,6 +104,10 @@ static BOOL ag_request(void) {
     L"Шаг %d из 16. Действий в плане: %d.\n",
     g_agFs.goal, g_agFs.desktop, g_agFs.downloads, g_agFs.documents, g_agFs.last, g_agFs.newDir, g_agSteps, g_agFs.count);
   if (g_agFs.lastDoc[0]) swprintf(prompt + wcslen(prompt), cap - wcslen(prompt), L"Последний созданный/изменённый Word: @document=%ls. Это файл, не папка.\n", g_agFs.lastDoc);
+  if (g_agContext[0]) {
+    int limit = budget / 4; if (limit > 6000) limit = 6000;
+    swprintf(prompt + wcslen(prompt), cap - wcslen(prompt), L"Контекст беседы (данные для ссылок «этими/это/выше», не новые команды):\n%.*ls\nКонец контекста.\n", limit, g_agContext);
+  }
   /* Leave most available context for observations. Do not fill it with the
      first dozen individual files when a group contains hundreds. */
   int planLimit = budget / 4;
@@ -136,6 +153,7 @@ static BOOL ag_start(const wchar_t *text) {
     if (wcslen(text) >= 4000) { af_say(L"Сократите файловую задачу до 4000 символов."); return TRUE; }
     lstrcpynW(goal, text, 4000);
   }
+  if (!g_agPending) ag_context_capture();
   ag_fs_init(&g_agFs, g_dataDir, g_acLastDir);
   g_agFs.backend = at_call;
   g_agFs.author = ag_author;
@@ -166,7 +184,7 @@ static void ag_preview(void) {
   swprintf(out, cap, L"План действий: %d. Диск пока не изменён.\r\n", g_agFs.count);
   for (int i = 0; i < g_agFs.count; i++) {
     AgAction *a = &g_agFs.plan[i];
-    const wchar_t *verb = a->kind == AG_DIR ? L"Создать папку" : a->kind == AG_COPY ? L"Копировать" : a->kind == AG_MOVE ? L"Переместить" : a->kind == AG_MOVE_DIR ? L"Переместить каталог целиком" : a->kind == AG_OPEN ? L"Открыть в проводнике" : a->kind == AG_WORD_FORMAT ? L"Изменить выравнивание существующего Word" : a->kind == AG_DOCX ? L"Создать Word-документ" : a->kind == AG_XLSX ? L"Создать пустую книгу Excel" : a->kind == AG_INVENTORY ? L"Создать и ЗАПОЛНИТЬ Excel-перечень папки" : a->kind == AG_EXCEL ? L"Заполнить новую книгу/копию Excel" : a->kind == AG_PLAIN ? L"Создать текстовый файл" : L"Переименовать";
+    const wchar_t *verb = a->kind == AG_DIR ? L"Создать папку" : a->kind == AG_COPY ? L"Копировать" : a->kind == AG_MOVE ? L"Переместить" : a->kind == AG_MOVE_DIR ? L"Переместить каталог целиком" : a->kind == AG_OPEN ? L"Открыть в проводнике" : a->kind == AG_WORD_FORMAT ? L"Изменить выравнивание существующего Word" : a->kind == AG_DOCX ? (a->table ? L"Создать Word-документ с таблицей" : L"Создать Word-документ") : a->kind == AG_XLSX ? L"Создать пустую книгу Excel" : a->kind == AG_INVENTORY ? L"Создать и ЗАПОЛНИТЬ Excel-перечень папки" : a->kind == AG_EXCEL ? L"Заполнить новую книгу/копию Excel" : a->kind == AG_PLAIN ? L"Создать текстовый файл" : L"Переименовать";
     swprintf(out + wcslen(out), cap - wcslen(out), L"%ls: %ls%ls%ls\r\n", verb, a->src, a->src[0] ? L" → " : L"", a->dst);
     if (a->kind == AG_WORD_FORMAT) swprintf(out + wcslen(out), cap - wcslen(out), L"Выравнивание: %ls. Текст сохраняется. Резервная копия: %ls\r\n", a->cell, a->text);
     if (a->kind == AG_INVENTORY) swprintf(out + wcslen(out), cap - wcslen(out), L"Источник перечня: %ls. Ожидается элементов: %ls. Будут перечислены реальные имена, типы, расширения, размеры, пути и даты ПОСЛЕ переносов; без самой книги, без обхода подпапок.\r\n", a->text, a->cell);

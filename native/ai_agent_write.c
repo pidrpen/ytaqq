@@ -13,6 +13,31 @@ static void ag_le32(BYTE *p, DWORD v) { for (int i = 0; i < 4; i++) p[i] = (BYTE
 static BOOL ag_bytes(HANDLE h, const void *p, DWORD n) {
   DWORD written = 0; return !n || (WriteFile(h, p, n, &written, NULL) && written == n);
 }
+/* A table is explicit, rectangular TSV; never infer it from arbitrary tabs. */
+static BOOL ag_word_table_valid(const wchar_t *text, int *columns) {
+  int rows = 0, width = 0, cells = 1;
+  if (!text[0] || wcslen(text) >= 2000) return FALSE;
+  for (const wchar_t *p = text; ; p++) {
+    if (*p == L'\t') cells++;
+    if (!*p || *p == L'\n') {
+      if (!*p && p > text && p[-1] == L'\n') break;
+      if (!width) width = cells;
+      if (cells != width || width > 20 || ++rows > 100 || rows * width > 500) return FALSE;
+      cells = 1;
+      if (!*p) break;
+    } else if (*p < 32 && *p != L'\t' && *p != L'\r') return FALSE;
+  }
+  *columns = width; return rows >= 2;
+}
+static BOOL ag_word_table_goal(const wchar_t *goal) {
+  wchar_t lower[4000]; lstrcpynW(lower, goal, 4000); CharLowerBuffW(lower, (DWORD)wcslen(lower));
+  return wcsstr(lower, L"таблицу") || wcsstr(lower, L"таблицей") || wcsstr(lower, L"в виде таблиц") || wcsstr(lower, L"в виде табилц") || wcsstr(lower, L"табличном виде") || wcsstr(lower, L"table");
+}
+static BOOL ag_xml_add(char *xml, size_t cap, const char *part) {
+  size_t n = strlen(xml), length = strlen(part);
+  if (n + length >= cap) return FALSE;
+  memcpy(xml + n, part, length + 1); return TRUE;
+}
 static BOOL ag_write_document(const wchar_t *path, const wchar_t *text, AgKind kind, const char *sheetXml) {
   BOOL docx = kind == AG_DOCX, xlsx = kind == AG_XLSX;
   if (xlsx && text[0]) { SetLastError(ERROR_NOT_SUPPORTED); return FALSE; }
@@ -21,7 +46,10 @@ static BOOL ag_write_document(const wchar_t *path, const wchar_t *text, AgKind k
   char utf8[8001], xml[128000];
   int n = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, text, -1, utf8, sizeof(utf8), NULL, NULL);
   if (!n) return FALSE;
-  if (docx) {
+  if (docx && sheetXml) {
+    if (strlen(sheetXml) >= sizeof(xml)) return FALSE;
+    strcpy(xml, sheetXml);
+  } else if (docx) {
     strcpy(xml, "<?xml version=\"1.0\" encoding=\"UTF-8\"?><w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:p><w:r><w:t xml:space=\"preserve\">");
     size_t at = strlen(xml);
     for (int i = 0; i < n - 1; i++) {
@@ -81,4 +109,36 @@ static BOOL ag_write_document(const wchar_t *path, const wchar_t *text, AgKind k
 }
 static BOOL ag_write_new(const wchar_t *path, const wchar_t *text, AgKind kind) {
   return ag_write_document(path, text, kind, NULL);
+}
+
+static BOOL ag_write_word_table(const wchar_t *path, const wchar_t *text) {
+  int columns; if (!ag_word_table_valid(text, &columns)) return FALSE;
+  char utf8[8001];
+  int n = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, text, -1, utf8, sizeof(utf8), NULL, NULL);
+  if (!n) return FALSE;
+  char *xml = (char *)calloc(128000, 1); if (!xml) return FALSE;
+  BOOL ok = ag_xml_add(xml, 128000, "<?xml version=\"1.0\" encoding=\"UTF-8\"?><w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:tbl><w:tblPr><w:tblW w:w=\"0\" w:type=\"auto\"/><w:tblBorders>");
+  const char *borders[] = {"top", "left", "bottom", "right", "insideH", "insideV"};
+  char part[200];
+  for (int i = 0; i < 6 && ok; i++) { snprintf(part, sizeof(part), "<w:%s w:val=\"single\" w:sz=\"4\" w:color=\"808080\"/>", borders[i]); ok = ag_xml_add(xml, 128000, part); }
+  ok = ok && ag_xml_add(xml, 128000, "</w:tblBorders></w:tblPr><w:tblGrid>");
+  for (int i = 0; i < columns && ok; i++) { snprintf(part, sizeof(part), "<w:gridCol w:w=\"%d\"/>", 9000 / columns); ok = ag_xml_add(xml, 128000, part); }
+  const char *openCell = "<w:tc><w:tcPr><w:tcW w:w=\"0\" w:type=\"auto\"/></w:tcPr><w:p><w:r><w:t xml:space=\"preserve\">";
+  const char *closeCell = "</w:t></w:r></w:p></w:tc>";
+  ok = ok && ag_xml_add(xml, 128000, "</w:tblGrid><w:tr>") && ag_xml_add(xml, 128000, openCell);
+  for (int i = 0; i < n - 1 && ok; i++) {
+    if (utf8[i] == '\r') continue;
+    if (utf8[i] == '\t') ok = ag_xml_add(xml, 128000, closeCell) && ag_xml_add(xml, 128000, openCell);
+    else if (utf8[i] == '\n') {
+      ok = ag_xml_add(xml, 128000, closeCell) && ag_xml_add(xml, 128000, "</w:tr>");
+      if (i < n - 2) ok = ok && ag_xml_add(xml, 128000, "<w:tr>") && ag_xml_add(xml, 128000, openCell);
+    } else {
+      char character[2] = {utf8[i], 0};
+      ok = ag_xml_add(xml, 128000, utf8[i] == '&' ? "&amp;" : utf8[i] == '<' ? "&lt;" : utf8[i] == '>' ? "&gt;" : character);
+    }
+  }
+  if (n < 2 || utf8[n - 2] != '\n') ok = ok && ag_xml_add(xml, 128000, closeCell) && ag_xml_add(xml, 128000, "</w:tr>");
+  ok = ok && ag_xml_add(xml, 128000, "</w:tbl><w:p/><w:sectPr><w:pgSz w:w=\"12240\" w:h=\"15840\"/><w:pgMar w:top=\"1440\" w:right=\"1440\" w:bottom=\"1440\" w:left=\"1440\"/></w:sectPr></w:body></w:document>");
+  if (ok) ok = ag_write_document(path, text, AG_DOCX, xml);
+  free(xml); return ok;
 }

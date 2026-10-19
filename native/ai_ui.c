@@ -22,6 +22,11 @@
 #define ID_AI_ZFORGET 521
 static HWND g_aiSource, g_aiZModel, g_aiZKey, g_aiZSave, g_aiZForget, g_aiZInfo;
 static BOOL ac_provider_change(int provider);
+static void ai_ui_zai_select(void) {
+  wchar_t model[64]; MultiByteToWideChar(CP_UTF8, 0, g_aiZaiModel, -1, model, 64);
+  LRESULT selected = SendMessageW(g_aiZModel, CB_FINDSTRINGEXACT, (WPARAM)-1, (LPARAM)model);
+  SendMessageW(g_aiZModel, CB_SETCURSEL, selected, 0);
+}
 
 static HWND g_aiBtnReport, g_aiBtnLlama, g_aiBtnCtx, g_aiBtnOff;
 static HWND g_aiChkOn, g_aiBtnTier[AI_TIERS], g_aiChkGpu, g_aiStat, g_aiBar, g_aiBtnDl, g_aiBtnTest, g_aiBtnDir,
@@ -140,16 +145,16 @@ static void ai_ui_create(HWND p) {
   g_aiSource = CreateWindowExW(0, L"COMBOBOX", L"", WS_CHILD | CBS_DROPDOWNLIST | WS_TABSTOP, 0, 0, 300, 180, p, (HMENU)(INT_PTR)ID_AI_SOURCE, NULL, NULL);
   SendMessageW(g_aiSource, CB_ADDSTRING, 0, (LPARAM)L"Локальная модель · без интернета");
   SendMessageW(g_aiSource, CB_ADDSTRING, 0, (LPARAM)L"Z.ai API · через интернет");
-  g_aiZModel = CreateWindowExW(0, L"COMBOBOX", L"", WS_CHILD | CBS_DROPDOWN | WS_TABSTOP | CBS_AUTOHSCROLL, 0, 0, 300, 200, p, (HMENU)(INT_PTR)ID_AI_ZMODEL, NULL, NULL);
-  const wchar_t *models[] = {L"glm-4.5-flash", L"glm-4.7-flash", L"glm-4.6v-flash", L"glm-4.7", L"glm-5.3", L"glm-5.3-flash", L"glm-4.6v"};
+  g_aiZModel = CreateWindowExW(0, L"COMBOBOX", L"", WS_CHILD | CBS_DROPDOWNLIST | WS_TABSTOP, 0, 0, 300, 200, p, (HMENU)(INT_PTR)ID_AI_ZMODEL, NULL, NULL);
+  const wchar_t *models[] = {L"glm-4.5-flash", L"glm-4.7-flash", L"glm-4.6v-flash"};
   for (size_t i = 0; i < sizeof(models) / sizeof(models[0]); i++) SendMessageW(g_aiZModel, CB_ADDSTRING, 0, (LPARAM)models[i]);
-  wchar_t model[64]; MultiByteToWideChar(CP_UTF8, 0, g_aiZaiModel, -1, model, 64); SetWindowTextW(g_aiZModel, model);
+  ai_ui_zai_select();
   g_aiZKey = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_TABSTOP | ES_PASSWORD | ES_AUTOHSCROLL, 0, 0, 300, 26, p, (HMENU)(INT_PTR)ID_AI_ZKEY, NULL, NULL);
   SendMessageW(g_aiZKey, EM_SETLIMITTEXT, 1024, 0);
   SendMessageW(g_aiZKey, 0x1501, TRUE, (LPARAM)L"Вставьте обычный API-ключ Z.ai");
   g_aiZSave = mk_btn(p, L"Сохранить ключ", ID_AI_ZSAVE);
   g_aiZForget = mk_btn(p, L"Удалить ключ", ID_AI_ZFORGET);
-  g_aiZInfo = CreateWindowExW(0, L"STATIC", L"Сообщения, картинки и данные файлов из задач передаются Z.ai. Нужен стандартный API-ключ (не Coding Plan). GLM-4.5-Flash, GLM-4.7-Flash и GLM-4.6V-Flash бесплатны; остальные модели могут списывать баланс. Одна задача делает несколько запросов. Модели на ПК не нужны. Изменения файлов — после «Применить».", WS_CHILD | SS_LEFT, 0, 0, 300, 100, p, NULL, NULL, NULL);
+  g_aiZInfo = CreateWindowExW(0, L"STATIC", L"Сообщения, картинки и данные файлов из задач передаются Z.ai. Нужен стандартный API-ключ (не Coding Plan). Доступны только бесплатные GLM-4.5-Flash, GLM-4.7-Flash и GLM-4.6V-Flash. Одна задача делает несколько запросов. Модели на ПК не нужны. Изменения файлов — после «Применить».", WS_CHILD | SS_LEFT, 0, 0, 300, 100, p, NULL, NULL, NULL);
   for (int i = 0; i < AI_TIERS; i++) g_aiBtnTier[i] = mk_btn(p, kAiTiers[i].button, ID_AI_TIER + i);
   g_aiBtnCtx = mk_btn(p, L"", ID_AI_CTX);
   g_aiChkGpu = CreateWindowExW(0, L"BUTTON", L"Считать на видеокарте (если в ней от 4 ГБ)",
@@ -415,7 +420,7 @@ static BOOL ai_ui_command(HWND hwnd, int id, int code) {
   }
   if (id == ID_AI_ZMODEL && (code == CBN_SELCHANGE || code == CBN_KILLFOCUS)) {
     if (g_aiActive) {
-      wchar_t current[64]; MultiByteToWideChar(CP_UTF8, 0, g_aiZaiModel, -1, current, 64); SetWindowTextW(g_aiZModel, current);
+      ai_ui_zai_select();
       lstrcpynW(g_aiTestMsg, L"Модель можно изменить после текущего ответа.", 300); ai_ui_refresh(); return TRUE;
     }
     wchar_t name[64]; char model[64];
@@ -425,8 +430,8 @@ static BOOL ai_ui_command(HWND hwnd, int id, int code) {
     wchar_t *trimmed = name; while (*trimmed == L' ' || *trimmed == L'\t') trimmed++;
     size_t length = wcslen(trimmed); while (length && (trimmed[length - 1] == L' ' || trimmed[length - 1] == L'\t')) trimmed[--length] = 0;
     if (!WideCharToMultiByte(CP_UTF8, 0, trimmed, -1, model, 64, NULL, NULL) || !ai_zai_model_valid(model)) {
-      wchar_t current[64]; MultiByteToWideChar(CP_UTF8, 0, g_aiZaiModel, -1, current, 64); SetWindowTextW(g_aiZModel, current);
-      _snwprintf(g_aiTestMsg, 300, L"Имя не сохранено. Выбрана %s. Укажите glm-… латиницей без кавычек.", current);
+      wchar_t current[64]; MultiByteToWideChar(CP_UTF8, 0, g_aiZaiModel, -1, current, 64); ai_ui_zai_select();
+      _snwprintf(g_aiTestMsg, 300, L"Имя не сохранено. Выбрана %s. Выберите бесплатную модель из списка.", current);
     } else { lstrcpynA(g_aiZaiModel, model, 64); g_aiTestMsg[0] = 0; ai_save(); }
     ai_ui_refresh(); return TRUE;
   }

@@ -87,20 +87,16 @@ def read_protected_key(path):
 def zai_wire(body):
     wire = {k: copy.deepcopy(body[k]) for k in ('model', 'messages', 'temperature', 'top_p', 'max_tokens') if k in body}
     model = wire.get('model', '')
-    if not re.fullmatch(r'glm-[a-z0-9._-]{1,59}', model):
-        raise ValueError('Z.ai: укажите корректное имя модели glm-…')
+    if model not in ('glm-4.5-flash', 'glm-4.7-flash', 'glm-4.6v-flash'):
+        raise ValueError('Z.ai: разрешены только бесплатные glm-4.5-flash, glm-4.7-flash, glm-4.6v-flash')
     wire['stream'] = False
-    if model in ('glm-5.3', 'glm-5.3-flash'):
-        wire.update(thinking={'type': 'enabled'}, reasoning_effort='low')
-        wire['max_tokens'] = max(8192, wire.get('max_tokens', 1024))
-    else:
-        wire['thinking'] = {'type': 'disabled'}
+    wire['thinking'] = {'type': 'disabled'}
     schema = body.get('response_format', {}).get('json_schema', {}).get('schema')
     if schema:
         # Z.ai JSON mode does not implement llama.cpp's json_schema grammar.
         # Give the exact schema in the prompt, then validate it locally.
         wire['messages'].insert(0, {'role': 'system', 'content': 'Return ONLY one JSON value conforming to this JSON Schema. No markdown or explanatory prose:\n'+json.dumps(schema, ensure_ascii=False)})
-        if model not in ('glm-4.5v', 'glm-4.6v', 'glm-4.6v-flash', 'glm-5.3-flash'):
+        if model != 'glm-4.6v-flash':
             wire['response_format'] = {'type': 'json_object'}
     return wire, schema
 
@@ -140,6 +136,8 @@ def local_call(endpoint, key, body, timeout, _repair=False):
         messages = {400: 'проверьте модель, параметры и баланс API', 401: 'неверный API-ключ', 403: 'нет доступа к модели или тарифу', 404: 'модель не найдена', 429: 'лимит запросов или квота; повторите позже'}
         if service == '1113':
             message = 'недостаточный баланс API или нет пакета для выбранной модели; выберите бесплатную glm-4.5-flash / glm-4.7-flash либо проверьте баланс'
+        elif service == '1305':
+            message = 'сервис Z.ai временно перегружен; повторите позже или выберите другую бесплатную модель'
         else:
             message = messages.get(error.code, 'сервис недоступен')
         raise ValueError(f'Z.ai HTTP {error.code}{code} [{wire["model"]}]: {message}') from None

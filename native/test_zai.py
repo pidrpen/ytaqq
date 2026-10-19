@@ -33,7 +33,7 @@ class Mock:
  def open(self,request,timeout):
   assert request.full_url==b.ZAI_ENDPOINT,'Unexpected destination'
   assert request.get_header('Authorization')=='Bearer '+FAKE,'Wrong protected credential'
-  body=json.loads(request.data);assert body['model']=='glm-4.7'
+  body=json.loads(request.data);assert body['model']=='glm-4.5-flash'
   assert not any(k in body for k in ['cursorpad','cache_prompt','chat_template_kwargs','test_case'])
   if mode in ['401','429']:raise urllib.error.HTTPError(request.full_url,int(mode),'test',{},None)
   schema=None
@@ -44,6 +44,9 @@ class Mock:
   content='Ответ Z.ai'
   if schema:
    if 'requirements' in schema.get('properties',{}):content=json.dumps({'requirements':[original['cursorpad']['goal']]},ensure_ascii=False)
+   elif 'verdict' in schema.get('properties',{}):
+    assert 'Белая трость' in body['messages'][-1]['content'] and 'мытьё рук' in body['messages'][-1]['content']
+    content=json.dumps({'verdict':'ready','text':'Праздник\tОписание\nБелая трость\tПоддержка\nСельские женщины\tВклад\nМытьё рук\tГигиена\nРак груди\tОсведомлённость','reason':''},ensure_ascii=False)
    elif 'anyOf' in schema:content=json.dumps({'tool':'write','path':'@desktop\\API.docx','text':'Проверка Z.ai'},ensure_ascii=False)
    else:content=json.dumps({'ok':True})
   if mode=='bad-schema':content='{"wrong":1}'
@@ -56,7 +59,7 @@ b.main()
 stub=stub.replace("split('\\\\n',1)","split('\\n',1)")
 (root/'stub.py').write_text(stub,encoding='utf-8')
 schema={'type':'object','properties':{'ok':{'const':True}},'required':['ok'],'additionalProperties':False}
-body={'model':'glm-4.7','messages':[{'role':'user','content':'Тест'}],'stream':True,'max_tokens':100,'cache_prompt':True,'chat_template_kwargs':{'enable_thinking':False}}
+body={'model':'glm-4.5-flash','messages':[{'role':'user','content':'Тест'}],'stream':True,'max_tokens':100,'cache_prompt':True,'chat_template_kwargs':{'enable_thinking':False}}
 try:
     r=run(-29,'credentials',{});assert r['status']==0,r
     r=run(-30,'chat',body);assert r['status']==0 and r['text']=='Ответ Z.ai',r
@@ -69,6 +72,12 @@ try:
     r=run(-31,'word',request);assert r['status']==0,r
     with zipfile.ZipFile(profile/'files/API.docx') as z:
         xml=ET.fromstring(z.read('word/document.xml'));assert 'Проверка Z.ai' in ''.join(xml.itertext())
+    r=run(-32,'word-table',body);assert r['status']==0,r
+    with zipfile.ZipFile(profile/'table-files/Праздники.docx') as z:
+        xml=ET.fromstring(z.read('word/document.xml'));ns={'w':'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}
+        tables=xml.findall('.//w:tbl',ns);assert len(tables)==1
+        rows=tables[0].findall('w:tr',ns);assert len(rows)==5 and all(len(row.findall('w:tc',ns))==2 for row in rows)
+        assert 'Белая трость' in ''.join(xml.itertext()) and 'Задача 1' not in ''.join(xml.itertext())
     for p in profile.rglob('*'):
         if p.is_file() and (p.suffix in ['.json','.key'] or p.name=='ai.txt'):
             assert fake.encode() not in p.read_bytes(),f'Credential leaked to {p.name}'
@@ -85,15 +94,18 @@ b.CLOUD=False
 try:b.local_call(b.ZAI_ENDPOINT,FAKE,{},1)
 except ValueError:pass
 else:raise AssertionError('Local mode reached cloud')
-wire,s=b.zai_wire({'model':'glm-5.3','messages':[],'max_tokens':100,'cache_prompt':True});assert wire['thinking']['type']=='enabled' and wire['max_tokens']>=8192 and 'cache_prompt' not in wire
-wire,s=b.zai_wire({'model':'glm-4.7','messages':[]});assert wire['thinking']['type']=='disabled'
+for model in ['glm-5.3','glm-4.7','glm-4.6v','glm-4.7-flashx','glm-4.6v-flashx']:
+ try:b.zai_wire({'model':model,'messages':[]})
+ except ValueError:pass
+ else:raise AssertionError('Paid model accepted')
+wire,s=b.zai_wire({'model':'glm-4.5-flash','messages':[]});assert wire['thinking']['type']=='disabled'
 print('PASS: DPAPI interoperability, endpoint allowlist, no local cloud fallback, GLM thinking compatibility')
 '''.replace('BRIDGE',repr(str(runtime/'bridge.py'))).replace('KEY',repr(str(profile/'zai-key.dat'))).replace('FAKE',repr(fake))
     (root/'unit.py').write_text(unit,encoding='utf-8')
     subprocess.run([str(runtime/'python.exe'),'-I','-B',str(root/'unit.py')],check=True,timeout=60)
     subprocess.run([str(runtime/'python.exe'),'-I','-B',str(repo/'native/test_agent_coverage.py'),str(runtime/'bridge.py')],check=True,timeout=60)
     subprocess.run([str(runtime/'python.exe'),'-I','-B',str(repo/'native/test_zai_schema.py'),str(runtime/'bridge.py')],check=True,timeout=60)
-    (root/'verified.json').write_text(json.dumps(dict(passed=True,native_cases=len(report),live_api_calls=0,protected_credentials=True,endpoint_allowlist=True,local_mode_preserved=True,word_apply_verified=True),indent=2),encoding='utf-8')
+    (root/'verified.json').write_text(json.dumps(dict(passed=True,native_cases=len(report),live_api_calls=0,protected_credentials=True,endpoint_allowlist=True,local_mode_preserved=True,word_apply_verified=True,word_table_verified=True,free_model_allowlist=True),indent=2),encoding='utf-8')
     print('PASS: native UI/credential lifecycle, chat, schema validation, 401/429/truncation, Word plan/Apply; no live API calls',flush=True)
 finally:
     (root/'report.json').write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')
