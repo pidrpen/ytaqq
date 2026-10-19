@@ -1047,6 +1047,11 @@ static int ag_tool(AgFs *fs, const wchar_t *json, wchar_t *out, int cap) {
       if (!of_excel_word_text(source, reviewed, 2000, out, cap)) return -1;
       if (!ag_word_hash(source, after) || wcscmp(hash, after)) { lstrcpynW(out, L"Excel изменился во время чтения. Документ не добавлен; повторите чтение актуального источника.", cap); return -1; }
     } else if (docx && reviewed[0] && fs->author && !fs->author(fs->goal, reviewed, reviewed, 2000, fs->cancel, out, cap)) return -1;
+    BOOL wordTable = docx && (!wcscmp(ag_get(&j, L"mode"), L"table") || ag_word_table_goal(fs->goal));
+    int wordColumns;
+    if (wordTable && !ag_word_table_valid(reviewed, &wordColumns)) {
+      lstrcpynW(out, L"Для таблицы Word нужен прямоугольный TSV: строка заголовков и строки данных, табуляция между столбцами. Передай конкретные данные из беседы, не заглушки. План не изменён.", cap); return -1;
+    }
     AgAction *a = NULL;
     for (int i = 0; i < fs->count; i++) if (ag_same_path(fs->plan[i].dst, path)) {
       if (docx && fs->plan[i].kind == AG_DOCX) a = &fs->plan[i];
@@ -1060,7 +1065,7 @@ static int ag_tool(AgFs *fs, const wchar_t *json, wchar_t *out, int cap) {
       if (!GetFileAttributesExW(source, GetFileExInfoStandard, &before)) goto fail;
       a->before = before; lstrcpynW(a->src, source, MAX_PATH);
     } else a->src[0] = 0;
-    lstrcpynW(a->text, reviewed, 2000); lstrcpynW(a->sheet, hash, 128);
+    lstrcpynW(a->text, reviewed, 2000); lstrcpynW(a->sheet, hash, 128); a->table = wordTable;
     swprintf(out, cap, L"Создание %ls добавлено в план: %ls. %ls Родительские папки УЖЕ добавлены автоматически: mkdir не нужен. Эта часть задачи запланирована полностью. Если других действий не просили, следующий вызов done. Диск пока не изменён.", docx ? L"Word-документа" : xlsx ? L"пустой книги Excel" : L"текстового файла", a->dst, source[0] ? L"Все листы и сохранённые значения Excel перенесены кодом, без переписывания моделью. Оформление, графики и вычисление формул не переносятся; даты могут быть серийными числами." : L"");
     return 0;
   }
@@ -1269,6 +1274,7 @@ static BOOL ag_apply(AgFs *fs, wchar_t *out, int cap) {
       ok = fs->backend(L"xlsx", a->dst, a->text, a->sheet, a->cell, a->table ? L"table" : L"text", L"", fs->cancel, detail, 6000);
       if (!ok) { swprintf(out, cap, L"Остановлено после %d из %d действий. %ls Выполненные действия сохранены.", i, fs->count, detail); return FALSE; }
     }
+    else if (a->kind == AG_DOCX && a->table) ok = ag_write_word_table(a->dst, a->text);
     else if (a->kind == AG_DOCX || a->kind == AG_PLAIN || a->kind == AG_XLSX) ok = ag_write_new(a->dst, a->text, a->kind);
     else if (a->kind == AG_WORD_FORMAT) {
       wchar_t detail[1600]; ok = ag_word_apply(fs, a, detail, 1600);

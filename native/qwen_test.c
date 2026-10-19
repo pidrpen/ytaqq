@@ -35,11 +35,14 @@ static int aq_test(void) {
   if (port == -29 && argc == 7 && job.body) {
     /* All writes are inside the supplied scratch profile; no live API call. */
     const wchar_t *fake = L"cursorpad-zai-test-only-not-a-real-key";
-    BOOL ok = !ai_zai_model_valid("glm-4.7\r\nheader") && ai_zai_model_valid("glm-4.7");
+    BOOL ok = !ai_zai_model_valid("glm-4.7\r\nheader") && ai_zai_model_valid("glm-4.5-flash") && !ai_zai_model_valid("glm-5.3") && !ai_zai_model_valid("glm-4.7");
     g_aiProvider = 1; g_aiOn = TRUE; ai_save();
     g_setHwnd = CreateWindowExW(0, L"STATIC", L"", WS_POPUP, 0, 0, 600, 850, NULL, NULL, GetModuleHandleW(NULL), NULL);
     ai_ui_create(g_setHwnd);
-    ok = ok && SendMessageW(g_aiZModel, CB_GETCOUNT, 0, 0) == 7;
+    ok = ok && SendMessageW(g_aiZModel, CB_GETCOUNT, 0, 0) == 3;
+    ok = ok && (GetWindowLongW(g_aiZModel, GWL_STYLE) & 3) == CBS_DROPDOWNLIST;
+    AiJob stale = {0}; stale.timeout = 1000; ai_job_run(&stale);
+    ok = ok && stale.status == AI_CANCELLED && !g_aiProc; free(stale.text);
     ok = ok && g_aiSource && g_aiZKey && (GetWindowLongW(g_aiZKey, GWL_STYLE) & ES_PASSWORD);
     g_layOpen = TRUE; ai_ui_layout(14, 40, 540, 554, 28, 8, 18, 90);
     ok = ok && (GetWindowLongW(g_aiZKey, GWL_STYLE) & WS_VISIBLE) && !(GetWindowLongW(g_aiBtnDl, GWL_STYLE) & WS_VISIBLE);
@@ -53,7 +56,7 @@ static int aq_test(void) {
     swprintf(path, MAX_PATH, L"%ls\\ai.txt", g_dataDir); char *pref = aq_read(path);
     ok = ok && pref && strstr(pref, "provider 1") && !strstr(pref, "cursorpad-zai-test-only"); free(pref);
     char *body = ai_body(L"Тест", "\"привет\"", 64); AiJob *one = body ? ai_job_new(body, 1000) : NULL;
-    ok = ok && one && one->provider == 1 && strstr(one->body, "glm-4.7");
+    ok = ok && one && one->provider == 1 && strstr(one->body, "glm-4.5-flash");
     g_aiProvider = 0; if (one) { ok = ok && one->provider == 1; ai_job_release(one); }
     ai_load(); ok = ok && g_aiProvider == 1;
     ai_ui_command(g_setHwnd, ID_AI_ZFORGET, BN_CLICKED); ok = ok && !ai_zai_has_key() && !ai_ready();
@@ -61,16 +64,46 @@ static int aq_test(void) {
     ac_push(0, L"LOCAL_PRIVATE_HISTORY_MARKER"); ac_push(1, L"old reply"); g_agPending = TRUE;
     ok = ok && ac_provider_change(1) && g_acContextStart == g_acN && !g_agPending;
     char *routed = ac_route_body(L"привет"); ok = ok && routed && !strstr(routed, "LOCAL_PRIVATE_HISTORY_MARKER"); free(routed); ac_clear_turns();
-    SetWindowTextW(g_aiZModel, L"  glm-4.6v-flash  "); ai_ui_command(g_setHwnd, ID_AI_ZMODEL, CBN_KILLFOCUS);
+    SendMessageW(g_aiZModel, CB_SETCURSEL, 2, 0); ai_ui_command(g_setHwnd, ID_AI_ZMODEL, CBN_SELCHANGE);
     ok = ok && !strcmp(g_aiZaiModel, "glm-4.6v-flash") && ai_zai_vision();
-    SetWindowTextW(g_aiZModel, L"invalid model"); ai_ui_command(g_setHwnd, ID_AI_ZMODEL, CBN_KILLFOCUS);
+    ai_ui_command(g_setHwnd, ID_AI_ZMODEL, CBN_KILLFOCUS);
     wchar_t shown[64]; GetWindowTextW(g_aiZModel, shown, 64);
-    ok = ok && !wcscmp(shown, L"glm-4.6v-flash") && wcsstr(g_aiTestMsg, L"не сохранено");
+    ok = ok && !wcscmp(shown, L"glm-4.6v-flash");
     wchar_t system[24000]; ac_sys_build(L"какая ты модель", NULL, system, 24000);
     ok = ok && wcsstr(system, L"glm-4.6v-flash") && !wcsstr(system, L"Не называй себя локальной Qwen");
-    lstrcpyA(g_aiZaiModel, "glm-4.7"); ai_save();
+    /* A previously saved paid model migrates and persists a free default. */
+    wchar_t settings[MAX_PATH]; swprintf(settings, MAX_PATH, L"%ls\\ai.txt", g_dataDir);
+    ok = ok && aq_write(settings, "on 1\r\nprovider 1\r\nzai_model glm-5.3\r\n");
+    ai_load(); ok = ok && !strcmp(g_aiZaiModel, "glm-4.5-flash") && !ai_zai_vision();
+    char *migrated = aq_read(settings); ok = ok && migrated && strstr(migrated, "zai_model glm-4.5-flash") && !strstr(migrated, "glm-5.3"); free(migrated);
+    lstrcpyA(g_aiZaiModel, "glm-4.5-flash"); ai_save();
     DestroyWindow(g_setHwnd); g_setHwnd = NULL;
     status = ok ? AI_OK : AI_ERROR; job.text = _wcsdup(ok ? L"PASS: masked UI, encrypted key, delete, settings and provider snapshot; no model/network" : L"FAIL: Z.ai UI/credential protocol");
+  } else if (port == -32 && argc == 7 && job.body) {
+    g_aiProvider = 1; g_aiOn = TRUE; g_aqTestBridge = argv[6];
+    ac_push(0, L"какие праздники?");
+    ac_push(1, L"Белая трость; сельские женщины; мытьё рук; осведомлённость о раке груди.");
+    ag_context_capture();
+    BOOL ok = wcsstr(g_agContext, L"Белая трость") && wcsstr(g_agContext, L"мытьё рук");
+    int columns;
+    ok = ok && !ag_word_table_valid(L"A\tB\nonly one", &columns) && ag_word_table_valid(L"A\tB\n1\t2\n", &columns) && columns == 2;
+    SYSTEMTIME end = {0}; end.wYear = 2026; end.wMonth = 12; end.wDay = 31;
+    SYSTEMTIME next = ac_date_shift(end, 1); ok = ok && next.wYear == 2027 && next.wMonth == 1 && next.wDay == 1;
+    wchar_t *dated = ac_web_dated(L"какие завтра праздники"); ok = ok && dated && wcsstr(dated, L"Дата:"); free(dated);
+    AgFs *fs = (AgFs *)calloc(1, sizeof(AgFs)); wchar_t scratch[MAX_PATH], observed[6000];
+    swprintf(scratch, MAX_PATH, L"%ls\\table-files", g_dataDir);
+    ok = ok && fs && CreateDirectoryW(scratch, NULL);
+    if (ok) {
+      ag_fs_init(fs, L"C:\\protected-test-runtime", scratch); lstrcpynW(fs->desktop, scratch, MAX_PATH); fs->author = ag_author;
+      lstrcpynW(fs->goal, L"создай список в ворд на рабочий стол с этими праздниками в виде табилцы", 4000);
+      ok = ag_tool(fs, L"{\"tool\":\"write\",\"path\":\"@desktop\\\\Праздники.docx\",\"mode\":\"table\",\"text\":\"Задача 1\\tОписание\\nЗадача 2\\tОписание\"}", observed, 6000) == 0;
+      ok = ok && fs->count == 1 && fs->plan[0].table && wcsstr(fs->plan[0].text, L"Белая трость") && !wcsstr(fs->plan[0].text, L"Задача 1");
+      if (ok) ok = GetFileAttributesW(fs->plan[0].dst) == INVALID_FILE_ATTRIBUTES && ag_apply(fs, observed, 6000);
+    }
+    free(fs);
+    g_acContextStart = g_acN; ag_context_capture(); ok = ok && !g_agContext[0]; ac_clear_turns();
+    g_aqTestBridge = NULL; status = ok ? AI_OK : AI_ERROR;
+    job.text = _wcsdup(ok ? L"PASS: recent chat reaches Word author, placeholder replaced, native table staged/applied, context boundary, tomorrow/year rollover" : L"FAIL: Word table/context");
   } else if ((port == -30 || port == -31) && argc == 7 && job.body) {
     /* Test bootstrap is supplied only to this test build; production has no
        endpoint override. It mocks HTTPS without sending even a fake key. */

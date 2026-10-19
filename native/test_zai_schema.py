@@ -72,7 +72,7 @@ assert not b.audit_result(result,['Excel'],'[action=1] excel_write',1)['covered'
 assert len(mock.calls)==2
 
 # Provider failures never trigger an automatic repeat / switch to a paid model.
-for status, code, expected_text in [(429,'1113','недостаточный баланс'),(429,'1302','лимит запросов'),(401,'1000','API-ключ')]:
+for status, code, expected_text in [(429,'1113','недостаточный баланс'),(429,'1302','лимит запросов'),(429,'1305','временно перегружен'),(401,'1000','API-ключ')]:
     error=urllib.error.HTTPError(b.ZAI_ENDPOINT,status,'test',{},io.BytesIO(json.dumps({'error':{'code':code,'message':key}}).encode()))
     mock, body=run([error],b.CHECKLIST_SCHEMA)
     try:b.local_call(b.ZAI_ENDPOINT,key,body,2)
@@ -93,4 +93,13 @@ image={'type':'image_url','image_url':{'url':'data:image/png;base64,TEST'}}
 wire, schema=b.zai_wire({'model':'glm-4.6v-flash','messages':[{'role':'user','content':[image]}],
     'response_format':{'type':'json_schema','json_schema':{'schema':b.CHECKLIST_SCHEMA}}})
 assert wire['messages'][-1]['content']==[image] and 'response_format' not in wire and schema==b.CHECKLIST_SCHEMA
-print('PASS: both reported long reasons; scalar/invalid/duplicate JSON repair; one retry cap; strict IDs; 1113 balance, 401, rate, truncation; vision payload; zero live API calls')
+for model in ['glm-4.7','glm-5.3','glm-5.3-flash','glm-4.6v','glm-4.7-flashx','glm-4.6v-flashx','GLM-4.5-Flash','glm-unknown']:
+    mock, body=run([],b.CHECKLIST_SCHEMA); body['model']=model
+    try:b.local_call(b.ZAI_ENDPOINT,key,body,2)
+    except ValueError as e:assert 'только бесплатные' in str(e)
+    else:raise AssertionError('paid or unknown model accepted')
+    assert not mock.calls
+for model in ['glm-4.5-flash','glm-4.7-flash','glm-4.6v-flash']:
+    wire,_=b.zai_wire({'model':model,'messages':[]})
+    assert wire['model']==model and wire['thinking']['type']=='disabled'
+print('PASS: free-model allowlist before network; both reported long reasons; scalar/invalid/duplicate JSON repair; one retry cap; strict IDs; 1113 balance, 401, rate, truncation; vision payload; zero live API calls')

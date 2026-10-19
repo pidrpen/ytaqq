@@ -455,13 +455,22 @@ static void ac_learn_recall(const wchar_t *query, wchar_t *out, int cap) {
 
 static BOOL ac_picture_context(const wchar_t *q);
 
+static SYSTEMTIME ac_date_shift(SYSTEMTIME date, int days) {
+  FILETIME file; ULARGE_INTEGER ticks;
+  if (!SystemTimeToFileTime(&date, &file)) return date;
+  ticks.LowPart = file.dwLowDateTime; ticks.HighPart = file.dwHighDateTime;
+  ticks.QuadPart += (ULONGLONG)days * 864000000000ULL;
+  file.dwLowDateTime = ticks.LowPart; file.dwHighDateTime = ticks.HighPart;
+  FileTimeToSystemTime(&file, &date); return date;
+}
 static void ac_sys_build(const wchar_t *q, const wchar_t *web, wchar_t *out, int cap) {
   const wchar_t *title = NULL;
   const wchar_t *card = mini_ai_card(q, &title);
   wchar_t lessons[1500];
   ac_learn_recall(q, lessons, 1500);
   SYSTEMTIME now; GetLocalTime(&now); wchar_t date[500];
-  _snwprintf(date, 500, L"\r\nДата на компьютере: %04u-%02u-%02u.\r\n", now.wYear, now.wMonth, now.wDay);
+  SYSTEMTIME tomorrow = ac_date_shift(now, 1);
+  _snwprintf(date, 500, L"\r\nСегодня по календарю компьютера: %04u-%02u-%02u. Завтра означает %04u-%02u-%02u. Используй эту дату для относительных вопросов; даты в источниках её не заменяют.\r\n", now.wYear, now.wMonth, now.wDay, tomorrow.wYear, tomorrow.wMonth, tomorrow.wDay);
   _snwprintf(out, cap, L"%s%s%s%s%s%s%s%s%s%s%s%s%s%s", AC_SYS, date,
              ac_picture_context(q) ? AC_SYS_IMAGE : L"",
              ac_policy_technical(q) ? AC_SYS_TECH : L"",
@@ -1055,10 +1064,20 @@ static BOOL ac_web_refers(const wchar_t *q) {
   return FALSE;
 }
 
+static wchar_t *ac_web_dated(const wchar_t *q) {
+  wchar_t lower[3000]; lstrcpynW(lower, q, 3000); CharLowerBuffW(lower, (DWORD)wcslen(lower));
+  const wchar_t *word = wcsstr(lower, L"завтра");
+  if (!word || (word != lower && acw_word(word[-1])) || acw_word(word[6])) return _wcsdup(q);
+  SYSTEMTIME now; GetLocalTime(&now); SYSTEMTIME date = ac_date_shift(now, 1);
+  size_t cap = wcslen(q) + 80; wchar_t *out = (wchar_t *)calloc(cap, sizeof(wchar_t));
+  if (out) _snwprintf(out, cap, L"%ls Дата: %04u-%02u-%02u", q, date.wYear, date.wMonth, date.wDay);
+  return out;
+}
 /* Resolve short follow-ups only from user-supplied links, never assistant text. */
 static wchar_t *ac_web_question(const wchar_t *q) {
   wchar_t urls[2][3300];
-  if (acw_urls(q, urls) || !ac_web_refers(q)) return _wcsdup(q);
+  if (acw_urls(q, urls)) return _wcsdup(q);
+  if (!ac_web_refers(q)) return ac_web_dated(q);
   int seen = 0;
   for (int i = g_acN - 2; i >= g_acContextStart && seen < 8; i--) {
     if (g_acTurns[i].assistant) continue;
@@ -1074,7 +1093,7 @@ static wchar_t *ac_web_question(const wchar_t *q) {
     }
     if (count < 0 || !ac_web_refers(prior)) break;
   }
-  return _wcsdup(q);
+  return ac_web_dated(q);
 }
 
 static BOOL ac_web_off(const wchar_t *q) {

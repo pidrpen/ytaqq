@@ -264,6 +264,7 @@ static void ai_save(void) {
 
 static void ai_load(void) {
   g_aiUiThread = GetCurrentThreadId();
+  BOOL migratedZai = FALSE;
   wchar_t p[MAX_PATH];
   _snwprintf(p, MAX_PATH, L"%s\\ai.txt", g_dataDir);
   HANDLE h = CreateFileW(p, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
@@ -277,7 +278,10 @@ static void ai_load(void) {
     int v;
     if (sscanf(line, "on %d", &v) == 1) g_aiOn = v == 1;
     else if (sscanf(line, "provider %d", &v) == 1 && (v == 0 || v == 1)) g_aiProvider = v;
-    else if (!strncmp(line, "zai_model ", 10) && ai_zai_model_valid(line + 10)) lstrcpynA(g_aiZaiModel, line + 10, 64);
+    else if (!strncmp(line, "zai_model ", 10)) {
+      migratedZai = !ai_zai_model_valid(line + 10);
+      lstrcpynA(g_aiZaiModel, migratedZai ? "glm-4.5-flash" : line + 10, 64);
+    }
     else if (sscanf(line, "tier %d", &v) == 1 && v >= 0 && v < AI_TIERS) g_aiTier = v;
     else if (sscanf(line, "ctx %d", &v) == 1 && v >= 2048 && v <= 16384) g_aiCtx = v;
     else if (sscanf(line, "gpu %d", &v) == 1) g_aiGpu = v == 1;
@@ -297,6 +301,7 @@ static void ai_load(void) {
       }
     }
   }
+  if (migratedZai) ai_save();
 }
 
 /* --- строки: UTF-8, JSON ------------------------------------------------------ */
@@ -768,7 +773,7 @@ static int ai_server_ensure(DWORD deadline, volatile LONG *cancel, int minimumCo
     lstrcpynW(exeDir, exe, MAX_PATH);
     wchar_t *sl = wcsrchr(exeDir, L'\\');
     if (sl) *sl = 0;
-    ai_log(L"Запуск: %s", cmd);
+    ai_log(L"Запуск локального llama-server; порт %d", g_aiPort);
     BOOL ok = CreateProcessW(exe, cmd, NULL, NULL, lf != INVALID_HANDLE_VALUE, CREATE_NO_WINDOW | CREATE_SUSPENDED,
                              NULL, exeDir, &si, &pi);
     if (lf != INVALID_HANDLE_VALUE) CloseHandle(lf);
@@ -961,7 +966,7 @@ static wchar_t *ai_sse_text(const char *s) {
 static void ai_job_run(AiJob *j) {
   DWORD t0 = GetTickCount(), deadline = t0 + j->timeout;
   InterlockedIncrement(&g_aiActive);
-  int st = j->provider ? (!g_aiOn ? AI_OFF : AI_OK) : ai_server_ensure(deadline, &j->cancel, j->agentTask ? 16384 : 0);
+  int st = j->provider != g_aiProvider ? AI_CANCELLED : j->provider ? (!g_aiOn ? AI_OFF : AI_OK) : ai_server_ensure(deadline, &j->cancel, j->agentTask ? 16384 : 0);
   if (st == AI_NO_SERVER || st == AI_NO_MODEL) {
     AcquireSRWLockShared(&g_aiSrvLock);
     j->text = _wcsdup(g_aiSrvNote[0] ? g_aiSrvNote : ai_status_text(st));

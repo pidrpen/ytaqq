@@ -2,12 +2,10 @@
    it never enters ai.txt, diagnostics, command lines or task JSON. */
 #include <wincrypt.h>
 static int g_aiProvider; /* 0 local, 1 Z.ai standard API */
-static char g_aiZaiModel[64] = "glm-4.7";
+static char g_aiZaiModel[64] = "glm-4.5-flash";
 static void ai_zai_key_path(wchar_t *out) { swprintf(out, MAX_PATH, L"%ls\\zai-key.dat", g_dataDir); }
 static BOOL ai_zai_model_valid(const char *model) {
-  size_t n = strlen(model); if (n < 5 || n > 63 || strncmp(model, "glm-", 4)) return FALSE;
-  for (size_t i = 4; i < n; i++) if (!((model[i] >= 'a' && model[i] <= 'z') || (model[i] >= '0' && model[i] <= '9') || model[i] == '-' || model[i] == '.' || model[i] == '_')) return FALSE;
-  return TRUE;
+  return !strcmp(model, "glm-4.5-flash") || !strcmp(model, "glm-4.7-flash") || !strcmp(model, "glm-4.6v-flash");
 }
 static BOOL ai_zai_has_key(void) {
   wchar_t path[MAX_PATH]; ai_zai_key_path(path);
@@ -34,6 +32,6 @@ static BOOL ai_zai_store_key(const wchar_t *key) {
   LocalFree(sealed.pbData); return ok;
 }
 static BOOL ai_zai_vision(void) {
-  return !strcmp(g_aiZaiModel, "glm-4.6v-flash") || !strcmp(g_aiZaiModel, "glm-4.6v") || !strcmp(g_aiZaiModel, "glm-4.5v") || !strcmp(g_aiZaiModel, "glm-5.3-flash");
+  return !strcmp(g_aiZaiModel, "glm-4.6v-flash");
 }
 static const char *ai_selected_model(void) { return g_aiProvider ? g_aiZaiModel : g_aiExtModel[0] ? g_aiExtModel : "local"; }
