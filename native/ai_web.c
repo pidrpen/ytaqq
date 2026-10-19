@@ -4,6 +4,9 @@
 #include <winhttp.h>
 #include <wctype.h>
 #include <windns.h>
+#ifndef WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY
+#define WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY 4
+#endif
 #define AC_WEB_CAP 8000
 
 typedef struct {
@@ -147,7 +150,10 @@ static BOOL acw_request(const wchar_t *host, const wchar_t *path, const char *bo
   lstrcpynW(info->stage, L"создание сессии", 40);
   if (acw_stopped(info)) { info->error = ERROR_CANCELLED; return FALSE; }
   HINTERNET ses = WinHttpOpen(L"CursorPad/2026.10 local-Qwen-search",
-                              WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+                              WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+  if (!ses && GetLastError() == ERROR_INVALID_PARAMETER)
+    ses = WinHttpOpen(L"CursorPad/2026.10 local-Qwen-search",
+        WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
   if (!ses) { info->error = GetLastError(); acw_trace(host, started, info); return FALSE; }
   WinHttpSetTimeouts(ses, 2000, 3000, body ? 12000 : 3000, body ? 15000 : 3000);
   lstrcpynW(info->stage, L"подготовка соединения", 40);
@@ -374,14 +380,14 @@ static BOOL acw_word(wchar_t c) {
 static int acw_score(const wchar_t *query, const wchar_t *text) {
   wchar_t q[600], t[2400]; lstrcpynW(q, query, 600); lstrcpynW(t, text, 2400);
   CharLowerBuffW(q, (DWORD)wcslen(q)); CharLowerBuffW(t, (DWORD)wcslen(t));
-  const wchar_t *stop = L"|какие|какой|какая|какое|сколько|когда|почему|найди|найти|интернет|интернете|поищи|поиск|расскажи|пожалуйста|сегодня|сейчас|можешь|нужно|what|where|when|which|please|search|";
+  const wchar_t *stop = L"|какие|какой|какая|какое|сколько|когда|почему|найди|найти|интернет|интернете|поищи|поиск|расскажи|пожалуйста|сегодня|завтра|послезавтра|сейчас|можешь|нужно|цена|стоимость|what|where|when|which|please|search|the|and|for|";
   int score = 0;
   for (wchar_t *p = q; *p;) {
     while (*p && !acw_word(*p)) p++;
     wchar_t token[80]; int n = 0;
     while (*p && acw_word(*p)) { if (n < 79) token[n++] = *p; p++; }
     token[n] = 0;
-    if (n < 4) continue;
+    if (n < 3) continue;
     wchar_t word[84]; _snwprintf(word, 84, L"|%s|", token);
     if (wcsstr(stop, word)) continue;
     if (n >= 5) token[n > 5 ? 5 : 4] = 0; /* e.g. сталь / стали */
@@ -390,14 +396,16 @@ static int acw_score(const wchar_t *query, const wchar_t *text) {
   return score;
 }
 
-#ifdef AC_WEB_TEST
 static BOOL acw_append(const char *title, const char *snip, const char *url,
                        const wchar_t *query, wchar_t *out, int cap) {
   if (acw_skip_url(url, (int)strlen(url))) return FALSE;
   char block[2400]; wchar_t wide[2400] = L"";
-  snprintf(block, sizeof(block), "%s\n%s\n%s\n\n", title, snip, url);
+  snprintf(block, sizeof(block), "%s\nТолько поисковая выдержка:\n%s\n%s\n\n", title, snip, url);
   if (!MultiByteToWideChar(CP_UTF8, 0, block, -1, wide, 2400)) return FALSE;
-  if (query && !acw_score(query, wide)) return FALSE;
+  if (query) {
+    int tokens = acw_score(query, query);
+    if (!tokens || acw_score(query, wide) < (tokens > 1 ? 2 : 1)) return FALSE;
+  }
   if (wcslen(out) + wcslen(wide) >= (size_t)cap) return FALSE;
   wcscat(out, wide); return TRUE;
 }
@@ -424,6 +432,7 @@ static BOOL acw_rss(const char *html, const wchar_t *query, wchar_t *out, int ca
   return hits != 0;
 }
 
+#ifdef AC_WEB_TEST
 static BOOL acw_attr(const char *start, const char *end, const char *name, char *out, int cap) {
   char key[40]; snprintf(key, 40, " %s=\"", name);
   const char *p = strstr(start, key); if (!p || p >= end) return FALSE;
@@ -543,7 +552,38 @@ static int acw_urls(const wchar_t *query, wchar_t urls[2][3300]) {
   return count;
 }
 
-/* No browser scraping, repeated Brave requests or encyclopedia substitution. */
+/* Bing's RSS search endpoint works without an API key. Use the same bounded
+   reader, relevance filter and page validation as all other web sources. */
+static BOOL acw_bing_find(const wchar_t *query, wchar_t *out, int cap, AcWebInfo *info) {
+  int bytes = WideCharToMultiByte(CP_UTF8, 0, query, -1, NULL, 0, NULL, NULL);
+  if (bytes <= 1 || bytes > 12000) return FALSE;
+  char *utf8 = (char *)malloc((size_t)bytes);
+  wchar_t *path = (wchar_t *)malloc(((size_t)bytes * 3 + 100) * sizeof(wchar_t));
+  if (!utf8 || !path) { free(utf8); free(path); return FALSE; }
+  WideCharToMultiByte(CP_UTF8, 0, query, -1, utf8, bytes, NULL, NULL);
+  BOOL russian = FALSE;
+  for (const wchar_t *p = query; *p; p++) if (*p >= 0x0400 && *p <= 0x04ff) russian = TRUE;
+  lstrcpyW(path, russian ? L"/search?format=rss&mkt=ru-RU&setlang=ru&cc=RU&q=" : L"/search?format=rss&q=");
+  size_t used = wcslen(path);
+  static const wchar_t hex[] = L"0123456789ABCDEF";
+  for (int i = 0; i < bytes - 1; i++) {
+    unsigned char c = (unsigned char)utf8[i];
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+        (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~') path[used++] = c;
+    else { path[used++] = L'%'; path[used++] = hex[c >> 4]; path[used++] = hex[c & 15]; }
+  }
+  path[used] = 0;
+  char *rss = NULL; DWORD n = 0;
+  BOOL got = acw_get(L"www.bing.com", path, &rss, &n, info);
+  free(path); free(utf8);
+  BOOL ok = got && acw_rss(rss, query, out, cap); free(rss);
+  if (ok) {
+    lstrcpynW(info->note, L"Поиск Bing: получены поисковые выдержки. Текст страниц проверяется отдельно.", 360);
+  }
+  return ok;
+}
+
+/* Tavily remains a fallback when RSS is unavailable or irrelevant. */
 static BOOL ac_web_find(const wchar_t *query, wchar_t *out, int cap, AcWebInfo *info) {
   out[0] = 0;
   info->note[0] = 0; info->status = info->error = 0; info->page = info->prepared = FALSE;
@@ -555,6 +595,11 @@ static BOOL ac_web_find(const wchar_t *query, wchar_t *out, int cap, AcWebInfo *
     lstrcpynW(info->note, L"Локально: короткая реплика, поиск не требуется.", 360);
     info->prepared = TRUE; return FALSE;
   }
+  if (acw_bing_find(query, out, cap, info)) return TRUE;
+#ifndef AC_WEB_TEST
+  ai_log(L"Поиск Bing: %ls; HTTP %lu; Windows %lu. Пробуем Tavily.",
+      info->status == 200 ? L"нет подходящих результатов" : L"недоступен", info->status, info->error);
+#endif
   size_t len = wcslen(query), cap8 = len * 4 + 1;
   char *utf8 = (char *)malloc(cap8), *body = (char *)malloc(cap8 * 2 + 200);
   if (!utf8 || !body || !WideCharToMultiByte(CP_UTF8, 0, query, -1, utf8, (int)cap8, NULL, NULL)) { free(utf8); free(body); return FALSE; }
@@ -569,9 +614,9 @@ static BOOL ac_web_find(const wchar_t *query, wchar_t *out, int cap, AcWebInfo *
   free(body); free(utf8);
   BOOL ok = got && acw_tavily_parse(json, n, query, out, cap, info); free(json);
   if (ok) return TRUE;
-  if (info->status == 429) lstrcpynW(info->note, L"Tavily: исчерпан лимит поиска без ключа. Сетевых данных нет; повторять запросы сейчас бесполезно.", 360);
-  else if (info->status && info->status != 200) _snwprintf(info->note, 360, L"Поиск Tavily недоступен: HTTP %lu. Ответ без сетевых данных.", info->status);
-  else if (info->error) _snwprintf(info->note, 360, L"Поиск Tavily недоступен: ошибка Windows %lu. Ответ без сетевых данных.", info->error);
+  if (info->status == 429) lstrcpynW(info->note, L"Bing не дал результатов; Tavily: исчерпан лимит поиска без ключа. Сетевых данных нет; повторять запросы сейчас бесполезно.", 360);
+  else if (info->status && info->status != 200) _snwprintf(info->note, 360, L"Поиск Bing и Tavily недоступен: Tavily HTTP %lu. Ответ без сетевых данных.", info->status);
+  else if (info->error) _snwprintf(info->note, 360, L"Поиск Bing и Tavily недоступен: Tavily ошибка Windows %lu. Ответ без сетевых данных.", info->error);
   else lstrcpynW(info->note, L"Tavily не вернул пригодных результатов. Ответ без сетевых данных.", 360);
   info->note[359] = 0;
   size_t usedNote = wcslen(info->note);
@@ -779,6 +824,9 @@ static void ac_web_read_pages(const wchar_t *query, wchar_t *web, int cap, AcWeb
 int wmain(int argc, wchar_t **argv) {
   wchar_t out[AC_WEB_CAP];
   AcWebInfo info = {0};
+  if (argc > 3 && !wcscmp(argv[1], L"--score")) {
+    printf("score %d\n", acw_score(argv[2], argv[3])); return 0;
+  }
   if (argc > 2 && !wcscmp(argv[1], L"--error-code")) {
     char json[4096], code[320];
     WideCharToMultiByte(CP_UTF8, 0, argv[2], -1, json, sizeof(json), NULL, NULL);

@@ -30,4 +30,6 @@ def connection_error(error, endpoint, model, key, elapsed):
     if isinstance(reason, socket.gaierror):
         return f'{prefix}; этап=DNS; код={reason.errno}; имя сервера не разрешено'
     code = getattr(reason, 'winerror', None) or getattr(reason, 'errno', None)
+    if code in (12037, 12038, 12044, 12045, 12057, 12157, 12175):
+        return f'{prefix}; этап=TLS Windows; код={code}; {safe_text(reason, key)}; проверьте доверие Windows к сертификату и HTTPS-фильтр сети'
     return f'{prefix}; этап=соединение/чтение; {type(reason).__name__}; код={code}; {safe_text(reason, key)}'

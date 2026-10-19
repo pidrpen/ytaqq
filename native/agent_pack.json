@@ -1,7 +1,7 @@
 {
-  "file": "CursorPad-paw-fac4f568fcc0e377.zip",
-  "sha256": "fac4f568fcc0e3777745b0107c4bd0ac0da3d8e04fe0c24c1bb2ced94220e843",
-  "size": 78429867,
+  "file": "CursorPad-paw-95ca2829a8f74f94.zip",
+  "sha256": "95ca2829a8f74f943d0bd98ca5d52f71f22aa0e4e0a10cf163e2384c634d8fe4",
+  "size": 78431966,
   "python": {
     "version": "3.13.16",
     "sha256": "97dae5274cc54867065e8d5a3226e48c35017ed332a0fdb0e27d5b5821961297",
@@ -1671,11 +1671,12 @@
     }
   ],
   "application_sources": {
-    "bridge.py": "3144c42de4b5a697886496b15b25a118d2295a9d78a4a10e42f6a22bfc872b31",
-    "network_diagnostics.py": "5ad2c3308e0323d9c354e1c95a59e9eee9a4de34d2cb1b0f2a06db108fbdf8ba",
+    "bridge.py": "4a9bd0c1f225b550c9d49b2450986ec90b694c8c87f6e6941d2b7b5b5b8f5720",
+    "network_diagnostics.py": "8ec223ac7f274872574502103881e0316eee63df032d1422a4938d2a7e6f55c3",
     "skills/documents/SKILL.md": "9760f3d52b7dfed077790723cc969b2378c72d5b75aaef9241901ab524f8b4cb",
     "skills/files/SKILL.md": "26759b1a34abeb629b6259e3204f7ecf1a4fb161f12c9903c25bd5ada2a0a5f7",
     "skills/spreadsheets/SKILL.md": "e294b92ce7d769d96884dbf54f7588ae11614ec8a992bef7f8e8a3be41e966b9",
-    "skills/task-completion/SKILL.md": "5ef1465c7923e266362cab23848801386cc8ff9c6ee4226f032c649ec58c79dc"
+    "skills/task-completion/SKILL.md": "5ef1465c7923e266362cab23848801386cc8ff9c6ee4226f032c649ec58c79dc",
+    "windows_https.py": "2d712cc8c527935c42be8eb5a642b944cd97926da68af1837eda763ef0f26b94"
   }
 }

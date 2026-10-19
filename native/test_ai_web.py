@@ -53,7 +53,11 @@ def main():
         assert code == 0 and 'Python документация' in text and '?a=1&b=2' in text
         assert 'not-a-result' not in text
         assert run('--rss', rss, 'столица Франции')[0] == 1
-        assert run('--rss', rss.replace('Python', 'Сталь'), 'твёрдость стали')[0] == 0
+        assert run('--rss', rss.replace('Python', 'Сталь'), 'твёрдость стали')[0] == 1
+        relevant = rss.replace('Python', 'Сталь').replace('hashlib и SHA-256', 'Твёрдость стали после закалки')
+        assert run('--rss', relevant, 'твёрдость стали')[0] == 0
+        unrelated = rss.replace('Python', 'Видеокарта').replace('hashlib и SHA-256', 'Цена видеокарты')
+        assert run('--rss', unrelated, 'цена стали 40Х')[0] == 1
         assert run('--rss', rss.replace('https://docs.python.org/', 'file:///C:/'))[0] == 1
         assert run('--rss', rss.replace('https://docs.python.org/', 'javascript:alert(1)'))[0] == 1
         assert run('--rss', rss.replace('</item>', ''))[0] == 1

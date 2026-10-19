@@ -19,7 +19,7 @@ if '--transport-only' in sys.argv:
     names = {'local_call', 'zai_wire', 'strict_json'}
     tree.body = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in names]
     b = types.ModuleType('transport')
-    exec('import copy, json, re, time, urllib.request, urllib.error\nfrom network_diagnostics import connection_error, safe_text', b.__dict__)
+    exec('import copy, json, re, sys, time, urllib.request, urllib.error\nfrom network_diagnostics import connection_error, safe_text\nfrom windows_https import WindowsHTTPSHandler', b.__dict__)
     b.ZAI_ENDPOINT = 'https://api.z.ai/api/paas/v4/chat/completions'
     exec(compile(tree, str(bridge), 'exec'), b.__dict__)
 else:
@@ -41,6 +41,7 @@ cases = [
     (urllib.error.URLError(cert), ['этап=TLS', 'verify_code=89', 'Basic Constraints', 'Python', 'OpenSSL']),
     (urllib.error.URLError(socket.gaierror(11001, 'name not resolved')), ['этап=DNS', '11001']),
     (TimeoutError('timed out'), ['время ожидания']),
+    (OSError(12175, 'Windows HTTPS certificate error'), ['этап=TLS Windows', '12175']),
     (urllib.error.URLError(ConnectionRefusedError(111, 'refused '+key)), ['этап=соединение/чтение', '111']),
     (urllib.error.HTTPError(b.ZAI_ENDPOINT, 429, 'limit', {}, io.BytesIO(b'{"error":{"code":"1305"}}')), ['HTTP 429', '1305', 'этап=HTTP']),
     (urllib.error.HTTPError(b.ZAI_ENDPOINT, 401, 'bad key', {}, io.BytesIO(b'not JSON')), ['HTTP 401', 'неверный API-ключ']),

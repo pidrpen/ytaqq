@@ -17,6 +17,7 @@ import urllib.request
 import urllib.error
 import uuid
 from network_diagnostics import connection_error, safe_text
+from windows_https import WindowsHTTPSHandler
 
 ROOT = Path(__file__).resolve().parent
 CLOUD = False
@@ -112,7 +113,10 @@ def local_call(endpoint, key, body, timeout, _repair=False):
     class NoRedirect(urllib.request.HTTPRedirectHandler):
         def redirect_request(self, *args, **kwargs):
             raise ValueError('Model redirects are disabled')
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+    handlers = [urllib.request.ProxyHandler({}), NoRedirect()]
+    if CLOUD and sys.platform == 'win32':
+        handlers.append(WindowsHTTPSHandler())
+    opener = urllib.request.build_opener(*handlers)
     headers = {'Content-Type': 'application/json'}
     if key:
         headers['Authorization'] = 'Bearer ' + key
