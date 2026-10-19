@@ -188,6 +188,7 @@ static void tools_cleanup_old(void) {
    в нём и не идёт сохранение. Перезапуск занимает пару секунд, заметки
    сохранены. Щелчок по всплывашке — поставить сразу. */
 static void upd_idle_tick(void) {
+  if (g_cvBusy) return; /* Do not restart while a converted copy is being saved. */
   if (!g_updReady || !g_updPath[0]) {
     KillTimer(g_hwnd, TIMER_UPD_IDLE);
     return;

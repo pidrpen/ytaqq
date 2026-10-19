@@ -4110,6 +4110,7 @@ static void create_settings(HWND owner) {
 #include "hotkeys.c"    /* F8, F6, Pause… — какие назначены в Настройках */
 #include "layout_fix.c" /* Pause: «ghbdtn» → «привет» */
 #include "msg.c"        /* исчезающие сообщения коллегам — через ту же папку, что нарды */
+#include "convert.c" /* Shift-drag conversion ring; real OLE drop target */
 #include "tools.c" /* после нардов: автообновление смотрит, не открыты ли они */
 
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -4194,6 +4195,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     update_cursor_buttons();
     round_corners(hwnd);
     layout_children();
+    cv_init();
     SetTimer(hwnd, TIMER_FOLLOW, 10, NULL);
     tools_cleanup_old(); /* страницы и Edge прежних версий */
     if (!UPD_AUTO_DISABLED) SetTimer(hwnd, TIMER_UPD_AUTO, 90000, NULL); /* обновление — само, через полторы минуты */
@@ -4416,7 +4418,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     else if (wParam >= HOTKEY_SNIP_BASE && wParam < HOTKEY_SNIP_BASE + SNIP_COUNT)
       paste_line((int)(wParam - HOTKEY_SNIP_BASE + 1));
     return 0;
+  case WM_CONVERT_DONE:
+    cv_done((CvJob *)lParam); return 0;
   case WM_TIMER:
+    if (wParam == TIMER_CONVERT) { cv_tick(); return 0; }
     if (wParam == TIMER_LF_RESTORE) {
       layout_fix_timer();
       return 0;
@@ -4629,6 +4634,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     if (lParam == NIN_BALLOONUSERCLICK) {
       if (g_balloonKind == 1) nardy_show();
       else if (g_balloonKind == 5) shashki_show();
+      else if (g_balloonKind == 6) cv_reveal();
       else if (g_balloonKind == 2) { /* «вышла новая версия» — поставить сейчас */
         if (g_updReady && g_updPath[0]) {
           KillTimer(hwnd, TIMER_UPD_IDLE);
@@ -4654,6 +4660,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     }
     return 0;
   case WM_CLOSE:
+    if (g_cvBusy) { show_status(L"Дождитесь завершения конвертации файла."); return 0; }
     DestroyWindow(hwnd);
     return 0;
   case WM_NARDY_POLL:
@@ -4674,6 +4681,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     fx_burst((int)(LONG_PTR)wParam, (int)(LONG_PTR)lParam);
     return 0;
   case WM_DESTROY:
+    cv_shutdown();
     InterlockedExchange(&g_quitting, 1);
     close_other_windows(hwnd);
     KillTimer(hwnd, TIMER_IDLE_FIGHT);
