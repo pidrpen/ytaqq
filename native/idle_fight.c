@@ -3763,7 +3763,8 @@ static int if_blocked(int strict) {
   ULONG es = 0;
   if (cnpi && cnpi(16 /* SystemExecutionState */, NULL, 0, &es, sizeof(es)) == 0 && (es & ES_DISPLAY_REQUIRED)) return 1;
   SYSTEM_POWER_STATUS ps;
-  if (GetSystemPowerStatus(&ps) && (ps.SystemStatusFlag & 1)) return 1;
+  /* Older mingw headers name the Windows battery-saver byte Reserved1. */
+  if (GetSystemPowerStatus(&ps) && (((const BYTE *)&ps)[3] & 1)) return 1;
   return 0;
 }
 

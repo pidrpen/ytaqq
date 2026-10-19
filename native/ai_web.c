@@ -14,6 +14,8 @@ typedef struct {
   LONG expected;
   BOOL page;
   BOOL prepared;
+  wchar_t stage[40], service[80];
+  DWORD retryAfter, elapsed;
 } AcWebInfo;
 
 static BOOL acw_stopped(const AcWebInfo *info) {
@@ -28,6 +30,31 @@ static int acw_hex(char c) {
   return -1;
 }
 #include "ai_web_json.h"
+
+/* Only machine codes are copied from remote errors, never echoed queries. */
+static void acw_error_code(const char *json, DWORD n, AcWebInfo *info) {
+  const char *p, *end; char code[80] = "";
+  if (!acj_field(json, json + n, "error", &p, &end) || !acj_text(p, end, "code", code, sizeof(code))) return;
+  for (int i = 0; code[i]; i++)
+    if (!((code[i] >= 'a' && code[i] <= 'z') || (code[i] >= 'A' && code[i] <= 'Z') ||
+          (code[i] >= '0' && code[i] <= '9') || strchr("_.-", code[i]))) return;
+  MultiByteToWideChar(CP_UTF8, 0, code, -1, info->service, 80);
+}
+
+static void acw_trace(const wchar_t *host, DWORD started, AcWebInfo *info) {
+  info->elapsed = GetTickCount() - started;
+#ifndef AC_WEB_TEST
+  wchar_t detail[160] = L"";
+  if (info->error) FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+      NULL, info->error, 0, detail, 160, NULL);
+  for (wchar_t *p = detail; *p; p++) if (*p < 32) *p = L' ';
+  ai_log(L"Сеть: %ls; этап=%ls; HTTP %lu; Windows %lu %ls; код=%ls; Retry-After=%lu с; %lu мс",
+      host, info->stage, info->status, info->error, detail,
+      info->service[0] ? info->service : L"—", info->retryAfter, info->elapsed);
+#else
+  (void)host;
+#endif
+}
 
 static void acw_unescape(const char *in, char *out, int cap) {
   int o = 0;
@@ -115,21 +142,28 @@ static BOOL acw_request(const wchar_t *host, const wchar_t *path, const char *bo
   *out = NULL;
   *outlen = 0;
   info->status = info->error = 0;
+  info->service[0] = 0; info->retryAfter = 0;
+  DWORD started = GetTickCount();
+  lstrcpynW(info->stage, L"создание сессии", 40);
   if (acw_stopped(info)) { info->error = ERROR_CANCELLED; return FALSE; }
   HINTERNET ses = WinHttpOpen(L"CursorPad/2026.10 local-Qwen-search",
                               WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-  if (!ses) { info->error = GetLastError(); return FALSE; }
+  if (!ses) { info->error = GetLastError(); acw_trace(host, started, info); return FALSE; }
   WinHttpSetTimeouts(ses, 2000, 3000, body ? 12000 : 3000, body ? 15000 : 3000);
+  lstrcpynW(info->stage, L"подготовка соединения", 40);
   HINTERNET con = WinHttpConnect(ses, host, INTERNET_DEFAULT_HTTPS_PORT, 0);
   if (!con) {
     info->error = GetLastError();
+    acw_trace(host, started, info);
     WinHttpCloseHandle(ses);
     return FALSE;
   }
+  lstrcpynW(info->stage, L"создание запроса", 40);
   HINTERNET req = WinHttpOpenRequest(con, body ? L"POST" : L"GET", path, NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
                                      WINHTTP_FLAG_SECURE);
   if (!req) {
     info->error = GetLastError();
+    acw_trace(host, started, info);
     WinHttpCloseHandle(con);
     WinHttpCloseHandle(ses);
     return FALSE;
@@ -153,14 +187,29 @@ static BOOL acw_request(const wchar_t *host, const wchar_t *path, const char *bo
                            (ULONG)-1L, WINHTTP_ADDREQ_FLAG_ADD);
   const wchar_t *headers = body ? L"Content-Type: application/json\r\nAccept: application/json\r\nX-Tavily-Access-Mode: keyless\r\n" : NULL;
   DWORD bytes = body ? (DWORD)strlen(body) : 0;
+  lstrcpynW(info->stage, L"DNS/соединение/TLS/отправка", 40);
   BOOL ok = WinHttpSendRequest(req, headers, headers ? (DWORD)-1L : 0, (LPVOID)body, bytes, bytes, 0);
-  if (ok) ok = WinHttpReceiveResponse(req, NULL);
+  if (ok) { lstrcpynW(info->stage, L"ожидание HTTP", 40); ok = WinHttpReceiveResponse(req, NULL); }
   if (ok) {
     DWORD status = 0, sl = sizeof(status);
     if (!WinHttpQueryHeaders(req, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, NULL, &status, &sl,
                              WINHTTP_NO_HEADER_INDEX)) ok = FALSE;
     info->status = status;
-    if (status != 200) ok = FALSE;
+    if (status != 200) {
+      lstrcpynW(info->stage, L"ответ HTTP", 40);
+      DWORD size = sizeof(info->retryAfter);
+      WinHttpQueryHeaders(req, WINHTTP_QUERY_CUSTOM | WINHTTP_QUERY_FLAG_NUMBER,
+          L"Retry-After", &info->retryAfter, &size, NULL);
+      /* Read one bounded chunk only for the fixed Tavily API. */
+      if (body && !wcscmp(host, L"api.tavily.com")) {
+        char errorBody[4097]; DWORD total = 0, got = 0;
+        while (total < 4096 && !acw_stopped(info) &&
+               WinHttpReadData(req, errorBody + total, 4096 - total, &got) && got) total += got;
+        errorBody[total] = 0;
+        if (total) acw_error_code(errorBody, total, info);
+      }
+      ok = FALSE;
+    }
     if (ok && info->page) {
       wchar_t type[160] = L""; DWORD size = sizeof(type);
       if (!WinHttpQueryHeaders(req, WINHTTP_QUERY_CONTENT_TYPE, NULL, type, &size, NULL) ||
@@ -171,12 +220,14 @@ static BOOL acw_request(const wchar_t *host, const wchar_t *path, const char *bo
   }
   if (!ok) {
     if (!info->error) info->error = info->status ? 0 : GetLastError();
+    acw_trace(host, started, info);
     WinHttpCloseHandle(req);
     WinHttpCloseHandle(con);
     WinHttpCloseHandle(ses);
     return FALSE;
   }
   DWORD cap = 0, n = 0;
+  lstrcpynW(info->stage, L"чтение ответа", 40);
   char *buf = NULL;
   for (;;) {
     if (acw_stopped(info)) { info->error = ERROR_CANCELLED; ok = FALSE; break; }
@@ -199,6 +250,8 @@ static BOOL acw_request(const wchar_t *host, const wchar_t *path, const char *bo
     if (!got) break;
     n += got;
   }
+  if (ok) lstrcpynW(info->stage, L"ответ получен", 40);
+  acw_trace(host, started, info);
   WinHttpCloseHandle(req);
   WinHttpCloseHandle(con);
   WinHttpCloseHandle(ses);
@@ -475,7 +528,7 @@ static int acw_urls(const wchar_t *query, wchar_t urls[2][3300]) {
     if (_wcsnicmp(p, L"https://", 8) && _wcsnicmp(p, L"http://", 7)) continue;
     const wchar_t *end = p;
     while (*end && !iswspace(*end) && !wcschr(L"\"<>«»", *end)) end++;
-    while (end > p && wcschr(L".,;!)\u005d}", end[-1])) end--;
+    while (end > p && wcschr(L".,;!)]}", end[-1])) end--;
     size_t n = (size_t)(end - p);
     if (n >= 3300) return -1;
     wchar_t url[3300]; memcpy(url, p, n * sizeof(wchar_t)); url[n] = 0;
@@ -520,6 +573,10 @@ static BOOL ac_web_find(const wchar_t *query, wchar_t *out, int cap, AcWebInfo *
   else if (info->status && info->status != 200) _snwprintf(info->note, 360, L"Поиск Tavily недоступен: HTTP %lu. Ответ без сетевых данных.", info->status);
   else if (info->error) _snwprintf(info->note, 360, L"Поиск Tavily недоступен: ошибка Windows %lu. Ответ без сетевых данных.", info->error);
   else lstrcpynW(info->note, L"Tavily не вернул пригодных результатов. Ответ без сетевых данных.", 360);
+  info->note[359] = 0;
+  size_t usedNote = wcslen(info->note);
+  _snwprintf(info->note + usedNote, 360 - usedNote, L" Этап: %ls; код: %ls; Retry-After: %lu с; %lu мс.",
+      info->stage, info->service[0] ? info->service : L"—", info->retryAfter, info->elapsed);
   info->note[359] = 0; return FALSE;
 }
 
@@ -722,6 +779,13 @@ static void ac_web_read_pages(const wchar_t *query, wchar_t *web, int cap, AcWeb
 int wmain(int argc, wchar_t **argv) {
   wchar_t out[AC_WEB_CAP];
   AcWebInfo info = {0};
+  if (argc > 2 && !wcscmp(argv[1], L"--error-code")) {
+    char json[4096], code[320];
+    WideCharToMultiByte(CP_UTF8, 0, argv[2], -1, json, sizeof(json), NULL, NULL);
+    acw_error_code(json, (DWORD)strlen(json), &info);
+    WideCharToMultiByte(CP_UTF8, 0, info.service, -1, code, sizeof(code), NULL, NULL);
+    puts(code); return 0;
+  }
   if (argc > 1 && !wcscmp(argv[1], L"--local-tests")) {
     BOOL ok = acw_local_query(L"?") && acw_local_query(L"ы") && acw_local_query(L"Привет!!!") &&
       acw_local_query(L"😀") && !acw_local_query(L"привет, какая погода завтра") && !acw_local_query(L"материал стали 40Х");

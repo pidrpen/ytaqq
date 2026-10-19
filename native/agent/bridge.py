@@ -12,9 +12,11 @@ import os
 from pathlib import Path
 import re
 import sys
+import time
 import urllib.request
 import urllib.error
 import uuid
+from network_diagnostics import connection_error, safe_text
 
 ROOT = Path(__file__).resolve().parent
 CLOUD = False
@@ -118,17 +120,16 @@ def local_call(endpoint, key, body, timeout, _repair=False):
     wire.pop('cursorpad', None)
     wire['stream'] = False
     request = urllib.request.Request(endpoint, data=json.dumps(wire, ensure_ascii=False).encode(), headers=headers)
+    started = time.monotonic()
     try:
         with opener.open(request, timeout=timeout) as response:
             raw = response.read(262145)
     except urllib.error.HTTPError as error:
-        if not CLOUD:
-            raise
         code, service = '', ''
         try:
             detail = json.loads(error.read(4096))
             value = str(detail.get('error', {}).get('code', ''))
-            if re.fullmatch(r'[0-9]{1,12}', value):
+            if re.fullmatch(r'[A-Za-z0-9_.-]{1,64}', value) and (not key or key not in value):
                 service = value
                 code = ', код сервиса '+value
         except (ValueError, TypeError, AttributeError):
@@ -140,11 +141,19 @@ def local_call(endpoint, key, body, timeout, _repair=False):
             message = 'сервис Z.ai временно перегружен; повторите позже или выберите другую бесплатную модель'
         else:
             message = messages.get(error.code, 'сервис недоступен')
-        raise ValueError(f'Z.ai HTTP {error.code}{code} [{wire["model"]}]: {message}') from None
+        target = 'Z.ai api.z.ai' if CLOUD else 'локальная модель 127.0.0.1'
+        raise ValueError(f'{target} HTTP {error.code}{code} [{safe_text(wire.get("model", ""), key, 60)}]: {message}; этап=HTTP; {time.monotonic()-started:.1f} с') from None
+    except (urllib.error.URLError, OSError) as error:
+        raise ValueError(connection_error(error, endpoint, wire.get('model', ''), key, time.monotonic()-started)) from None
     if len(raw) > 262144:
         raise ValueError('Model response exceeds limit')
-    result = json.loads(raw)
-    choice = result['choices'][0]
+    try:
+        result = json.loads(raw)
+        choice = result['choices'][0]
+        if not isinstance(choice['message']['content'], str):
+            raise TypeError('content')
+    except (ValueError, KeyError, IndexError, TypeError):
+        raise ValueError('этап=разбор ответа API; HTTP 200; неверный JSON или отсутствует choices/message/content; '+str(len(raw))+' байт') from None
     if CLOUD and choice.get('finish_reason') != 'stop':
         finish = choice.get('finish_reason')
         message = 'достигнут предел длины ответа; сократите задачу' if finish == 'length' else 'ответ ограничен сервисом' if finish == 'sensitive' else 'ответ не завершён в ожидаемом формате'
@@ -487,7 +496,7 @@ def main():
             result = {'ok': True, 'action': json.dumps(action, ensure_ascii=False, separators=(',', ':'))}
     except Exception as error:
         # No silent fallback to the old backend, and no fake completed action.
-        message = f'QwenPaw: {type(error).__name__}: {str(error)[:700]}'
+        message = f'{"Z.ai" if CLOUD else "QwenPaw"}: {type(error).__name__}: {safe_text(error, key, 1100)}'
         result = {'ok': False, 'error': message.replace(key, '[ключ скрыт]') if key else message}
     a.response.write_text(json.dumps(result, ensure_ascii=False), encoding='utf-8')
 

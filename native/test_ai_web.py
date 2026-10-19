@@ -20,6 +20,14 @@ def main():
             return p.returncode, p.stdout
         def urls(query):
             return subprocess.run([probe, '--urls', query], capture_output=True, encoding='utf-8', check=True).stdout
+        for payload, expected in [
+            ('{"error":{"code":"ip_rate_limit_exceeded","message":"private prompt"}}', 'ip_rate_limit_exceeded'),
+            ('{"error":{"code":"bad token SECRET"}}', ''),
+            ('{"error":{"code":42}}', ''),
+            ('not JSON', ''),
+        ]:
+            result = subprocess.run([probe, '--error-code', payload], capture_output=True, encoding='utf-8', check=True)
+            assert result.stdout.strip() == expected
         assert urls('привет') == 'count 0\n'
         assert urls('что по ссылке «https://www.ozon.ru/product/item-123/?x=1&y=2»') == 'count 1\nhttps://www.ozon.ru/product/item-123/?x=1&y=2\n'
         assert urls('[товар](https://example.org/a).') == 'count 1\nhttps://example.org/a\n'

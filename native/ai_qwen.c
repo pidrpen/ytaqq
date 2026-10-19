@@ -52,14 +52,17 @@ static char *aq_read(const wchar_t *path) {
 static int aq_process(const wchar_t *exe, wchar_t *cmd, const wchar_t *cwd, AiJob *j, DWORD deadline) {
   STARTUPINFOW si = {0}; PROCESS_INFORMATION pi = {0}; si.cb = sizeof(si);
   HANDLE group = CreateJobObjectW(NULL, NULL);
-  if (!group) return AI_ERROR;
+  if (!group) { ai_log(L"ИИ: этап=создание группы процесса; Windows %lu", GetLastError()); return AI_ERROR; }
   JOBOBJECT_EXTENDED_LIMIT_INFORMATION lim = {0};
   lim.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
   if (!SetInformationJobObject(group, JobObjectExtendedLimitInformation, &lim, sizeof(lim)) ||
       !CreateProcessW(exe, cmd, NULL, NULL, FALSE, CREATE_NO_WINDOW | CREATE_SUSPENDED, NULL, cwd, &si, &pi)) {
+    DWORD error = GetLastError();
+    ai_log(L"ИИ: этап=запуск помощника; Windows %lu", error);
     CloseHandle(group); return AI_ERROR;
   }
   if (!AssignProcessToJobObject(group, pi.hProcess)) {
+    ai_log(L"ИИ: этап=назначение группы процесса; Windows %lu", GetLastError());
     TerminateProcess(pi.hProcess, 1); CloseHandle(pi.hThread); CloseHandle(pi.hProcess); CloseHandle(group); return AI_ERROR;
   }
   ResumeThread(pi.hThread); CloseHandle(pi.hThread);
@@ -70,7 +73,10 @@ static int aq_process(const wchar_t *exe, wchar_t *cmd, const wchar_t *cwd, AiJo
     if ((LONG)(deadline - GetTickCount()) <= 0) { status = AI_TIMEOUT; break; }
   }
   DWORD code = 1;
-  if (status == AI_OK && (!GetExitCodeProcess(pi.hProcess, &code) || code)) status = AI_ERROR;
+  if (status == AI_OK && (!GetExitCodeProcess(pi.hProcess, &code) || code)) {
+    ai_log(L"ИИ: этап=завершение помощника; код выхода %lu", code); status = AI_ERROR;
+  }
+  if (status == AI_TIMEOUT) ai_log(L"ИИ: этап=ожидание помощника; время ожидания истекло");
   CloseHandle(group); CloseHandle(pi.hProcess); return status;
 }
 
@@ -189,6 +195,8 @@ static int at_prepare(AiJob *j, DWORD deadline, wchar_t root[MAX_PATH], wchar_t 
 static const wchar_t *g_aqTestBridge;
 #endif
 static int aq_run(AiJob *j, DWORD deadline, int port) {
+  DWORD started = GetTickCount();
+  ai_log(L"Вызов ИИ: источник=%ls; режим=%ls; этап=подготовка", j->provider ? L"Z.ai api.z.ai" : L"QwenPaw 127.0.0.1", j->agentTask ? L"инструменты" : L"ответ");
   /* Current product guarantee is offline/local. Do not silently send agent
      context to an external configured host. Ordinary chat keeps its behavior. */
   if (!j->provider && ai_ext() && wcscmp(g_aiExtHost, L"127.0.0.1") && wcscmp(g_aiExtHost, L"localhost")) {
@@ -228,6 +236,7 @@ static int aq_run(AiJob *j, DWORD deadline, int port) {
     if (!j->text) status = AI_ERROR;
   }
   if (status == AI_OK) ai_log(L"%ls: %ls", j->provider ? L"Z.ai" : L"QwenPaw", j->agentTask ? L"инструмент выбран" : L"ответ получен");
+  if (status != AI_CANCELLED) ai_log(L"Вызов ИИ: источник=%ls; результат=%ls; %lu мс", j->provider ? L"Z.ai" : L"QwenPaw", status == AI_OK ? L"успешно" : L"ошибка", GetTickCount() - started);
 cleanup:
   DeleteFileW(input); DeleteFileW(output); DeleteFileW(key);
   if (status != AI_OK && status != AI_CANCELLED && !j->text)
