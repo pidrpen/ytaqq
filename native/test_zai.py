@@ -92,6 +92,7 @@ print('PASS: DPAPI interoperability, endpoint allowlist, no local cloud fallback
     (root/'unit.py').write_text(unit,encoding='utf-8')
     subprocess.run([str(runtime/'python.exe'),'-I','-B',str(root/'unit.py')],check=True,timeout=60)
     subprocess.run([str(runtime/'python.exe'),'-I','-B',str(repo/'native/test_agent_coverage.py'),str(runtime/'bridge.py')],check=True,timeout=60)
+    subprocess.run([str(runtime/'python.exe'),'-I','-B',str(repo/'native/test_zai_schema.py'),str(runtime/'bridge.py')],check=True,timeout=60)
     (root/'verified.json').write_text(json.dumps(dict(passed=True,native_cases=len(report),live_api_calls=0,protected_credentials=True,endpoint_allowlist=True,local_mode_preserved=True,word_apply_verified=True),indent=2),encoding='utf-8')
     print('PASS: native UI/credential lifecycle, chat, schema validation, 401/429/truncation, Word plan/Apply; no live API calls',flush=True)
 finally:

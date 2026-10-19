@@ -34,6 +34,6 @@ static BOOL ai_zai_store_key(const wchar_t *key) {
   LocalFree(sealed.pbData); return ok;
 }
 static BOOL ai_zai_vision(void) {
-  return !strcmp(g_aiZaiModel, "glm-4.6v") || !strcmp(g_aiZaiModel, "glm-4.5v") || !strcmp(g_aiZaiModel, "glm-5.3-flash");
+  return !strcmp(g_aiZaiModel, "glm-4.6v-flash") || !strcmp(g_aiZaiModel, "glm-4.6v") || !strcmp(g_aiZaiModel, "glm-4.5v") || !strcmp(g_aiZaiModel, "glm-5.3-flash");
 }
 static const char *ai_selected_model(void) { return g_aiProvider ? g_aiZaiModel : g_aiExtModel[0] ? g_aiExtModel : "local"; }

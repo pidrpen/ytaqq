@@ -1,7 +1,7 @@
 {
-  "file": "CursorPad-paw-8113634ca7b64e82.zip",
-  "sha256": "8113634ca7b64e8258366d2819be6e3880adbb485632a8df0dd658deede5ce65",
-  "size": 78427914,
+  "file": "CursorPad-paw-4af5f725eeec3bcc.zip",
+  "sha256": "4af5f725eeec3bcc1036f12de32f9a77a4b06f2aae3c07e169804e52fcdde2db",
+  "size": 78428753,
   "python": {
     "version": "3.13.16",
     "sha256": "97dae5274cc54867065e8d5a3226e48c35017ed332a0fdb0e27d5b5821961297",
@@ -1671,10 +1671,11 @@
     }
   ],
   "application_sources": {
-    "bridge.py": "65769c000794914837c7844f1035929bd8bf8416f73b1eaed5ae6f080fc10e35",
+    "bridge.py": "7eabc87f6b7c8ecc507557d9ba26d77a320f57442a64ecf5a51b2e8da6d98262",
     "skills/documents/SKILL.md": "9760f3d52b7dfed077790723cc969b2378c72d5b75aaef9241901ab524f8b4cb",
     "skills/files/SKILL.md": "26759b1a34abeb629b6259e3204f7ecf1a4fb161f12c9903c25bd5ada2a0a5f7",
     "skills/spreadsheets/SKILL.md": "e294b92ce7d769d96884dbf54f7588ae11614ec8a992bef7f8e8a3be41e966b9",
-    "skills/task-completion/SKILL.md": "5ef1465c7923e266362cab23848801386cc8ff9c6ee4226f032c649ec58c79dc"
+    "skills/task-completion/SKILL.md": "5ef1465c7923e266362cab23848801386cc8ff9c6ee4226f032c649ec58c79dc",
+    "workspace/.qwenpaw_restore.lock": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d"
   }
 }

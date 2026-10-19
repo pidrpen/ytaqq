@@ -141,15 +141,15 @@ static void ai_ui_create(HWND p) {
   SendMessageW(g_aiSource, CB_ADDSTRING, 0, (LPARAM)L"Локальная модель · без интернета");
   SendMessageW(g_aiSource, CB_ADDSTRING, 0, (LPARAM)L"Z.ai API · через интернет");
   g_aiZModel = CreateWindowExW(0, L"COMBOBOX", L"", WS_CHILD | CBS_DROPDOWN | WS_TABSTOP | CBS_AUTOHSCROLL, 0, 0, 300, 200, p, (HMENU)(INT_PTR)ID_AI_ZMODEL, NULL, NULL);
-  const wchar_t *models[] = {L"glm-4.7", L"glm-5.3", L"glm-5.3-flash", L"glm-4.6v"};
-  for (int i = 0; i < 4; i++) SendMessageW(g_aiZModel, CB_ADDSTRING, 0, (LPARAM)models[i]);
+  const wchar_t *models[] = {L"glm-4.5-flash", L"glm-4.7-flash", L"glm-4.6v-flash", L"glm-4.7", L"glm-5.3", L"glm-5.3-flash", L"glm-4.6v"};
+  for (size_t i = 0; i < sizeof(models) / sizeof(models[0]); i++) SendMessageW(g_aiZModel, CB_ADDSTRING, 0, (LPARAM)models[i]);
   wchar_t model[64]; MultiByteToWideChar(CP_UTF8, 0, g_aiZaiModel, -1, model, 64); SetWindowTextW(g_aiZModel, model);
   g_aiZKey = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_TABSTOP | ES_PASSWORD | ES_AUTOHSCROLL, 0, 0, 300, 26, p, (HMENU)(INT_PTR)ID_AI_ZKEY, NULL, NULL);
   SendMessageW(g_aiZKey, EM_SETLIMITTEXT, 1024, 0);
   SendMessageW(g_aiZKey, 0x1501, TRUE, (LPARAM)L"Вставьте обычный API-ключ Z.ai");
   g_aiZSave = mk_btn(p, L"Сохранить ключ", ID_AI_ZSAVE);
   g_aiZForget = mk_btn(p, L"Удалить ключ", ID_AI_ZFORGET);
-  g_aiZInfo = CreateWindowExW(0, L"STATIC", L"Сообщения, картинки и данные файлов из задач передаются Z.ai. Нужен стандартный API с балансом (не Coding Plan). Одна задача делает несколько запросов. Модели на ПК не нужны. Изменения файлов — после «Применить».", WS_CHILD | SS_LEFT, 0, 0, 300, 100, p, NULL, NULL, NULL);
+  g_aiZInfo = CreateWindowExW(0, L"STATIC", L"Сообщения, картинки и данные файлов из задач передаются Z.ai. Нужен стандартный API-ключ (не Coding Plan). GLM-4.5-Flash, GLM-4.7-Flash и GLM-4.6V-Flash бесплатны; остальные модели могут списывать баланс. Одна задача делает несколько запросов. Модели на ПК не нужны. Изменения файлов — после «Применить».", WS_CHILD | SS_LEFT, 0, 0, 300, 100, p, NULL, NULL, NULL);
   for (int i = 0; i < AI_TIERS; i++) g_aiBtnTier[i] = mk_btn(p, kAiTiers[i].button, ID_AI_TIER + i);
   g_aiBtnCtx = mk_btn(p, L"", ID_AI_CTX);
   g_aiChkGpu = CreateWindowExW(0, L"BUTTON", L"Считать на видеокарте (если в ней от 4 ГБ)",
@@ -303,13 +303,14 @@ static void ai_ui_copy_report(HWND hwnd) {
 #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
   GetVersionExW(&ov);
 #pragma GCC diagnostic pop
+  wchar_t apiModel[64]; MultiByteToWideChar(CP_UTF8, 0, g_aiZaiModel, -1, apiModel, 64);
   size_t n = (size_t)_snwprintf(
       r, cap,
       L"CursorPad %s, Windows %lu.%lu.%lu\r\nПамять: %.1f ГБ, свободно %.1f ГБ; ядер %d; диск свободно %.1f ГБ\r\n"
-      L"ИИ: %s, уровень %s, видеокарта %s\r\nПапка: %s\r\nllama-server: %s\r\nМодель: %s %s\r\n"
+      L"Источник: %s; модель API: %s\r\nИИ: %s, локальный уровень %s, видеокарта %s\r\nПапка: %s\r\nllama-server: %s\r\nМодель: %s %s\r\n"
       L"Своя модель: %s\r\nСейчас: %s\r\nПроверка: %s\r\n\r\n--- журнал ---\r\n",
       APP_VERSION_STR, ov.dwMajorVersion, ov.dwMinorVersion, ov.dwBuildNumber, ms.ullTotalPhys / 1e9,
-      ms.ullAvailPhys / 1e9, ai_cores(), fr.QuadPart / 1e9, g_aiOn ? L"включён" : L"выключен",
+      ms.ullAvailPhys / 1e9, ai_cores(), fr.QuadPart / 1e9, g_aiProvider ? L"Z.ai API" : L"Локальный", g_aiProvider ? apiModel : L"не используется", g_aiOn ? L"включён" : L"выключен",
       kAiTiers[g_aiTier].button, g_aiGpu ? L"да" : L"нет", d, exe, m, mm, g_aiModel[0] ? g_aiModel : L"нет",
       g_aiDl.msg, g_aiTestMsg);
   AcquireSRWLockShared(&g_aiLogLock);
@@ -319,7 +320,7 @@ static void ai_ui_copy_report(HWND hwnd) {
   wchar_t log[MAX_PATH];
   _snwprintf(log, MAX_PATH, L"%s\\server.log", d);
   HANDLE h = CreateFileW(log, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
-  if (h != INVALID_HANDLE_VALUE && n + 100 < cap) {
+  if (!g_aiProvider && h != INVALID_HANDLE_VALUE && n + 100 < cap) {
     char b[3000];
     DWORD sz = GetFileSize(h, NULL), got = 0;
     if (sz > sizeof(b) - 1) SetFilePointer(h, (LONG)(sz - (sizeof(b) - 1)), NULL, FILE_BEGIN);
@@ -421,8 +422,11 @@ static BOOL ai_ui_command(HWND hwnd, int id, int code) {
     int selected = (int)SendMessageW(g_aiZModel, CB_GETCURSEL, 0, 0);
     if (code == CBN_SELCHANGE && selected >= 0) SendMessageW(g_aiZModel, CB_GETLBTEXT, selected, (LPARAM)name);
     else GetWindowTextW(g_aiZModel, name, 64);
-    if (!WideCharToMultiByte(CP_UTF8, 0, name, -1, model, 64, NULL, NULL) || !ai_zai_model_valid(model)) {
-      lstrcpynW(g_aiTestMsg, L"Имя модели: glm-… (латиница, цифры, точка или дефис).", 300);
+    wchar_t *trimmed = name; while (*trimmed == L' ' || *trimmed == L'\t') trimmed++;
+    size_t length = wcslen(trimmed); while (length && (trimmed[length - 1] == L' ' || trimmed[length - 1] == L'\t')) trimmed[--length] = 0;
+    if (!WideCharToMultiByte(CP_UTF8, 0, trimmed, -1, model, 64, NULL, NULL) || !ai_zai_model_valid(model)) {
+      wchar_t current[64]; MultiByteToWideChar(CP_UTF8, 0, g_aiZaiModel, -1, current, 64); SetWindowTextW(g_aiZModel, current);
+      _snwprintf(g_aiTestMsg, 300, L"Имя не сохранено. Выбрана %s. Укажите glm-… латиницей без кавычек.", current);
     } else { lstrcpynA(g_aiZaiModel, model, 64); g_aiTestMsg[0] = 0; ai_save(); }
     ai_ui_refresh(); return TRUE;
   }
