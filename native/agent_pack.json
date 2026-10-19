@@ -1,7 +1,7 @@
 {
-  "file": "CursorPad-paw-cc809a77d5259072.zip",
-  "sha256": "cc809a77d52590726871b49bff84e0d07f12abde664ef33462aa57a946367a3e",
-  "size": 78432574,
+  "file": "CursorPad-paw-751d62ec1fe6b8f7.zip",
+  "sha256": "751d62ec1fe6b8f7910c0904f9e0eeccc605297ba2b1f7bca3f2ced50d56595f",
+  "size": 78439317,
   "python": {
     "version": "3.13.16",
     "sha256": "97dae5274cc54867065e8d5a3226e48c35017ed332a0fdb0e27d5b5821961297",
@@ -1672,6 +1672,7 @@
   ],
   "application_sources": {
     "bridge.py": "fe1cfef6c9f17f214a9326f1b93583b6491b3ca93238e39a41e52f81d2acaa6c",
+    "convert_files.py": "b10d26207d426ebb383a715ab1b3924bf5c6adee2b32519c8de26691af85b612",
     "network_diagnostics.py": "8ec223ac7f274872574502103881e0316eee63df032d1422a4938d2a7e6f55c3",
     "skills/documents/SKILL.md": "4f60f36e3073ee8a80cc70f71326e08e8782de6438f01afed2d939da1686ddca",
     "skills/files/SKILL.md": "26759b1a34abeb629b6259e3204f7ecf1a4fb161f12c9903c25bd5ada2a0a5f7",

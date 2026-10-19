@@ -19,6 +19,7 @@ static HINSTANCE g_inst;
 static void ai_log(const wchar_t *text, ...) { (void)text; }
 static void show_status(const wchar_t *text) { (void)text; }
 static void upd_balloon(int kind, const wchar_t *title, const wchar_t *text) { (void)kind; (void)title; (void)text; }
+#define CV_RING_TEST
 #include "convert.c"
 typedef struct { IDataObject iface; const wchar_t *path; BOOL multiple; } FakeData;
 static HRESULT STDMETHODCALLTYPE data_query(IDataObject *self, REFIID iid, void **out) { (void)iid; *out = self; return S_OK; }
@@ -75,11 +76,12 @@ int wmain(int argc, wchar_t **argv) {
   RECT rect; GetWindowRect(g_cvWnd,&rect); POINTL center={rect.left+g_cvSize/2,rect.top+g_cvSize/2};
   DWORD effect=DROPEFFECT_COPY|DROPEFFECT_MOVE;
   cv_enter(&g_cvDrop.iface,&data.iface,MK_SHIFT,center,&effect);
-  if (effect != DROPEFFECT_NONE || g_cvCount != 3) return 4;
-  POINTL sector={center.x+(LONG)(g_cvSize*.30),center.y-(LONG)(g_cvSize*.17)};
+  if (effect != DROPEFFECT_NONE || g_cvCount < 3) return 4;
+  double angle=-1.5707963267948966+3.141592653589793/g_cvCount;
+  POINTL sector={center.x+(LONG)(cos(angle)*g_cvSize*.35),center.y+(LONG)(sin(angle)*g_cvSize*.35)};
   effect=DROPEFFECT_COPY|DROPEFFECT_MOVE; cv_over(&g_cvDrop.iface,0,sector,&effect); if (effect != DROPEFFECT_NONE) return 5;
   data.multiple=TRUE; effect=DROPEFFECT_COPY|DROPEFFECT_MOVE;
-  cv_enter(&g_cvDrop.iface,&data.iface,MK_SHIFT,sector,&effect); if (effect != DROPEFFECT_NONE || g_cvCount) return 6;
+  cv_enter(&g_cvDrop.iface,&data.iface,MK_SHIFT,sector,&effect); if (g_cvSelection.count != 2 || !g_cvCount) return 6;
   data.multiple=FALSE; effect=DROPEFFECT_COPY|DROPEFFECT_MOVE;
   cv_enter(&g_cvDrop.iface,&data.iface,MK_SHIFT,sector,&effect); if (effect != DROPEFFECT_COPY) return 7;
   UpdateWindow(g_cvWnd); capture(argv[2]);
@@ -91,6 +93,6 @@ int wmain(int argc, wchar_t **argv) {
   }
   BOOL ok=!g_cvBusy && g_cvLast[0] && GetFileAttributesW(g_cvLast)!=INVALID_FILE_ATTRIBUTES;
   cv_shutdown(); DestroyWindow(g_hwnd);
-  puts(ok ? "PASS: OLE registration, CF_HDROP, center cancellation, Shift, multiple-file rejection, COPY effect, threaded conversion" : "FAIL: conversion");
+  puts(ok ? "PASS: OLE registration, CF_HDROP, center cancellation, Shift, multiple-file selection, COPY effect, threaded conversion" : "FAIL: conversion");
   return ok ? 0 : 9;
 }

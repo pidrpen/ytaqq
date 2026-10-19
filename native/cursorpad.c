@@ -4418,6 +4418,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     else if (wParam >= HOTKEY_SNIP_BASE && wParam < HOTKEY_SNIP_BASE + SNIP_COUNT)
       paste_line((int)(wParam - HOTKEY_SNIP_BASE + 1));
     return 0;
+  case WM_CVX_DONE:
+    cvx_done((CvxJob *)lParam); return 0;
   case WM_CONVERT_DONE:
     cv_done((CvJob *)lParam); return 0;
   case WM_TIMER:
@@ -4779,7 +4781,13 @@ static void enable_dpi(void) {
 #ifdef QWEN_TEST
 #include "qwen_test.c"
 #endif
+#ifdef CVX_LAB
+#include "convert_workbench_test.c"
+#endif
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
+#ifdef CVX_LAB
+  return cvx_lab(inst);
+#endif
 #ifdef QWEN_TEST
   return aq_test();
 #endif
@@ -4970,6 +4978,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
         continue;
       }
     }
+    if (g_cvxWnd && IsWindowVisible(g_cvxWnd) && IsDialogMessageW(g_cvxWnd, &msg)) continue;
     TranslateMessage(&msg);
     DispatchMessageW(&msg);
   }

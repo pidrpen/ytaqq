@@ -9,31 +9,39 @@ static BOOL g_cvDown, g_cvSource, g_cvDismissed;
 static POINT g_cvOrigin;
 static DWORD g_cvReleased;
 static volatile LONG g_cvBusy;
-static int g_cvSize = 300, g_cvCount, g_cvFormats[7], g_cvHover = -1;
+static int g_cvSize = 340, g_cvCount, g_cvFormats[16], g_cvHover = -1;
 static wchar_t g_cvPath[MAX_PATH], g_cvLast[MAX_PATH];
+#define CV_FILES 128
+typedef struct { int count; wchar_t paths[CV_FILES][MAX_PATH]; } CvSelection;
+static CvSelection g_cvSelection;
+static BOOL cvx_dispatch(const CvSelection *selection, int action);
+static void cvx_show(void);
+static void cvx_shutdown(void);
 static void cv_hide(void) { if (g_cvWnd) ShowWindow(g_cvWnd, SW_HIDE); g_cvHover = -1; }
 static void cv_reveal(void) {
   if (!g_cvLast[0]) return;
   wchar_t args[MAX_PATH + 40]; swprintf(args, MAX_PATH + 40, L"/select,\"%ls\"", g_cvLast);
   ShellExecuteW(g_hwnd, L"open", L"explorer.exe", args, NULL, SW_SHOWNORMAL);
 }
+#ifdef CV_RING_TEST
 static DWORD WINAPI cv_worker(void *parameter) {
   CvJob *job = (CvJob *)parameter; cv_convert(job);
   if (!PostMessageW(g_hwnd, WM_CONVERT_DONE, 0, (LPARAM)job)) { free(job); InterlockedExchange(&g_cvBusy, 0); }
   return 0;
 }
+#endif
 static void cv_done(CvJob *job) {
   InterlockedExchange(&g_cvBusy, 0);
   if (job->out[0]) {
-    ai_log(L"Конвертер: %ls; результат сохранён", kCvFormats[job->format].label);
+    ai_log(L"Конвертер: %ls; результат сохранён", job->label[0] ? job->label : kCvFormats[job->format].label);
     lstrcpynW(g_cvLast, job->out, MAX_PATH);
-    show_status(L"Конвертация готова. Копия сохранена рядом с исходником.");
+    show_status(job->summary[0] ? job->summary : L"Конвертация готова. Копия сохранена рядом с исходником.");
     upd_balloon(6, L"CursorPad: файл преобразован", job->out);
-  } else {
+  } else if (job->error[0]) {
     ai_log(L"Конвертер: %ls", job->error);
     show_status(job->error);
     MessageBoxW(g_hwnd, job->error[0] ? job->error : L"Не удалось преобразовать файл. Исходник сохранён.", L"CursorPad — конвертация", MB_OK | MB_ICONINFORMATION);
-  }
+  } else if (job->summary[0]) show_status(job->summary);
   free(job);
 }
 static BOOL cv_explorer_at(POINT point) {
@@ -97,18 +105,41 @@ static void cv_tick(void) {
       (abs(point.x - g_cvOrigin.x) > GetSystemMetrics(SM_CXDRAG) + 8 ||
        abs(point.y - g_cvOrigin.y) > GetSystemMetrics(SM_CYDRAG) + 8)) cv_show(point);
 }
-static BOOL cv_data(IDataObject *data, wchar_t path[MAX_PATH]) {
+static BOOL cv_data(IDataObject *data, CvSelection *selection) {
   FORMATETC format = {CF_HDROP, NULL, DVASPECT_CONTENT, -1, TYMED_HGLOBAL}; STGMEDIUM medium;
-  memset(&medium, 0, sizeof(medium)); path[0] = 0;
+  memset(&medium, 0, sizeof(medium)); memset(selection,0,sizeof(*selection));
   if (FAILED(data->lpVtbl->GetData(data, &format, &medium))) return FALSE;
-  BOOL ok = medium.tymed == TYMED_HGLOBAL && medium.hGlobal &&
-      DragQueryFileW((HDROP)medium.hGlobal, 0xffffffff, NULL, 0) == 1;
-  if (ok) {
-    UINT size = DragQueryFileW((HDROP)medium.hGlobal, 0, NULL, 0);
-    ok = size > 0 && size < MAX_PATH && DragQueryFileW((HDROP)medium.hGlobal, 0, path, MAX_PATH) == size;
+  UINT count=medium.tymed==TYMED_HGLOBAL && medium.hGlobal ? DragQueryFileW((HDROP)medium.hGlobal,0xffffffff,NULL,0):0;
+  BOOL ok=count>0 && count<=CV_FILES;
+  for (UINT i=0;ok && i<count;i++) {
+    UINT size=DragQueryFileW((HDROP)medium.hGlobal,i,NULL,0);
+    wchar_t *path=selection->paths[i];
+    ok=size>0 && size<MAX_PATH && DragQueryFileW((HDROP)medium.hGlobal,i,path,MAX_PATH)==size;
+    if (ok) { DWORD attr=GetFileAttributesW(path); ok=attr!=INVALID_FILE_ATTRIBUTES && !(attr&FILE_ATTRIBUTE_DIRECTORY); }
   }
-  if (ok) { DWORD attr = GetFileAttributesW(path); ok = attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY); }
-  ReleaseStgMedium(&medium); if (!ok) path[0] = 0; return ok;
+  ReleaseStgMedium(&medium); selection->count=ok?(int)count:0; return ok;
+}
+static BOOL cvx_can(int action, const wchar_t *path) {
+  int image=cv_image_type(path); const wchar_t *e=cv_extension(path);
+  BOOL pdf=!_wcsicmp(e,L"pdf"), word=!_wcsicmp(e,L"docx") && g_cvWord, excel=!_wcsicmp(e,L"xlsx") && g_cvExcel;
+  if (action==7 || action==15) return TRUE;
+  if (action<4 || action==8 || action==9) return image>=0;
+  if (action==4) return image>=0 || word || excel;
+  if (action==5) return word;
+  if (action==6) return excel;
+  if (action==14) return pdf || image>=0 || word || excel;
+  return pdf;
+}
+static BOOL cvx_all(const CvSelection *s,int action) { if (!s->count) return FALSE; for(int i=0;i<s->count;i++) if(!cvx_can(action,s->paths[i])) return FALSE; return TRUE; }
+static void cv_menu_formats(void) {
+  g_cvCount=0;
+  if (!g_cvSelection.count) return;
+  if (cvx_all(&g_cvSelection,0)) {
+    for (int i=0;i<4;i++) if(g_cvSelection.count>1 || cv_image_type(g_cvPath)!=i) g_cvFormats[g_cvCount++]=i;
+    g_cvFormats[g_cvCount++]=8; g_cvFormats[g_cvCount++]=9;
+  } else if (cvx_all(&g_cvSelection,10)) { for(int i=10;i<=13;i++) g_cvFormats[g_cvCount++]=i; }
+  else { for(int i=4;i<=6;i++) if(cvx_all(&g_cvSelection,i)) g_cvFormats[g_cvCount++]=i; if (!g_cvCount && cvx_all(&g_cvSelection,14)) g_cvFormats[g_cvCount++]=14; }
+  g_cvFormats[g_cvCount++]=7; g_cvFormats[g_cvCount++]=15;
 }
 typedef struct { IDropTarget iface; LONG refs; } CvDrop;
 static HRESULT STDMETHODCALLTYPE cv_query(IDropTarget *self, REFIID iid, void **out) {
@@ -129,7 +160,7 @@ static HRESULT STDMETHODCALLTYPE cv_over(IDropTarget *self, DWORD keys, POINTL p
 }
 static HRESULT STDMETHODCALLTYPE cv_enter(IDropTarget *self, IDataObject *data, DWORD keys, POINTL position, DWORD *effect) {
   g_cvCount = 0; g_cvPath[0] = 0;
-  if (cv_data(data, g_cvPath)) g_cvCount = cv_formats(g_cvPath, g_cvWord, g_cvExcel, g_cvFormats);
+  if (cv_data(data, &g_cvSelection)) { lstrcpynW(g_cvPath,g_cvSelection.paths[0],MAX_PATH); cv_menu_formats(); }
   InvalidateRect(g_cvWnd, NULL, FALSE); return cv_over(self, keys, position, effect);
 }
 static HRESULT STDMETHODCALLTYPE cv_leave(IDropTarget *self) {
@@ -137,15 +168,13 @@ static HRESULT STDMETHODCALLTYPE cv_leave(IDropTarget *self) {
 }
 static HRESULT STDMETHODCALLTYPE cv_drop(IDropTarget *self, IDataObject *data, DWORD keys, POINTL position, DWORD *effect) {
   cv_over(self, keys, position, effect);
-  wchar_t path[MAX_PATH]; BOOL accepted = g_cvHover >= 0 && cv_data(data, path) && !wcscmp(path, g_cvPath);
+  CvSelection *dropped=(CvSelection*)calloc(1,sizeof(*dropped));
+  BOOL accepted=g_cvHover>=0 && dropped && cv_data(data,dropped) && dropped->count==g_cvSelection.count;
+  for(int i=0;accepted && i<dropped->count;i++) if(wcscmp(dropped->paths[i],g_cvSelection.paths[i])) accepted=FALSE;
   int target = accepted ? g_cvFormats[g_cvHover] : -1;
   *effect = DROPEFFECT_NONE;
-  if (accepted && !InterlockedCompareExchange(&g_cvBusy, 1, 0)) {
-    CvJob *job = (CvJob *)calloc(1, sizeof(*job)); HANDLE thread = NULL;
-    if (job) { lstrcpynW(job->src, path, MAX_PATH); job->format = target; thread = CreateThread(NULL, 0, cv_worker, job, 0, NULL); }
-    if (thread) { CloseHandle(thread); *effect = DROPEFFECT_COPY; show_status(L"Преобразую файл… Исходник остаётся на месте."); }
-    else { free(job); InterlockedExchange(&g_cvBusy, 0); }
-  }
+  if (accepted && !g_cvBusy && cvx_dispatch(dropped,target)) *effect=DROPEFFECT_COPY;
+  free(dropped);
   g_cvDismissed = TRUE; cv_hide(); return S_OK;
 }
 static IDropTargetVtbl g_cvVtbl = {cv_query, cv_addref, cv_release, cv_enter, cv_over, cv_leave, cv_drop};
@@ -171,7 +200,7 @@ static LRESULT CALLBACK cv_proc(HWND hwnd, UINT message, WPARAM wp, LPARAM lp) {
     HBRUSH inner = CreateSolidBrush(RGB(27,31,40)), oldBrush = SelectObject(dc, inner);
     int radius = (int)(g_cvSize * .23); Ellipse(dc, center-radius, center-radius, center+radius, center+radius);
     SelectObject(dc, oldBrush); DeleteObject(inner); SelectObject(dc, oldPen); DeleteObject(pen);
-    HFONT font = CreateFontW(-MulDiv(15, g_cvSize, 300), 0, 0, 0, FW_SEMIBOLD, FALSE,FALSE,FALSE,DEFAULT_CHARSET,0,0,CLEARTYPE_QUALITY,0,L"Segoe UI");
+    HFONT font = CreateFontW(-MulDiv(g_cvCount>6?12:15, g_cvSize, 340), 0, 0, 0, FW_SEMIBOLD, FALSE,FALSE,FALSE,DEFAULT_CHARSET,0,0,CLEARTYPE_QUALITY,0,L"Segoe UI");
     HFONT oldFont = SelectObject(dc, font); SetBkMode(dc, TRANSPARENT);
     for (int i = 0; i < count; i++) {
       double a = -1.5707963267948966 + 6.283185307179586 * (i + .5) / count;
@@ -181,9 +210,10 @@ static LRESULT CALLBACK cv_proc(HWND hwnd, UINT message, WPARAM wp, LPARAM lp) {
       DrawTextW(dc, g_cvCount ? kCvFormats[g_cvFormats[i]].label : L"·", -1, &label, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
     RECT label = {center-radius+5,center-radius+10,center+radius-5,center+radius-10}; SetTextColor(dc, RGB(210,217,228));
-    const wchar_t *text = g_cvCount ? L"Выберите\nформат\n\nEsc — отмена" : g_cvPath[0] ?
+    wchar_t selected[100]; swprintf(selected,100,L"Файлов: %d\nВыберите\nдействие\n\nEsc — отмена",g_cvSelection.count);
+    const wchar_t *text = g_cvCount ? selected : g_cvPath[0] ?
       (!_wcsicmp(cv_extension(g_cvPath), L"docx") && !g_cvWord ? L"Нужен\nWord" :
-       !_wcsicmp(cv_extension(g_cvPath), L"xlsx") && !g_cvExcel ? L"Нужен\nExcel" : L"Формат не\nподдержан") : L"Перетащите\nодин файл\nс Shift";
+       !_wcsicmp(cv_extension(g_cvPath), L"xlsx") && !g_cvExcel ? L"Нужен\nExcel" : L"Формат не\nподдержан") : L"Перетащите\nфайлы\nс Shift";
     DrawTextW(dc, text, -1, &label, DT_CENTER | DT_WORDBREAK);
     SelectObject(dc, oldFont); DeleteObject(font);
     BitBlt(screen,0,0,g_cvSize,g_cvSize,dc,0,0,SRCCOPY); SelectObject(dc,oldBitmap); DeleteObject(bitmap); DeleteDC(dc); EndPaint(hwnd,&ps); return 0;
@@ -199,7 +229,7 @@ static void cv_init(void) {
   typedef UINT (WINAPI *DpiForWindow)(HWND);
   DpiForWindow dpiForWindow = (DpiForWindow)GetProcAddress(GetModuleHandleW(L"user32.dll"),"GetDpiForWindow");
   if (dpiForWindow) dpi = (int)dpiForWindow(g_hwnd);
-  g_cvSize = MulDiv(300, dpi, 96);
+  g_cvSize = MulDiv(340, dpi, 96);
   WNDCLASSW klass = {0}; klass.lpfnWndProc = cv_proc; klass.hInstance = g_inst; klass.lpszClassName = L"CursorPadConvertRing"; klass.hCursor = LoadCursorW(NULL,IDC_ARROW);
   if (!RegisterClassW(&klass) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) return;
   g_cvWnd = CreateWindowExW(WS_EX_TOPMOST|WS_EX_TOOLWINDOW|WS_EX_NOACTIVATE,klass.lpszClassName,L"Конвертация CursorPad",WS_POPUP,0,0,g_cvSize,g_cvSize,g_hwnd,NULL,g_inst,NULL);
@@ -210,8 +240,21 @@ static void cv_init(void) {
   if (g_cvRegistered) SetTimer(g_hwnd,TIMER_CONVERT,30,NULL);
 }
 static void cv_shutdown(void) {
+  cvx_shutdown();
   KillTimer(g_hwnd,TIMER_CONVERT);
   if (g_cvRegistered) { RevokeDragDrop(g_cvWnd); g_cvRegistered = FALSE; }
   if (g_cvWnd) { DestroyWindow(g_cvWnd); g_cvWnd = NULL; }
   if (g_cvOle) { OleUninitialize(); g_cvOle = FALSE; }
 }
+#ifdef CV_RING_TEST
+static BOOL cvx_dispatch(const CvSelection *selection,int action) {
+  if(action>=7 || selection->count!=1 || InterlockedCompareExchange(&g_cvBusy,1,0)) return FALSE;
+  CvJob *job=(CvJob*)calloc(1,sizeof(*job)); if(!job) { g_cvBusy=0; return FALSE; }
+  lstrcpynW(job->src,selection->paths[0],MAX_PATH); job->format=action;
+  HANDLE thread=CreateThread(NULL,0,cv_worker,job,0,NULL); if(!thread) { free(job);g_cvBusy=0;return FALSE; } CloseHandle(thread); return TRUE;
+}
+static void cvx_show(void) { }
+static void cvx_shutdown(void) { }
+#else
+#include "convert_workbench.c"
+#endif

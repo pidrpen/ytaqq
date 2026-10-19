@@ -36,7 +36,7 @@ typedef struct {
   int kind;      /* 0 — пункт, 1 — заголовок раздела, 2 — опасный (красный), 3 — пока не работает (серый) */
 } MoreItem;
 
-enum { MORE_OCR = 20, MORE_NARDY, MORE_CHANGES, MORE_CLEAR, MORE_LAYOUT, MORE_MSG, MORE_ROUTE, MORE_SHASHKI, MORE_EXPORT, MORE_PACKAGE, MORE_MATCH, MORE_DRAWREC, MORE_AICHAT };
+enum { MORE_OCR = 20, MORE_NARDY, MORE_CHANGES, MORE_CLEAR, MORE_LAYOUT, MORE_MSG, MORE_ROUTE, MORE_SHASHKI, MORE_EXPORT, MORE_PACKAGE, MORE_MATCH, MORE_DRAWREC, MORE_AICHAT, MORE_CONVERT };
 static const MoreItem kMore[] = {
     {0, L"ИНСТРУМЕНТЫ", NULL, 0, 1},
     {1, L"Расчёт резки и газов", NULL, RGB(0x1F, 0x6B, 0x5A), 0},
@@ -48,6 +48,7 @@ static const MoreItem kMore[] = {
     {MORE_PACKAGE, L"Пакет для загрузки в PLM", NULL, RGB(0x3F, 0x7F, 0x4F), 0}, /* с .80: ЭСИ, состав, ТП */
     {MORE_MATCH, L"Сопоставить с Союзом", NULL, RGB(0x8F, 0x5F, 0x2F), 0}, /* с 2026.10.16.1: Excel ↔ Союз */
     {MORE_DRAWREC, L"Распознать чертёж", NULL, RGB(0x2F, 0x7F, 0x7F), 0}, /* штамп и спецификация со скана */
+    {MORE_CONVERT, L"Файлы: конвертер, PDF и история", NULL, RGB(0xB4, 0x7A, 0x28), 0},
     {MORE_AICHAT, L"Спросить ИИ", NULL, RGB(0x6B, 0x3F, 0x9E), 0}, /* чат с локальной моделью, с историей */
     {-1, NULL, NULL, 0, 0}, /* черта */
     {MORE_OCR, L"Выделить и прочитать", g_hkName[HK_OCR], 0, 0}, /* клавиши — какие назначены (hotkeys.c) */
@@ -145,6 +146,7 @@ static void tools_menu(HWND owner, HWND btn) {
   else if (cmd == MORE_PACKAGE) package_show(FALSE);
   else if (cmd == MORE_MATCH) match_show();
   else if (cmd == MORE_DRAWREC) drawrec_show();
+  else if (cmd == MORE_CONVERT) cvx_show();
   else if (cmd == MORE_AICHAT) aichat_show();
   else if (cmd == MORE_LAYOUT) layout_fix_hint();
   else if (cmd == MORE_MSG) msg_compose_show();
@@ -198,7 +200,7 @@ static void upd_idle_tick(void) {
   if (g_tmExporting || g_tsExporting || g_tmLoadPending || g_tsLoadPending || g_rtBusy) return;
   for (int i = 0; i < 8; i++)
     if (g_msgInSlots[i]) return; /* на экране сообщение коллеги — перезапуск стёр бы его */
-  HWND busy[] = {g_cutWnd, g_tmWnd, g_tsWnd, g_ndWnd, g_shWnd, g_msgOut, g_pnWnd, g_rtWnd, g_hkWnd, g_drWnd};
+  HWND busy[] = {g_cutWnd, g_tmWnd, g_tsWnd, g_ndWnd, g_shWnd, g_msgOut, g_pnWnd, g_rtWnd, g_hkWnd, g_drWnd, g_cvxWnd};
   for (size_t i = 0; i < sizeof(busy) / sizeof(busy[0]); i++)
     if (busy[i] && IsWindowVisible(busy[i]) && !IsIconic(busy[i])) return; /* открыто — не мешаем */
   KillTimer(g_hwnd, TIMER_UPD_IDLE);

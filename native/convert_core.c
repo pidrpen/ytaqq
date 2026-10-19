@@ -2,8 +2,10 @@
    replacement) from a private, reserved sibling temporary file. */
 typedef struct { const wchar_t *ext, *label; } CvFormat;
 static const CvFormat kCvFormats[] = {{L"png", L"PNG"}, {L"jpg", L"JPG"}, {L"bmp", L"BMP"},
-    {L"tif", L"TIFF"}, {L"pdf", L"PDF"}, {L"txt", L"TXT"}, {L"csv", L"CSV · лист 1"}};
-typedef struct { wchar_t src[MAX_PATH], out[MAX_PATH], error[400]; int format; HRESULT hr; } CvJob;
+    {L"tif", L"TIFF"}, {L"pdf", L"PDF"}, {L"txt", L"TXT"}, {L"csv", L"CSV · лист 1"},
+    {L"zip",L"ZIP"},{L"png",L"Размер"},{L"jpg",L"Сжать"},{L"pdf",L"Собрать PDF"},
+    {L"pdf",L"Страницы"},{L"pdf",L"Разделить"},{L"pdf",L"Повернуть"},{L"pdf",L"PDF-пакет"},{L"",L"Ещё…"}};
+typedef struct { wchar_t src[MAX_PATH], out[MAX_PATH], error[400], summary[1600], label[80]; int format; HRESULT hr; } CvJob;
 
 static const wchar_t *cv_extension(const wchar_t *path) {
   const wchar_t *slash = wcsrchr(path, L'\\'), *dot = wcsrchr(path, L'.');
@@ -141,7 +143,7 @@ done:
   if (!ok) swprintf(job->error, 400, L"Не удалось преобразовать документ (Office 0x%08lx). Нужен установленный %ls; файл не должен требовать пароль. Исходник сохранён.", (unsigned long)job->hr, excel ? L"Excel" : L"Word");
   return ok;
 }
-static BOOL cv_convert(CvJob *job) {
+static inline BOOL cv_convert(CvJob *job) {
   int available[7], n = cv_formats(job->src, TRUE, TRUE, available); BOOL supported = FALSE;
   for (int i = 0; i < n; i++) if (available[i] == job->format) supported = TRUE;
   DWORD attr = GetFileAttributesW(job->src);
