@@ -471,7 +471,11 @@ static void ac_sys_build(const wchar_t *q, const wchar_t *web, wchar_t *out, int
              web && web[0] ? AC_SYS_WEB : L"",
              web && web[0] ? L"\r\nИнтернет (фрагменты источников):\r\n" : L"", web && web[0] ? web : L"");
   out[cap - 1] = 0;
-  if (g_aiProvider && wcslen(out) + 140 < (size_t)cap) wcscat(out, L"\r\nСейчас отвечает облачная модель Z.ai по API. Не называй себя локальной Qwen и не утверждай, что этот запрос работает без интернета.\r\n");
+  if (g_aiProvider && wcslen(out) + 240 < (size_t)cap) {
+    wchar_t model[64], identity[240]; MultiByteToWideChar(CP_UTF8, 0, g_aiZaiModel, -1, model, 64);
+    _snwprintf(identity, 240, L"\r\nТы работаешь через облачный Z.ai API. Выбранная модель: %s. Сообщай это название, если пользователь спрашивает, какая ты модель.\r\n", model);
+    wcscat(out, identity);
+  }
 }
 
 /* showUser — вписать реплику в беседу (это был вопрос в поле, а не кнопка) */
@@ -1786,7 +1790,7 @@ static BOOL ac_png(IWICImagingFactory *f, IWICBitmapSource *src, UINT w, UINT h,
 static void ac_take(IWICImagingFactory *f, IWICBitmapSource *src) {
   if (g_acRouting) { ac_status(L"Сначала дождитесь ответа или нажмите «Стоп»"); return; }
   if (!ai_vision_ready()) {
-    ac_status(L"Для картинок выберите «Средний» (Qwen3.5) или «С картинками» и нажмите «Скачать» на вкладке «ИИ».");
+    ac_status(g_aiProvider ? L"Для картинок выберите glm-4.6v-flash или другую модель Z.ai с изображениями." : L"Для картинок выберите «Средний» (Qwen3.5) или «С картинками» и нажмите «Скачать» на вкладке «ИИ».");
     ac_open_settings();
     return;
   }
@@ -1890,7 +1894,7 @@ static void ac_shot_done(RECT r) {
 
 static void ac_shot(void) {
   if (!ai_vision_ready()) {
-    ac_status(L"Для картинок выберите «Средний» (Qwen3.5) или «С картинками» и нажмите «Скачать» на вкладке «ИИ».");
+    ac_status(g_aiProvider ? L"Для картинок выберите glm-4.6v-flash или другую модель Z.ai с изображениями." : L"Для картинок выберите «Средний» (Qwen3.5) или «С картинками» и нажмите «Скачать» на вкладке «ИИ».");
     ac_open_settings();
     return;
   }

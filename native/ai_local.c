@@ -231,7 +231,7 @@ const wchar_t *ai_status_text(int st) {
   case AI_TIMEOUT: return L"ИИ не успел ответить";
   case AI_CANCELLED: return L"отменено";
   case AI_BUSY: return L"нельзя ждать ИИ в потоке окон";
-  case AI_NO_VISION: return g_aiProvider ? L"Для картинок выберите в Z.ai модель с изображениями, например glm-4.6v" : L"нужна модель с картинками: «Средний» или «С картинками»";
+  case AI_NO_VISION: return g_aiProvider ? L"Для картинок выберите в Z.ai модель с изображениями, например glm-4.6v-flash" : L"нужна модель с картинками: «Средний» или «С картинками»";
   default: return L"ошибка ИИ";
   }
 }
@@ -1342,8 +1342,7 @@ int ai_ask_image_sync(const wchar_t *instruction, const wchar_t *imagePath, DWOR
   if (GetCurrentThreadId() == g_aiUiThread) return AI_BUSY;
   int pre = ai_precheck();
   if (pre != AI_OK) return pre;
-  wchar_t m[MAX_PATH], mm[MAX_PATH];
-  if (!ai_ext() && (!ai_pick_model(m, mm) || !mm[0])) return AI_NO_VISION;
+  if (!ai_vision_ready()) return AI_NO_VISION;
   HANDLE h = CreateFileW(imagePath, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
   if (h == INVALID_HANDLE_VALUE) return AI_ERROR;
   DWORD sz = GetFileSize(h, NULL), got = 0;

@@ -39,6 +39,7 @@ static int aq_test(void) {
     g_aiProvider = 1; g_aiOn = TRUE; ai_save();
     g_setHwnd = CreateWindowExW(0, L"STATIC", L"", WS_POPUP, 0, 0, 600, 850, NULL, NULL, GetModuleHandleW(NULL), NULL);
     ai_ui_create(g_setHwnd);
+    ok = ok && SendMessageW(g_aiZModel, CB_GETCOUNT, 0, 0) == 7;
     ok = ok && g_aiSource && g_aiZKey && (GetWindowLongW(g_aiZKey, GWL_STYLE) & ES_PASSWORD);
     g_layOpen = TRUE; ai_ui_layout(14, 40, 540, 554, 28, 8, 18, 90);
     ok = ok && (GetWindowLongW(g_aiZKey, GWL_STYLE) & WS_VISIBLE) && !(GetWindowLongW(g_aiBtnDl, GWL_STYLE) & WS_VISIBLE);
@@ -60,6 +61,14 @@ static int aq_test(void) {
     ac_push(0, L"LOCAL_PRIVATE_HISTORY_MARKER"); ac_push(1, L"old reply"); g_agPending = TRUE;
     ok = ok && ac_provider_change(1) && g_acContextStart == g_acN && !g_agPending;
     char *routed = ac_route_body(L"привет"); ok = ok && routed && !strstr(routed, "LOCAL_PRIVATE_HISTORY_MARKER"); free(routed); ac_clear_turns();
+    SetWindowTextW(g_aiZModel, L"  glm-4.6v-flash  "); ai_ui_command(g_setHwnd, ID_AI_ZMODEL, CBN_KILLFOCUS);
+    ok = ok && !strcmp(g_aiZaiModel, "glm-4.6v-flash") && ai_zai_vision();
+    SetWindowTextW(g_aiZModel, L"invalid model"); ai_ui_command(g_setHwnd, ID_AI_ZMODEL, CBN_KILLFOCUS);
+    wchar_t shown[64]; GetWindowTextW(g_aiZModel, shown, 64);
+    ok = ok && !wcscmp(shown, L"glm-4.6v-flash") && wcsstr(g_aiTestMsg, L"не сохранено");
+    wchar_t system[24000]; ac_sys_build(L"какая ты модель", NULL, system, 24000);
+    ok = ok && wcsstr(system, L"glm-4.6v-flash") && !wcsstr(system, L"Не называй себя локальной Qwen");
+    lstrcpyA(g_aiZaiModel, "glm-4.7"); ai_save();
     DestroyWindow(g_setHwnd); g_setHwnd = NULL;
     status = ok ? AI_OK : AI_ERROR; job.text = _wcsdup(ok ? L"PASS: masked UI, encrypted key, delete, settings and provider snapshot; no model/network" : L"FAIL: Z.ai UI/credential protocol");
   } else if ((port == -30 || port == -31) && argc == 7 && job.body) {
