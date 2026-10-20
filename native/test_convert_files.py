@@ -59,9 +59,27 @@ with tempfile.TemporaryDirectory(prefix='cursorpad-batch-test-') as directory:
     # Duplicate archive names preserve every file and Unicode.
     other=src/'other';other.mkdir();duplicate=other/a.name;duplicate.write_bytes(b'other file')
     zipped=run('zip',[a,duplicate,pdf1]);archive=paths(zipped)[0]
+    assert archive.name == 'Скан.zip'
     with zipfile.ZipFile(archive) as z:
         assert len(z.namelist())==3 and z.read('Скан.png')==a.read_bytes() and z.read('Скан (2).png')==b'other file'
     assert 'размер' in zipped['summary'] and any(unit in zipped['summary'] for unit in ['байт','КБ','МБ'])
+    assert zipped['source_bytes'] == sum(p.stat().st_size for p in [a,duplicate,pdf1])
+    assert zipped['archive_bytes'] == archive.stat().st_size
+    # Single-file names retain intermediate dots, collisions preserve old archives.
+    text=src/'Ведомость.РНЕ.20.txt';text.write_text('Материал 40Х\n'*10000,encoding='utf-8')
+    single=run('zip',[text]);single_path=paths(single)[0];saved_zip=single_path.read_bytes()
+    assert single_path.name == 'Ведомость.РНЕ.20.zip'
+    assert single['archive_bytes'] < single['source_bytes'] / 10 and 'Уменьшение:' in single['summary']
+    with zipfile.ZipFile(single_path) as z:
+        assert z.testzip() is None and z.read(text.name) == text.read_bytes()
+        assert z.getinfo(text.name).compress_type == zipfile.ZIP_DEFLATED
+    collision=run('zip',[text]);assert paths(collision)[0].name == 'Ведомость.РНЕ.20 (2).zip'
+    assert single_path.read_bytes() == saved_zip
+    # Already compressed data remains intact even when ZIP cannot reduce it further.
+    nested=run('zip',[single_path]);assert nested['archive_bytes'] == paths(nested)[0].stat().st_size
+    with zipfile.ZipFile(paths(nested)[0]) as z:assert z.read(single_path.name) == saved_zip
+    empty=src/'Пустой.txt';empty.write_bytes(b'');empty_zip=run('zip',[empty])
+    assert empty_zip['source_bytes'] == 0 and 'Размер не уменьшился' in empty_zip['summary']
     # Undo removes only matching output files, skips edited copies and sources.
     target=paths(converted)[0];target.write_bytes(b'user changed this result')
     undone=run('undo',entry_id=converted['id']);assert target.exists() and not outputs[1].exists()

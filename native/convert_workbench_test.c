@@ -48,9 +48,9 @@ static int cvx_lab(HINSTANCE instance) {
   SetWindowTextW(g_cvxSize,L"abc");cvx_run();if(g_cvBusy)return 23;
   wchar_t message[600];GetWindowTextW(g_cvxStatus,message,600);if(!wcsstr(message,L"ширину"))return 24;
   SendMessageW(g_cvxMode,CB_SETCURSEL,1,0);SetWindowTextW(g_cvxSize,L"50");cvx_run();if(!cvx_lab_wait()||!cvx_lab_exists(L"one-размер.png"))return 5;
-  SendMessageW(g_cvxAction,CB_SETCURSEL,7,0);cvx_run();if(!cvx_lab_wait()||!cvx_lab_exists(L"Пакет для отправки.zip"))return 6;
+  SendMessageW(g_cvxAction,CB_SETCURSEL,7,0);cvx_run();if(!cvx_lab_wait()||!cvx_lab_exists(L"one.zip"))return 6;
   cvx_toggle_history();if(!cvx_lab_wait()||!IsWindowVisible(g_cvxHistory))return 25;
-  SendMessageW(g_cvxHistory,LB_SETCURSEL,0,0);cvx_history(16);if(!cvx_lab_wait()||cvx_lab_exists(L"Пакет для отправки.zip"))return 7;
+  SendMessageW(g_cvxHistory,LB_SETCURSEL,0,0);cvx_history(16);if(!cvx_lab_wait()||cvx_lab_exists(L"one.zip"))return 7;
   swprintf(g_cvxSelection.paths[1],MAX_PATH,L"%ls\\inputs\\pages.pdf",g_dataDir);cvx_list();
   SendMessageW(g_cvxAction,CB_SETCURSEL,14,0);cvx_run();if(!cvx_lab_wait()||!cvx_lab_exists(L"Пакет чертежей.pdf"))return 8;
   cvx_toggle_history();if(g_cvxHistoryOpen||IsWindowVisible(g_cvxHistory))return 26;

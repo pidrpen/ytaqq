@@ -378,7 +378,8 @@ def pdfs(task, files, op):
 
 
 def archive(task, files):
-    output = task.stage(task.destination(files[0]), 'Пакет для отправки.zip')
+    output = task.stage(task.destination(files[0]), files[0].stem + '.zip')
+    source_bytes = 0
     used = set()
     with zipfile.ZipFile(output, 'x', compression=zipfile.ZIP_DEFLATED, compresslevel=6, allowZip64=True) as archive_file:
         for source in files:
@@ -393,6 +394,8 @@ def archive(task, files):
             after = source.stat()
             if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
                 raise ValueError(f'Файл изменился во время упаковки: {source.name}')
+            source_bytes += before.st_size
+    return source_bytes, output.stat().st_size
 
 
 def execute(request):
@@ -438,11 +441,12 @@ def execute(request):
               'merge': 'Объединение PDF', 'packet': 'Пакет чертежей', 'extract': 'Страницы PDF',
               'split': 'Разделение PDF', 'rotate': 'Поворот PDF', 'to_pdf': 'Преобразование в PDF'}
     try:
+        zip_sizes = None
         if files:
             if op in ('convert', 'resize', 'compress'):
                 images(task, files, op)
             elif op == 'zip':
-                archive(task, files)
+                zip_sizes = archive(task, files)
             elif op in ('merge', 'packet', 'extract', 'split', 'rotate', 'to_pdf'):
                 pdfs(task, files, op)
             else:
@@ -455,7 +459,15 @@ def execute(request):
             shutil.copyfile(source, task.stage(destination, item['name']))
         if not task.staged:
             raise ValueError('Нет результатов для сохранения')
-        return task.commit(history, labels.get(op, 'Конвертация'))
+        result = task.commit(history, labels.get(op, 'Конвертация'))
+        if zip_sizes is not None:
+            source_bytes, archive_bytes = zip_sizes
+            savings = (1 - archive_bytes / source_bytes) * 100 if source_bytes else 0
+            detail = (f'Уменьшение: {savings:.1f}%.' if savings > 0 else
+                      'Размер не уменьшился. Уже сжатые файлы, например видео, ZIP почти не сжимает.')
+            result['summary'] += f' Исходный размер: {size_label(source_bytes)}. ZIP: {size_label(archive_bytes)}. {detail}'
+            result['source_bytes'], result['archive_bytes'] = zip_sizes
+        return result
     finally:
         task.stack.close()
 

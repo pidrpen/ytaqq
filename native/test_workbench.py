@@ -29,7 +29,7 @@ assert (root/'passed.txt').exists()
 for name,size in [('one-размер.png',(320,160)),('Фото-размер.png',(150,250))]:
     with Image.open(root/'out'/name) as image:assert image.size==size
 assert len(PdfReader(root/'out/Пакет чертежей.pdf').pages)==3
-assert not (root/'out/Пакет для отправки.zip').exists()
+assert not (root/'out/one.zip').exists()
 history=json.loads((root/'conversions/history.json').read_text());assert any(e['state']=='undone' for e in history['entries'])
 assert len(history['entries'])==4
 for path,digest in before.items():assert hashlib.sha256(path.read_bytes()).hexdigest()==digest
