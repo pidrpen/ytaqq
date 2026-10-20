@@ -1,11 +1,17 @@
 /* Explorer Shift-drag -> a real OLE drop target. No injected input, clipboard
    changes or Explorer extensions. Drop always returns COPY, never MOVE. */
 #include "convert_core.c"
+#ifndef CV_RING_TEST
+#include "desktop_create.c"
+#endif
 #define TIMER_CONVERT 1739
 #define WM_CONVERT_DONE (WM_APP + 139)
+#define WM_CV_CREATE_MENU (WM_APP + 141)
 static HWND g_cvWnd;
 static BOOL g_cvOle, g_cvRegistered, g_cvWord, g_cvExcel;
 static BOOL g_cvDown, g_cvSource, g_cvDismissed;
+static BOOL g_cvDesktopGesture,g_cvDesktopDragged;
+static POINT g_cvCreatePoint;
 static POINT g_cvOrigin;
 static DWORD g_cvReleased;
 static volatile LONG g_cvBusy;
@@ -83,23 +89,28 @@ static void cv_show(POINT point) {
   SetWindowPos(g_cvWnd, HWND_TOPMOST, x, y, g_cvSize, g_cvSize, SWP_NOACTIVATE | SWP_SHOWWINDOW);
   cv_redraw();
 }
-static void cv_tick(void) {
-  if (!g_cvRegistered) return;
-  POINT point; GetCursorPos(&point);
-  BOOL down = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
-  BOOL shift = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+static void cv_gesture(POINT point,BOOL down,BOOL shift,BOOL escape,BOOL source,BOOL emptyDesktop) {
   if (down && !g_cvDown) {
-    g_cvOrigin = point; g_cvSource = cv_explorer_at(point); g_cvDismissed = FALSE; g_cvReleased = 0;
+    g_cvOrigin = point; g_cvSource = source; g_cvDismissed = FALSE; g_cvReleased = 0;
+    g_cvDesktopGesture=shift&&emptyDesktop;g_cvDesktopDragged=FALSE;
   }
   g_cvDown = down;
   if (!down) {
+    if(g_cvDesktopDragged&&!g_cvDismissed&&shift&&!escape&&emptyDesktop&&!g_cvBusy) {
+      g_cvCreatePoint=point;PostMessageW(g_cvWnd,WM_CV_CREATE_MENU,0,0);
+    }
+    g_cvDesktopGesture=FALSE;g_cvDesktopDragged=FALSE;
     if (!g_cvReleased) g_cvReleased = GetTickCount();
     /* Let an in-flight OLE Drop arrive before hiding the target. */
     if (GetTickCount() - g_cvReleased > 220) cv_hide();
     return;
   }
-  if (GetAsyncKeyState(VK_ESCAPE) & 0x8000) { cv_hide(); g_cvDismissed = TRUE; return; }
-  if (!shift || g_cvBusy) { cv_hide(); return; }
+  if (escape) { cv_hide(); g_cvDismissed = TRUE;g_cvDesktopGesture=FALSE;g_cvDesktopDragged=FALSE;return; }
+  if (!shift || g_cvBusy) { cv_hide();g_cvDesktopGesture=FALSE;g_cvDesktopDragged=FALSE;return; }
+  if(g_cvDesktopGesture) {
+    if(abs(point.x-g_cvOrigin.x)>GetSystemMetrics(SM_CXDRAG)+8||abs(point.y-g_cvOrigin.y)>GetSystemMetrics(SM_CYDRAG)+8)g_cvDesktopDragged=TRUE;
+    return;
+  }
   if (IsWindowVisible(g_cvWnd)) {
     RECT r; GetWindowRect(g_cvWnd, &r); InflateRect(&r, 45, 45);
     if (!PtInRect(&r, point)) { cv_hide(); g_cvDismissed = TRUE; }
@@ -108,6 +119,16 @@ static void cv_tick(void) {
   if (!g_cvDismissed && g_cvSource &&
       (abs(point.x - g_cvOrigin.x) > GetSystemMetrics(SM_CXDRAG) + 8 ||
        abs(point.y - g_cvOrigin.y) > GetSystemMetrics(SM_CYDRAG) + 8)) cv_show(point);
+}
+static void cv_tick(void) {
+  if(!g_cvRegistered)return;
+  POINT point;GetCursorPos(&point);BOOL down=(GetAsyncKeyState(VK_LBUTTON)&0x8000)!=0;
+  BOOL shift=(GetAsyncKeyState(VK_SHIFT)&0x8000)!=0,empty=FALSE;
+#ifndef CV_RING_TEST
+  if(shift&&((down&&!g_cvDown)||(!down&&g_cvDesktopDragged)))empty=dc_empty_desktop(point);
+#endif
+  BOOL source=down&&!g_cvDown?cv_explorer_at(point):FALSE;
+  cv_gesture(point,down,shift,(GetAsyncKeyState(VK_ESCAPE)&0x8000)!=0,source,empty);
 }
 static BOOL cv_data(IDataObject *data, CvSelection *selection) {
   FORMATETC format = {CF_HDROP, NULL, DVASPECT_CONTENT, -1, TYMED_HGLOBAL}; STGMEDIUM medium;
@@ -193,6 +214,9 @@ static HRESULT STDMETHODCALLTYPE cv_drop(IDropTarget *self, IDataObject *data, D
 static IDropTargetVtbl g_cvVtbl = {cv_query, cv_addref, cv_release, cv_enter, cv_over, cv_leave, cv_drop};
 static CvDrop g_cvDrop = {{&g_cvVtbl}, 1};
 static LRESULT CALLBACK cv_proc(HWND hwnd, UINT message, WPARAM wp, LPARAM lp) {
+#ifndef CV_RING_TEST
+  if(message==WM_CV_CREATE_MENU){dc_menu(g_cvCreatePoint);return 0;}
+#endif
   if (message == WM_MOUSEACTIVATE) return MA_NOACTIVATE;
   if (message == WM_ERASEBKGND) return 1;
   if (message == WM_PAINT) {

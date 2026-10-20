@@ -34,7 +34,7 @@ static void cvx_lab_capture(const wchar_t *path) {
 static int cvx_lab(HINSTANCE instance) {
   int argc;LPWSTR *args=CommandLineToArgvW(GetCommandLineW(),&argc);if(argc!=2)return 2;
   GetFullPathNameW(args[1],MAX_PATH,g_dataDir,NULL);LocalFree(args);g_inst=instance;
-  INITCOMMONCONTROLSEX common={sizeof(common),ICC_STANDARD_CLASSES|ICC_PROGRESS_CLASS};InitCommonControlsEx(&common);
+  INITCOMMONCONTROLSEX common={sizeof(common),ICC_STANDARD_CLASSES|ICC_PROGRESS_CLASS|ICC_LISTVIEW_CLASSES};InitCommonControlsEx(&common);
   WNDCLASSW k={0};k.hInstance=instance;k.lpfnWndProc=cvx_lab_proc;k.lpszClassName=L"CursorPadWorkbenchTest";RegisterClassW(&k);
   g_hwnd=CreateWindowW(k.lpszClassName,L"test",WS_OVERLAPPEDWINDOW,0,0,100,100,NULL,NULL,instance,NULL);
   cv_init();cvx_show();if(!cvx_lab_wait())return 3;
@@ -78,6 +78,36 @@ static int cvx_lab(HINSTANCE instance) {
   if(button.bottom>client.bottom||button.right>client.right)return 30;
   g_cvBusy=1;cvx_controls();if(IsWindowEnabled(GetDlgItem(g_cvxWnd,CX_RUN))||IsWindowEnabled(GetDlgItem(g_cvxWnd,CX_ADD))||!IsWindowEnabled(GetDlgItem(g_cvxWnd,CX_CANCEL)))return 31;g_cvBusy=0;cvx_controls();
   SendMessageW(g_cvxWnd,WM_COMMAND,IDCANCEL,0);if(IsWindowVisible(g_cvxWnd))return 32;
+  /* The exact native creator writes into this isolated profile, never Desktop. */
+  wchar_t desktop[MAX_PATH],created[MAX_PATH];swprintf(desktop,MAX_PATH,L"%ls\\desktop",g_dataDir);if(!CreateDirectoryW(desktop,NULL))return 40;
+  for(int kind=1;kind<=4;kind++) {
+    if(!dc_create_at(desktop,kind,created)||!dc_create_at(desktop,kind,created)||!wcsstr(created,L" (2)"))return 41;
+  }
+  if(dc_create_at(desktop,0,created)||created[0])return 42;
+  if(!dc_empty_role(ROLE_SYSTEM_LIST,CHILDID_SELF,TRUE)||dc_empty_role(ROLE_SYSTEM_LISTITEM,1,TRUE)||dc_empty_role(ROLE_SYSTEM_LIST,1,TRUE))return 43;
+  HWND probe=CreateWindowExW(WS_EX_TOPMOST|WS_EX_TOOLWINDOW|WS_EX_NOACTIVATE,k.lpszClassName,L"CursorPad desktop test",WS_POPUP|WS_VISIBLE,50,50,300,300,NULL,NULL,instance,NULL);
+  HWND list=CreateWindowW(WC_LISTVIEWW,L"",WS_CHILD|WS_VISIBLE|LVS_REPORT|LVS_NOCOLUMNHEADER,0,0,300,300,probe,NULL,instance,NULL);
+  LVCOLUMNW column={0};column.mask=LVCF_WIDTH;column.cx=280;SendMessageW(list,LVM_INSERTCOLUMNW,0,(LPARAM)&column);
+  LVITEMW item={0};item.mask=LVIF_TEXT;item.pszText=L"Тестовый файл";SendMessageW(list,LVM_INSERTITEMW,0,(LPARAM)&item);
+  UpdateWindow(probe);POINT blank={200,200};ClientToScreen(list,&blank);
+  if(!dc_empty_accessible(blank,TRUE)||dc_empty_desktop(blank))return 44;
+  RECT row={LVIR_BOUNDS,0,0,0};SendMessageW(list,LVM_GETITEMRECT,0,(LPARAM)&row);POINT icon={10,(row.top+row.bottom)/2};ClientToScreen(list,&icon);
+  if(dc_empty_accessible(icon,TRUE))return 45;
+  DestroyWindow(probe);
+  POINT start={500,400},end={550,430};MSG gesture;
+  cv_gesture(start,TRUE,TRUE,FALSE,TRUE,TRUE);cv_gesture(end,TRUE,TRUE,FALSE,FALSE,FALSE);
+  if(IsWindowVisible(g_cvWnd)||!g_cvDesktopDragged)return 46;
+  cv_gesture(end,FALSE,TRUE,FALSE,FALSE,TRUE);
+  if(!PeekMessageW(&gesture,g_cvWnd,WM_CV_CREATE_MENU,WM_CV_CREATE_MENU,PM_REMOVE))return 47;
+  cv_gesture(end,FALSE,TRUE,FALSE,FALSE,TRUE);
+  if(PeekMessageW(&gesture,g_cvWnd,WM_CV_CREATE_MENU,WM_CV_CREATE_MENU,PM_REMOVE))return 48;
+  cv_gesture(start,TRUE,TRUE,FALSE,TRUE,TRUE);cv_gesture(end,TRUE,TRUE,FALSE,FALSE,FALSE);cv_gesture(end,FALSE,FALSE,FALSE,FALSE,TRUE);
+  if(PeekMessageW(&gesture,g_cvWnd,WM_CV_CREATE_MENU,WM_CV_CREATE_MENU,PM_REMOVE))return 49;
+  cv_gesture(start,TRUE,TRUE,FALSE,TRUE,TRUE);cv_gesture(end,TRUE,TRUE,FALSE,FALSE,FALSE);cv_gesture(end,FALSE,TRUE,TRUE,FALSE,TRUE);
+  if(PeekMessageW(&gesture,g_cvWnd,WM_CV_CREATE_MENU,WM_CV_CREATE_MENU,PM_REMOVE))return 50;
+  cv_gesture(start,TRUE,TRUE,FALSE,TRUE,FALSE);cv_gesture(end,TRUE,TRUE,FALSE,FALSE,FALSE);
+  if(!IsWindowVisible(g_cvWnd)||g_cvDesktopGesture)return 51;
+  cv_hide();cv_gesture(end,FALSE,FALSE,FALSE,FALSE,FALSE);
   cv_shutdown();DestroyWindow(g_hwnd);
   swprintf(out,MAX_PATH,L"%ls\\passed.txt",g_dataDir);aq_write(out,"PASS: native controls -> JSON request -> pinned Python helper -> batch JPEG/resize/ZIP/PDF packet -> history -> guarded undo; no API or Office");
   return 0;
