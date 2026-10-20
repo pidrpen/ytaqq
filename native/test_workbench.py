@@ -29,8 +29,20 @@ assert (root/'passed.txt').exists()
 for name,size in [('one-размер.png',(320,160)),('Фото-размер.png',(150,250))]:
     with Image.open(root/'out'/name) as image:assert image.size==size
 assert len(PdfReader(root/'out/Пакет чертежей.pdf').pages)==3
-assert not (root/'out/Пакет для отправки.zip').exists()
+assert not (root/'out/one.zip').exists()
 history=json.loads((root/'conversions/history.json').read_text());assert any(e['state']=='undone' for e in history['entries'])
 assert len(history['entries'])==4
 for path,digest in before.items():assert hashlib.sha256(path.read_bytes()).hexdigest()==digest
+desktop=root/'desktop'
+assert (desktop/'Новая папка').is_dir() and (desktop/'Новая папка (2)').is_dir()
+assert (desktop/'Новый текст.txt').read_bytes()==b'' and (desktop/'Новый текст (2).txt').read_bytes()==b''
+import xml.etree.ElementTree as ET
+for name,part in [('Новый документ','word/document.xml'),('Новая таблица','xl/workbook.xml')]:
+    extension='.docx' if part.startswith('word') else '.xlsx'
+    for ending in ['', ' (2)']:
+        with zipfile.ZipFile(desktop/(name+ending+extension)) as z:
+            assert z.testzip() is None
+            for member in z.namelist():ET.fromstring(z.read(member))
+            assert part in z.namelist()
 print((root/'passed.txt').read_text())
+print('PASS: desktop native TXT/DOCX/XLSX/folder creation, collisions, MSAA whitespace/item distinction, gesture dispatch, Shift/Esc cancellation; no real Desktop writes')

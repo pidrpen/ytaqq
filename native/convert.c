@@ -1,11 +1,17 @@
 /* Explorer Shift-drag -> a real OLE drop target. No injected input, clipboard
    changes or Explorer extensions. Drop always returns COPY, never MOVE. */
 #include "convert_core.c"
+#ifndef CV_RING_TEST
+#include "desktop_create.c"
+#endif
 #define TIMER_CONVERT 1739
 #define WM_CONVERT_DONE (WM_APP + 139)
+#define WM_CV_CREATE_MENU (WM_APP + 141)
 static HWND g_cvWnd;
 static BOOL g_cvOle, g_cvRegistered, g_cvWord, g_cvExcel;
 static BOOL g_cvDown, g_cvSource, g_cvDismissed;
+static BOOL g_cvDesktopGesture,g_cvDesktopDragged;
+static POINT g_cvCreatePoint;
 static POINT g_cvOrigin;
 static DWORD g_cvReleased;
 static volatile LONG g_cvBusy;
@@ -14,10 +20,14 @@ static wchar_t g_cvPath[MAX_PATH], g_cvLast[MAX_PATH];
 #define CV_FILES 128
 typedef struct { int count; wchar_t paths[CV_FILES][MAX_PATH]; } CvSelection;
 static CvSelection g_cvSelection;
+static IDataObject *g_cvPendingData;
+static DWORD g_cvDataAttempt;
 static BOOL cvx_dispatch(const CvSelection *selection, int action);
 static void cvx_show(void);
 static void cvx_shutdown(void);
-static void cv_hide(void) { if (g_cvWnd) ShowWindow(g_cvWnd, SW_HIDE); g_cvHover = -1; }
+static void cv_pending_clear(void) { if(g_cvPendingData){g_cvPendingData->lpVtbl->Release(g_cvPendingData);g_cvPendingData=NULL;} }
+static void cv_redraw(void) { if(g_cvWnd)RedrawWindow(g_cvWnd,NULL,NULL,RDW_INVALIDATE|RDW_UPDATENOW); }
+static void cv_hide(void) { cv_pending_clear();if (g_cvWnd) ShowWindow(g_cvWnd, SW_HIDE); g_cvHover = -1; }
 static void cv_reveal(void) {
   if (!g_cvLast[0]) return;
   wchar_t args[MAX_PATH + 40]; swprintf(args, MAX_PATH + 40, L"/select,\"%ls\"", g_cvLast);
@@ -68,7 +78,7 @@ static int cv_hit(POINT point) {
   return (int)(angle * g_cvCount / 6.283185307179586) % g_cvCount;
 }
 static void cv_show(POINT point) {
-  g_cvPath[0] = 0; g_cvCount = 0; g_cvHover = -1;
+  cv_pending_clear();g_cvSelection.count=0;g_cvPath[0] = 0; g_cvCount = 0; g_cvHover = -1;
   HMONITOR monitor = MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST);
   MONITORINFO info = {sizeof(info)}; GetMonitorInfoW(monitor, &info);
   int x = point.x - g_cvSize / 2, y = point.y - g_cvSize / 2;
@@ -77,25 +87,30 @@ static void cv_show(POINT point) {
   if (x < info.rcWork.left) x = info.rcWork.left;
   if (y < info.rcWork.top) y = info.rcWork.top;
   SetWindowPos(g_cvWnd, HWND_TOPMOST, x, y, g_cvSize, g_cvSize, SWP_NOACTIVATE | SWP_SHOWWINDOW);
-  InvalidateRect(g_cvWnd, NULL, FALSE);
+  cv_redraw();
 }
-static void cv_tick(void) {
-  if (!g_cvRegistered) return;
-  POINT point; GetCursorPos(&point);
-  BOOL down = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
-  BOOL shift = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+static void cv_gesture(POINT point,BOOL down,BOOL shift,BOOL escape,BOOL source,BOOL emptyDesktop) {
   if (down && !g_cvDown) {
-    g_cvOrigin = point; g_cvSource = cv_explorer_at(point); g_cvDismissed = FALSE; g_cvReleased = 0;
+    g_cvOrigin = point; g_cvSource = source; g_cvDismissed = FALSE; g_cvReleased = 0;
+    g_cvDesktopGesture=shift&&emptyDesktop;g_cvDesktopDragged=FALSE;
   }
   g_cvDown = down;
   if (!down) {
+    if(g_cvDesktopDragged&&!g_cvDismissed&&shift&&!escape&&emptyDesktop&&!g_cvBusy) {
+      g_cvCreatePoint=point;PostMessageW(g_cvWnd,WM_CV_CREATE_MENU,0,0);
+    }
+    g_cvDesktopGesture=FALSE;g_cvDesktopDragged=FALSE;
     if (!g_cvReleased) g_cvReleased = GetTickCount();
     /* Let an in-flight OLE Drop arrive before hiding the target. */
     if (GetTickCount() - g_cvReleased > 220) cv_hide();
     return;
   }
-  if (GetAsyncKeyState(VK_ESCAPE) & 0x8000) { cv_hide(); g_cvDismissed = TRUE; return; }
-  if (!shift || g_cvBusy) { cv_hide(); return; }
+  if (escape) { cv_hide(); g_cvDismissed = TRUE;g_cvDesktopGesture=FALSE;g_cvDesktopDragged=FALSE;return; }
+  if (!shift || g_cvBusy) { cv_hide();g_cvDesktopGesture=FALSE;g_cvDesktopDragged=FALSE;return; }
+  if(g_cvDesktopGesture) {
+    if(abs(point.x-g_cvOrigin.x)>GetSystemMetrics(SM_CXDRAG)+8||abs(point.y-g_cvOrigin.y)>GetSystemMetrics(SM_CYDRAG)+8)g_cvDesktopDragged=TRUE;
+    return;
+  }
   if (IsWindowVisible(g_cvWnd)) {
     RECT r; GetWindowRect(g_cvWnd, &r); InflateRect(&r, 45, 45);
     if (!PtInRect(&r, point)) { cv_hide(); g_cvDismissed = TRUE; }
@@ -104,6 +119,16 @@ static void cv_tick(void) {
   if (!g_cvDismissed && g_cvSource &&
       (abs(point.x - g_cvOrigin.x) > GetSystemMetrics(SM_CXDRAG) + 8 ||
        abs(point.y - g_cvOrigin.y) > GetSystemMetrics(SM_CYDRAG) + 8)) cv_show(point);
+}
+static void cv_tick(void) {
+  if(!g_cvRegistered)return;
+  POINT point;GetCursorPos(&point);BOOL down=(GetAsyncKeyState(VK_LBUTTON)&0x8000)!=0;
+  BOOL shift=(GetAsyncKeyState(VK_SHIFT)&0x8000)!=0,empty=FALSE;
+#ifndef CV_RING_TEST
+  if(shift&&((down&&!g_cvDown)||(!down&&g_cvDesktopDragged)))empty=dc_empty_desktop(point);
+#endif
+  BOOL source=down&&!g_cvDown?cv_explorer_at(point):FALSE;
+  cv_gesture(point,down,shift,(GetAsyncKeyState(VK_ESCAPE)&0x8000)!=0,source,empty);
 }
 static BOOL cv_data(IDataObject *data, CvSelection *selection) {
   FORMATETC format = {CF_HDROP, NULL, DVASPECT_CONTENT, -1, TYMED_HGLOBAL}; STGMEDIUM medium;
@@ -141,6 +166,13 @@ static void cv_menu_formats(void) {
   else { for(int i=4;i<=6;i++) if(cvx_all(&g_cvSelection,i)) g_cvFormats[g_cvCount++]=i; if (!g_cvCount && cvx_all(&g_cvSelection,14)) g_cvFormats[g_cvCount++]=14; }
   g_cvFormats[g_cvCount++]=7; g_cvFormats[g_cvCount++]=15;
 }
+static void cv_read_pending(void) {
+  if(!g_cvPendingData)return;
+  g_cvDataAttempt=GetTickCount();
+  if(cv_data(g_cvPendingData,&g_cvSelection)) {
+    lstrcpynW(g_cvPath,g_cvSelection.paths[0],MAX_PATH);cv_menu_formats();cv_pending_clear();cv_redraw();
+  }
+}
 typedef struct { IDropTarget iface; LONG refs; } CvDrop;
 static HRESULT STDMETHODCALLTYPE cv_query(IDropTarget *self, REFIID iid, void **out) {
   if (!out) return E_POINTER;
@@ -153,18 +185,20 @@ static HRESULT STDMETHODCALLTYPE cv_query(IDropTarget *self, REFIID iid, void **
 static ULONG STDMETHODCALLTYPE cv_addref(IDropTarget *self) { return (ULONG)InterlockedIncrement(&((CvDrop *)self)->refs); }
 static ULONG STDMETHODCALLTYPE cv_release(IDropTarget *self) { return (ULONG)InterlockedDecrement(&((CvDrop *)self)->refs); }
 static HRESULT STDMETHODCALLTYPE cv_over(IDropTarget *self, DWORD keys, POINTL position, DWORD *effect) {
-  (void)self; POINT point = {position.x, position.y}; int hover = cv_hit(point);
+  (void)self;
+  if(g_cvPendingData&&(keys&MK_SHIFT)&&GetTickCount()-g_cvDataAttempt>=100)cv_read_pending();
+  POINT point = {position.x, position.y}; int hover = cv_hit(point);
   if (g_cvBusy || !(keys & MK_SHIFT) || !g_cvPath[0] || !(*effect & DROPEFFECT_COPY)) hover = -1;
-  if (hover != g_cvHover) { g_cvHover = hover; InvalidateRect(g_cvWnd, NULL, FALSE); }
+  if (hover != g_cvHover) { g_cvHover = hover; cv_redraw(); }
   *effect = hover >= 0 ? DROPEFFECT_COPY : DROPEFFECT_NONE; return S_OK;
 }
 static HRESULT STDMETHODCALLTYPE cv_enter(IDropTarget *self, IDataObject *data, DWORD keys, POINTL position, DWORD *effect) {
-  g_cvCount = 0; g_cvPath[0] = 0;
-  if (cv_data(data, &g_cvSelection)) { lstrcpynW(g_cvPath,g_cvSelection.paths[0],MAX_PATH); cv_menu_formats(); }
-  InvalidateRect(g_cvWnd, NULL, FALSE); return cv_over(self, keys, position, effect);
+  cv_pending_clear();g_cvCount = 0; g_cvPath[0] = 0;g_cvSelection.count=0;
+  if(data){g_cvPendingData=data;data->lpVtbl->AddRef(data);cv_read_pending();}
+  cv_redraw();return cv_over(self, keys, position, effect);
 }
 static HRESULT STDMETHODCALLTYPE cv_leave(IDropTarget *self) {
-  (void)self; g_cvHover = -1; InvalidateRect(g_cvWnd, NULL, FALSE); return S_OK;
+  (void)self;cv_pending_clear();g_cvHover = -1;cv_redraw();return S_OK;
 }
 static HRESULT STDMETHODCALLTYPE cv_drop(IDropTarget *self, IDataObject *data, DWORD keys, POINTL position, DWORD *effect) {
   cv_over(self, keys, position, effect);
@@ -180,13 +214,16 @@ static HRESULT STDMETHODCALLTYPE cv_drop(IDropTarget *self, IDataObject *data, D
 static IDropTargetVtbl g_cvVtbl = {cv_query, cv_addref, cv_release, cv_enter, cv_over, cv_leave, cv_drop};
 static CvDrop g_cvDrop = {{&g_cvVtbl}, 1};
 static LRESULT CALLBACK cv_proc(HWND hwnd, UINT message, WPARAM wp, LPARAM lp) {
+#ifndef CV_RING_TEST
+  if(message==WM_CV_CREATE_MENU){dc_menu(g_cvCreatePoint);return 0;}
+#endif
   if (message == WM_MOUSEACTIVATE) return MA_NOACTIVATE;
   if (message == WM_ERASEBKGND) return 1;
   if (message == WM_PAINT) {
     PAINTSTRUCT ps; HDC screen = BeginPaint(hwnd, &ps), dc = CreateCompatibleDC(screen);
     HBITMAP bitmap = CreateCompatibleBitmap(screen, g_cvSize, g_cvSize), oldBitmap = SelectObject(dc, bitmap);
     RECT bounds = {0,0,g_cvSize,g_cvSize}; HBRUSH background = CreateSolidBrush(RGB(27,31,40)); FillRect(dc, &bounds, background); DeleteObject(background);
-    int count = g_cvCount ? g_cvCount : 4, center = g_cvSize / 2;
+    int count = g_cvCount ? g_cvCount : 1, center = g_cvSize / 2;
     HPEN pen = CreatePen(PS_SOLID, 2, RGB(27,31,40)); HPEN oldPen = SelectObject(dc, pen);
     for (int i = 0; i < count; i++) {
       POINT points[67]; points[0].x = center; points[0].y = center;
@@ -207,13 +244,13 @@ static LRESULT CALLBACK cv_proc(HWND hwnd, UINT message, WPARAM wp, LPARAM lp) {
       int x = center + (int)(cos(a) * g_cvSize * .355), y = center + (int)(sin(a) * g_cvSize * .355);
       RECT label = {x-g_cvSize/6,y-24,x+g_cvSize/6,y+24};
       SetTextColor(dc, i == g_cvHover ? RGB(25,28,34) : RGB(241,243,247));
-      DrawTextW(dc, g_cvCount ? kCvFormats[g_cvFormats[i]].label : L"·", -1, &label, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+      DrawTextW(dc, g_cvCount ? kCvFormats[g_cvFormats[i]].label : L"Файлы сюда", -1, &label, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
     RECT label = {center-radius+5,center-radius+10,center+radius-5,center+radius-10}; SetTextColor(dc, RGB(210,217,228));
     wchar_t selected[100]; swprintf(selected,100,L"Файлов: %d\nВыберите\nдействие\n\nEsc — отмена",g_cvSelection.count);
     const wchar_t *text = g_cvCount ? selected : g_cvPath[0] ?
       (!_wcsicmp(cv_extension(g_cvPath), L"docx") && !g_cvWord ? L"Нужен\nWord" :
-       !_wcsicmp(cv_extension(g_cvPath), L"xlsx") && !g_cvExcel ? L"Нужен\nExcel" : L"Формат не\nподдержан") : L"Перетащите\nфайлы\nс Shift";
+       !_wcsicmp(cv_extension(g_cvPath), L"xlsx") && !g_cvExcel ? L"Нужен\nExcel" : L"Формат не\nподдержан") : L"Ведите файлы\nв круг\n\nНе отпускайте\nмышь и Shift";
     DrawTextW(dc, text, -1, &label, DT_CENTER | DT_WORDBREAK);
     SelectObject(dc, oldFont); DeleteObject(font);
     BitBlt(screen,0,0,g_cvSize,g_cvSize,dc,0,0,SRCCOPY); SelectObject(dc,oldBitmap); DeleteObject(bitmap); DeleteDC(dc); EndPaint(hwnd,&ps); return 0;
@@ -240,6 +277,7 @@ static void cv_init(void) {
   if (g_cvRegistered) SetTimer(g_hwnd,TIMER_CONVERT,30,NULL);
 }
 static void cv_shutdown(void) {
+  cv_pending_clear();
   cvx_shutdown();
   KillTimer(g_hwnd,TIMER_CONVERT);
   if (g_cvRegistered) { RevokeDragDrop(g_cvWnd); g_cvRegistered = FALSE; }

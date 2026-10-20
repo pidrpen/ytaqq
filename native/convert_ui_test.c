@@ -21,11 +21,12 @@ static void show_status(const wchar_t *text) { (void)text; }
 static void upd_balloon(int kind, const wchar_t *title, const wchar_t *text) { (void)kind; (void)title; (void)text; }
 #define CV_RING_TEST
 #include "convert.c"
-typedef struct { IDataObject iface; const wchar_t *path; BOOL multiple; } FakeData;
+typedef struct { IDataObject iface; const wchar_t *path; BOOL multiple; int pending; } FakeData;
 static HRESULT STDMETHODCALLTYPE data_query(IDataObject *self, REFIID iid, void **out) { (void)iid; *out = self; return S_OK; }
 static ULONG STDMETHODCALLTYPE data_ref(IDataObject *self) { (void)self; return 1; }
 static HRESULT STDMETHODCALLTYPE data_get(IDataObject *self, FORMATETC *format, STGMEDIUM *medium) {
   FakeData *data = (FakeData *)self;
+  if(data->pending>0){data->pending--;return E_PENDING;}
   if (format->cfFormat != CF_HDROP || !(format->tymed & TYMED_HGLOBAL)) return DV_E_FORMATETC;
   size_t length = wcslen(data->path) + 1, count = data->multiple ? 2 : 1;
   HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, sizeof(DROPFILES) + (length * count + 1) * sizeof(wchar_t));
@@ -57,7 +58,8 @@ static LRESULT CALLBACK test_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 static void capture(const wchar_t *path) {
   HDC dc = GetDC(g_cvWnd), memory = CreateCompatibleDC(dc);
   HBITMAP bitmap = CreateCompatibleBitmap(dc,g_cvSize,g_cvSize), old = SelectObject(memory,bitmap);
-  BitBlt(memory,0,0,g_cvSize,g_cvSize,dc,0,0,SRCCOPY); SelectObject(memory,old);
+  if(!PrintWindow(g_cvWnd,memory,2))SendMessageW(g_cvWnd,WM_PRINT,(WPARAM)memory,PRF_CLIENT|PRF_ERASEBKGND);
+  SelectObject(memory,old);
   BITMAPINFO info = {0}; info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER); info.bmiHeader.biWidth = g_cvSize;
   info.bmiHeader.biHeight = -g_cvSize; info.bmiHeader.biPlanes = 1; info.bmiHeader.biBitCount = 32;
   DWORD size = (DWORD)g_cvSize*g_cvSize*4; BYTE *pixels = (BYTE *)malloc(size);
@@ -72,11 +74,15 @@ int wmain(int argc, wchar_t **argv) {
   RegisterClassW(&klass); g_hwnd=CreateWindowW(klass.lpszClassName,L"test",WS_OVERLAPPEDWINDOW,0,0,100,100,NULL,NULL,g_inst,NULL);
   cv_init(); if (!g_cvRegistered) return 3;
   wchar_t path[MAX_PATH]; GetFullPathNameW(argv[1],MAX_PATH,path,NULL);
-  FakeData data={{&data_vtable},path,FALSE}; POINT show={450,300}; cv_show(show); UpdateWindow(g_cvWnd);
+  FakeData data={{&data_vtable},path,FALSE,1}; POINT show={450,300}; cv_show(show);
+  if(GetUpdateRect(g_cvWnd,NULL,FALSE))return 10;
   RECT rect; GetWindowRect(g_cvWnd,&rect); POINTL center={rect.left+g_cvSize/2,rect.top+g_cvSize/2};
   DWORD effect=DROPEFFECT_COPY|DROPEFFECT_MOVE;
   cv_enter(&g_cvDrop.iface,&data.iface,MK_SHIFT,center,&effect);
+  if(g_cvCount||!g_cvPendingData)return 11;
+  Sleep(110);effect=DROPEFFECT_COPY|DROPEFFECT_MOVE;cv_over(&g_cvDrop.iface,MK_SHIFT,center,&effect);
   if (effect != DROPEFFECT_NONE || g_cvCount < 3) return 4;
+  if(g_cvPendingData||GetUpdateRect(g_cvWnd,NULL,FALSE))return 12;
   double angle=-1.5707963267948966+3.141592653589793/g_cvCount;
   POINTL sector={center.x+(LONG)(cos(angle)*g_cvSize*.35),center.y+(LONG)(sin(angle)*g_cvSize*.35)};
   effect=DROPEFFECT_COPY|DROPEFFECT_MOVE; cv_over(&g_cvDrop.iface,0,sector,&effect); if (effect != DROPEFFECT_NONE) return 5;
@@ -84,7 +90,8 @@ int wmain(int argc, wchar_t **argv) {
   cv_enter(&g_cvDrop.iface,&data.iface,MK_SHIFT,sector,&effect); if (g_cvSelection.count != 2 || !g_cvCount) return 6;
   data.multiple=FALSE; effect=DROPEFFECT_COPY|DROPEFFECT_MOVE;
   cv_enter(&g_cvDrop.iface,&data.iface,MK_SHIFT,sector,&effect); if (effect != DROPEFFECT_COPY) return 7;
-  UpdateWindow(g_cvWnd); capture(argv[2]);
+  if(GetUpdateRect(g_cvWnd,NULL,FALSE))return 13;
+  capture(argv[2]);
   effect=DROPEFFECT_COPY|DROPEFFECT_MOVE; cv_drop(&g_cvDrop.iface,&data.iface,MK_SHIFT,sector,&effect);
   if (effect != DROPEFFECT_COPY) return 8;
   DWORD started=GetTickCount();
@@ -93,6 +100,6 @@ int wmain(int argc, wchar_t **argv) {
   }
   BOOL ok=!g_cvBusy && g_cvLast[0] && GetFileAttributesW(g_cvLast)!=INVALID_FILE_ATTRIBUTES;
   cv_shutdown(); DestroyWindow(g_hwnd);
-  puts(ok ? "PASS: OLE registration, CF_HDROP, center cancellation, Shift, multiple-file selection, COPY effect, threaded conversion" : "FAIL: conversion");
+  puts(ok ? "PASS: OLE registration, delayed CF_HDROP retry without re-click, immediate paint, center cancellation, Shift, multiple-file selection, COPY effect, threaded conversion" : "FAIL: conversion");
   return ok ? 0 : 9;
 }
