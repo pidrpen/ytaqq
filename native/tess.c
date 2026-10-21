@@ -26,6 +26,14 @@
    («C:\Users\Иванов»). Поэтому он запускается из своей папки и получает
    только относительные пути. */
 
+/* С 2026.10.21.2 пакет принимается, только если его pack.txt — ровно тот, что
+   закреплён в программе (tess_pack.h, его пишет make_tess_pack.py). Раньше
+   pack.txt брался из того же места, что и файлы: кто может писать в общую
+   папку, подкладывал свой tesseract.exe вместе с «верными» отпечатками, и он
+   запускался у коллег при F6. Теперь отпечатки файлов идут из закреплённого
+   pack.txt, а папку пакета перед запуском один раз за сеанс сверяют целиком. */
+#include "tess_pack.h" /* TESS_PACK_SHA */
+
 #define TESS_PACK_MAX 64        /* файлов в пакете */
 #define TESS_FILE_MAX (24u << 20) /* один файл пакета — не больше 24 МБ */
 
@@ -82,15 +90,39 @@ static BOOL tess_dir_ok(const wchar_t *dir) {
   return GetFileAttributesW(p) != INVALID_FILE_ATTRIBUTES;
 }
 
+static BOOL tess_pack_read(const wchar_t *path, TessPack *p);
+static BOOL tess_file_ok(const wchar_t *path, const TessFile *f);
+static wchar_t g_tessTrusted[MAX_PATH]; /* папка, уже сверенная целиком в этом сеансе */
+static wchar_t g_tessRejected[MAX_PATH]; /* не прошла сверку: до новой установки не сверяем заново */
+
+/* Запускать tesseract.exe можно только из папки, где pack.txt закреплённый и
+   каждый файл совпал с ним по размеру и sha256. ~28 МБ — один раз за сеанс. */
+static BOOL tess_dir_trusted(const wchar_t *dir) {
+  if (!tess_dir_ok(dir)) return FALSE;
+  if (!wcscmp(dir, g_tessTrusted)) return TRUE;
+  if (!wcscmp(dir, g_tessRejected)) return FALSE;
+  wchar_t p[MAX_PATH];
+  _snwprintf(p, MAX_PATH, L"%s\\pack.txt", dir);
+  TessPack *pk = (TessPack *)calloc(1, sizeof(TessPack));
+  BOOL ok = pk && tess_pack_read(p, pk);
+  for (int i = 0; ok && i < pk->n; i++) {
+    _snwprintf(p, MAX_PATH, L"%s\\%s", dir, pk->f[i].name);
+    ok = tess_file_ok(p, &pk->f[i]);
+  }
+  free(pk);
+  lstrcpynW(ok ? g_tessTrusted : g_tessRejected, dir, MAX_PATH);
+  return ok;
+}
+
 /* рабочая папка пакета: сначала у данных (её обновляем), потом рядом с exe */
 static BOOL tess_find(wchar_t *dir) {
   if (g_dataDir[0]) {
     _snwprintf(dir, MAX_PATH, L"%s\\tesseract", g_dataDir);
-    if (tess_dir_ok(dir)) return TRUE;
+    if (tess_dir_trusted(dir)) return TRUE;
   }
   exe_dir(dir, MAX_PATH);
   wcsncat(dir, L"\\tesseract", MAX_PATH - wcslen(dir) - 1);
-  return tess_dir_ok(dir);
+  return tess_dir_trusted(dir);
 }
 
 static BOOL tess_ready(void) {
@@ -216,11 +248,27 @@ static BOOL tess_pack_parse(const char *t, TessPack *p) {
   return p->n > 0;
 }
 
+/* pack.txt — тот, что закреплён в программе? Переводы строк CRLF → LF: так же
+   считает make_tess_pack.py, копия через git или общую папку их может сменить. */
+static BOOL tess_pack_pinned(const char *t, DWORD n) {
+  char *norm = (char *)malloc(n + 1);
+  if (!norm) return FALSE;
+  DWORD k = 0;
+  for (DWORD i = 0; i < n; i++)
+    if (!(t[i] == '\r' && i + 1 < n && t[i + 1] == '\n')) norm[k++] = t[i];
+  char got[65];
+  BOOL ok = upd_buf_sha256(norm, k, got) && !strcmp(got, TESS_PACK_SHA);
+  free(norm);
+  return ok;
+}
+
 static BOOL tess_pack_read(const wchar_t *path, TessPack *p) {
   char *t = NULL;
   DWORD n = 0;
   if (!read_file_bytes(path, &t, &n, 64 * 1024)) return FALSE;
-  BOOL ok = tess_pack_parse(t, p);
+  BOOL ok = tess_pack_pinned(t, n);
+  if (!ok) upd_log(L"  %s — не тот пакет, что закреплён в этой версии программы; не беру", path);
+  ok = ok && tess_pack_parse(t, p);
   free(t);
   return ok;
 }
@@ -344,7 +392,7 @@ static BOOL tess_pack_sync(BOOL fromNet) {
     goto out;
   }
   upd_log(L"  выпущен: %s (%ld)", want->title, want->ver);
-  if (have->ver >= want->ver && tess_dir_ok(live)) {
+  if (have->ver >= want->ver && tess_dir_trusted(live)) { /* файл подменили — поставим заново */
     upd_log(L"  актуален");
     lstrcpynW(g_tessNote, L"Tesseract актуален", 160);
     ok = TRUE;
@@ -409,6 +457,7 @@ static BOOL tess_pack_sync(BOOL fromNet) {
     }
   }
   /* подмена: рабочую — в .old, новую — на её место */
+  g_tessTrusted[0] = g_tessRejected[0] = 0; /* новую папку сверят заново перед первым запуском */
   BOOL hadLive = GetFileAttributesW(live) != INVALID_FILE_ATTRIBUTES;
   if (hadLive && !MoveFileW(live, old)) {
     upd_log(L"  папка tesseract занята (идёт распознавание?) — подменю в следующий раз");

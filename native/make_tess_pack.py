@@ -13,13 +13,33 @@
 
 --share <папка> — то же самое обычными файлами в <папка>\\CursorPad-PLM\\tesseract
 для ПК без интернета (CursorPad берёт его оттуда сам).
+
+Каждый раз пишет и native/tess_pack.h — отпечаток этого pack.txt. Программа
+принимает только закреплённый в ней пакет, откуда бы он ни пришёл (общая папка,
+зеркала): новый пакет доходит до ПК вместе с новой версией CursorPad.
+    python native/make_tess_pack.py --pin   # только заголовок по public/tess/pack.txt
 """
 import datetime, hashlib, pathlib, shutil, sys
 
 HERE = pathlib.Path(__file__).resolve().parent
 PUB = HERE.parent / "public" / "tess"
+PIN = HERE / "tess_pack.h"
 SKIP = {"pack.txt"}
 MAX = 24 << 20  # tess.c: TESS_FILE_MAX
+
+
+def pin_text(pack_bytes):
+    """tess_pack.h для этого pack.txt; переводы строк — как в tess.c, CRLF → LF."""
+    sha = hashlib.sha256(pack_bytes.replace(b"\r\n", b"\n")).hexdigest()
+    return ("/* Сгенерировано native/make_tess_pack.py, руками не править.\n"
+            "   sha256 public/tess/pack.txt (CRLF → LF): программа принимает только этот пакет\n"
+            "   Tesseract — из общей папки, с зеркал или рядом с exe. */\n"
+            f'#define TESS_PACK_SHA "{sha}"\n')
+
+
+def write_pin():
+    PIN.write_text(pin_text((PUB / "pack.txt").read_bytes()), encoding="utf-8", newline="\n")
+    print("Записан", PIN.name)
 
 
 def files_of(src):
@@ -51,6 +71,9 @@ def next_version(prev_text):
 
 def main():
     args = sys.argv[1:]
+    if args == ["--pin"]:
+        write_pin()
+        return
     share = None
     if "--share" in args:
         i = args.index("--share")
@@ -86,6 +109,7 @@ def main():
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(p, dst)
     (PUB / "pack.txt").write_text(text, encoding="utf-8", newline="\n")
+    write_pin()
     total = sum(p.stat().st_size for _, p in files)
     print(f"public/tess: пакет {ver}, {len(files)} файлов, {total / 1048576:.1f} МБ, языки {', '.join(langs)}")
 

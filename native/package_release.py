@@ -7,12 +7,24 @@ import shutil
 import sys
 import zipfile
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import update_sign  # noqa: E402 — подпись выпуска (RELEASE_SIGNING.md)
+
 pub, native = map(Path, sys.argv[1:3])
 version = (native / 'version.txt').read_text(encoding='utf-8').splitlines()[:2]
 header = (native / 'version.h').read_text(encoding='utf-8')
 assert re.search(r'#define APP_VERSION (\d+)', header)[1] == version[0]
 assert re.search(r'#define APP_VERSION_A "([^"]+)"', header)[1] == version[1]
 date = tuple(map(int, version[1].split('.')[:3])) + (0, 0, 0)
+# Выпуск без подписи программа (с 2026.10.21.2) не поставит — лучше не собрать его вовсе.
+signing_key = update_sign.load_key()
+update_sign.check_header(signing_key)
+# Пакет Tesseract принимается только закреплённый в exe (tess.c, tess_pack.h).
+tess_list = native.parent / 'public' / 'tess' / 'pack.txt'
+if tess_list.exists():
+    tess_sha = hashlib.sha256(tess_list.read_bytes().replace(b'\r\n', b'\n')).hexdigest()
+    if tess_sha not in (native / 'tess_pack.h').read_text(encoding='utf-8'):
+        raise SystemExit('tess_pack.h не от public/tess/pack.txt: python native/make_tess_pack.py --pin')
 shutil.copyfile(native / 'cursorpad.manifest', pub / 'CursorPad.exe.manifest')
 shutil.copyfile(pub / 'CursorPad.exe', pub / 'CursorPad.bin')
 (pub / 'cursors-win').mkdir(exist_ok=True)
@@ -48,5 +60,8 @@ if tools_pack.parent.resolve() != pub.resolve():
 # Separate release asset: embedding both companions exceeds GitHub's 100 MiB
 # per-file limit. The EXE prepares tools automatically from the pinned asset.
 notes = (native / 'whatsnew.txt').read_text(encoding='utf-8').rstrip()
-(pub / 'version.txt').write_text('\n'.join(version + ['sha256 ' + sha, notes]) + '\n', encoding='utf-8')
+signature = update_sign.signature_line(version[0], version[1], sha, signing_key)
+# только LF: на Windows иначе вторая строка «2026.10.21.2\r», и метка выпуска в release.yml ломается
+(pub / 'version.txt').write_text('\n'.join(version + ['sha256 ' + sha, signature, notes]) + '\n',
+                                 encoding='utf-8', newline='\n')
 print(f'CursorPad {version[1]} sha256 {sha}')

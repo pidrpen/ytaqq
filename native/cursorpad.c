@@ -5324,6 +5324,34 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
       upd_data_file(p, L"sha-test.txt");
       write_all(p, h, (DWORD)strlen(h));
     }
+    /* --upd-verify version.txt отчёт — разобрать version.txt: отпечаток и подпись выпуска */
+    if (argv && argc >= 4 && !wcscmp(argv[1], L"--upd-verify")) {
+      char *t = NULL, line[160] = "unreadable";
+      DWORD n = 0;
+      if (read_file_bytes(argv[2], &t, &n, 256 * 1024)) {
+        upd_parse_extra(t);
+        snprintf(line, sizeof(line), "sha=%s sig=%d", g_updSha[0] ? g_updSha : "-", g_updSigOk);
+        free(t);
+      }
+      write_all(argv[3], line, (DWORD)strlen(line));
+      ExitProcess(0);
+    }
+    /* --tess-share данные общая отчёт — поставить Tesseract только из общей папки */
+    if (argv && argc >= 5 && !wcscmp(argv[1], L"--tess-share")) {
+      lstrcpynW(g_dataDir, argv[2], MAX_PATH);
+      lstrcpynW(g_shareRoot, argv[3], MAX_PATH);
+      g_updLog[0] = 0;
+      BOOL synced = tess_pack_sync(FALSE);
+      wchar_t dir[MAX_PATH];
+      BOOL trusted = tess_find(dir);
+      wchar_t rep[8000];
+      _snwprintf(rep, 8000, L"sync=%d trusted=%d\r\n%s", synced, trusted, g_updLog);
+      rep[7999] = 0;
+      char u[24000];
+      int k = WideCharToMultiByte(CP_UTF8, 0, rep, -1, u, sizeof(u), NULL, NULL);
+      write_all(argv[4], u, k > 0 ? (DWORD)k - 1 : 0);
+      ExitProcess(0);
+    }
     if (argv) LocalFree(argv);
   }
 #endif
