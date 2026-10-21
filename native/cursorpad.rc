@@ -128,3 +128,4 @@ END
 375 RCDATA "cursors/k7_app.ani"
 330 RCDATA "whatsnew.txt"
 346 RCDATA "match_rules.txt"
+380 RCDATA "ai_avatar_atlas.png"

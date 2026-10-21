@@ -65,7 +65,7 @@ static void rt_status(const wchar_t *fmt, ...) {
   if (g_rtWnd) {
     RECT rc;
     GetClientRect(g_rtWnd, &rc);
-    RECT st = {0, RS(84), rc.right, RS(112)};
+    RECT st = {0, RS(96), rc.right, RS(124)}; /* строка состояния (rt_paint) */
     InvalidateRect(g_rtWnd, &st, FALSE);
   }
 }
@@ -363,33 +363,39 @@ static void rt_show_log(void) {
   SetForegroundWindow(g_rtLog);
 }
 
+/* с 2026.10.21 — рамка окна-инструмента (tool_frame_paint): поля и таблица —
+   на карточке, «Сохранить в Excel…» — справа в подвале */
 static void rt_layout(void) {
   RECT rc;
   GetClientRect(g_rtWnd, &rc);
-  int pad = RS(14), y = PANEL_TITLE_H + RS(24), h = RS(26);
+  int pad = RS(26), y = PANEL_TITLE_H + RS(36), h = RS(26);
   place_panel_close(g_rtWnd);
   MoveWindow(g_rtDes, pad, y, RS(300), h, TRUE);
   MoveWindow(g_rtOrder, pad + RS(312), y, RS(170), h, TRUE);
   MoveWindow(g_rtNum, pad + RS(494), y, RS(150), h, TRUE);
   MoveWindow(GetDlgItem(g_rtWnd, ID_RT_BUILD), pad + RS(656), y - RS(1), RS(110), h + RS(2), TRUE);
-  int by = rc.bottom - pad - RS(30);
-  int ly = RS(116);
-  MoveWindow(g_rtList, pad, ly, rc.right - pad * 2, by - RS(10) - ly, TRUE);
-  MoveWindow(GetDlgItem(g_rtWnd, ID_RT_SAVE), pad, by, RS(170), RS(30), TRUE);
-  MoveWindow(GetDlgItem(g_rtWnd, ID_RT_COPY), pad + RS(180), by, RS(120), RS(30), TRUE);
-  MoveWindow(GetDlgItem(g_rtWnd, ID_RT_LOG), pad + RS(310), by, RS(120), RS(30), TRUE);
-  MoveWindow(GetDlgItem(g_rtWnd, ID_RT_DUMP), pad + RS(440), by, RS(200), RS(30), TRUE);
+  int foot = rc.bottom - RS(TOOL_FOOT_H), by = foot + (RS(TOOL_FOOT_H) - RS(30)) / 2;
+  int ly = RS(128);
+  MoveWindow(g_rtList, pad, ly, rc.right - pad * 2, foot - RS(26) - ly, TRUE);
+  /* подвал: второстепенные — слева, главное «Сохранить в Excel…» — справа */
+  MoveWindow(GetDlgItem(g_rtWnd, ID_RT_COPY), RS(16), by, RS(120), RS(30), TRUE);
+  MoveWindow(GetDlgItem(g_rtWnd, ID_RT_LOG), RS(16) + RS(128), by, RS(120), RS(30), TRUE);
+  MoveWindow(GetDlgItem(g_rtWnd, ID_RT_DUMP), RS(16) + RS(256), by, RS(200), RS(30), TRUE);
+  MoveWindow(GetDlgItem(g_rtWnd, ID_RT_SAVE), rc.right - RS(16) - RS(180), by, RS(180), RS(30), TRUE);
+  InvalidateRect(g_rtWnd, NULL, FALSE); /* карточка и подвал — по новому размеру */
 }
 
 static void rt_paint(HWND hwnd, HDC hdc) {
   RECT rc;
   GetClientRect(hwnd, &rc);
-  FillRect(hdc, &rc, bg_brush(FALSE));
-  draw_panel_header(hwnd, hdc, L"Маршрутная ведомость");
+  int foot = rc.bottom - RS(TOOL_FOOT_H);
+  RECT card = {RS(12), PANEL_TITLE_H + RS(12), rc.right - RS(12), foot - RS(12)};
+  tool_frame_paint(hwnd, hdc, L"Маршрутная ведомость", L"Состав, материал, заготовка, норма и маршрут по цехам — из PLM",
+                   card, foot);
   SetBkMode(hdc, TRANSPARENT);
   if (g_fontSmall) SelectObject(hdc, g_fontSmall);
   SetTextColor(hdc, COL_MUTED);
-  int pad = RS(14), y = PANEL_TITLE_H + RS(6);
+  int pad = RS(26), y = PANEL_TITLE_H + RS(18);
   RECT a = {pad, y, pad + RS(300), y + RS(18)}, b = {pad + RS(312), y, pad + RS(482), y + RS(18)},
        c = {pad + RS(494), y, pad + RS(644), y + RS(18)};
   DrawTextW(hdc, L"Обозначение сборки или детали", -1, &a, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
@@ -397,7 +403,7 @@ static void rt_paint(HWND hwnd, HDC hdc) {
   DrawTextW(hdc, L"Заказ № — в колонтитулы", -1, &c, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
   if (g_fontUi) SelectObject(hdc, g_fontUi);
   SetTextColor(hdc, g_rtBusy ? COL_SAGE : COL_INK);
-  RECT st = {pad, RS(84), rc.right - pad, RS(112)};
+  RECT st = {pad, RS(96), rc.right - pad, RS(124)};
   DrawTextW(hdc,
             g_rtStatus[0] ? g_rtStatus
                           : L"Состав, материал, заготовка, норма и маршрут по цехам — из PLM. Enter — собрать.",
@@ -546,6 +552,7 @@ static void route_show(void) {
     round_corners(g_rtWnd);
     mk_btn(g_rtWnd, L"×", ID_PANEL_CLOSE);
     mk_btn(g_rtWnd, L"–", ID_PANEL_MIN);
+    tool_frame_init(g_rtWnd); /* шапка, карточка и подвал — общие (cursorpad.c) */
     g_rtDes = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL, 0, 0,
                               10, 10, g_rtWnd, NULL, g_inst, NULL);
     g_rtOrder = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL, 0,

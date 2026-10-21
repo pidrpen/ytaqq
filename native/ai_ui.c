@@ -239,7 +239,8 @@ static void ai_ui_label(HDC hdc, HWND under, const wchar_t *text, RECT rc) {
   RECT wr;
   GetWindowRect(under, &wr);
   MapWindowPoints(HWND_DESKTOP, g_setHwnd, (POINT *)&wr, 2);
-  RECT a = {14, wr.top - 18, rc.right - 14, wr.top - 2};
+  /* подпись — над элементом, от его левого края (раздел стоит на карточке справа) */
+  RECT a = {wr.left, wr.top - 18, rc.right - 14, wr.top - 2};
   draw_set_label(hdc, text, a, rc.bottom);
 }
 

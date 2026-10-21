@@ -165,7 +165,7 @@ static wchar_t g_hkName[HK_COUNT][40]; /* на чём работает сейч�
 #define CLIP_H 26
 #define PAD 12
 #define GUTTER 26
-#define SET_W 356 /* шесть вкладок в ряд (с 2026.10.16.4, было 312) */
+#define SET_W 600 /* слева разделы, справа страница (с 2026.10.21; было 356 — шесть вкладок в ряд) */
 #define SET_FOOT_H 34 /* внизу окна Настроек — подвал с версией, прокрутка под него не заходит */
 /* полная высота содержимого Настроек считается при раскладке (g_setContentH):
    она зависит от того, какие разделы раскрыты; окно прокручивается, если выше экрана */
@@ -359,6 +359,7 @@ static BOOL g_hidden = FALSE;
 static UINT g_followMs = 10;
 static int g_followIdle;
 static POINT g_lastCur;
+static BOOL g_overBot; /* курсор на помощнике мини-ИИ: блокнот спрятан, чтобы не заслонять робота */
 
 static void follow_rate(HWND h, UINT ms) {
   if (ms == g_followMs) return;
@@ -475,6 +476,8 @@ static void create_ocr(HWND owner);
 static void show_ocr_text(const wchar_t *text);
 static void show_answer_text(const wchar_t *text);
 static void note_margins(void);
+
+#include "ui_theme.c" /* общий вид: палитра, рисование, хром окон, анимации */
 
 static void apply_dpi(HWND hwnd) {
   UINT dpi = 96;
@@ -752,6 +755,7 @@ static void layout_ocr(void);
 static void theme_zoom_fonts_reset(void);
 static void round_corners(HWND hwnd);
 static void theme_fit_windows(void);
+static void ac_retheme(void); /* ai_chat.c: цвета чата при смене темы */
 /* шрифт текста текущей темы: по нему строят свои шрифты окна с масштабом */
 static wchar_t g_faceBody[LF_FACESIZE] = L"Segoe UI";
 
@@ -1066,6 +1070,7 @@ static void apply_theme(void) {
   COL_MUTED = kThemes[g_theme].muted;
   COL_SAGE = kThemes[g_theme].sage;
   COL_LINE = blend_rgb(COL_INK, COL_PAPER, 224);
+  ui_sync_tokens();
   if (g_paper) DeleteObject(g_paper);
   if (g_paperDark) DeleteObject(g_paperDark);
   g_paper = CreateSolidBrush(COL_PAPER);
@@ -1111,6 +1116,9 @@ static void apply_theme(void) {
   theme_fit_windows();
   for (int i = 0; i < 6; i++)
     if (tops[i]) RedrawWindow(tops[i], NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
+  /* окна модулей (расчёты, PLM, чат ИИ…): хром Windows 11, рамки полей */
+  ui_theme_changed();
+  ac_retheme();
 }
 
 static void set_theme(int t) {
@@ -1585,6 +1593,8 @@ static void layout_children(void) {
     if (g_btnMore) MoveWindow(g_btnMore, cw - pad - ib * 2 - gap, iy, ib, ib, TRUE);
   }
   th += mh; /* дальше всё — под рядом режимов */
+  /* высота шапки — для подложки кнопок и бегущей линии (ui_theme.c) */
+  SetPropW(g_hwnd, L"CpUiHead", (HANDLE)(INT_PTR)th);
 
   int clipH = MulDiv(CLIP_H, dpi, 96);
   int histW = MulDiv(26, dpi, 96);
@@ -1627,18 +1637,10 @@ static void layout_children(void) {
   }
 }
 
+/* углы окна берутся из темы (у «Чертежа» прямые, у остальных круглые);
+   с 2026.10.21 — весь хром Windows 11: рамка и заголовок, см. ui_theme.c */
 static void round_corners(HWND hwnd) {
-  HMODULE dwm = LoadLibraryW(L"dwmapi.dll");
-  if (!dwm) return;
-  typedef HRESULT(WINAPI *DwmSetWindowAttributeFn)(HWND, DWORD, LPCVOID, DWORD);
-  DwmSetWindowAttributeFn fn =
-      (DwmSetWindowAttributeFn)GetProcAddress(dwm, "DwmSetWindowAttribute");
-  if (fn) {
-    /* углы окна берутся из темы: у «Чертежа» прямые, у остальных круглые */
-    int pref = (g_theme >= 0 && g_theme < THEME_COUNT) ? kThemes[g_theme].corners : 2;
-    fn(hwnd, 33, &pref, sizeof(pref));
-  }
-  FreeLibrary(dwm);
+  ui_window_chrome(hwnd);
 }
 
 static void apply_follow_state(void) {
@@ -2167,6 +2169,11 @@ static void draw_panel_header(HWND hwnd, HDC hdc, const wchar_t *title);
 static LRESULT panel_hittest(HWND hwnd, LPARAM lParam);
 static void place_panel_close(HWND hwnd);
 static void round_corners(HWND hwnd);
+/* рамка окна-инструмента (с 2026.10.21): светлая шапка с пояснением, страница
+   темнее, содержимое на карточке, подвал с кнопками — главная справа */
+#define TOOL_FOOT_H 52
+static void tool_frame_init(HWND hwnd);
+static void tool_frame_paint(HWND hwnd, HDC hdc, const wchar_t *title, const wchar_t *desc, RECT card, int footTop);
 
 #include "pad_extra.c"
 #include "fairy_fx.c"
@@ -2208,24 +2215,18 @@ static void set_idle_sec(int sec) {
   show_status(msg);
 }
 
+/* с 2026.10.21 скругления сглажены (ui_theme.c) — у всех тем и во всех
+   окнах, что рисуют через эту функцию */
 static void fill_round_rect(HDC hdc, RECT rc, COLORREF fill, COLORREF border, int rad) {
-  int d = rad * 2;
-  if (d < 2) d = 2;
-  HBRUSH br = CreateSolidBrush(fill);
-  HPEN pn = CreatePen(PS_SOLID, 1, border);
-  HGDIOBJ obr = SelectObject(hdc, br);
-  HGDIOBJ opn = SelectObject(hdc, pn);
-  RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, d, d);
-  SelectObject(hdc, obr);
-  SelectObject(hdc, opn);
-  DeleteObject(br);
-  DeleteObject(pn);
+  ui_round_fill(hdc, rc, rad < 1 ? 1 : rad, fill, border);
 }
 
 static void draw_panel_header(HWND hwnd, HDC hdc, const wchar_t *title) {
   RECT rc;
   GetClientRect(hwnd, &rc);
   const PadTheme *th = &kThemes[g_theme];
+  /* высота шапки — для подложки кнопок в ней (ui_theme.c) */
+  SetPropW(hwnd, L"CpUiHead", (HANDLE)(INT_PTR)PANEL_TITLE_H);
   if (th->head == HEAD_BANNER) {
     /* рамка по краю окна и знамя в шапке; если справа есть крестик,
        знамя кончается до него */
@@ -2298,6 +2299,57 @@ static void place_panel_close(HWND hwnd) {
   MoveWindow(b, rc.right - 14 - 26, (PANEL_TITLE_H - 24) / 2, 26, 24, TRUE);
   HWND m = GetDlgItem(hwnd, ID_PANEL_MIN);
   if (m) MoveWindow(m, rc.right - 14 - 26 - 4 - 26, (PANEL_TITLE_H - 24) / 2, 26, 24, TRUE);
+}
+
+/* ---- рамка окна-инструмента (с 2026.10.21) ---------------------------------
+   Роли поверхностей, как в приложениях Windows 11: шапка — светлая полоса с
+   названием и серым пояснением, под ней страница чуть темнее, содержимое — на
+   светлой карточке, внизу — светлая полоса с кнопками (главная — справа,
+   остальные — слева). Окно само решает, где карточка и где начинается подвал
+   (обычно rc.bottom - TOOL_FOOT_H). У рыцарской темы — прежний вид. */
+static void tool_frame_init(HWND hwnd) {
+  SetPropW(hwnd, L"CpUiHead", (HANDLE)(INT_PTR)-1); /* шапка светлая — без полосы темы */
+  SetPropW(hwnd, L"CpUiBg", (HANDLE)(INT_PTR)1);    /* все кнопки — на светлых поверхностях */
+}
+
+static void tool_frame_paint(HWND hwnd, HDC hdc, const wchar_t *title, const wchar_t *desc, RECT card, int footTop) {
+  RECT rc;
+  GetClientRect(hwnd, &rc);
+  if (knight_on()) {
+    FillRect(hdc, &rc, bg_brush(FALSE));
+    draw_panel_header(hwnd, hdc, title);
+    return;
+  }
+  COLORREF hair = blend_rgb(COL_LINE, COL_INK, 24);
+  HBRUSH line = CreateSolidBrush(hair);
+  FillRect(hdc, &rc, bg_brush(TRUE)); /* страница */
+  RECT head = {0, 0, rc.right, PANEL_TITLE_H};
+  FillRect(hdc, &head, bg_brush(FALSE));
+  RECT hr = {0, PANEL_TITLE_H - 1, rc.right, PANEL_TITLE_H};
+  FillRect(hdc, &hr, line);
+  SetBkMode(hdc, TRANSPARENT);
+  int right = rc.right - 50 - (GetDlgItem(hwnd, ID_PANEL_MIN) ? 30 : 0);
+  RECT t = {16, 0, right, PANEL_TITLE_H};
+  if (g_fontUi) SelectObject(hdc, g_fontUi);
+  SetTextColor(hdc, COL_INK);
+  SIZE sz = {0, 0};
+  GetTextExtentPoint32W(hdc, title, (int)wcslen(title), &sz);
+  DrawTextW(hdc, title, -1, &t, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+  if (desc && desc[0] && 16 + sz.cx + 16 < right) {
+    RECT d = {16 + sz.cx + 14, 0, right, PANEL_TITLE_H};
+    if (g_fontSmall) SelectObject(hdc, g_fontSmall);
+    SetTextColor(hdc, COL_MUTED);
+    DrawTextW(hdc, desc, -1, &d, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+  }
+  if (card.right > card.left && card.bottom > card.top)
+    ui_round_fill(hdc, card, kThemes[g_theme].radius == 0 ? 0 : 8, COL_PAPER, hair);
+  if (footTop > PANEL_TITLE_H && footTop < rc.bottom) {
+    RECT f = {0, footTop, rc.right, rc.bottom};
+    FillRect(hdc, &f, bg_brush(FALSE));
+    RECT fl = {0, footTop, rc.right, footTop + 1};
+    FillRect(hdc, &fl, line);
+  }
+  DeleteObject(line);
 }
 
 /* Кнопка рыцарской темы. Обычная — стальная пластина с заклёпками по
@@ -2466,22 +2518,134 @@ static int ui_glyph_of(int id) {
   return id == ID_PIN ? GL_PIN : id == ID_MORE_BTN ? GL_DOTS : id == ID_SETTINGS ? GL_GEAR : -1;
 }
 
-/* вкладка Настроек: открытая — залита цветом темы, прочие — только надпись */
+/* Кнопка (кроме рыцарской темы): под ней — фон родителя (углы сливаются с
+   окном), форма сглажена, фокус клавиатуры — кольцо цвета акцента; всё
+   рисуется в памяти и кладётся одним разом, без мигания. icon — знак из
+   Segoe Fluent Icons; нет шрифта значков — рисунок линиями (glyph) или
+   надпись. */
+static void pad_btn_paint(const DRAWITEMSTRUCT *dis, COLORREF fill, COLORREF bd, int rad, COLORREF fg,
+                          const wchar_t *label, int glyph, wchar_t icon) {
+  HWND btn = dis->hwndItem, parent = GetParent(btn);
+  RECT pr;
+  GetWindowRect(btn, &pr);
+  MapWindowPoints(HWND_DESKTOP, parent, (POINT *)&pr, 2);
+  UiCanvas cv;
+  BOOL ok = ui_canvas_begin(&cv, dis->hDC, pr, dis->rcItem.left, dis->rcItem.top, FALSE);
+  HDC dc = ok ? cv.dc : dis->hDC;
+  RECT r = ok ? pr : dis->rcItem;
+  if (ok) {
+    ui_underlay(&cv, parent, pr);
+    UiShape s;
+    memset(&s, 0, sizeof(s));
+    s.r = (float)rad;
+    if (fill == (COLORREF)-1) { /* без своей подложки: bd — оттенок, в старшем байте — сколько его */
+      s.fill = bd & 0xFFFFFF;
+      s.fillA = (int)((DWORD)bd >> 24);
+    } else {
+      s.fill = fill;
+      s.fillA = 255;
+      if (bd != fill) {
+        s.border = bd;
+        s.borderA = 255;
+        s.bw = 1.0f;
+      }
+    }
+    ui_shape(&cv, r, &s);
+    if ((dis->itemState & ODS_FOCUS) && !(dis->itemState & ODS_NOFOCUSRECT)) {
+      UiShape f;
+      memset(&f, 0, sizeof(f));
+      f.r = (float)(rad > 2 ? rad - 2 : rad);
+      f.border = fill == COL_SAGE ? COL_PAPER : COL_SAGE;
+      f.borderA = 230;
+      f.bw = 1.5f;
+      RECT fr = r;
+      InflateRect(&fr, -2, -2);
+      ui_shape(&cv, fr, &f);
+    }
+  } else if (fill != (COLORREF)-1) {
+    fill_round_rect(dc, r, fill, bd, rad);
+  }
+  SetBkMode(dc, TRANSPARENT);
+  SetTextColor(dc, fg);
+  int side =(r.right - r.left) < (r.bottom - r.top) ? r.right - r.left : r.bottom - r.top;
+  HFONT ifont = icon ? ui_icon_font(side * (glyph == -3 ? 38 : 50) / 100) : NULL;
+  if (ifont) {
+    HGDIOBJ of = SelectObject(dc, ifont);
+    DrawTextW(dc, &icon, 1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    SelectObject(dc, of);
+  } else if (glyph == -2) {
+    draw_down_arrow(dc, r, fg);
+  } else if (glyph >= 0) {
+    draw_ui_glyph(dc, r, glyph, fg);
+  } else {
+    HGDIOBJ of = g_fontUi ? SelectObject(dc, g_fontUi) : NULL;
+    DrawTextW(dc, label, -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    if (of) SelectObject(dc, of);
+  }
+  if (ok) ui_canvas_end(&cv, dis->hDC);
+}
+
+/* значки разделов Настроек (Segoe Fluent Icons / MDL2), по номеру раздела */
+static const wchar_t kSecIcons[SEC_COUNT] = {0xE8B0, 0xE945, 0xE790, 0xE721, 0xE712, 0xE99A};
+
+/* раздел Настроек — строка левой панели, как в «Параметрах» Windows 11:
+   значок и название; открытый — на чуть более тёмной подложке с полоской
+   цвета акцента слева, под мышью подложка проступает плавно */
 static void draw_settings_tab(const DRAWITEMSTRUCT *dis, int sec) {
-  HDC dc = dis->hDC;
   RECT rc = dis->rcItem;
   BOOL open = sec == g_tab, press = (dis->itemState & ODS_SELECTED) != 0;
-  int tr = kThemes[g_theme].radius, h = rc.bottom - rc.top;
-  int rad = tr < 0 ? h / 2 : tr;
-  COLORREF fill = open ? COL_SAGE : blend_rgb(COL_PAPER, COL_PAPER_DARK, 128);
-  if (press) fill = blend_rgb(fill, COL_INK, 30);
-  fill_round_rect(dc, rc, fill, open ? COL_SAGE : COL_LINE, rad);
   wchar_t t[32] = {0};
   GetWindowTextW(dis->hwndItem, t, 32);
-  SetBkMode(dc, TRANSPARENT);
-  SetTextColor(dc, open ? COL_PAPER : COL_INK);
-  if (g_fontUi) SelectObject(dc, g_fontUi);
-  DrawTextW(dc, t, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+  HWND btn = dis->hwndItem, parent = GetParent(btn);
+  RECT pr;
+  GetWindowRect(btn, &pr);
+  MapWindowPoints(HWND_DESKTOP, parent, (POINT *)&pr, 2);
+  UiCanvas cv;
+  if (!ui_canvas_begin(&cv, dis->hDC, pr, rc.left, rc.top, FALSE)) return;
+  SetBrushOrgEx(cv.dc, -cv.lx, -cv.ly, NULL);
+  FillRect(cv.dc, &pr, bg_brush(TRUE)); /* подложка панели разделов */
+  int hot = ui_hover_level(btn);
+  int shade = open ? 20 : hot * 12 / 255;
+  if (press) shade += 10;
+  UiShape s;
+  memset(&s, 0, sizeof(s));
+  s.r = (float)ui_px(btn, 6);
+  if (shade > 0) {
+    s.fill = blend_rgb(COL_PAPER_DARK, COL_INK, shade);
+    s.fillA = 255;
+    ui_shape(&cv, pr, &s);
+  }
+  int h = pr.bottom - pr.top, x = pr.left + ui_px(btn, 12);
+  if (open) { /* полоска акцента */
+    int ih = h * 45 / 100;
+    RECT bar = {pr.left + ui_px(btn, 1), pr.top + (h - ih) / 2, pr.left + ui_px(btn, 4), pr.top + (h - ih) / 2 + ih};
+    s.fill = COL_SAGE;
+    s.r = -1;
+    ui_shape(&cv, bar, &s);
+  }
+  SetTextColor(cv.dc, COL_INK);
+  HFONT ifont = ui_icon_font(ui_px(btn, 16));
+  if (ifont) {
+    HGDIOBJ of = SelectObject(cv.dc, ifont);
+    RECT ir = {x, pr.top, x + ui_px(btn, 18), pr.bottom};
+    DrawTextW(cv.dc, &kSecIcons[sec], 1, &ir, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    SelectObject(cv.dc, of);
+    x += ui_px(btn, 30);
+  }
+  HGDIOBJ of = g_fontBody ? SelectObject(cv.dc, g_fontBody) : NULL;
+  RECT tr = {x, pr.top, pr.right - ui_px(btn, 6), pr.bottom};
+  DrawTextW(cv.dc, t, -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+  if (of) SelectObject(cv.dc, of);
+  if ((dis->itemState & ODS_FOCUS) && !(dis->itemState & ODS_NOFOCUSRECT)) {
+    UiShape f;
+    memset(&f, 0, sizeof(f));
+    f.r = (float)ui_px(btn, 6);
+    f.border = COL_SAGE;
+    f.borderA = 230;
+    f.bw = 1.5f;
+    ui_shape(&cv, pr, &f);
+  }
+  ui_canvas_end(&cv, dis->hDC);
 }
 
 static void draw_pad_button(const DRAWITEMSTRUCT *dis) {
@@ -2490,6 +2654,7 @@ static void draw_pad_button(const DRAWITEMSTRUCT *dis) {
   BOOL press = (dis->itemState & ODS_SELECTED) != 0;
   BOOL disab = (dis->itemState & ODS_DISABLED) != 0;
   int id = (int)dis->CtlID;
+  ui_btn_track(dis->hwndItem); /* подсветка под мышью — у каждой кнопки */
   if (id >= ID_SEC_BASE && id < ID_SEC_BASE + SEC_COUNT) {
     draw_settings_tab(dis, id - ID_SEC_BASE);
     return;
@@ -2505,7 +2670,9 @@ static void draw_pad_button(const DRAWITEMSTRUCT *dis) {
                  id == ID_SH_INVITE || id == ID_SH_ACCEPT || id == ID_SH_DRAWOK ||
                  id == ID_ANS_DRAW || id == ID_ANS_SHOW || /* чертёж нашёлся — кнопки синие */
                  id == ID_MSG_SEND || id == ID_MSG_REPLY || id == ID_RT_BUILD || id == ID_RT_SAVE ||
-                 id == 4714; /* «Применить» в окне «Спросить ИИ» */
+                 id == 4714 || /* «Применить» в окне «Спросить ИИ» */
+                 id == 4703 || /* и «Отправить» там же */
+                 id == ID_XP_SAVE || id == ID_PK_SAVE; /* главное действие в подвале окон PLM */
   BOOL quiet = id == ID_CLOSE || id == ID_MIN || id == ID_PANEL_CLOSE || id == ID_PANEL_MIN;
   COLORREF fill, fg, bd;
   /* рыцарская тема рисует кнопки целиком по-своему; кнопка выбора
@@ -2601,6 +2768,32 @@ static void draw_pad_button(const DRAWITEMSTRUCT *dis) {
       bd = COL_LINE;
     }
   }
+  int hot = disab ? 0 : ui_hover_level(dis->hwndItem);
+  int gl = ui_glyph_of(id);
+  /* значки — шрифтом Segoe Fluent Icons, если он есть (иначе линиями) */
+  wchar_t icon = id == ID_CLIPHIST ? 0xE70D /* ChevronDown */
+                 : gl == GL_PIN    ? (g_follow ? 0xE718 : 0xE840) /* Pin / Pinned */
+                 : gl == GL_DOTS   ? 0xE712
+                 : gl == GL_GEAR   ? 0xE713
+                                   : 0;
+  if (quiet) {
+    /* «закрыть» и «свернуть» — как в заголовке Windows 11: без подложки,
+       под мышью проступает серая, у «закрыть» — красная */
+    BOOL closeBtn = id == ID_CLOSE || id == ID_PANEL_CLOSE;
+    if ((t[0] == 0x00D7 || t[0] == 0x2013 || t[0] == L'-') && t[1] == 0) icon = closeBtn ? 0xE8BB : 0xE921;
+    int lvl = press ? 255 : hot;
+    COLORREF tint = closeBtn ? RGB(196, 43, 28) : COL_INK;
+    int amt = closeBtn ? lvl : lvl * (press ? 34 : 22) / 255;
+    pad_btn_paint(dis, (COLORREF)-1, (COLORREF)(tint | ((DWORD)amt << 24)), kThemes[g_theme].radius == 0 ? 0 : 6,
+                  closeBtn && lvl > 128 ? RGB(255, 255, 255) : (disab ? COL_MUTED : COL_INK), t, -3, icon);
+    return;
+  }
+  /* под мышью — чуть темнее (с 2026.10.21), плавно за 0,1 с */
+  if (hot && !press) {
+    BOOL filled = on || primary;
+    fill = blend_rgb(fill, COL_INK, hot * (filled ? 26 : 14) / 255);
+    if (!filled) bd = blend_rgb(bd, COL_INK, hot * 40 / 255);
+  }
   int h = rc.bottom - rc.top;
   /* скругление задаёт тема; кнопки выбора темы рисуются формой своей
      темы — сразу видно, что получится */
@@ -2608,29 +2801,22 @@ static void draw_pad_button(const DRAWITEMSTRUCT *dis) {
   int rad;
   if (tr < 0) rad = h / 2;
   else if (tr == 0) rad = 0;
-  else rad = quiet ? (h / 2) : (h >= 26 ? tr : (tr > 2 ? tr - 2 : tr));
-  fill_round_rect(dis->hDC, rc, fill, bd, rad);
-  SetBkMode(dis->hDC, TRANSPARENT);
-  SetTextColor(dis->hDC, fg);
-  if (g_fontUi) SelectObject(dis->hDC, g_fontUi);
+  else rad = h >= 26 ? tr : (tr > 2 ? tr - 2 : tr);
   const wchar_t *label = t;
   if (themeBtn) label = kThemes[ti].name;
   else if (t[0] == 0x25CF && t[1] == L' ') label = t + 2;
-  if (id == ID_CLIPHIST) {
-    draw_down_arrow(dis->hDC, rc, fg);
-    return;
-  }
-  if (ui_glyph_of(id) >= 0) {
-    draw_ui_glyph(dis->hDC, rc, ui_glyph_of(id), fg);
-    return;
-  }
-  DrawTextW(dis->hDC, label, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+  pad_btn_paint(dis, fill, bd, rad, fg, label, id == ID_CLIPHIST ? -2 : gl, icon);
 }
 
 static HWND mk_btn(HWND parent, const wchar_t *text, int id) {
   HWND b = CreateWindowExW(0, L"BUTTON", text, WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 0, 0, 80, 26,
                            parent, (HMENU)(INT_PTR)id, NULL, NULL);
   if (b && g_fontUi) SendMessageW(b, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
+  /* крестик в шапке — значит, у окна шапка панели: её высоту знают сразу,
+     ещё до первой отрисовки (подложка кнопок в шапке-полосе, ui_theme.c) */
+  if (b && parent && (id == ID_PANEL_CLOSE || id == ID_PANEL_MIN) && !GetPropW(parent, L"CpUiHead"))
+    SetPropW(parent, L"CpUiHead", (HANDLE)(INT_PTR)PANEL_TITLE_H);
+  if (b) ui_btn_track(b);
   return b;
 }
 
@@ -3184,11 +3370,11 @@ static void draw_set_label(HDC hdc, const wchar_t *text, RECT r, int clientBotto
   DrawTextW(hdc, text, -1, &r, DT_LEFT | DT_SINGLELINE);
 }
 
-/* Настройки — вкладками (с 2026.10.14.4): видна одна страница, окно
-   небольшое и почти не прокручивается. Порядок вкладок можно менять правым
-   щелчком по вкладке, он запоминается (g_tabOrder), как и открытая вкладка.
-   Элементы других вкладок уезжают далеко за край — их прячет
-   clip_settings_children, как и всё, что ушло под шапку при прокрутке. */
+/* Настройки — разделами (с 2026.10.14.4 вкладками, с 2026.10.21 столбиком
+   слева, как «Параметры» Windows 11): видна одна страница. Порядок разделов
+   можно менять правым щелчком по разделу, он запоминается (g_tabOrder), как и
+   открытый раздел. Элементы других разделов уезжают далеко за край — их
+   прячет clip_settings_children, как и всё, что ушло под шапку при прокрутке. */
 static const wchar_t *const kSecNames[SEC_COUNT] = {L"Курсор", L"Эффект", L"Вид", L"Поиск", L"Ещё", L"ИИ"};
 #define SET_SEC_H 28
 static int g_setContentH = 480; /* высота содержимого: по самой длинной вкладке */
@@ -3217,6 +3403,123 @@ static int set_grid(HWND *b, int n, int cols, int x, int y, int w, int bh, int g
 
 #include "ai_ui.c" /* вкладка «ИИ» */
 
+/* ---- Настройки как «Параметры» Windows 11 (с 2026.10.21) ------------------
+   Слева — разделы со значками (порядок — правым щелчком, как раньше), справа —
+   страница раздела: заголовок, над каждой карточкой — название группы; в
+   карточке — строки: название и серое пояснение слева, элемент справа, а ряд
+   вариантов — под ними; между строками — тонкие линии. Элементы те же, что
+   были (те же ID и порядок обхода клавишей Tab), меняется только раскладка.
+   Подписи, карточки и линии запоминаются при раскладке (g_setDeco) и
+   рисуются в WM_PAINT; прокручивается только страница, разделы стоят. */
+#define SET_RAIL_W 172 /* панель разделов */
+#define SET_NAV_H 36   /* строка раздела */
+#define SET_PAGE_PAD 20
+#define SET_CARD_PAD 14
+enum { SD_PAGE, SD_GROUP, SD_TITLE, SD_DESC, SD_CARD, SD_SEP };
+typedef struct {
+  RECT r; /* в координатах содержимого (до прокрутки) */
+  int kind;
+  const wchar_t *text;
+} SetDeco;
+#define SET_DECO_N 96
+static SetDeco g_setDeco[SET_DECO_N];
+static int g_setDecoN;
+static int g_sy;              /* куда класть дальше по высоте */
+static int g_sx0, g_sx1;      /* края карточек */
+static int g_cardTop, g_cardRows;
+static HDC g_setMeasure;      /* мерить подписи при раскладке */
+static wchar_t g_setVerDesc[64];
+
+static void sd_add(int kind, int l, int t, int r, int b, const wchar_t *text) {
+  if (!g_layOpen || g_setDecoN >= SET_DECO_N) return;
+  SetDeco *d = &g_setDeco[g_setDecoN++];
+  SetRect(&d->r, l, t, r, b);
+  d->kind = kind;
+  d->text = text;
+}
+
+/* высота текста в ширину w (с переносом) */
+static int sd_text_h(HFONT f, const wchar_t *t, int w) {
+  if (!t || !t[0] || !g_setMeasure) return 0;
+  HGDIOBJ of = f ? SelectObject(g_setMeasure, f) : NULL;
+  RECT r = {0, 0, w > 20 ? w : 20, 0};
+  DrawTextW(g_setMeasure, t, -1, &r, DT_LEFT | DT_WORDBREAK | DT_CALCRECT | DT_NOPREFIX);
+  if (of) SelectObject(g_setMeasure, of);
+  return r.bottom;
+}
+
+static void sd_page(const wchar_t *title) {
+  int h = sd_text_h(g_fontDisplay, title, g_sx1 - g_sx0) + 4;
+  sd_add(SD_PAGE, g_sx0, g_sy, g_sx1, g_sy + h, title);
+  g_sy += h + 12;
+}
+
+static void sd_group(const wchar_t *head) {
+  int h = sd_text_h(g_fontUi, head, g_sx1 - g_sx0);
+  sd_add(SD_GROUP, g_sx0 + 2, g_sy, g_sx1, g_sy + h, head);
+  g_sy += h + 6;
+}
+
+static void sd_card_begin(void) {
+  g_cardTop = g_sy;
+  g_cardRows = 0;
+}
+
+static void sd_card_end(void) {
+  sd_add(SD_CARD, g_sx0, g_cardTop, g_sx1, g_sy, NULL);
+  g_sy += 20;
+}
+
+/* новая строка карточки: между строками — тонкая линия */
+static void sd_row_start(void) {
+  if (g_cardRows++) sd_add(SD_SEP, g_sx0 + 1, g_sy, g_sx1 - 1, g_sy + 1, NULL);
+}
+
+/* название и пояснение во всю ширину; возвращает, где ставить элементы */
+static int sd_stack(const wchar_t *title, const wchar_t *desc) {
+  sd_row_start();
+  int x0 = g_sx0 + SET_CARD_PAD, x1 = g_sx1 - SET_CARD_PAD, y = g_sy + 12;
+  if (title) {
+    int h = sd_text_h(g_fontBody, title, x1 - x0);
+    sd_add(SD_TITLE, x0, y, x1, y + h, title);
+    y += h;
+  }
+  if (desc) {
+    int h = sd_text_h(g_fontSmall, desc, x1 - x0);
+    sd_add(SD_DESC, x0, y + 1, x1, y + 1 + h, desc);
+    y += h + 1;
+  }
+  return y + ((title || desc) ? 8 : 0);
+}
+static void sd_stack_end(int y) { g_sy = y + 12; }
+
+/* строка: название и пояснение слева, n элементов справа шириной w[i] */
+static void sd_row(const wchar_t *title, const wchar_t *desc, HWND *ctl, const int *w, int n, int ctlH) {
+  sd_row_start();
+  int x0 = g_sx0 + SET_CARD_PAD, x1 = g_sx1 - SET_CARD_PAD, cw = 0;
+  for (int i = 0; i < n; i++) cw += w[i] + (i ? 8 : 0);
+  int tw = x1 - x0 - cw - 16;
+  int th = sd_text_h(g_fontBody, title, tw), dh = sd_text_h(g_fontSmall, desc, tw);
+  int textH = th + (dh ? dh + 1 : 0);
+  int rowH = (textH > ctlH ? textH : ctlH) + 24;
+  int ty = g_sy + (rowH - textH) / 2;
+  if (title) sd_add(SD_TITLE, x0, ty, x0 + tw, ty + th, title);
+  if (desc) sd_add(SD_DESC, x0, ty + th + 1, x0 + tw, ty + th + 1 + dh, desc);
+  int cx = x1 - cw, cy = g_sy + (rowH - ctlH) / 2;
+  for (int i = 0; i < n; i++) {
+    set_place(ctl[i], cx, cy, w[i], ctlH);
+    cx += w[i] + 8;
+  }
+  g_sy += rowH;
+}
+
+/* строка из одного элемента во всю ширину (галочка, длинная кнопка) */
+static void sd_full(HWND ctl, int h) {
+  sd_row_start();
+  set_place(ctl, g_sx0 + SET_CARD_PAD, g_sy + 8, g_sx1 - g_sx0 - 2 * SET_CARD_PAD, h);
+  g_sy += h + 16;
+}
+
 static void layout_settings(void) {
   if (!g_setHwnd) return;
   RECT rc;
@@ -3225,106 +3528,175 @@ static void layout_settings(void) {
   if (maxScroll < 0) maxScroll = 0;
   if (g_setScroll > maxScroll) g_setScroll = maxScroll;
   if (g_setScroll < 0) g_setScroll = 0;
-  int pad = 14, gap = 7, btnH = 28, lab = 22, browseW = 78;
-  int cw = rc.right - pad;
-  int fullW = cw - pad;
-  int half = (fullW - gap) / 2;
-  int y0 = PANEL_TITLE_H + 8, yEnd = 0;
+  int gap = 8, btnH = 30, lab = 22, browseW = 92;
+  int yEnd = 0;
   place_panel_close(g_setHwnd);
-  { /* ряд вкладок в выбранном порядке */
-    int tg = 4, tw = (fullW - tg * (SEC_COUNT - 1)) / SEC_COUNT;
+  { /* разделы — столбиком слева, в выбранном порядке; не прокручиваются */
     for (int pos = 0; pos < SEC_COUNT; pos++) {
       HWND b = g_btnSec[g_tabOrder[pos]];
-      int x = pad + pos * (tw + tg);
-      if (b) MOVE_SET(b, x, y0, pos == SEC_COUNT - 1 ? cw - x : tw, SET_SEC_H, TRUE);
+      if (b) MoveWindow(b, 8, PANEL_TITLE_H + 10 + pos * (SET_NAV_H + 2), SET_RAIL_W - 16, SET_NAV_H, TRUE);
     }
   }
-  y0 += SET_SEC_H + 12;
+  g_sx0 = SET_RAIL_W + 4;
+  g_sx1 = rc.right - SET_PAGE_PAD;
+  if (g_sx1 < g_sx0 + 240) g_sx1 = g_sx0 + 240;
+  int x0 = g_sx0 + SET_CARD_PAD, x1 = g_sx1 - SET_CARD_PAD, iw = x1 - x0;
+  g_setDecoN = 0;
+  g_setMeasure = GetDC(g_setHwnd);
   for (int sec = 0; sec < SEC_COUNT; sec++) {
     g_layOpen = sec == g_tab;
-    int y = y0;
+    g_sy = PANEL_TITLE_H + 16;
+    sd_page(kSecNames[sec]);
     switch (sec) {
     case 0: /* курсоры с просмотром */
     case 1: { /* эффекты с тем же просмотром */
-      if (g_layOpen) set_place(g_preview, pad, y, fullW, 150);
-      y += 150 + gap + lab;
+      sd_card_begin();
+      int y = sd_stack(NULL, NULL);
+      if (g_layOpen) set_place(g_preview, x0, y, iw, 150);
+      sd_stack_end(y + 150);
+      sd_card_end();
+      sd_card_begin();
       if (sec == 0) {
         HWND sk[7 + ST_COUNT] = {g_btnK2, g_btnK3, g_btnK4, g_btnK5, g_btnK6, g_btnK7};
         for (int i = 0; i < ST_COUNT; i++) sk[6 + i] = g_btnSt[i];
         sk[6 + ST_COUNT] = g_btnSys;
-        y += set_grid(sk, 7 + ST_COUNT, 3, pad, y, fullW, btnH, gap);
+        y = sd_stack(L"Курсор", L"Персонажи и стили; «Курсор Windows» — обычные стрелки");
+        y += set_grid(sk, 7 + ST_COUNT, 3, x0, y, iw, btnH, gap) - gap;
       } else {
-        y += set_grid(g_btnFx, FX_OPTIONS, 3, pad, y, fullW, btnH, gap);
+        y = sd_stack(L"Эффект при нажатии", L"Любой курсор можно сочетать с любым эффектом");
+        y += set_grid(g_btnFx, FX_OPTIONS, 3, x0, y, iw, btnH, gap) - gap;
       }
+      sd_stack_end(y);
+      sd_card_end();
       break;
     }
-    case 2: /* тема, прозрачность, бой при бездействии */
-      y += lab;
-      y += set_grid(g_btnTheme, THEME_COUNT, 4, pad, y, fullW, btnH, gap) + lab;
-      set_place(g_tbBg, pad, y, fullW, btnH);
-      y += btnH + 24;
-      set_place(g_tbFg, pad, y, fullW, btnH);
-      y += btnH + gap + lab;
-      y += set_grid(g_btnIdle, IDLE_OPTIONS, IDLE_OPTIONS, pad, y, fullW, btnH, gap) + lab;
-      y += set_grid(g_btnIdleSz, IDLE_SIZES, IDLE_SIZES, pad, y, fullW, btnH, gap);
-      set_place(g_btnIdleShow, pad, y, fullW, btnH);
-      y += btnH + gap;
-      set_place(g_btnIdleWatch, pad, y, fullW, btnH);
-      y += btnH + gap;
-      break;
-    case 3: /* где искать файлы и вход в PLM */
-      set_place(g_filesRootEdit, pad, y, fullW - browseW - gap, btnH);
-      set_place(GetDlgItem(g_setHwnd, ID_FILES_BROWSE), cw - browseW, y, browseW, btnH);
-      y += btnH + gap;
-      set_place(g_btnIdx, pad, y, fullW, btnH);
-      y += btnH + gap;
-      set_place(g_filesStat, pad, y, fullW, btnH);
-      set_place(g_filesBar, pad, y + btnH - 8, fullW, 6);
-      y += btnH + gap;
-      set_place(g_chkNotify, pad, y, fullW, btnH);
-      y += btnH + gap;
-      set_place(g_filesWatchEdit, pad, y, fullW - browseW - gap, btnH);
-      set_place(GetDlgItem(g_setHwnd, ID_WATCH_BROWSE), cw - browseW, y, browseW, btnH);
-      y += btnH + gap;
-      set_place(g_plmServer, pad, y, half, btnH);
-      set_place(g_plmDb, pad + half + gap, y, fullW - half - gap, btnH);
-      y += btnH + gap;
-      set_place(g_plmUser, pad, y, half, btnH);
-      set_place(g_plmPass, pad + half + gap, y, fullW - half - gap, btnH);
-      y += btnH + gap;
-      break;
-    case SEC_AI: /* локальный ИИ */
-      y = ai_ui_layout(pad, y, fullW, cw, btnH, gap, lab, browseW);
-      break;
-    default: /* общая папка (нарды и шашки идут через неё), распознавание, программа */
-      y += lab;
-      set_place(g_shareEdit, pad, y, fullW - browseW - gap, btnH);
-      set_place(GetDlgItem(g_setHwnd, ID_SHARE_BROWSE), cw - browseW, y, browseW, btnH);
-      y += btnH + gap;
-      set_place(g_chkServe, pad, y, fullW, btnH);
-      y += btnH + gap;
-      set_place(g_btnNd, pad, y, half, btnH);
-      set_place(g_btnSh, pad + half + gap, y, fullW - half - gap, btnH);
-      y += btnH + gap;
-      set_place(g_chkTess, pad, y, fullW, btnH);
-      y += btnH + gap;
-      set_place(g_ocr, pad, y, fullW, btnH);
-      y += btnH + gap;
-      set_place(g_btnHk, pad, y, fullW, btnH);
-      y += btnH + gap;
-      set_place(g_chkAuto, pad, y, fullW, btnH);
-      y += btnH + gap;
-      set_place(g_chkAnsPin, pad, y, fullW, btnH);
-      y += btnH + gap;
-      set_place(g_btnUp, pad, y, fullW, btnH);
-      y += btnH + gap;
+    case 2: { /* тема, прозрачность, бой при бездействии */
+      sd_group(L"Оформление");
+      sd_card_begin();
+      int y = sd_stack(L"Тема", L"Меняет шрифт, форму кнопок, шапки и углы окон");
+      y += set_grid(g_btnTheme, THEME_COUNT, 3, x0, y, iw, btnH, gap) - gap;
+      sd_stack_end(y);
+      sd_card_end();
+      sd_group(L"Прозрачность окна");
+      sd_card_begin();
+      y = sd_stack(L"Пока окно следует за курсором", NULL);
+      set_place(g_tbBg, x0 - 4, y - 4, iw + 8, btnH);
+      sd_stack_end(y + btnH - 8);
+      y = sd_stack(L"Когда окно закреплено", NULL);
+      set_place(g_tbFg, x0 - 4, y - 4, iw + 8, btnH);
+      sd_stack_end(y + btnH - 8);
+      sd_card_end();
+      sd_group(L"Бой Годжо и Сукуны");
+      sd_card_begin();
+      y = sd_stack(L"Начинать, если мышь не трогать", NULL);
+      y += set_grid(g_btnIdle, IDLE_OPTIONS, IDLE_OPTIONS, x0, y, iw, btnH, gap) - gap;
+      sd_stack_end(y);
+      y = sd_stack(L"Размер бойцов", NULL);
+      y += set_grid(g_btnIdleSz, IDLE_SIZES, IDLE_SIZES, x0, y, iw, btnH, gap) - gap;
+      sd_stack_end(y);
+      {
+        HWND c[1] = {g_btnIdleShow};
+        int w[1] = {176};
+        sd_row(L"Показать бой", L"Сразу, не дожидаясь бездействия", c, w, 1, btnH);
+      }
+      y = sd_stack(L"Режим просмотра", L"Бой идёт и при работе мышью; щелчки проходят сквозь него");
+      set_place(g_btnIdleWatch, x0, y, iw, btnH);
+      sd_stack_end(y + btnH);
+      sd_card_end();
       break;
     }
-    if (y > yEnd) yEnd = y;
+    case 3: { /* где искать файлы и вход в PLM */
+      sd_group(L"Файлы");
+      sd_card_begin();
+      int y = sd_stack(L"Папка с файлами", L"Сетевая папка, где искать файлы по имени");
+      set_place(g_filesRootEdit, x0, y, iw - browseW - gap, btnH);
+      set_place(GetDlgItem(g_setHwnd, ID_FILES_BROWSE), x1 - browseW, y, browseW, btnH);
+      sd_stack_end(y + btnH);
+      y = sd_stack(L"Индекс файлов", NULL);
+      set_place(g_filesStat, x0, y + 4, iw - 150 - gap, btnH - 6);
+      set_place(g_filesBar, x0, y + btnH, iw - 150 - gap, 6);
+      set_place(g_btnIdx, x1 - 150, y, 150, btnH);
+      sd_stack_end(y + btnH + 6);
+      sd_full(g_chkNotify, btnH);
+      y = sd_stack(L"Следить за изменениями", L"Папка внутри архива; пусто — вся папка");
+      set_place(g_filesWatchEdit, x0, y, iw - browseW - gap, btnH);
+      set_place(GetDlgItem(g_setHwnd, ID_WATCH_BROWSE), x1 - browseW, y, browseW, btnH);
+      sd_stack_end(y + btnH);
+      sd_card_end();
+      sd_group(L"PLM");
+      sd_card_begin();
+      y = sd_stack(L"Вход в базу PLM", L"Сервер SQL, база, логин и пароль");
+      int half = (iw - gap) / 2;
+      set_place(g_plmServer, x0, y, half, btnH);
+      set_place(g_plmDb, x0 + half + gap, y, iw - half - gap, btnH);
+      y += btnH + gap;
+      set_place(g_plmUser, x0, y, half, btnH);
+      set_place(g_plmPass, x0 + half + gap, y, iw - half - gap, btnH);
+      sd_stack_end(y + btnH);
+      sd_card_end();
+      break;
+    }
+    case SEC_AI: { /* локальный ИИ: свои подписи над элементами (ai_ui_paint) */
+      sd_group(L"Мини-ИИ");
+      sd_card_begin();
+      int y = sd_stack(NULL, NULL);
+      y = ai_ui_layout(x0, y, iw, x1, btnH, gap, lab, browseW);
+      sd_stack_end(y - gap);
+      sd_card_end();
+      break;
+    }
+    default: { /* общая папка (нарды и шашки идут через неё), распознавание, программа */
+      sd_group(L"Общая папка отдела");
+      sd_card_begin();
+      int y = sd_stack(L"Общая папка", L"Через неё коллеги получают PLM, идут нарды и шашки");
+      set_place(g_shareEdit, x0, y, iw - browseW - gap, btnH);
+      set_place(GetDlgItem(g_setHwnd, ID_SHARE_BROWSE), x1 - browseW, y, browseW, btnH);
+      sd_stack_end(y + btnH);
+      sd_full(g_chkServe, btnH);
+      {
+        HWND c[2] = {g_btnNd, g_btnSh};
+        int w[2] = {96, 96};
+        sd_row(L"Игры с коллегами", L"Партия идёт через общую папку", c, w, 2, btnH);
+      }
+      sd_card_end();
+      sd_group(L"Распознавание текста");
+      sd_card_begin();
+      sd_full(g_chkTess, btnH);
+      {
+        HWND c[1] = {g_ocr};
+        int w[1] = {196};
+        sd_row(L"Прочитать текст с экрана", L"Выделите область — текст откроется в своём окне", c, w, 1, btnH);
+      }
+      sd_card_end();
+      sd_group(L"Программа");
+      sd_card_begin();
+      {
+        HWND c[1] = {g_btnHk};
+        int w[1] = {178};
+        sd_row(L"Клавиши", L"Назначить, сменить или убрать горячие клавиши", c, w, 1, btnH);
+      }
+      sd_full(g_chkAuto, btnH);
+      sd_full(g_chkAnsPin, btnH);
+      {
+        _snwprintf(g_setVerDesc, 64, L"Сейчас — %s", APP_VERSION_STR);
+        g_setVerDesc[63] = 0;
+        HWND c[1] = {g_btnUp};
+        int w[1] = {180};
+        sd_row(L"Обновления", g_setVerDesc, c, w, 1, btnH);
+      }
+      sd_card_end();
+      break;
+    }
+    }
+    if (g_sy > yEnd) yEnd = g_sy;
   }
+  if (g_setMeasure) ReleaseDC(g_setHwnd, g_setMeasure);
+  g_setMeasure = NULL;
   g_layOpen = TRUE;
-  if (g_tab > 1 && g_preview) MoveWindow(g_preview, pad, -4000, fullW, 150, FALSE);
-  int contentH = yEnd + 4 + SET_FOOT_H;
+  if (g_tab > 1 && g_preview) MoveWindow(g_preview, x0, -4000, iw, 150, FALSE);
+  int railH = PANEL_TITLE_H + 10 + SEC_COUNT * (SET_NAV_H + 2) + 12;
+  if (yEnd < railH) yEnd = railH;
+  int contentH = yEnd + SET_FOOT_H;
   if (contentH != g_setContentH) {
     g_setContentH = contentH;
     int newMax = contentH - rc.bottom;
@@ -3337,6 +3709,51 @@ static void layout_settings(void) {
   }
   clip_settings_children();
   preview_wake();
+}
+
+/* подписи, карточки и линии страницы (раскладка — layout_settings) */
+static void settings_paint_page(HDC hdc, RECT rc) {
+  int save = SaveDC(hdc);
+  IntersectClipRect(hdc, SET_RAIL_W, PANEL_TITLE_H, rc.right, rc.bottom - SET_FOOT_H);
+  SetBkMode(hdc, TRANSPARENT);
+  COLORREF hair = blend_rgb(COL_LINE, COL_INK, 24);
+  for (int pass = 0; pass < 2; pass++) /* сначала карточки, потом всё, что на них */
+    for (int i = 0; i < g_setDecoN; i++) {
+      const SetDeco *d = &g_setDeco[i];
+      RECT r = d->r;
+      OffsetRect(&r, 0, -g_setScroll);
+      if (r.bottom < PANEL_TITLE_H || r.top > rc.bottom - SET_FOOT_H) continue;
+      if ((d->kind == SD_CARD) != (pass == 0)) continue;
+      switch (d->kind) {
+      case SD_CARD:
+        if (knight_on()) {
+          RECT f = r;
+          SetBrushOrgEx(hdc, 0, 0, NULL);
+          FillRect(hdc, &f, bg_brush(FALSE));
+          frame_rect(hdc, f, KN_GOLD_DK, 1);
+        } else {
+          ui_round_fill(hdc, r, kThemes[g_theme].radius == 0 ? 0 : 8, COL_PAPER, hair);
+        }
+        break;
+      case SD_SEP: {
+        HBRUSH b = CreateSolidBrush(blend_rgb(COL_LINE, COL_PAPER, 60));
+        FillRect(hdc, &r, b);
+        DeleteObject(b);
+        break;
+      }
+      case SD_PAGE:
+      case SD_GROUP:
+      case SD_TITLE:
+      case SD_DESC: {
+        HFONT f = d->kind == SD_PAGE ? g_fontDisplay : d->kind == SD_GROUP ? g_fontUi : d->kind == SD_TITLE ? g_fontBody : g_fontSmall;
+        if (f) SelectObject(hdc, f);
+        SetTextColor(hdc, d->kind == SD_DESC ? COL_MUTED : COL_INK);
+        DrawTextW(hdc, d->text, -1, &r, DT_LEFT | DT_WORDBREAK | DT_NOPREFIX);
+        break;
+      }
+      }
+    }
+  RestoreDC(hdc, save);
 }
 
 static void scroll_settings(int pos) {
@@ -3389,15 +3806,15 @@ static void select_tab(int sec) {
   settings_relayout();
 }
 
-/* правый щелчок по вкладке: сдвинуть её левее или правее */
+/* правый щелчок по разделу: сдвинуть его выше или ниже */
 static void tab_menu(int sec, int x, int y) {
   int pos = 0;
   while (pos < SEC_COUNT && g_tabOrder[pos] != sec) pos++;
   if (pos >= SEC_COUNT) return;
   HMENU m = CreatePopupMenu();
-  AppendMenuW(m, MF_STRING | (pos == 0 ? MF_GRAYED : 0), 1, L"← Сдвинуть влево");
-  AppendMenuW(m, MF_STRING | (pos == SEC_COUNT - 1 ? MF_GRAYED : 0), 2, L"Сдвинуть вправо →");
-  AppendMenuW(m, MF_STRING | (pos == 0 ? MF_GRAYED : 0), 3, L"Сделать первой");
+  AppendMenuW(m, MF_STRING | (pos == 0 ? MF_GRAYED : 0), 1, L"↑ Сдвинуть выше");
+  AppendMenuW(m, MF_STRING | (pos == SEC_COUNT - 1 ? MF_GRAYED : 0), 2, L"↓ Сдвинуть ниже");
+  AppendMenuW(m, MF_STRING | (pos == 0 ? MF_GRAYED : 0), 3, L"Сделать первым");
   AppendMenuW(m, MF_SEPARATOR, 0, NULL);
   AppendMenuW(m, MF_STRING, 4, L"Порядок как был");
   int cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, x, y, 0, g_setHwnd, NULL);
@@ -3420,93 +3837,55 @@ static void tab_menu(int sec, int x, int y) {
 
 static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
   switch (msg) {
+  case WM_ERASEBKGND:
+    return 1; /* фон рисует WM_PAINT целиком */
   case WM_PAINT: {
     PAINTSTRUCT ps;
-    HDC hdc = BeginPaint(hwnd, &ps);
+    HDC pdc = BeginPaint(hwnd, &ps);
     RECT rc;
     GetClientRect(hwnd, &rc);
-    FillRect(hdc, &rc, bg_brush(TRUE));
+    /* в памяти и одним разом: карточки при прокрутке не мигают */
+    HDC hdc = CreateCompatibleDC(pdc);
+    HBITMAP pbm = hdc ? CreateCompatibleBitmap(pdc, rc.right > 0 ? rc.right : 1, rc.bottom > 0 ? rc.bottom : 1) : NULL;
+    HGDIOBJ pold = NULL;
+    if (hdc && pbm) {
+      pold = SelectObject(hdc, pbm);
+    } else {
+      if (hdc) DeleteDC(hdc);
+      if (pbm) DeleteObject(pbm);
+      hdc = pdc;
+    }
+    FillRect(hdc, &rc, bg_brush(TRUE)); /* фон страницы и панели разделов */
     draw_panel_header(hwnd, hdc, L"Настройки");
+    settings_paint_page(hdc, rc);
     SetBkMode(hdc, TRANSPARENT);
     if (g_fontSmall) SelectObject(hdc, g_fontSmall);
     SetTextColor(hdc, COL_MUTED);
-    if (g_shareEdit) {
-      RECT wr;
-      GetWindowRect(g_shareEdit, &wr);
-      MapWindowPoints(HWND_DESKTOP, hwnd, (POINT *)&wr, 2);
-      RECT a = {14, wr.top - 18, rc.right - 14, wr.top - 2};
-      draw_set_label(hdc, L"общая папка — PLM для коллег", a, rc.bottom);
-    }
-    if (g_btnK2) {
-      RECT wr;
-      GetWindowRect(g_btnK2, &wr);
-      MapWindowPoints(HWND_DESKTOP, hwnd, (POINT *)&wr, 2);
-      RECT a = {14, wr.top - 18, rc.right - 14, wr.top - 2};
-      draw_set_label(hdc, L"курсор", a, rc.bottom);
-    }
-    if (g_btnFx[0]) {
-      RECT wr;
-      GetWindowRect(g_btnFx[0], &wr);
-      MapWindowPoints(HWND_DESKTOP, hwnd, (POINT *)&wr, 2);
-      RECT a = {14, wr.top - 18, rc.right - 14, wr.top - 2};
-      draw_set_label(hdc, L"эффект при нажатии", a, rc.bottom);
-    }
-    if (g_tbBg) {
-      RECT wr;
-      GetWindowRect(g_tbBg, &wr);
-      MapWindowPoints(HWND_DESKTOP, hwnd, (POINT *)&wr, 2);
-      RECT a = {14, wr.top - 18, rc.right - 14, wr.top - 2};
-      draw_set_label(hdc, L"прозрачность следования", a, rc.bottom);
-    }
-    if (g_tbFg) {
-      RECT wr;
-      GetWindowRect(g_tbFg, &wr);
-      MapWindowPoints(HWND_DESKTOP, hwnd, (POINT *)&wr, 2);
-      RECT b = {14, wr.top - 18, rc.right - 14, wr.top - 2};
-      draw_set_label(hdc, L"прозрачность закреплённого окна", b, rc.bottom);
-    }
-    if (g_btnTheme[0]) {
-      RECT wr;
-      GetWindowRect(g_btnTheme[0], &wr);
-      MapWindowPoints(HWND_DESKTOP, hwnd, (POINT *)&wr, 2);
-      RECT c = {14, wr.top - 18, rc.right - 14, wr.top - 2};
-      draw_set_label(hdc, L"тема", c, rc.bottom);
-    }
-    if (g_btnIdle[0]) {
-      RECT wr;
-      GetWindowRect(g_btnIdle[0], &wr);
-      MapWindowPoints(HWND_DESKTOP, hwnd, (POINT *)&wr, 2);
-      RECT d = {14, wr.top - 18, rc.right - 14, wr.top - 2};
-      draw_set_label(hdc, L"бой Годжо и Сукуны, если мышь не трогать", d, rc.bottom);
-    }
-    if (g_btnIdleSz[0]) {
-      RECT wr;
-      GetWindowRect(g_btnIdleSz[0], &wr);
-      MapWindowPoints(HWND_DESKTOP, hwnd, (POINT *)&wr, 2);
-      RECT d = {14, wr.top - 18, rc.right - 14, wr.top - 2};
-      draw_set_label(hdc, L"размер бойцов", d, rc.bottom);
-    }
-    ai_ui_paint(hdc, rc);
+    ai_ui_paint(hdc, rc); /* подписи над элементами раздела «ИИ» */
     {
-      RECT ver = {14, rc.bottom - 28, rc.right - 14, rc.bottom - 10};
+      RECT ver = {16, rc.bottom - 28, rc.right - 16, rc.bottom - 10};
       wchar_t vs[64];
       _snwprintf(vs, 64, L"%s", APP_VERSION_STR); /* «CursorPad» не влезал рядом с подсказкой */
       DrawTextW(hdc, vs, -1, &ver, DT_LEFT | DT_SINGLELINE);
-      DrawTextW(hdc, L"правый щелчок — порядок вкладок", -1, &ver, DT_RIGHT | DT_SINGLELINE);
+      DrawTextW(hdc, L"правый щелчок по разделу — порядок разделов", -1, &ver, DT_RIGHT | DT_SINGLELINE);
     }
     {
-      /* полоска прокрутки справа: видно, что окно выше экрана */
+      /* полоска прокрутки справа: видно, что страница выше окна */
       int bandTop = PANEL_TITLE_H, bandBot = rc.bottom - SET_FOOT_H;
       if (g_setContentH > rc.bottom && bandBot > bandTop) {
         int bandH = bandBot - bandTop, maxScroll = g_setContentH - rc.bottom;
         int thumbH = bandH * rc.bottom / g_setContentH;
         if (thumbH < 24) thumbH = 24;
         int thumbY = bandTop + (bandH - thumbH) * g_setScroll / maxScroll;
-        RECT th = {rc.right - 5, thumbY, rc.right - 2, thumbY + thumbH};
-        HBRUSH br = CreateSolidBrush(COL_MUTED);
-        FillRect(hdc, &th, br);
-        DeleteObject(br);
+        RECT th = {rc.right - 7, thumbY, rc.right - 3, thumbY + thumbH};
+        fill_round_rect(hdc, th, blend_rgb(COL_MUTED, COL_PAPER_DARK, 90), blend_rgb(COL_MUTED, COL_PAPER_DARK, 90), 2);
       }
+    }
+    if (hdc != pdc) {
+      BitBlt(pdc, 0, 0, rc.right, rc.bottom, hdc, 0, 0, SRCCOPY);
+      SelectObject(hdc, pold);
+      DeleteObject(pbm);
+      DeleteDC(hdc);
     }
     EndPaint(hwnd, &ps);
     return 0;
@@ -3515,15 +3894,16 @@ static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
     draw_pad_button((const DRAWITEMSTRUCT *)lParam);
     return TRUE;
   case WM_CTLCOLOREDIT: {
-    /* fields read as filled surfaces against the panel, no sunken border */
+    /* поля — на светлой карточке, рамку рисует ui_theme.c */
     HDC hdc = (HDC)wParam;
     SetBkColor(hdc, COL_PAPER);
     SetTextColor(hdc, COL_INK);
     return (LRESULT)g_paper;
   }
   case WM_CTLCOLORSTATIC: {
+    /* галочки, ползунки и строки состояния стоят на карточках */
     HDC hdc = (HDC)wParam;
-    SetBkColor(hdc, COL_PAPER_DARK);
+    SetBkColor(hdc, COL_PAPER);
     SetTextColor(hdc, COL_MUTED);
     /* на пергаменте галочки и ползунки не должны стоять ровными плашками */
     if (knight_on()) {
@@ -3534,9 +3914,14 @@ static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
       GetWindowRect((HWND)lParam, &cr);
       MapWindowPoints(HWND_DESKTOP, hwnd, (POINT *)&cr, 2);
       SetBrushOrgEx(hdc, -cr.left, -cr.top, NULL);
-      return (LRESULT)bg_brush(TRUE);
+      return (LRESULT)bg_brush(FALSE);
     }
-    return (LRESULT)g_paperDark;
+    return (LRESULT)g_paper;
+  }
+  case WM_NOTIFY: { /* ползунки прозрачности рисуются в цветах темы (ui_theme.c) */
+    LRESULT res = 0;
+    if (ui_trackbar_draw((const NMHDR *)lParam, &res)) return res;
+    break;
   }
   case WM_NCHITTEST:
     return panel_hittest(hwnd, lParam);
@@ -3959,6 +4344,8 @@ static void create_settings(HWND owner) {
       SET_W, g_setContentH, owner, NULL, g_inst, NULL);
   mk_btn(g_setHwnd, L"×", ID_PANEL_CLOSE);
   round_corners(g_setHwnd);
+  /* кнопки страницы стоят на светлых карточках — под ними светлый фон (ui_theme.c) */
+  SetPropW(g_setHwnd, L"CpUiBg", (HANDLE)(INT_PTR)1);
   for (int i = 0; i < SEC_COUNT; i++) g_btnSec[i] = mk_btn(g_setHwnd, kSecNames[i], ID_SEC_BASE + i);
   g_preview = preview_create(g_setHwnd, ID_PREVIEW);
   g_filesRootEdit = CreateWindowExW(0, L"EDIT", g_filesRoot,
@@ -4116,6 +4503,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
   switch (msg) {
   case WM_CREATE: {
     g_hwnd = hwnd;
+    ui_init(); /* оформление: плавное появление окон, подсветка, хром Windows 11 */
     apply_dpi(hwnd);
     g_paper = CreateSolidBrush(COL_PAPER);
     g_paperDark = CreateSolidBrush(COL_PAPER_DARK);
@@ -4220,6 +4608,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     apply_follow_state();
     if (g_skin != 0) install_scheme_cursors();
     fx_sync();
+    ac_avatar_startup();
     return 0;
   }
   case WM_SIZE:
@@ -4239,9 +4628,21 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     return 1;
   case WM_PAINT: {
     PAINTSTRUCT ps;
-    HDC hdc = BeginPaint(hwnd, &ps);
+    HDC pdc = BeginPaint(hwnd, &ps);
     RECT rc;
     GetClientRect(hwnd, &rc);
+    /* рисуем в памяти и кладём разом (с 2026.10.21): тёмная шапка «Модерна»
+       не мигает светлым при перерисовке */
+    HDC hdc = CreateCompatibleDC(pdc);
+    HBITMAP pbm = hdc ? CreateCompatibleBitmap(pdc, rc.right > 0 ? rc.right : 1, rc.bottom > 0 ? rc.bottom : 1) : NULL;
+    HGDIOBJ pold = NULL;
+    if (hdc && pbm) {
+      pold = SelectObject(hdc, pbm);
+    } else {
+      if (hdc) DeleteDC(hdc);
+      if (pbm) DeleteObject(pbm);
+      hdc = pdc;
+    }
     FillRect(hdc, &rc, bg_brush(FALSE));
     int dpi = 96;
     HMODULE user32 = GetModuleHandleW(L"user32.dll");
@@ -4360,13 +4761,14 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
       DrawTextW(hdc, L"Где:", -1, &a, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     }
 
-    if (pth->ornate) {
-      draw_knight_frame(hdc, rc);
-    } else {
-      RECT accent = {0, 0, MulDiv(3, dpi, 96), rc.bottom};
-      HBRUSH sage = CreateSolidBrush(COL_SAGE);
-      FillRect(hdc, &accent, sage);
-      DeleteObject(sage);
+    /* с 2026.10.21 цветной полосы по левому краю нет: цвет акцента — только у
+       главной кнопки, выбранного и фокуса; край окна даёт рамка Windows */
+    if (pth->ornate) draw_knight_frame(hdc, rc);
+    if (hdc != pdc) {
+      BitBlt(pdc, 0, 0, rc.right, rc.bottom, hdc, 0, 0, SRCCOPY);
+      SelectObject(hdc, pold);
+      DeleteObject(pbm);
+      DeleteDC(hdc);
     }
     EndPaint(hwnd, &ps);
     return 0;
@@ -4467,6 +4869,13 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
       } else {
         POINT p;
         GetCursorPos(&p);
+        /* курсор на помощнике мини-ИИ — блокнот прячется, а не заслоняет робота;
+           едет дальше невидимым и появляется уже у курсора */
+        BOOL overBot = ac_avatar_under(p);
+        if (overBot != g_overBot) {
+          g_overBot = overBot;
+          ShowWindow(g_hwnd, overBot ? SW_HIDE : SW_SHOWNOACTIVATE);
+        }
         int tx = p.x + g_offx;
         int ty = p.y + g_offy;
         clamp_to_work(&tx, &ty, p);
@@ -4676,6 +5085,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
   case WM_DESTROY:
     InterlockedExchange(&g_quitting, 1);
     close_other_windows(hwnd);
+    ac_avatar_destroy();
     KillTimer(hwnd, TIMER_IDLE_FIGHT);
     idle_fight_stop(TRUE);
     fx_shutdown();

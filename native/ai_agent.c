@@ -201,6 +201,7 @@ static void ag_preview(void) {
 static void ag_tool_ready(void *result) {
   AgToolJob *job = (AgToolJob *)result;
   if (job->generation != g_agGeneration || !g_agActive) { free(job); return; }
+  ac_avatar_set(AC_AV_FILES);
   g_agTool = NULL;
   if (job->applying) {
     if (job->state == 1 && job->fs.count) {
@@ -232,6 +233,7 @@ static void ag_tool_ready(void *result) {
   free(job); ac_busy(FALSE);
   if (state == 1) {
     g_agActive = FALSE;
+    ac_avatar_set(AC_AV_SUCCESS);
     if (g_agFs.count) ag_preview();
     else { af_say(g_agReadout[0] ? g_agReadout : L"План пуст. Ничего не изменено."); }
     ac_status(L""); return;
@@ -274,7 +276,12 @@ static void ag_result(AiResult *r) {
     return;
   }
   AgJson appJson;
-  if (ag_json(r->text, &appJson) && !wcscmp(ag_get(&appJson, L"tool"), L"app")) {
+  BOOL parsed = ag_json(r->text, &appJson);
+  if (parsed) { /* аватар показывает, что ИИ сейчас делает */
+    const wchar_t *target = ag_get(&appJson, L"path");
+    ac_avatar_tool(ag_get(&appJson, L"tool"), target[0] ? target : ag_get(&appJson, L"src"));
+  }
+  if (parsed && !wcscmp(ag_get(&appJson, L"tool"), L"app")) {
     int state = ag_app_call(&appJson, g_agObservation, 6000);
     g_agLastState = state;
     ag_note(r->text, g_agObservation);

@@ -22,42 +22,49 @@ static const ToolPage kTools[] = {
     {L"Расчёт краски", paint_show},              /* с 2026.09.23.43 */
 };
 #define TOOLS_N ((int)(sizeof(kTools) / sizeof(kTools[0])))
+#define MORE_AVATAR 60 /* «Призвать / Отозвать помощника» — аватар мини-ИИ (ai_avatar.c) */
 
 /* ---- меню «Ещё» (⋯) --------------------------------------------------------------
 
-   С 2026.09.23.41 — разделами, рисуется само: сверху «Инструменты» с цветной
-   меткой каждого окна (цвет его страницы), ниже действия (распознать текст,
-   нарды, что нового в папке) и внизу красным «Очистить блокнот…» — бывшая
-   кнопка «Сброс» (с тем же вопросом и запасной копией заметок). */
+   С 2026.09.23.41 — разделами, рисуется само; внизу красным «Очистить
+   блокнот…» — бывшая кнопка «Сброс» (с тем же вопросом и запасной копией
+   заметок). С 2026.10.21 разделы по смыслу, у каждого пункта — значок
+   (Segoe Fluent Icons / MDL2; нет шрифта — без значка), выделение — серая
+   скруглённая подложка, как в меню Windows 11. */
 typedef struct {
   int cmd;
   const wchar_t *text, *key;
-  COLORREF mark; /* цветная метка; 0 — нет */
-  int kind;      /* 0 — пункт, 1 — заголовок раздела, 2 — опасный (красный), 3 — пока не работает (серый) */
+  wchar_t icon; /* знак из шрифта значков; 0 — нет */
+  int kind;     /* 0 — пункт, 1 — заголовок раздела, 2 — опасный (красный), 3 — пока не работает (серый) */
 } MoreItem;
 
 enum { MORE_OCR = 20, MORE_NARDY, MORE_CHANGES, MORE_CLEAR, MORE_LAYOUT, MORE_MSG, MORE_ROUTE, MORE_SHASHKI, MORE_EXPORT, MORE_PACKAGE, MORE_MATCH, MORE_DRAWREC, MORE_AICHAT };
 static const MoreItem kMore[] = {
-    {0, L"ИНСТРУМЕНТЫ", NULL, 0, 1},
-    {1, L"Расчёт резки и газов", NULL, RGB(0x1F, 0x6B, 0x5A), 0},
-    {2, L"Объединение TIFF / PDF", NULL, RGB(0x25, 0x63, 0xEB), 0},
-    {3, L"Сортировка TIFF A4 / A3", NULL, RGB(0xC9, 0xA2, 0x27), 0},
-    {4, L"Расчёт краски", NULL, RGB(0xB4, 0x4B, 0x2A), 0},
-    {MORE_ROUTE, L"Маршрутная ведомость", NULL, RGB(0x5B, 0x4B, 0x8A), 0}, /* с 2026.09.23.45: из PLM в Excel */
-    {MORE_EXPORT, L"Выгрузка из PLM", NULL, RGB(0x2F, 0x6F, 0x8F), 0}, /* с 2026.09.23.78: ЭСИ, ТП, извещения */
-    {MORE_PACKAGE, L"Пакет для загрузки в PLM", NULL, RGB(0x3F, 0x7F, 0x4F), 0}, /* с .80: ЭСИ, состав, ТП */
-    {MORE_MATCH, L"Сопоставить с Союзом", NULL, RGB(0x8F, 0x5F, 0x2F), 0}, /* с 2026.10.16.1: Excel ↔ Союз */
-    {MORE_DRAWREC, L"Распознать чертёж", NULL, RGB(0x2F, 0x7F, 0x7F), 0}, /* штамп и спецификация со скана */
-    {MORE_AICHAT, L"Спросить ИИ", NULL, RGB(0x6B, 0x3F, 0x9E), 0}, /* чат с локальной моделью, с историей */
+    {0, L"Расчёты и чертежи", NULL, 0, 1},
+    {1, L"Расчёт резки и газов", NULL, 0xE8C6, 0},
+    {4, L"Расчёт краски", NULL, 0xE771, 0},
+    {MORE_DRAWREC, L"Распознать чертёж", NULL, 0xE8B9, 0}, /* штамп и спецификация со скана */
+    {0, L"TIFF и PDF", NULL, 0, 1},
+    {2, L"Объединение TIFF / PDF", NULL, 0xE7C4, 0},
+    {3, L"Сортировка TIFF A4 / A3", NULL, 0xE8CB, 0},
+    {0, L"PLM", NULL, 0, 1},
+    {MORE_ROUTE, L"Маршрутная ведомость", NULL, 0xE8FD, 0},     /* с 2026.09.23.45: из PLM в Excel */
+    {MORE_EXPORT, L"Выгрузка из PLM", NULL, 0xE896, 0},        /* с 2026.09.23.78: ЭСИ, ТП, извещения */
+    {MORE_PACKAGE, L"Пакет для загрузки в PLM", NULL, 0xE898, 0}, /* с .80: ЭСИ, состав, ТП */
+    {MORE_MATCH, L"Сопоставить с Союзом", NULL, 0xE8AB, 0},     /* с 2026.10.16.1: Excel ↔ Союз */
+    {0, L"ИИ", NULL, 0, 1},
+    {MORE_AICHAT, L"Спросить ИИ", NULL, 0xE8BD, 0},             /* чат с локальной моделью, с историей */
+    {MORE_AVATAR, g_acAvatarMenuText, NULL, 0xE99A, 0},         /* текст — по тому, на столе ли он */
+    {0, L"Текст", NULL, 0, 1},
+    {MORE_OCR, L"Выделить и прочитать", g_hkName[HK_OCR], 0xE7A8, 0},  /* клавиши — какие назначены (hotkeys.c) */
+    {MORE_LAYOUT, L"Исправить раскладку", g_hkName[HK_LAYOUT], 0xE765, 0}, /* с 2026.09.23.42 */
+    {0, L"С коллегами", NULL, 0, 1},
+    {MORE_MSG, L"Чат с коллегами", L"пока не работает", 0xE8F2, 3}, /* с .68; с .75 выключен */
+    {MORE_NARDY, L"Нарды", NULL, 0xE7FC, 0},
+    {MORE_SHASHKI, L"Шашки", NULL, 0xE7FC, 0}, /* с 2026.09.23.65: по сети, как нарды */
+    {MORE_CHANGES, L"Что нового в папке", NULL, 0xE8B7, 0},
     {-1, NULL, NULL, 0, 0}, /* черта */
-    {MORE_OCR, L"Выделить и прочитать", g_hkName[HK_OCR], 0, 0}, /* клавиши — какие назначены (hotkeys.c) */
-    {MORE_LAYOUT, L"Исправить раскладку", g_hkName[HK_LAYOUT], 0, 0}, /* с 2026.09.23.42 */
-    {MORE_MSG, L"Чат с коллегами", L"пока не работает", 0, 3}, /* с .68; с .75 выключен */
-    {MORE_NARDY, L"Нарды", NULL, 0, 0},
-    {MORE_SHASHKI, L"Шашки", NULL, 0, 0}, /* с 2026.09.23.65: по сети, как нарды */
-    {MORE_CHANGES, L"Что нового в папке", NULL, 0, 0},
-    {-1, NULL, NULL, 0, 0},
-    {MORE_CLEAR, L"Очистить блокнот…", NULL, 0, 2},
+    {MORE_CLEAR, L"Очистить блокнот…", NULL, 0xE74D, 2},
 };
 
 static int more_px(int v) {
@@ -81,8 +88,9 @@ static void tools_menu_measure(MEASUREITEMSTRUCT *mi) {
   }
   if (of) SelectObject(dc, of);
   if (dc) ReleaseDC(NULL, dc);
-  mi->itemWidth = (UINT)(sz.cx + kz.cx + more_px(it->key ? 90 : 60));
-  mi->itemHeight = (UINT)more_px(it->kind == 1 ? 26 : 34);
+  mi->itemWidth = (UINT)(sz.cx + kz.cx + more_px(it->key ? 96 : 66));
+  /* заголовок раздела — с воздухом сверху, кроме самого первого */
+  mi->itemHeight = (UINT)more_px(it->kind == 1 ? (it == kMore ? 26 : 32) : 32);
 }
 
 static void tools_menu_draw(const DRAWITEMSTRUCT *di) {
@@ -91,27 +99,33 @@ static void tools_menu_draw(const DRAWITEMSTRUCT *di) {
   HDC dc = di->hDC;
   RECT r = di->rcItem;
   BOOL sel = (di->itemState & ODS_SELECTED) && it->kind != 1 && it->kind != 3;
-  HBRUSH bg = CreateSolidBrush(sel ? blend_rgb(COL_SAGE, COL_PAPER, 215) : COL_PAPER);
-  FillRect(dc, &r, bg);
-  DeleteObject(bg);
+  FillRect(dc, &r, g_paper);
+  if (sel) { /* выделение — серая скруглённая подложка с отступом от краёв */
+    RECT s = {r.left + more_px(4), r.top + 1, r.right - more_px(4), r.bottom - 1};
+    COLORREF c = blend_rgb(COL_PAPER, COL_INK, 16);
+    fill_round_rect(dc, s, c, c, more_px(4));
+  }
   SetBkMode(dc, TRANSPARENT);
-  int x = r.left + more_px(12);
-  if (it->kind == 1) { /* заголовок раздела: мелко, прописными */
-    if (g_fontSmall) SelectObject(dc, g_fontSmall);
+  int x = r.left + more_px(14);
+  if (it->kind == 1) { /* заголовок раздела: мелко и серым */
+    if (g_fontUi) SelectObject(dc, g_fontUi);
     SetTextColor(dc, COL_MUTED);
-    RECT t = {x, r.top, r.right - more_px(8), r.bottom};
-    DrawTextW(dc, it->text, -1, &t, DT_LEFT | DT_BOTTOM | DT_SINGLELINE);
+    RECT t = {x, r.top, r.right - more_px(8), r.bottom - more_px(4)};
+    DrawTextW(dc, it->text, -1, &t, DT_LEFT | DT_BOTTOM | DT_SINGLELINE | DT_NOPREFIX);
     return;
   }
-  int mk = more_px(18);
-  if (it->mark) { /* цветная метка окна */
-    RECT m = {x, (r.top + r.bottom - mk) / 2, x + mk, (r.top + r.bottom + mk) / 2};
-    fill_round_rect(dc, m, it->mark, it->mark, more_px(4));
+  COLORREF fg = it->kind == 2 ? RGB(0xB4, 0x23, 0x18) : it->kind == 3 ? COL_MUTED : COL_INK;
+  HFONT ifont = it->icon ? ui_icon_font(more_px(16)) : NULL;
+  if (ifont) {
+    SelectObject(dc, ifont);
+    SetTextColor(dc, fg);
+    RECT ir = {x, r.top, x + more_px(18), r.bottom};
+    DrawTextW(dc, &it->icon, 1, &ir, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
   }
-  x += mk + more_px(10);
+  x += more_px(30);
   if (g_fontBody) SelectObject(dc, g_fontBody);
-  SetTextColor(dc, it->kind == 2 ? RGB(0xB4, 0x23, 0x18) : it->kind == 3 ? COL_MUTED : COL_INK);
-  RECT t = {x, r.top, r.right - more_px(12), r.bottom};
+  SetTextColor(dc, fg);
+  RECT t = {x, r.top, r.right - more_px(14), r.bottom};
   DrawTextW(dc, it->text, -1, &t, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
   if (it->key) {
     if (g_fontSmall) SelectObject(dc, g_fontSmall);
@@ -124,6 +138,7 @@ static void tools_menu_draw(const DRAWITEMSTRUCT *di) {
 static void tools_menu(HWND owner, HWND btn) {
   HMENU m = CreatePopupMenu();
   if (!m) return;
+  ac_avatar_menu_label();
   for (size_t k = 0; k < sizeof(kMore) / sizeof(kMore[0]); k++) {
     const MoreItem *it = &kMore[k];
     if (it->cmd < 0) AppendMenuW(m, MF_SEPARATOR, 0, NULL);
@@ -146,6 +161,7 @@ static void tools_menu(HWND owner, HWND btn) {
   else if (cmd == MORE_MATCH) match_show();
   else if (cmd == MORE_DRAWREC) drawrec_show();
   else if (cmd == MORE_AICHAT) aichat_show();
+  else if (cmd == MORE_AVATAR) ac_avatar_toggle();
   else if (cmd == MORE_LAYOUT) layout_fix_hint();
   else if (cmd == MORE_MSG) msg_compose_show();
   else if (cmd == MORE_NARDY) nardy_show();

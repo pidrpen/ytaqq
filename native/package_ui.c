@@ -40,7 +40,7 @@ static void pk_status(const wchar_t *fmt, ...) {
   if (g_pkWnd) {
     RECT rc;
     GetClientRect(g_pkWnd, &rc);
-    RECT st = {0, PANEL_TITLE_H + PKS(44), rc.right, PANEL_TITLE_H + PKS(70)};
+    RECT st = {0, PANEL_TITLE_H + PKS(56), rc.right, PANEL_TITLE_H + PKS(82)}; /* строка состояния (pk_paint) */
     InvalidateRect(g_pkWnd, &st, FALSE);
   }
 }
@@ -493,32 +493,36 @@ static void pk_clear(void) {
 static void pk_layout(void) {
   RECT rc;
   GetClientRect(g_pkWnd, &rc);
-  int pad = PKS(14), y = PANEL_TITLE_H + PKS(8), h = PKS(30);
+  int pad = PKS(26), y = PANEL_TITLE_H + PKS(20), h = PKS(30);
   place_panel_close(g_pkWnd);
   for (int k = 0; k < PK_NT; k++) MoveWindow(GetDlgItem(g_pkWnd, ID_PK_TAB + k), pad + k * PKS(150), y, PKS(142), h, TRUE);
   MoveWindow(GetDlgItem(g_pkWnd, ID_PK_FROMXP), rc.right - pad - PKS(180), y, PKS(180), h, TRUE);
-  int ly = PANEL_TITLE_H + PKS(74), by = rc.bottom - pad - PKS(30);
-  MoveWindow(g_pkList, pad, ly, rc.right - pad * 2, by - PKS(10) - ly, TRUE);
-  static const int ids[] = {ID_PK_ADD, ID_PK_DEL, ID_PK_PASTE, ID_PK_CHECK, ID_PK_SAVE, ID_PK_CLEAR};
-  static const int w[] = {100, 100, 150, 100, 170, 100};
-  int x = pad;
-  for (int i = 0; i < 6; i++) {
-    if (ids[i] == ID_PK_CLEAR) x = rc.right - pad - PKS(w[i]);
+  int foot = rc.bottom - PKS(TOOL_FOOT_H), by = foot + (PKS(TOOL_FOOT_H) - PKS(30)) / 2;
+  int ly = PANEL_TITLE_H + PKS(86);
+  MoveWindow(g_pkList, pad, ly, rc.right - pad * 2, foot - PKS(26) - ly, TRUE);
+  /* подвал (с 2026.10.21): правка строк — слева, главное «Сохранить» — справа */
+  static const int ids[] = {ID_PK_ADD, ID_PK_DEL, ID_PK_PASTE, ID_PK_CHECK, ID_PK_CLEAR};
+  static const int w[] = {100, 100, 150, 100, 100};
+  int x = PKS(16);
+  for (int i = 0; i < 5; i++) {
     MoveWindow(GetDlgItem(g_pkWnd, ids[i]), x, by, PKS(w[i]), PKS(30), TRUE);
     x += PKS(w[i] + 8);
   }
+  MoveWindow(GetDlgItem(g_pkWnd, ID_PK_SAVE), rc.right - PKS(16) - PKS(180), by, PKS(180), PKS(30), TRUE);
+  InvalidateRect(g_pkWnd, NULL, FALSE); /* карточка и подвал — по новому размеру */
 }
 
 static void pk_paint(HWND hwnd, HDC hdc) {
   RECT rc;
   GetClientRect(hwnd, &rc);
-  FillRect(hdc, &rc, bg_brush(FALSE));
-  draw_panel_header(hwnd, hdc, L"Пакет для загрузки в PLM");
+  int foot = rc.bottom - PKS(TOOL_FOOT_H);
+  RECT card = {PKS(12), PANEL_TITLE_H + PKS(10), rc.right - PKS(12), foot - PKS(12)};
+  tool_frame_paint(hwnd, hdc, L"Пакет для загрузки в PLM", L"ЭСИ, состав и техпроцессы — таблицей для PLM", card, foot);
   SetBkMode(hdc, TRANSPARENT);
   if (g_fontUi) SelectObject(hdc, g_fontUi);
   SetTextColor(hdc, COL_INK);
-  int pad = PKS(14);
-  RECT st = {pad, PANEL_TITLE_H + PKS(44), rc.right - pad, PANEL_TITLE_H + PKS(70)};
+  int pad = PKS(26);
+  RECT st = {pad, PANEL_TITLE_H + PKS(56), rc.right - pad, PANEL_TITLE_H + PKS(82)};
   DrawTextW(hdc,
             g_pkStatus[0] ? g_pkStatus
                           : L"Двойной щелчок или F2 — править, Enter — вниз, Tab — вправо, Ctrl+V — строки из Excel, "
@@ -672,6 +676,7 @@ static void package_show(BOOL fill) {
     round_corners(g_pkWnd);
     mk_btn(g_pkWnd, L"×", ID_PANEL_CLOSE);
     mk_btn(g_pkWnd, L"–", ID_PANEL_MIN);
+    tool_frame_init(g_pkWnd); /* шапка, карточка и подвал — общие (cursorpad.c) */
     for (int k = 0; k < PK_NT; k++) mk_btn(g_pkWnd, kPkSheets[k].name, ID_PK_TAB + k);
     mk_btn(g_pkWnd, L"Из выгрузки…", ID_PK_FROMXP);
     mk_btn(g_pkWnd, L"+ Строка", ID_PK_ADD);
