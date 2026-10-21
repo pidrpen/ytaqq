@@ -236,6 +236,9 @@ const wchar_t *ai_status_text(int st) {
   }
 }
 
+/* характер помощника в чате (ai_chat_policy.h): 0 обычный, 1 южный, 2 интеллигент, 3 неуверенный */
+static int g_aiPersona;
+
 /* ai.txt: строки «ключ значение», UTF-8 */
 static void ai_save(void) {
   wchar_t p[MAX_PATH];
@@ -244,7 +247,7 @@ static void ai_save(void) {
   WideCharToMultiByte(CP_UTF8, 0, g_aiModel, -1, model, sizeof(model), NULL, NULL);
   int n = snprintf(buf, sizeof(buf), "on %d\r\ntier %d\r\nctx %d\r\ngpu %d\r\nmodel %s\r\n", g_aiOn ? 1 : 0, g_aiTier, g_aiCtx,
                    g_aiGpu ? 1 : 0, model);
-  n += snprintf(buf + n, sizeof(buf) - n, "provider %d\r\nzai_model %s\r\n", g_aiProvider, g_aiZaiModel);
+  n += snprintf(buf + n, sizeof(buf) - n, "provider %d\r\nzai_model %s\r\npersona %d\r\n", g_aiProvider, g_aiZaiModel, g_aiPersona);
   if (g_aiSrvExe[0]) {
     char se[MAX_PATH * 3];
     WideCharToMultiByte(CP_UTF8, 0, g_aiSrvExe, -1, se, sizeof(se), NULL, NULL);
@@ -278,6 +281,7 @@ static void ai_load(void) {
     int v;
     if (sscanf(line, "on %d", &v) == 1) g_aiOn = v == 1;
     else if (sscanf(line, "provider %d", &v) == 1 && (v == 0 || v == 1)) g_aiProvider = v;
+    else if (sscanf(line, "persona %d", &v) == 1 && v >= 0 && v <= 3) g_aiPersona = v;
     else if (!strncmp(line, "zai_model ", 10)) {
       migratedZai = !ai_zai_model_valid(line + 10);
       lstrcpynA(g_aiZaiModel, migratedZai ? "glm-4.5-flash" : line + 10, 64);

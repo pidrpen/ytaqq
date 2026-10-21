@@ -20,6 +20,8 @@
 #define ID_AI_ZKEY 519
 #define ID_AI_ZSAVE 520
 #define ID_AI_ZFORGET 521
+#define ID_AI_PERSONA 522 /* характер помощника в чате */
+static HWND g_aiPersonaBox;
 static HWND g_aiSource, g_aiZModel, g_aiZKey, g_aiZSave, g_aiZForget, g_aiZInfo;
 static BOOL ac_provider_change(int provider);
 static void ai_ui_zai_select(void) {
@@ -145,6 +147,10 @@ static void ai_ui_create(HWND p) {
   g_aiSource = CreateWindowExW(0, L"COMBOBOX", L"", WS_CHILD | CBS_DROPDOWNLIST | WS_TABSTOP, 0, 0, 300, 180, p, (HMENU)(INT_PTR)ID_AI_SOURCE, NULL, NULL);
   SendMessageW(g_aiSource, CB_ADDSTRING, 0, (LPARAM)L"Локальная модель · без интернета");
   SendMessageW(g_aiSource, CB_ADDSTRING, 0, (LPARAM)L"Z.ai API · через интернет");
+  g_aiPersonaBox = CreateWindowExW(0, L"COMBOBOX", L"", WS_CHILD | CBS_DROPDOWNLIST | WS_TABSTOP, 0, 0, 300, 200, p, (HMENU)(INT_PTR)ID_AI_PERSONA, NULL, NULL);
+  const wchar_t *personas[] = {L"Обычный · просто и по делу", L"Южный · «ээ, брат, щас сделаем»", L"Интеллигент · вежливо и витиевато", L"Неуверенный · «эм… кажется… наверное»"};
+  for (int i = 0; i < 4; i++) SendMessageW(g_aiPersonaBox, CB_ADDSTRING, 0, (LPARAM)personas[i]);
+  SendMessageW(g_aiPersonaBox, CB_SETCURSEL, (WPARAM)g_aiPersona, 0);
   g_aiZModel = CreateWindowExW(0, L"COMBOBOX", L"", WS_CHILD | CBS_DROPDOWNLIST | WS_TABSTOP, 0, 0, 300, 200, p, (HMENU)(INT_PTR)ID_AI_ZMODEL, NULL, NULL);
   const wchar_t *models[] = {L"glm-4.5-flash", L"glm-4.7-flash", L"glm-4.6v-flash"};
   for (size_t i = 0; i < sizeof(models) / sizeof(models[0]); i++) SendMessageW(g_aiZModel, CB_ADDSTRING, 0, (LPARAM)models[i]);
@@ -190,6 +196,7 @@ static int ai_ui_layout(int pad, int y, int fullW, int cw, int btnH, int gap, in
   HWND cloud[] = {g_aiZModel, g_aiZKey, g_aiZSave, g_aiZForget, g_aiZInfo};
   HWND local[] = {g_aiBtnTier[0], g_aiBtnTier[1], g_aiBtnTier[2], g_aiBtnTier[3], g_aiChkGpu, g_aiBtnDl, g_aiBtnDir, g_aiBtnLlama, g_aiPathEdit, g_aiBtnBrowse};
   ShowWindow(g_aiSource, g_layOpen ? SW_SHOW : SW_HIDE);
+  ShowWindow(g_aiPersonaBox, g_layOpen ? SW_SHOW : SW_HIDE);
   for (int i = 0; i < 5; i++) { ShowWindow(cloud[i], g_layOpen && g_aiProvider ? SW_SHOW : SW_HIDE); if (!g_aiProvider) MoveWindow(cloud[i], 0, -4000, 300, 26, FALSE); }
   for (int i = 0; i < 10; i++) { ShowWindow(local[i], g_layOpen && !g_aiProvider ? SW_SHOW : SW_HIDE); if (g_aiProvider) MoveWindow(local[i], 0, -4000, 300, 26, FALSE); }
   if (g_aiProvider) { ShowWindow(g_aiBar, SW_HIDE); MoveWindow(g_aiBar, 0, -4000, 300, 6, FALSE); }
@@ -198,6 +205,8 @@ static int ai_ui_layout(int pad, int y, int fullW, int cw, int btnH, int gap, in
   set_place(g_aiBtnOff, pad + halfOn + gap, y, fullW - halfOn - gap, btnH);
   y += btnH + gap + lab;
   set_place(g_aiSource, pad, y, fullW, btnH + 130);
+  y += btnH + gap + lab;
+  set_place(g_aiPersonaBox, pad, y, fullW, btnH + 130);
   y += btnH + gap + lab;
   if (g_aiProvider) {
     set_place(g_aiZModel, pad, y, fullW, btnH + 160); y += btnH + gap + lab;
@@ -247,6 +256,7 @@ static void ai_ui_label(HDC hdc, HWND under, const wchar_t *text, RECT rc) {
 static void ai_ui_paint(HDC hdc, RECT rc) {
   if (g_tab != SEC_AI) return;
   ai_ui_label(hdc, g_aiSource, L"источник ИИ", rc);
+  ai_ui_label(hdc, g_aiPersonaBox, L"как помощник общается", rc);
   if (g_aiProvider) {
     ai_ui_label(hdc, g_aiZModel, L"модель Z.ai (можно ввести имя)", rc);
     ai_ui_label(hdc, g_aiZKey, L"API-ключ (не передаётся в отчёт)", rc); return;
@@ -412,6 +422,11 @@ static void ai_ui_pick_llama(HWND hwnd) {
 
 /* TRUE — команда наша */
 static BOOL ai_ui_command(HWND hwnd, int id, int code) {
+  if (id == ID_AI_PERSONA && code == CBN_SELCHANGE) { /* со следующего ответа */
+    int selected = (int)SendMessageW(g_aiPersonaBox, CB_GETCURSEL, 0, 0);
+    if (selected >= 0 && selected <= 3) { g_aiPersona = selected; ai_save(); }
+    return TRUE;
+  }
   if (id == ID_AI_SOURCE && code == CBN_SELCHANGE) {
     int selected = (int)SendMessageW(g_aiSource, CB_GETCURSEL, 0, 0);
     if (selected == g_aiProvider) return TRUE;

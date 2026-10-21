@@ -76,6 +76,7 @@ static BOOL ag_can_clear(void);
 static BOOL g_acRouting;
 static int g_acRouteDispatch; /* 0 classify, 1 file tools, 2 web, 3 ordinary reply */
 static BOOL ac_route_start(const wchar_t *q);
+static int ac_quick_route(const wchar_t *q);
 static void ac_route_result(AiResult *r);
 static void ac_route_reset(void);
 static BOOL g_acCmdWait;      /* ответ на команду для файлов, а не чат */
@@ -514,6 +515,7 @@ static int ac_log_twips(void) {
 }
 
 static void ac_redraw(void) {
+  ac_mini_refresh(); /* мини-чат у помощника показывает ту же беседу */
   if (g_acRich) {
     AcRtf rtf = {0}; ac_rtf_begin_ui(&rtf);
     int tw = ac_log_twips();
@@ -576,6 +578,7 @@ static void ac_busy(BOOL on) {
 /* план ждёт ответа: «Применить» и «Отмена» над полем ввода, вместо «С экрана» */
 static void ac_layout(int W, int H);
 static void ac_plan_ui(BOOL on) {
+  ac_mini_refresh(); /* в мини-чате — «Применить» / «Отмена» */
   SetWindowTextW(g_acSend, on ? L"Применить" : L"Отправить");
   SetWindowTextW(g_acStop, on ? L"Отмена" : L"Стоп");
   ShowWindow(g_acApply, on ? SW_SHOW : SW_HIDE);
@@ -836,7 +839,7 @@ static void ac_sys_build(const wchar_t *q, const wchar_t *web, wchar_t *out, int
   SYSTEMTIME now; GetLocalTime(&now); wchar_t date[500];
   SYSTEMTIME tomorrow = ac_date_shift(now, 1);
   _snwprintf(date, 500, L"\r\nСегодня по календарю компьютера: %04u-%02u-%02u. Завтра означает %04u-%02u-%02u. Используй эту дату для относительных вопросов; даты в источниках её не заменяют.\r\n", now.wYear, now.wMonth, now.wDay, tomorrow.wYear, tomorrow.wMonth, tomorrow.wDay);
-  _snwprintf(out, cap, L"%s%s%s%s%s%s%s%s%s%s%s%s%s%s", AC_SYS, date,
+  _snwprintf(out, cap, L"%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s", AC_SYS, kAcPersona[g_aiPersona & 3], date,
              ac_picture_context(q) ? AC_SYS_IMAGE : L"",
              ac_policy_technical(q) ? AC_SYS_TECH : L"",
              ac_policy_app(q) ? AC_SYS_APP : L"",
@@ -1856,7 +1859,10 @@ static void ac_send(void) {
   ac_avatar_set(AC_AV_LISTENING);
   if (g_acImg) ag_stop(); /* A new picture starts visual chat, not an old file clarification. */
   if (!g_acRouteDispatch && !g_acImg && !ac_picture_context(a) && ai_ready()) {
-    ac_route_start(a); free(in); return;
+    int quick = g_agPending ? 0 : ac_quick_route(a); /* явное — без лишнего вызова модели */
+    if (!quick) { ac_route_start(a); free(in); return; }
+    ag_stop();
+    g_acRouteDispatch = quick;
   }
   BOOL files = g_acRouteDispatch == 1;
   BOOL forceWeb = g_acRouteDispatch == 2;
@@ -2472,10 +2478,13 @@ static void ac_layout(int W, int H) {
   int logY = AC_HEAD_H + 12, logH = y - logY;
   if (logH < 60) logH = 60;
   SetRect(&g_acLogCard, pad, logY, W - pad, logY + logH);
-  MoveWindow(g_acLog, pad + AC_CARD_IN, logY + AC_CARD_IN, W - 2 * pad - 2 * AC_CARD_IN, logH - 2 * AC_CARD_IN, TRUE);
+  /* поля сверху и снизу даёт карточка, а не RichEdit: при прокрутке он сдвигает
+     и свою полосу полей, но не перерисовывает её — внизу оставался обрывок строки */
+  MoveWindow(g_acLog, pad + AC_CARD_IN, logY + AC_CARD_IN + 6, W - 2 * pad - 2 * AC_CARD_IN,
+             logH - 2 * AC_CARD_IN - 12, TRUE);
   if (g_acRich) {
-    RECT bounds; GetClientRect(g_acLog, &bounds); InflateRect(&bounds, -12, -8);
-    SendMessageW(g_acLog, EM_SETRECT, 0, (LPARAM)&bounds);
+    SendMessageW(g_acLog, EM_SETRECT, 0, 0); /* прямоугольник текста — вся лента */
+    SendMessageW(g_acLog, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(12, 12));
     /* реплики шириной в ленту: ширина сменилась — переложить, когда тянуть перестанут */
     RECT lc;
     GetClientRect(g_acLog, &lc);
@@ -2757,8 +2766,10 @@ static void ac_retheme(void) {
   RedrawWindow(g_acWnd, NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
 }
 
-/* пункт «Спросить ИИ» в «Ещё» */
-static void aichat_show(void) {
+#include "ai_minichat.c" /* мини-чат у помощника: та же беседа в маленьком окне у робота */
+
+/* полный чат — окном */
+static void aichat_show_full(void) {
   ac_avatar_startup(); /* отозванного помощника чат обратно не зовёт */
   if (!g_acWnd) ac_create();
   if (!g_acWnd) return;
@@ -2771,6 +2782,17 @@ static void aichat_show(void) {
     if (!ai_ready()) ac_status(ai_status_text(g_aiOn ? AI_NO_MODEL : AI_OFF));
     else ac_status(L"Enter — отправить · Shift+Enter — новая строка");
   }
+}
+
+/* пункт «Спросить ИИ» в «Ещё», двойной щелчок по роботу: помощник на столе —
+   мини-чат у него, иначе — окно чата */
+static void aichat_show(void) {
+  ac_avatar_startup();
+  if (ac_avatar_here()) {
+    ac_mini_show();
+    return;
+  }
+  aichat_show_full();
 }
 
 /* поиск с вопросом (мини-ИИ): открыть чат и сразу спросить */

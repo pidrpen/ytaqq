@@ -672,7 +672,8 @@ static BOOL ui_our_window(HWND h) {
   static const wchar_t *const skip[] = {L"CursorPadWindow", L"CursorPadFx", L"CursorPadIdleFight",
                                         L"CursorPadFloatingAvatar", L"CursorPadPick", L"CursorPadPreview",
                                         /* свои прозрачные окна: пузырь помощника, кольцо конвертера */
-                                        L"CursorPadAvatarBubble", L"CursorPadConvertRing"};
+                                        L"CursorPadAvatarBubble", L"CursorPadAvatarMenu", L"CursorPadMiniChat",
+                                        L"CursorPadConvertRing"};
   for (size_t i = 0; i < sizeof(skip) / sizeof(skip[0]); i++)
     if (!wcscmp(cls, skip[i])) return FALSE;
   return TRUE;

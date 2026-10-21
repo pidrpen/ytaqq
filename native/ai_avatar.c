@@ -14,13 +14,8 @@
 #define AC_AVATAR_DEFAULT_SIZE 160
 #define AC_AVATAR_SLEEP_AFTER 300000 /* засыпает через 5 минут без дела и без курсора рядом */
 #define AC_AVATAR_ROAM 140           /* гуляет не дальше стольких пикселей от места, куда поставили */
-#define AC_AVATAR_SCALE_BASE 4300    /* пункты «Масштаб»: 4300 + номер в kAcAvatarScales */
 #define AC_AVATAR_MIN 80             /* 50 % */
 #define AC_AVATAR_MAX 384            /* 240 %: кадр 192 px, крупнее — уже мыльно */
-#define AC_AVATAR_HIDE 4210
-#define AC_AVATAR_CHAT 4211
-#define AC_AVATAR_WANDER 4212
-#define AC_AVATAR_BUBBLES 4213
 
 /* порядок = строки атласа (STATES в make_avatar.py) */
 enum { AC_AV_IDLE, AC_AV_LISTENING, AC_AV_THINKING, AC_AV_FILES, AC_AV_WAVE, AC_AV_SUCCESS, AC_AV_ERROR,
@@ -73,6 +68,14 @@ static void ac_avatar_show(void);
 static void ac_avatar_ambient(int state, DWORD now);
 static void ac_avatar_dismiss(void);
 static void ac_avatar_menu_label(void);
+/* мини-чат у помощника (ai_minichat.c): маленькое окно у головы робота, ездит за ним */
+static BOOL ac_mini_open(void);
+static void ac_mini_follow(void);
+static void ac_mini_sync(void);
+static void ac_mini_refresh(void);
+static void ac_mini_status(const wchar_t *t);
+static BOOL g_acAvatarFollowing; /* робота двигает сам мини-чат — обратно его не двигать */
+static void ac_menu_close(void);
 
 /* GetTickCount переполняется раз в 49,7 суток: сравниваем разность, а не значения */
 static BOOL ac_due(DWORD now, DWORD at) { return (LONG)(now - at) >= 0; }
@@ -480,6 +483,69 @@ static float ac_triangle(float px, float py, const float *t) {
   return d;
 }
 
+/* Текст на прозрачном холсте: белым по чёрному во временный DIB, яркость —
+   покрытие, поверх pix цветом col. В dc уже выбран шрифт; dc — в памяти. */
+static void ac_text(BYTE *pix, int W, int H, HDC dc, const wchar_t *s, int n, RECT r, UINT fmt, COLORREF col) {
+  int tw = r.right - r.left, th = r.bottom - r.top;
+  if (tw <= 0 || th <= 0) return;
+  BITMAPINFO info;
+  memset(&info, 0, sizeof(info));
+  info.bmiHeader.biSize = sizeof(info.bmiHeader);
+  info.bmiHeader.biWidth = tw;
+  info.bmiHeader.biHeight = -th;
+  info.bmiHeader.biPlanes = 1;
+  info.bmiHeader.biBitCount = 32;
+  info.bmiHeader.biCompression = BI_RGB;
+  BYTE *tp = NULL;
+  HBITMAP tb = CreateDIBSection(dc, &info, DIB_RGB_COLORS, (void **)&tp, NULL, 0);
+  if (!tb || !tp) {
+    if (tb) DeleteObject(tb);
+    return;
+  }
+  HGDIOBJ old = SelectObject(dc, tb);
+  memset(tp, 0, (size_t)tw * th * 4);
+  SetBkMode(dc, TRANSPARENT);
+  SetTextColor(dc, RGB(255, 255, 255));
+  RECT lr = {0, 0, tw, th};
+  DrawTextW(dc, s, n, &lr, fmt);
+  GdiFlush();
+  for (int y = 0; y < th; y++) {
+    int py = r.top + y;
+    if (py < 0 || py >= H) continue;
+    for (int x = 0; x < tw; x++) {
+      int px = r.left + x;
+      const BYTE *c = tp + ((size_t)y * tw + x) * 4;
+      BYTE m = c[0] > c[1] ? c[0] : c[1];
+      if (c[2] > m) m = c[2];
+      if (m && px >= 0 && px < W) ac_px_over(pix + ((size_t)py * W + px) * 4, col, m / 255.0f);
+    }
+  }
+  SelectObject(dc, old);
+  DeleteObject(tb);
+}
+
+/* расстояние до скруглённого прямоугольника: внутри — минус, снаружи — плюс */
+static float ac_rrect_sd(float px, float py, float x0, float y0, float x1, float y1, float r) {
+  float hx = (x1 - x0) * 0.5f, hy = (y1 - y0) * 0.5f;
+  if (r > hx) r = hx;
+  if (r > hy) r = hy;
+  float qx = fabsf(px - (x0 + hx)) - (hx - r), qy = fabsf(py - (y0 + hy)) - (hy - r);
+  float ox = qx > 0.0f ? qx : 0.0f, oy = qy > 0.0f ? qy : 0.0f, in = qx > qy ? qx : qy;
+  return sqrtf(ox * ox + oy * oy) + (in < 0.0f ? in : 0.0f) - r;
+}
+
+/* скруглённый прямоугольник с мягким краем */
+static void ac_rrect(BYTE *pix, int W, int H, float x0, float y0, float x1, float y1, float r, COLORREF fill, float a) {
+  int ix0 = (int)x0 - 1, ix1 = (int)x1 + 1, iy0 = (int)y0 - 1, iy1 = (int)y1 + 1;
+  if (ix0 < 0) ix0 = 0;
+  if (iy0 < 0) iy0 = 0;
+  if (ix1 > W - 1) ix1 = W - 1;
+  if (iy1 > H - 1) iy1 = H - 1;
+  for (int y = iy0; y <= iy1; y++)
+    for (int x = ix0; x <= ix1; x++)
+      ac_px_over(pix + ((size_t)y * W + x) * 4, fill, a * (0.5f - ac_rrect_sd(x + 0.5f, y + 0.5f, x0, y0, x1, y1, r)));
+}
+
 static void ac_bubble_update(void) {
   if (!g_acBubble || !g_acAvatar) return;
   DWORD now = GetTickCount();
@@ -580,40 +646,9 @@ static void ac_bubble_update(void) {
           ac_px_over(dst, ac_mix(RGB(123, 92, 255), RGB(56, 225, 255), (fx - bx) / (bw > 1 ? bw : 1)), band * 0.95f);
       }
     }
-    /* текст: белым по чёрному в отдельный холст, яркость — покрытие */
-    if (textW > 0 && textH > 0) {
-      BITMAPINFO info;
-      memset(&info, 0, sizeof(info));
-      info.bmiHeader.biSize = sizeof(info.bmiHeader);
-      info.bmiHeader.biWidth = textW;
-      info.bmiHeader.biHeight = -textH;
-      info.bmiHeader.biPlanes = 1;
-      info.bmiHeader.biBitCount = 32;
-      info.bmiHeader.biCompression = BI_RGB;
-      BYTE *tp = NULL;
-      HBITMAP tb = CreateDIBSection(screen, &info, DIB_RGB_COLORS, (void **)&tp, NULL, 0);
-      if (tb && tp) {
-        HGDIOBJ oldBmp = SelectObject(dc, tb);
-        memset(tp, 0, (size_t)textW * textH * 4);
-        SetBkMode(dc, TRANSPARENT);
-        SetTextColor(dc, RGB(255, 255, 255));
-        RECT r = {0, 0, textW, textH};
-        DrawTextW(dc, g_acBubbleText, -1, &r, DT_WORDBREAK | DT_NOPREFIX | DT_EDITCONTROL | DT_END_ELLIPSIS);
-        GdiFlush();
-        int ox = (int)bx + pad, oy = (int)by + pad;
-        for (int ty = 0; ty < textH; ty++) {
-          for (int tx = 0; tx < textW; tx++) {
-            const BYTE *s = tp + ((size_t)ty * textW + tx) * 4;
-            BYTE m = s[0] > s[1] ? s[0] : s[1];
-            if (s[2] > m) m = s[2];
-            if (m && ox + tx < W && oy + ty < H)
-              ac_px_over(pix + ((size_t)(oy + ty) * W + ox + tx) * 4, RGB(236, 240, 255), m / 255.0f);
-          }
-        }
-        SelectObject(dc, oldBmp);
-      }
-      if (tb) DeleteObject(tb);
-    }
+    RECT tr2 = {(int)bx + pad, (int)by + pad, (int)bx + pad + textW, (int)by + pad + textH};
+    ac_text(pix, W, H, dc, g_acBubbleText, -1, tr2, DT_WORDBREAK | DT_NOPREFIX | DT_EDITCONTROL | DT_END_ELLIPSIS,
+            RGB(236, 240, 255));
     /* ИИ ещё работает: три точки бегут волной */
     if (dots) {
       for (int i = 0; i < 3; i++) {
@@ -656,6 +691,7 @@ static LRESULT CALLBACK AcBubbleProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
 /* Показать реплику рядом с аватаром. ms = 0 — держать, пока ИИ занят. */
 static void ac_avatar_bubble(const wchar_t *text, BOOL thought, DWORD ms) {
   if (!g_acAvatarBubbles || !g_acAvatar || !IsWindowVisible(g_acAvatar) || g_acAvatarAnim == 2 || !text) return;
+  if (ac_mini_open()) return; /* мини-чат открыт рядом — там то же самое */
   int n = 0;
   BOOL space = FALSE;
   for (const wchar_t *s = text; *s && n < 196; s++) {
@@ -702,6 +738,7 @@ static void ac_avatar_bubble(const wchar_t *text, BOOL thought, DWORD ms) {
    сообщения — только если окно чата не перед глазами. Подсказки про «Стоп»
    в пузыре не нужны: кнопка в чате. */
 static void ac_avatar_say(const wchar_t *text) {
+  ac_mini_status(text);
   if (!text || !text[0]) {
     if (!g_acAvatarBusy && g_acBubbleThought && !g_acBubbleUntil) g_acBubbleUntil = GetTickCount() + 900;
     return;
@@ -725,6 +762,7 @@ static void ac_avatar_say(const wchar_t *text) {
 /* ИИ начал или закончил работу (ac_busy). */
 static void ac_avatar_busy(BOOL on) {
   g_acAvatarBusy = on;
+  ac_mini_refresh();
   if (!on && g_acBubbleThought && !g_acBubbleUntil) g_acBubbleUntil = GetTickCount() + 1500;
 }
 
@@ -816,6 +854,18 @@ static void ac_avatar_apply_scale(int size) {
   }
   ac_avatar_present();
   ac_avatar_save_settings();
+  ac_mini_follow();
+}
+
+/* Мини-чат у помощника тянут мышью — робот едет рядом и запоминает место. */
+static void ac_avatar_follow_panel(int x, int y) {
+  if (!g_acAvatar || !IsWindowVisible(g_acAvatar)) return;
+  g_acAvatarFollowing = TRUE;
+  SetWindowPos(g_acAvatar, HWND_TOPMOST, x, y, g_acAvatarSize, g_acAvatarSize, SWP_NOACTIVATE | SWP_NOSIZE);
+  g_acAvatarFollowing = FALSE;
+  g_acAvatarHome.x = x;
+  g_acAvatarHome.y = y;
+  g_acAvatarMoving = FALSE;
 }
 
 /* размер в процентах от обычных 160 px — подпись в пузыре и в меню */
@@ -837,49 +887,378 @@ static void ac_avatar_hide(void) {
   KillTimer(g_acAvatar, AC_AVATAR_TIMER); /* скрытый не тратит процессор */
   ShowWindow(g_acAvatar, SW_HIDE);
   ac_bubble_hide(TRUE);
+  ac_menu_close();
   ac_avatar_save_settings();
+  ac_mini_sync(); /* помощника нет — мини-чата тоже */
 }
 
-static void ac_avatar_menu(HWND hwnd) {
-  static const int kAcAvatarScales[] = {50, 60, 70, 80, 90, 100, 110, 125, 150, 175, 200, 240};
-  enum { AV_SCALES = (int)(sizeof(kAcAvatarScales) / sizeof(kAcAvatarScales[0])) };
-  HMENU menu = CreatePopupMenu(), scale = CreatePopupMenu();
-  if (!menu || !scale) { if (menu) DestroyMenu(menu); if (scale) DestroyMenu(scale); return; }
-  for (int i = 0; i < AV_SCALES; i++) {
-    int px = AC_AVATAR_DEFAULT_SIZE * kAcAvatarScales[i] / 100;
-    wchar_t item[40];
-    swprintf(item, 40, L"%d %% · %d px", kAcAvatarScales[i], px);
-    AppendMenuW(scale, MF_STRING | (abs(g_acAvatarSize - px) <= 2 ? MF_CHECKED : 0), AC_AVATAR_SCALE_BASE + i, item);
+/* ---------- своё меню помощника (ПКМ) вместо строк Windows: тёмное стекло,
+   как пузырь, — шапка с состоянием, чат, ползунок размера, переключатели,
+   «Отозвать». Закрывается щелчком мимо и Esc, ходит стрелками. */
+
+enum { ACM_HEAD, ACM_CHAT, ACM_SIZE, ACM_BUBBLES, ACM_WANDER, ACM_SEP, ACM_DISMISS, ACM_N };
+#define AC_MENU_TIMER 0xA172
+static HWND g_acMenu;
+static RECT g_acMenuRow[ACM_N];
+static int g_acMenuHot = -1, g_acMenuW, g_acMenuH, g_acMenuK = 100; /* k — масштаб под DPI, % */
+static BOOL g_acMenuDrag, g_acMenuTrack;
+static BYTE g_acMenuAlpha;
+static HBITMAP g_acMenuBmp;
+static BYTE *g_acMenuPix;
+static int g_acMenuBmpW, g_acMenuBmpH;
+static HFONT g_acMenuFont, g_acMenuBold, g_acMenuSmall, g_acMenuIcons;
+
+static int ac_mpx(int v) { return v * g_acMenuK / 100; }
+static BOOL ac_menu_pick(int i) { return i == ACM_CHAT || i == ACM_SIZE || i == ACM_BUBBLES || i == ACM_WANDER || i == ACM_DISMISS; }
+
+static HFONT ac_menu_font(int px, int weight, const wchar_t *face) {
+  return CreateFontW(-ac_mpx(px), 0, 0, 0, weight, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+                     CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_SWISS, face);
+}
+
+static void ac_menu_free(void) {
+  HFONT *fonts[] = {&g_acMenuFont, &g_acMenuBold, &g_acMenuSmall, &g_acMenuIcons};
+  for (int i = 0; i < 4; i++)
+    if (*fonts[i]) { DeleteObject(*fonts[i]); *fonts[i] = NULL; }
+  if (g_acMenuBmp) { DeleteObject(g_acMenuBmp); g_acMenuBmp = NULL; g_acMenuPix = NULL; }
+}
+
+static void ac_menu_close(void) {
+  if (!g_acMenu) return;
+  HWND h = g_acMenu;
+  g_acMenu = NULL;
+  g_acMenuDrag = FALSE;
+  DestroyWindow(h);
+  ac_menu_free();
+}
+
+static void ac_menu_layout(void) {
+  static const int kRowH[ACM_N] = {56, 38, 62, 38, 38, 9, 38};
+  int m = ac_mpx(14), w = ac_mpx(292), pad = ac_mpx(6), y = m + pad;
+  for (int i = 0; i < ACM_N; i++) {
+    SetRect(&g_acMenuRow[i], m + pad, y, m + w - pad, y + ac_mpx(kRowH[i]));
+    y += ac_mpx(kRowH[i]);
   }
-  AppendMenuW(scale, MF_SEPARATOR, 0, NULL);
-  AppendMenuW(scale, MF_STRING | MF_GRAYED, 0, L"Плавно — Ctrl + колесо мыши над роботом");
-  wchar_t title[40];
-  swprintf(title, 40, L"Масштаб: %d %%", ac_avatar_percent(g_acAvatarSize));
-  AppendMenuW(menu, MF_POPUP, (UINT_PTR)scale, title);
-  AppendMenuW(menu, MF_STRING | (g_acAvatarBubbles ? MF_CHECKED : 0), AC_AVATAR_BUBBLES, L"Показывать мысли ИИ");
-  AppendMenuW(menu, MF_STRING | (g_acAvatarWander ? MF_CHECKED : 0), AC_AVATAR_WANDER, L"Гулять рядом с местом");
-  AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
-  AppendMenuW(menu, MF_STRING, AC_AVATAR_CHAT, L"Открыть чат с ИИ");
-  AppendMenuW(menu, MF_STRING, AC_AVATAR_HIDE, L"Отозвать помощника");
-  POINT p;
-  GetCursorPos(&p);
-  SetForegroundWindow(hwnd);
-  UINT command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, p.x, p.y, 0, hwnd, NULL);
-  DestroyMenu(menu);
-  if (command >= AC_AVATAR_SCALE_BASE && command < AC_AVATAR_SCALE_BASE + AV_SCALES) {
-    ac_avatar_apply_scale(AC_AVATAR_DEFAULT_SIZE * kAcAvatarScales[command - AC_AVATAR_SCALE_BASE] / 100);
-    return;
+  g_acMenuW = w + 2 * m;
+  g_acMenuH = y + pad + m;
+}
+
+/* ползунок размера: от x0 до x1 на высоте y */
+static void ac_menu_track(float *x0, float *x1, float *y) {
+  RECT r = g_acMenuRow[ACM_SIZE];
+  *x0 = (float)(r.left + ac_mpx(16));
+  *x1 = (float)(r.right - ac_mpx(16));
+  *y = (float)(r.bottom - ac_mpx(15));
+}
+
+static void ac_menu_switch(BYTE *pix, int W, int H, RECT row, BOOL on) {
+  float w = (float)ac_mpx(38), h = (float)ac_mpx(21), x1 = (float)(row.right - ac_mpx(12)), x0 = x1 - w;
+  float cy = (row.top + row.bottom) * 0.5f;
+  ac_rrect(pix, W, H, x0, cy - h / 2, x1, cy + h / 2, h / 2, on ? RGB(56, 200, 255) : RGB(58, 64, 96), 1.0f);
+  float knob[2] = {on ? x1 - h / 2 : x0 + h / 2, cy};
+  ac_paint_stroke(pix, W, H, knob, 1, h / 2 - ac_mpx(3), RGB(255, 255, 255), RGB(255, 255, 255), 0.0f, 1.0f);
+}
+
+/* строка: значок, подпись, справа — пояснение мелким */
+static void ac_menu_line(BYTE *pix, int W, int H, HDC dc, RECT row, wchar_t icon, const wchar_t *label,
+                         const wchar_t *note, COLORREF ink, COLORREF iconInk, int height) {
+  RECT ir = {row.left + ac_mpx(8), row.top, row.left + ac_mpx(34), row.top + height};
+  if (g_acMenuIcons && icon) {
+    SelectObject(dc, g_acMenuIcons);
+    ac_text(pix, W, H, dc, &icon, 1, ir, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX, iconInk);
   }
-  switch (command) {
-  case AC_AVATAR_BUBBLES:
+  RECT lr = {row.left + ac_mpx(42), row.top, row.right - ac_mpx(60), row.top + height};
+  SelectObject(dc, g_acMenuFont);
+  ac_text(pix, W, H, dc, label, -1, lr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS, ink);
+  if (note) {
+    RECT nr = {row.right - ac_mpx(110), row.top, row.right - ac_mpx(12), row.top + height};
+    SelectObject(dc, g_acMenuSmall);
+    ac_text(pix, W, H, dc, note, -1, nr, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX, RGB(140, 150, 190));
+  }
+}
+
+static const wchar_t *ac_menu_state(void) {
+  if (g_acAvatarBusy) return g_acAvatarState == AC_AV_FILES ? L"Работает с файлами" : L"Думает…";
+  switch (g_acAvatarState) {
+  case AC_AV_LISTENING: return L"Слушает";
+  case AC_AV_THINKING: return L"Думает…";
+  case AC_AV_FILES: return L"Работает с файлами";
+  case AC_AV_SUCCESS: return L"Готово!";
+  case AC_AV_ERROR: return L"Что-то не вышло";
+  case AC_AV_TALKING: return L"Рассказывает ответ";
+  case AC_AV_SLEEP: return L"Дремлет";
+  }
+  return L"Ждёт вопроса";
+}
+
+static void ac_menu_render(void) {
+  if (!g_acMenu) return;
+  int W = g_acMenuW, H = g_acMenuH;
+  HDC screen = GetDC(NULL);
+  HDC dc = screen ? CreateCompatibleDC(screen) : NULL;
+  if (!dc) { if (screen) ReleaseDC(NULL, screen); return; }
+  if (!g_acMenuBmp || g_acMenuBmpW != W || g_acMenuBmpH != H) {
+    if (g_acMenuBmp) DeleteObject(g_acMenuBmp);
+    BITMAPINFO info;
+    memset(&info, 0, sizeof(info));
+    info.bmiHeader.biSize = sizeof(info.bmiHeader);
+    info.bmiHeader.biWidth = W;
+    info.bmiHeader.biHeight = -H;
+    info.bmiHeader.biPlanes = 1;
+    info.bmiHeader.biBitCount = 32;
+    info.bmiHeader.biCompression = BI_RGB;
+    g_acMenuPix = NULL;
+    g_acMenuBmp = CreateDIBSection(screen, &info, DIB_RGB_COLORS, (void **)&g_acMenuPix, NULL, 0);
+    g_acMenuBmpW = W;
+    g_acMenuBmpH = H;
+  }
+  BYTE *pix = g_acMenuPix;
+  if (!g_acMenuBmp || !pix) { DeleteDC(dc); ReleaseDC(NULL, screen); return; }
+  memset(pix, 0, (size_t)W * H * 4);
+  HGDIOBJ oldFont = SelectObject(dc, g_acMenuFont);
+  /* стекло: тень, тёмная заливка, кромка от фиолетового к бирюзовому */
+  float m = (float)ac_mpx(14), r = (float)ac_mpx(14);
+  for (int y = 0; y < H; y++) {
+    for (int x = 0; x < W; x++) {
+      float d = ac_rrect_sd(x + 0.5f, y + 0.5f, m, m, W - m, H - m, r);
+      BYTE *dst = pix + ((size_t)y * W + x) * 4;
+      if (d > 0.0f) ac_px_over(dst, RGB(0, 0, 0), 0.38f * expf(-d / (m * 0.4f)));
+      ac_px_over(dst, RGB(17, 21, 38), 0.97f * (0.5f - d));
+      float band = 1.3f - fabsf(d + 0.9f);
+      if (band > 0.0f) ac_px_over(dst, ac_mix(RGB(123, 92, 255), RGB(56, 225, 255), (float)x / W), band * 0.9f);
+    }
+  }
+  if (g_acMenuHot >= 0 && ac_menu_pick(g_acMenuHot)) {
+    RECT hr = g_acMenuRow[g_acMenuHot];
+    ac_rrect(pix, W, H, (float)hr.left, hr.top + 1.0f, (float)hr.right, hr.bottom - 1.0f, (float)ac_mpx(9),
+             g_acMenuHot == ACM_DISMISS ? RGB(72, 32, 50) : RGB(36, 43, 74), 1.0f);
+  }
+  COLORREF ink = RGB(236, 240, 255), cyan = RGB(56, 225, 255);
+  /* шапка: огонёк настроения, имя и что сейчас делает */
+  RECT hd = g_acMenuRow[ACM_HEAD];
+  COLORREF mood = kAcAvatarMood[g_acAvatarState];
+  float dot[2] = {hd.left + (float)ac_mpx(21), (hd.top + hd.bottom) * 0.5f};
+  ac_paint_stroke(pix, W, H, dot, 1, (float)ac_mpx(7), ac_mix(mood, RGB(255, 255, 255), 0.4f), mood, (float)ac_mpx(4), 1.0f);
+  RECT nm = {hd.left + ac_mpx(42), hd.top + ac_mpx(8), hd.right - ac_mpx(8), hd.top + ac_mpx(30)};
+  SelectObject(dc, g_acMenuBold);
+  ac_text(pix, W, H, dc, L"Мини-ИИ", -1, nm, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX, ink);
+  RECT st = {hd.left + ac_mpx(42), hd.top + ac_mpx(30), hd.right - ac_mpx(8), hd.top + ac_mpx(50)};
+  SelectObject(dc, g_acMenuSmall);
+  ac_text(pix, W, H, dc, ac_menu_state(), -1, st, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX, RGB(140, 150, 190));
+  float rule[4] = {(float)hd.left + ac_mpx(8), hd.bottom - 0.5f, (float)hd.right - ac_mpx(8), hd.bottom - 0.5f};
+  ac_paint_stroke(pix, W, H, rule, 2, 0.5f, RGB(46, 54, 88), RGB(46, 54, 88), 0.0f, 1.0f);
+  /* строки */
+  int lineH = ac_mpx(38);
+  ac_menu_line(pix, W, H, dc, g_acMenuRow[ACM_CHAT], 0xE8BD, L"Открыть чат", L"2× щелчок", ink, cyan, lineH);
+  wchar_t pct[16];
+  swprintf(pct, 16, L"%d %%", ac_avatar_percent(g_acAvatarSize));
+  ac_menu_line(pix, W, H, dc, g_acMenuRow[ACM_SIZE], 0xE740, L"Размер", pct, ink, cyan, ac_mpx(34));
+  float tx0, tx1, ty;
+  ac_menu_track(&tx0, &tx1, &ty);
+  float pos = (float)(g_acAvatarSize - AC_AVATAR_MIN) / (AC_AVATAR_MAX - AC_AVATAR_MIN), kx = tx0 + (tx1 - tx0) * pos;
+  float track[4] = {tx0, ty, tx1, ty}, fill[4] = {tx0, ty, kx, ty}, knob[2] = {kx, ty};
+  ac_paint_stroke(pix, W, H, track, 2, (float)ac_mpx(2), RGB(58, 64, 96), RGB(58, 64, 96), 0.0f, 1.0f);
+  ac_paint_stroke(pix, W, H, fill, 2, (float)ac_mpx(2), cyan, cyan, (float)ac_mpx(2), 1.0f);
+  ac_paint_stroke(pix, W, H, knob, 1, (float)ac_mpx(7), RGB(255, 255, 255), cyan,
+                  (float)ac_mpx(g_acMenuDrag ? 5 : 3), 1.0f);
+  ac_menu_line(pix, W, H, dc, g_acMenuRow[ACM_BUBBLES], 0xE8F2, L"Мысли ИИ рядом", NULL, ink, cyan, lineH);
+  ac_menu_switch(pix, W, H, g_acMenuRow[ACM_BUBBLES], g_acAvatarBubbles);
+  ac_menu_line(pix, W, H, dc, g_acMenuRow[ACM_WANDER], 0xE805, L"Гулять рядом с местом", NULL, ink, cyan, lineH);
+  ac_menu_switch(pix, W, H, g_acMenuRow[ACM_WANDER], g_acAvatarWander);
+  RECT sp = g_acMenuRow[ACM_SEP];
+  float sep[4] = {(float)sp.left + ac_mpx(8), (sp.top + sp.bottom) * 0.5f, (float)sp.right - ac_mpx(8),
+                  (sp.top + sp.bottom) * 0.5f};
+  ac_paint_stroke(pix, W, H, sep, 2, 0.5f, RGB(46, 54, 88), RGB(46, 54, 88), 0.0f, 1.0f);
+  ac_menu_line(pix, W, H, dc, g_acMenuRow[ACM_DISMISS], 0xE711, L"Отозвать помощника", NULL, RGB(255, 128, 146),
+               RGB(255, 107, 129), lineH);
+  SelectObject(dc, oldFont);
+  HGDIOBJ oldBmp = SelectObject(dc, g_acMenuBmp);
+  RECT wr;
+  GetWindowRect(g_acMenu, &wr);
+  POINT at = {wr.left, wr.top}, origin = {0, 0};
+  SIZE size = {W, H};
+  BLENDFUNCTION blend = {AC_SRC_OVER, 0, g_acMenuAlpha, AC_SRC_ALPHA};
+  UpdateLayeredWindow(g_acMenu, screen, &at, &size, dc, &origin, 0, &blend, ULW_ALPHA);
+  SelectObject(dc, oldBmp);
+  DeleteDC(dc);
+  ReleaseDC(NULL, screen);
+}
+
+static int ac_menu_hit(int x, int y) {
+  POINT p = {x, y};
+  for (int i = 0; i < ACM_N; i++)
+    if (ac_menu_pick(i) && PtInRect(&g_acMenuRow[i], p)) return i;
+  return -1;
+}
+
+static void ac_menu_size_at(int x) {
+  float x0, x1, y;
+  ac_menu_track(&x0, &x1, &y);
+  float t = (x - x0) / (x1 - x0);
+  if (t < 0.0f) t = 0.0f;
+  if (t > 1.0f) t = 1.0f;
+  ac_avatar_apply_scale(AC_AVATAR_MIN + (int)(t * (AC_AVATAR_MAX - AC_AVATAR_MIN) + 0.5f));
+  ac_menu_render();
+}
+
+static void ac_menu_activate(int i) {
+  switch (i) {
+  case ACM_CHAT: ac_menu_close(); aichat_show(); break;
+  case ACM_BUBBLES:
     g_acAvatarBubbles = !g_acAvatarBubbles;
     if (!g_acAvatarBubbles) ac_bubble_hide(TRUE);
     ac_avatar_save_settings();
+    ac_menu_render();
     break;
-  case AC_AVATAR_WANDER: g_acAvatarWander = !g_acAvatarWander; g_acAvatarMoving = FALSE; ac_avatar_save_settings(); break;
-  case AC_AVATAR_CHAT: aichat_show(); break;
-  case AC_AVATAR_HIDE: ac_avatar_dismiss(); break;
+  case ACM_WANDER:
+    g_acAvatarWander = !g_acAvatarWander;
+    g_acAvatarMoving = FALSE;
+    ac_avatar_save_settings();
+    ac_menu_render();
+    break;
+  case ACM_DISMISS: ac_menu_close(); ac_avatar_dismiss(); break;
   }
+}
+
+static LRESULT CALLBACK AcMenuProc(HWND h, UINT msg, WPARAM wParam, LPARAM lParam) {
+  switch (msg) {
+  case WM_NCHITTEST: return HTCLIENT;
+  case WM_MOUSEMOVE: {
+    int x = GET_X_LPARAM(lParam), y = GET_Y_LPARAM(lParam);
+    if (!g_acMenuTrack) {
+      TRACKMOUSEEVENT t = {sizeof(t), TME_LEAVE, h, 0};
+      g_acMenuTrack = TrackMouseEvent(&t);
+    }
+    if (g_acMenuDrag) { ac_menu_size_at(x); return 0; }
+    int hot = ac_menu_hit(x, y);
+    if (hot != g_acMenuHot) { g_acMenuHot = hot; ac_menu_render(); }
+    return 0;
+  }
+  case WM_MOUSELEAVE:
+    g_acMenuTrack = FALSE;
+    if (!g_acMenuDrag && g_acMenuHot >= 0) { g_acMenuHot = -1; ac_menu_render(); }
+    return 0;
+  case WM_LBUTTONDOWN:
+    if (ac_menu_hit(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)) == ACM_SIZE) {
+      g_acMenuDrag = TRUE;
+      SetCapture(h);
+      ac_menu_size_at(GET_X_LPARAM(lParam));
+    }
+    return 0;
+  case WM_LBUTTONUP:
+  case WM_RBUTTONUP: {
+    if (g_acMenuDrag) {
+      g_acMenuDrag = FALSE;
+      ReleaseCapture();
+      ac_menu_render();
+      return 0;
+    }
+    int i = ac_menu_hit(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
+    if (i >= 0 && i != ACM_SIZE) ac_menu_activate(i);
+    return 0;
+  }
+  case WM_CAPTURECHANGED:
+    if (g_acMenuDrag) { g_acMenuDrag = FALSE; ac_menu_render(); }
+    return 0;
+  case WM_MOUSEWHEEL: /* колесо над меню — размер робота */
+    ac_avatar_apply_scale((int)(g_acAvatarSize * powf(1.08f, GET_WHEEL_DELTA_WPARAM(wParam) / (float)WHEEL_DELTA) + 0.5f));
+    ac_menu_render();
+    return 0;
+  case WM_KEYDOWN: {
+    int k = (int)wParam;
+    if (k == VK_ESCAPE) { ac_menu_close(); return 0; }
+    if (k == VK_UP || k == VK_DOWN) {
+      int i = g_acMenuHot;
+      for (int n = 0; n < ACM_N; n++) {
+        i = k == VK_DOWN ? (i + 1) % ACM_N : (i <= 0 ? ACM_N - 1 : i - 1);
+        if (ac_menu_pick(i)) break;
+      }
+      g_acMenuHot = i;
+      ac_menu_render();
+      return 0;
+    }
+    if ((k == VK_LEFT || k == VK_RIGHT) && g_acMenuHot == ACM_SIZE) {
+      ac_avatar_apply_scale(g_acAvatarSize + (k == VK_RIGHT ? 8 : -8));
+      ac_menu_render();
+      return 0;
+    }
+    if ((k == VK_RETURN || k == VK_SPACE) && g_acMenuHot >= 0) { ac_menu_activate(g_acMenuHot); return 0; }
+    break;
+  }
+  case WM_ACTIVATE:
+    if (LOWORD(wParam) == WA_INACTIVE) PostMessageW(h, WM_CLOSE, 0, 0); /* щёлкнули мимо */
+    return 0;
+  case WM_CLOSE:
+    if (h == g_acMenu) ac_menu_close();
+    return 0;
+  case WM_TIMER:
+    if (wParam == AC_MENU_TIMER) {
+      g_acMenuAlpha = g_acMenuAlpha > 255 - 64 ? 255 : g_acMenuAlpha + 64;
+      if (g_acMenuAlpha == 255) KillTimer(h, AC_MENU_TIMER);
+      ac_menu_render();
+      return 0;
+    }
+    break;
+  case WM_PAINT: ValidateRect(h, NULL); return 0;
+  }
+  return DefWindowProcW(h, msg, wParam, lParam);
+}
+
+static void ac_avatar_menu(HWND hwnd) {
+  (void)hwnd;
+  ac_menu_close();
+  WNDCLASSEXW wc;
+  memset(&wc, 0, sizeof(wc));
+  wc.cbSize = sizeof(wc);
+  wc.lpfnWndProc = AcMenuProc;
+  wc.hInstance = g_inst;
+  wc.hCursor = LoadCursorW(NULL, IDC_ARROW);
+  wc.lpszClassName = L"CursorPadAvatarMenu";
+  if (!RegisterClassExW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) return;
+  HDC screen = GetDC(NULL);
+  g_acMenuK = screen ? MulDiv(100, GetDeviceCaps(screen, LOGPIXELSX), 96) : 100;
+  if (screen) ReleaseDC(NULL, screen);
+  g_acMenuFont = ac_menu_font(14, FW_NORMAL, L"Segoe UI");
+  g_acMenuBold = ac_menu_font(15, FW_SEMIBOLD, L"Segoe UI");
+  g_acMenuSmall = ac_menu_font(12, FW_NORMAL, L"Segoe UI");
+  g_acMenuIcons = ac_menu_font(16, FW_NORMAL, L"Segoe Fluent Icons");
+  {
+    /* нет Fluent (Windows 10) — MDL2: у значков те же коды */
+    HDC probe = CreateCompatibleDC(NULL);
+    wchar_t face[64] = L"";
+    if (probe) {
+      HGDIOBJ o = SelectObject(probe, g_acMenuIcons);
+      GetTextFaceW(probe, 64, face);
+      SelectObject(probe, o);
+      DeleteDC(probe);
+    }
+    if (wcscmp(face, L"Segoe Fluent Icons")) {
+      DeleteObject(g_acMenuIcons);
+      g_acMenuIcons = ac_menu_font(16, FW_NORMAL, L"Segoe MDL2 Assets");
+    }
+  }
+  ac_menu_layout();
+  POINT p;
+  GetCursorPos(&p);
+  int m = ac_mpx(14), x = p.x - m, y = p.y - m;
+  MONITORINFO mi = {sizeof(mi)};
+  if (GetMonitorInfoW(MonitorFromPoint(p, MONITOR_DEFAULTTONEAREST), &mi)) {
+    if (x + g_acMenuW > mi.rcWork.right) x = p.x - g_acMenuW + m; /* справа не влезает — влево от курсора */
+    if (y + g_acMenuH > mi.rcWork.bottom) y = mi.rcWork.bottom - g_acMenuH;
+    if (x < mi.rcWork.left) x = mi.rcWork.left;
+    if (y < mi.rcWork.top) y = mi.rcWork.top;
+  }
+  g_acMenu = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST, L"CursorPadAvatarMenu", L"Помощник",
+                             WS_POPUP, x, y, g_acMenuW, g_acMenuH, NULL, NULL, g_inst, NULL);
+  if (!g_acMenu) { ac_menu_free(); return; }
+  ac_bubble_hide(FALSE);
+  g_acMenuHot = -1;
+  g_acMenuAlpha = 64;
+  ac_menu_render();
+  ShowWindow(g_acMenu, SW_SHOW);
+  SetForegroundWindow(g_acMenu);
+  SetFocus(g_acMenu);
+  SetTimer(g_acMenu, AC_MENU_TIMER, 16, NULL);
 }
 
 /* щелчок без перетаскивания — робот радуется */
@@ -916,7 +1295,7 @@ static BOOL ac_avatar_here(void) { return g_acAvatar && IsWindowVisible(g_acAvat
 static BOOL ac_avatar_under(POINT p) {
   if (!g_acAvatar || !IsWindowVisible(g_acAvatar)) return FALSE;
   HWND w = WindowFromPoint(p);
-  return w && (w == g_acAvatar || w == g_acBubble);
+  return w && (w == g_acAvatar || w == g_acBubble || w == g_acMenu);
 }
 
 static void ac_avatar_menu_label(void) {
@@ -983,6 +1362,7 @@ static LRESULT CALLBACK AcAvatarProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
   }
   case WM_MOVE:
     if (g_acBubble && IsWindowVisible(g_acBubble)) ac_bubble_update();
+    if (!g_acAvatarFollowing) ac_mini_follow(); /* мини-чат едет следом */
     break;
   case WM_TIMER:
     if (wParam == AC_AVATAR_TIMER) { ac_avatar_tick(); return 0; }
@@ -1172,7 +1552,7 @@ static void ac_avatar_tick(void) {
   }
   if (idle && ac_due(now, g_acAvatarNextIdle)) ac_avatar_ambient((ac_avatar_random() & 1) ? AC_AV_WAVE : AC_AV_THINKING, now);
   BOOL bubble = g_acBubble && IsWindowVisible(g_acBubble);
-  if (idle && g_acAvatarWander && !g_acAvatarMoving && !bubble && ac_due(now, g_acAvatarNextMove)) {
+  if (idle && g_acAvatarWander && !g_acAvatarMoving && !bubble && !ac_mini_open() && ac_due(now, g_acAvatarNextMove)) {
     MONITORINFO mi = {sizeof(mi)};
     if (GetMonitorInfoW(MonitorFromWindow(g_acAvatar, MONITOR_DEFAULTTONEAREST), &mi)) {
       int x = g_acAvatarHome.x - AC_AVATAR_ROAM + (int)(ac_avatar_random() % (2 * AC_AVATAR_ROAM + 1));
