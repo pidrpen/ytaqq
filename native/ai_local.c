@@ -544,8 +544,20 @@ static void ai_server_stop_locked(void) {
   g_aiPort = 0;
 }
 
+/* настройки сменили, пока сервер запускался: следующий запрос перезапустит его */
+static volatile LONG g_aiSrvStale;
+
 static void ai_server_stop(void) {
-  AcquireSRWLockExclusive(&g_aiSrvLock);
+  /* Поток окон не ждёт замка: ai_server_ensure держит его, пока грузится модель
+     (до срока запроса — минуты), а в этом потоке идут окна и хук мыши.
+     Замок занят — только пометка «устарел», сервер погасит следующий запрос. */
+  if (GetCurrentThreadId() == g_aiUiThread) {
+    if (!TryAcquireSRWLockExclusive(&g_aiSrvLock)) {
+      InterlockedExchange(&g_aiSrvStale, 1);
+      return;
+    }
+  } else
+    AcquireSRWLockExclusive(&g_aiSrvLock);
   ai_server_stop_locked();
   ReleaseSRWLockExclusive(&g_aiSrvLock);
 }
@@ -674,11 +686,13 @@ static int ai_server_ensure(DWORD deadline, volatile LONG *cancel, int minimumCo
   if (!g_aiOn || (cancel && *cancel)) {
     ReleaseSRWLockExclusive(&g_aiSrvLock); return !g_aiOn ? AI_OFF : AI_CANCELLED;
   }
-  if (g_aiProc && WaitForSingleObject(g_aiProc, 0) == WAIT_TIMEOUT && g_aiPort && g_aiSlotCtx >= minimumContext) {
+  if (g_aiProc && WaitForSingleObject(g_aiProc, 0) == WAIT_TIMEOUT && g_aiPort && g_aiSlotCtx >= minimumContext &&
+      !g_aiSrvStale) {
     ReleaseSRWLockExclusive(&g_aiSrvLock);
     return AI_OK;
   }
   ai_server_stop_locked();
+  InterlockedExchange(&g_aiSrvStale, 0); /* запускаем с текущими настройками */
   wchar_t exe[MAX_PATH], model[MAX_PATH], mm[MAX_PATH], log[MAX_PATH], dir[MAX_PATH];
   BOOL gpu = g_aiGpu && ai_server_exe(TRUE, exe);
   if (!gpu && !ai_server_exe(FALSE, exe) && !ai_server_exe(TRUE, exe)) {
@@ -773,7 +787,7 @@ static int ai_server_ensure(DWORD deadline, volatile LONG *cancel, int minimumCo
     lstrcpynW(exeDir, exe, MAX_PATH);
     wchar_t *sl = wcsrchr(exeDir, L'\\');
     if (sl) *sl = 0;
-    ai_log(L"Запуск локального llama-server; порт %d", g_aiPort);
+    ai_log(L"Запуск локального llama-server; порт %d", port); /* g_aiPort здесь уже 0: сервер только что остановлен */
     BOOL ok = CreateProcessW(exe, cmd, NULL, NULL, lf != INVALID_HANDLE_VALUE, CREATE_NO_WINDOW | CREATE_SUSPENDED,
                              NULL, exeDir, &si, &pi);
     if (lf != INVALID_HANDLE_VALUE) CloseHandle(lf);

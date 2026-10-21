@@ -166,6 +166,8 @@ static void af_known_folders(void) {
     if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || !wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L".."))
       continue;
     if (g_acKnownN >= 40) break;
+    /* _snwprintf при нехватке места не ставит 0 — длинный путь пропускаем, а не обрезаем */
+    if (wcslen(g_acLastDir) + wcslen(fd.cFileName) + 2 > MAX_PATH) continue;
     _snwprintf(g_acKnown[g_acKnownN++], MAX_PATH, L"%s\\%s", g_acLastDir, fd.cFileName);
   } while (FindNextFileW(h, &fd));
   FindClose(h);
@@ -225,6 +227,12 @@ static BOOL af_resolve(const wchar_t *in, wchar_t *out, BOOL allowNew) {
 
 /* имя файла с (2), (3)… — чтобы не перезаписать чужой файл */
 static void af_unique_target(const wchar_t *dir, const wchar_t *name, wchar_t *out) {
+  /* _snwprintf при нехватке места не ставит 0, а обрезанное имя — чужой путь.
+     Не влезает с запасом на « (99)» — цели нет (пустая строка), действие пропускается */
+  if (wcslen(dir) + wcslen(name) + 7 > MAX_PATH) {
+    out[0] = 0;
+    return;
+  }
   _snwprintf(out, MAX_PATH, L"%s\\%s", dir, name);
   for (int k = 2; af_exists(out) && k < 100; k++) {
     wchar_t base[MAX_PATH], ext[64] = L"";
@@ -297,6 +305,7 @@ static int af_match(const wchar_t *dir, const wchar_t *name) {
                ((ext & 64) && !wcscmp(e, L".dwg")) || ((ext & 128) && !wcscmp(e, L".bmp"));
       ok = t;
     }
+    if (ok && wcslen(dir) + wcslen(fd.cFileName) + 2 > MAX_PATH) ok = FALSE; /* не обрезать путь (см. af_unique_target) */
     if (ok && g_afHitN < 200) _snwprintf(g_afHits[g_afHitN++], MAX_PATH, L"%s\\%s", dir, fd.cFileName);
   } while (FindNextFileW(h, &fd));
   FindClose(h);
@@ -467,6 +476,7 @@ static void ac_take_plan(const wchar_t *src, const wchar_t *dst, const wchar_t *
     wchar_t list[700] = L"";
     af_list_dir(src, list, 700);
     _snwprintf(msg, 600, L"В папке нет таких файлов («%s»). Что там есть:%s", what, list[0] ? list : L"\r\nпусто");
+    msg[599] = 0; /* список длиннее msg: _snwprintf тогда не ставит 0 */
     af_say(msg);
     return;
   }
@@ -477,6 +487,7 @@ static void ac_take_plan(const wchar_t *src, const wchar_t *dst, const wchar_t *
       wcsncat(list, wcsrchr(g_afHits[i], L'\\') + 1, 699 - wcslen(list));
     }
     _snwprintf(msg, 600, L"Подходит несколько:%s\r\nНапишите «все» или уточните имя.", list);
+    msg[599] = 0;
     af_say(msg);
     return;
   }
@@ -485,7 +496,7 @@ static void ac_take_plan(const wchar_t *src, const wchar_t *dst, const wchar_t *
     wchar_t target[MAX_PATH];
     base = base ? base + 1 : g_afHits[i];
     af_unique_target(dst, base, target);
-    if (!_wcsicmp(g_afHits[i], target)) continue;
+    if (!target[0] || !_wcsicmp(g_afHits[i], target)) continue;
     af_add(mv ? AF_MOVE : AF_COPY, g_afHits[i], target);
   }
   if (!g_afN) {
@@ -618,12 +629,17 @@ static void ac_group_plan(const wchar_t *user, int mode) {
     wchar_t kind[32], stem[88], dir[MAX_PATH], full[MAX_PATH], target[MAX_PATH];
     af_ext_folder(fd.cFileName, kind);
     af_name_folder(fd.cFileName, stem);
+    /* путь длиннее MAX_PATH — файл не трогаем: _snwprintf не поставил бы 0 */
+    if (wcslen(dst) + wcslen(stem) + wcslen(kind) + 3 > MAX_PATH || wcslen(src) + wcslen(fd.cFileName) + 2 > MAX_PATH) {
+      skip++;
+      continue;
+    }
     if (mode == 1) _snwprintf(dir, MAX_PATH, L"%s\\%s", dst, stem);
     else if (mode == 2) _snwprintf(dir, MAX_PATH, L"%s\\%s", dst, kind);
     else _snwprintf(dir, MAX_PATH, L"%s\\%s\\%s", dst, stem, kind);
     _snwprintf(full, MAX_PATH, L"%s\\%s", src, fd.cFileName);
     af_unique_target(dir, fd.cFileName, target);
-    if (!_wcsicmp(full, target)) {
+    if (!target[0] || !_wcsicmp(full, target)) {
       skip++;
       continue;
     }
@@ -693,6 +709,7 @@ static void ac_files_run(const wchar_t *j) {
       wchar_t list[1200] = L"";
       af_list_dir(rs, list, 1200);
       _snwprintf(msg, 1200, L"Не нашёл файл «%s» в %s. Что там есть:%s\r\nУточните имя.", name, rs, list);
+      msg[1199] = 0; /* длинный список: _snwprintf не ставит 0 */
       af_say(msg);
       return;
     }
@@ -703,6 +720,7 @@ static void ac_files_run(const wchar_t *j) {
         wcsncat(list, wcsrchr(g_afHits[i], L'\\') + 1, 1199 - wcslen(list));
       }
       _snwprintf(msg, 1200, L"Нашлось несколько файлов:%s\r\nУточните имя или напишите «все».", list);
+      msg[1199] = 0;
       af_say(msg);
       return;
     }
@@ -710,7 +728,7 @@ static void ac_files_run(const wchar_t *j) {
     for (int i = 0; i < n; i++) {
       wchar_t target[MAX_PATH];
       af_unique_target(rd, wcsrchr(g_afHits[i], L'\\') + 1, target);
-      af_add(mv ? AF_MOVE : AF_COPY, g_afHits[i], target);
+      if (target[0]) af_add(mv ? AF_MOVE : AF_COPY, g_afHits[i], target);
     }
     af_show_plan();
     return;
@@ -720,8 +738,8 @@ static void ac_files_run(const wchar_t *j) {
       af_say(L"Не понял, в какой папке файл. Назовите её полностью, как в проводнике.");
       return;
     }
-    if (!af_valid_name(nw)) {
-      af_say(L"Новое имя пустое или содержит недопустимые знаки.");
+    if (!af_valid_name(nw) || wcslen(rs) + wcslen(nw) + 2 > MAX_PATH) {
+      af_say(L"Новое имя пустое, слишком длинное или содержит недопустимые знаки.");
       return;
     }
     int n = af_match(rs, name);
@@ -771,6 +789,7 @@ static void ac_files_apply(void) {
   _snwprintf(msg, 200, L"Готово: %d. Не вышло: %d%s", ok, bad,
              bad ? L" (возможно, файл открыт в другой программе)" : L"");
   af_say(msg);
+  ac_avatar_set(bad ? AC_AV_ERROR : AC_AV_SUCCESS);
 }
 
 static void ac_files_cancel(void) {

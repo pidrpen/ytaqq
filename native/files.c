@@ -170,9 +170,14 @@ static int idx_dir(FileIdx *ix, const wchar_t *dir) {
     if (_wcsicmp(ix->dirs[ix->dirsN - i], dir) == 0) return ix->dirsN - i;
   if (ix->dirsN >= ix->dirsCap) {
     int cap = ix->dirsCap ? ix->dirsCap * 2 : 256;
+    /* удавшийся realloc уже освободил старый блок — новый запоминаем сразу,
+       даже если следующий не удастся: иначе ix держит освобождённую память */
     const wchar_t **grown = (const wchar_t **)realloc((void *)ix->dirs, (size_t)cap * sizeof(wchar_t *));
+    if (grown) ix->dirs = grown;
     ULONGLONG *mt = (ULONGLONG *)realloc(ix->mtime, (size_t)cap * sizeof(ULONGLONG));
+    if (mt) ix->mtime = mt;
     int *su = (int *)realloc(ix->subs, (size_t)cap * sizeof(int));
+    if (su) ix->subs = su;
     if (!grown || !mt || !su) return -1;
     if (cap > ix->dirsCap) {
       memset(mt + ix->dirsCap, 0, (size_t)(cap - ix->dirsCap) * sizeof(ULONGLONG));
@@ -243,8 +248,11 @@ static BOOL idx_merge(FileIdx *dst, FileIdx *src) {
     while (cap < dst->dirsN + src->dirsN) cap *= 2;
     const wchar_t **grown =
         (const wchar_t **)realloc((void *)dst->dirs, (size_t)cap * sizeof(wchar_t *));
+    if (grown) dst->dirs = grown; /* как в idx_dir: не держать освобождённый блок */
     ULONGLONG *mt = (ULONGLONG *)realloc(dst->mtime, (size_t)cap * sizeof(ULONGLONG));
+    if (mt) dst->mtime = mt;
     int *su = (int *)realloc(dst->subs, (size_t)cap * sizeof(int));
+    if (su) dst->subs = su;
     if (!grown || !mt || !su) return FALSE;
     if (cap > dst->dirsCap) {
       memset(mt + dst->dirsCap, 0, (size_t)(cap - dst->dirsCap) * sizeof(ULONGLONG));
@@ -961,7 +969,9 @@ static BOOL wq_push_owned(WalkQ *q, wchar_t *owned, ULONGLONG mtime) {
   if (q->head + q->n >= q->cap) {
     int cap = q->cap ? q->cap * 2 : 4096;
     wchar_t **grown = (wchar_t **)realloc(q->item, (size_t)cap * sizeof(wchar_t *));
+    if (grown) q->item = grown; /* старый блок уже освобождён — см. idx_dir */
     ULONGLONG *tm = (ULONGLONG *)realloc(q->time, (size_t)cap * sizeof(ULONGLONG));
+    if (tm) q->time = tm;
     if (!grown || !tm) {
       free(owned);
       return FALSE;

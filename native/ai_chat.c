@@ -47,6 +47,7 @@ static DWORD g_acImgLen;
 static HBITMAP g_acThumbBmp; /* миниатюра ждущей картинки (и той, что не ушла) */
 static void ac_relayout(void);
 static void ac_layout(int W, int H);
+static void aichat_show(void);
 static BOOL g_acPlanOn; /* план «было → станет» ждёт «Применить» */
 static void ac_plan_ui(BOOL on);
 static void ac_files_run(const wchar_t *j);
@@ -102,6 +103,8 @@ static int g_acReviewStage; /* 1 local draft, 2 targeted lookup, 3 final review 
 static wchar_t *g_acReviewDraft;
 static void ac_review_reset(void) { free(g_acReviewDraft); g_acReviewDraft = NULL; g_acReviewStage = 0; }
 
+#include "ai_avatar.c"
+
 static void ac_push(int assistant, const wchar_t *text) {
   if (g_acN == g_acCap) {
     int cap = g_acCap ? g_acCap * 2 : 16;
@@ -152,10 +155,369 @@ static DWORD CALLBACK ac_stream(DWORD_PTR cookie, LPBYTE buffer, LONG cap, LONG 
   size_t n = s->size - s->offset; if (n > (size_t)cap) n = (size_t)cap;
   memcpy(buffer, s->text + s->offset, n); s->offset += n; *read = (LONG)n; return 0;
 }
+
+/* ---- вид окна (с 2026.10.21, общий вид — ui_theme.c) -------------------------
+   Окно разложено по ролям, как приложения Windows 11: светлая шапка с
+   названием и «чипом» источника (пока ИИ думает — «думает…»); под ней на
+   сером фоне — белая карточка ленты; внизу — карточка ввода: поле,
+   «Отправить» и «Стоп» рядом с ним, ниже — строка мелких кнопок со значками.
+   План «было → станет» ждёт подтверждения на отдельной полосе над вводом.
+   Реплики — блоки: вопрос справа на сером, ответ слева с тонкой линией.
+   Ничего не анимируется, кроме общей подсветки кнопок. */
+#define AC_HEAD_H 48       /* шапка */
+#define AC_PAD 16          /* поля окна */
+#define AC_CARD_IN 6       /* лента внутри карточки: её углы не вылезают за скругление */
+#define AC_TOOL_H 36       /* строка мелких кнопок внутри карточки ввода */
+#define AC_CONFIRM_H 48    /* полоса подтверждения плана */
+#define AC_TIMER_REFLOW 0x4AC1 /* ширина ленты сменилась — реплики перекладываются */
+#define ID_AC_AVATAR 4716  /* «Помощник»: призвать / отозвать аватар (ai_avatar.c) */
+static RECT g_acLogCard, g_acInCard, g_acConfirm; /* карточки, координаты окна */
+static int g_acToolTop;     /* где в карточке ввода начинается строка кнопок */
+static BOOL g_acToolIcons;  /* окно узкое — у мелких кнопок только значки */
+static BOOL g_acBusyFx;     /* ИИ думает — в чипе шапки «думает…» */
+static int g_acLogW;
+static HBRUSH g_acLogBrush;
+static HWND g_acAvatarBtn, g_acTip;
+
+static COLORREF ac_log_bg(void) { return COL_PAPER; }
+static HBRUSH ac_log_brush(void) {
+  if (!g_acLogBrush) g_acLogBrush = CreateSolidBrush(ac_log_bg());
+  return g_acLogBrush;
+}
+static COLORREF ac_hair(void) { return blend_rgb(COL_LINE, COL_INK, 20); }
+
+/* карточка: светлая поверхность, тонкая рамка, скругление 8; у поля ввода в
+   фокусе рамка — цветом акцента */
+static void ac_card(HDC dc, RECT card, BOOL focus) {
+  if (card.right <= card.left || card.bottom <= card.top) return;
+  RECT box = card;
+  InflateRect(&box, 1, 1);
+  UiCanvas cv;
+  if (!ui_canvas_begin(&cv, dc, box, box.left, box.top, TRUE)) return;
+  UiShape s;
+  memset(&s, 0, sizeof(s));
+  s.r = 8.0f;
+  s.fill = COL_PAPER;
+  s.fillA = 255;
+  s.border = focus ? COL_SAGE : ac_hair();
+  s.borderA = 255;
+  s.bw = focus ? 1.5f : 1.0f;
+  ui_shape(&cv, card, &s);
+  ui_canvas_end(&cv, dc);
+}
+
+static void ac_busy_fx(BOOL on) {
+  if (!g_acWnd || g_acBusyFx == on) return;
+  g_acBusyFx = on;
+  if (g_acTitle) InvalidateRect(g_acTitle, NULL, FALSE);
+}
+
+static void ac_paint(HWND hwnd) {
+  PAINTSTRUCT ps;
+  HDC pdc = BeginPaint(hwnd, &ps);
+  RECT rc;
+  GetClientRect(hwnd, &rc);
+  HDC dc = CreateCompatibleDC(pdc);
+  HBITMAP bm = dc ? CreateCompatibleBitmap(pdc, rc.right > 0 ? rc.right : 1, rc.bottom > 0 ? rc.bottom : 1) : NULL;
+  if (!dc || !bm) {
+    if (bm) DeleteObject(bm);
+    if (dc) DeleteDC(dc);
+    FillRect(pdc, &rc, bg_brush(TRUE));
+    EndPaint(hwnd, &ps);
+    return;
+  }
+  HGDIOBJ ob = SelectObject(dc, bm);
+  FillRect(dc, &rc, bg_brush(TRUE)); /* фон страницы */
+  RECT head = {0, 0, rc.right, AC_HEAD_H};
+  FillRect(dc, &head, bg_brush(FALSE)); /* шапка — светлая полоса */
+  RECT rule = {0, AC_HEAD_H - 1, rc.right, AC_HEAD_H};
+  HBRUSH line = CreateSolidBrush(ac_hair());
+  FillRect(dc, &rule, line);
+  ac_card(dc, g_acLogCard, FALSE);
+  if (g_acPlanOn && g_acConfirm.right > g_acConfirm.left) {
+    ac_card(dc, g_acConfirm, FALSE);
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, COL_INK);
+    HGDIOBJ of = g_fontUi ? SelectObject(dc, g_fontUi) : NULL;
+    RECT t = {g_acConfirm.left + 14, g_acConfirm.top, g_acConfirm.right - 260, g_acConfirm.bottom};
+    DrawTextW(dc, L"План готов — проверьте его в ленте и подтвердите", -1, &t,
+              DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+    if (of) SelectObject(dc, of);
+  }
+  ac_card(dc, g_acInCard, g_acIn && GetFocus() == g_acIn);
+  RECT sep = {g_acInCard.left + 1, g_acToolTop, g_acInCard.right - 1, g_acToolTop + 1};
+  if (g_acToolTop > g_acInCard.top) FillRect(dc, &sep, line);
+  DeleteObject(line);
+  BitBlt(pdc, 0, 0, rc.right, rc.bottom, dc, 0, 0, SRCCOPY);
+  SelectObject(dc, ob);
+  DeleteObject(bm);
+  DeleteDC(dc);
+  EndPaint(hwnd, &ps);
+}
+
+/* шапка: «Мини-ИИ» — крупнее, рядом «чип» с источником; пока ИИ думает —
+   «думает…» в том же чипе */
+static void ac_draw_title(const DRAWITEMSTRUCT *dis) {
+  HWND st = dis->hwndItem;
+  RECT pr;
+  GetWindowRect(st, &pr);
+  MapWindowPoints(HWND_DESKTOP, g_acWnd, (POINT *)&pr, 2);
+  UiCanvas cv;
+  if (!ui_canvas_begin(&cv, dis->hDC, pr, dis->rcItem.left, dis->rcItem.top, FALSE)) return;
+  SetBrushOrgEx(cv.dc, -pr.left, -pr.top, NULL);
+  FillRect(cv.dc, &pr, bg_brush(FALSE));
+  wchar_t t[128];
+  GetWindowTextW(st, t, 128);
+  wchar_t *src = wcsstr(t, L" · ");
+  if (src) {
+    *src = 0;
+    src += 3;
+  }
+  HFONT big = g_fontDisplay ? g_fontDisplay : g_fontUi;
+  HGDIOBJ of = big ? SelectObject(cv.dc, big) : NULL;
+  SIZE sz = {0, 0};
+  GetTextExtentPoint32W(cv.dc, t, (int)wcslen(t), &sz);
+  SetTextColor(cv.dc, COL_INK);
+  RECT tr = pr;
+  DrawTextW(cv.dc, t, -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+  wchar_t chip[96];
+  _snwprintf(chip, 96, L"%s%s%s", src ? src : L"", (src && g_acBusyFx) ? L" · " : L"", g_acBusyFx ? L"думает…" : L"");
+  chip[95] = 0;
+  if (chip[0]) {
+    if (g_fontSmall) SelectObject(cv.dc, g_fontSmall);
+    SIZE cz = {0, 0};
+    GetTextExtentPoint32W(cv.dc, chip, (int)wcslen(chip), &cz);
+    int ch = cz.cy + 8, cx = pr.left + sz.cx + 12, cy = (pr.top + pr.bottom - ch) / 2;
+    RECT pill = {cx, cy, cx + cz.cx + 20, cy + ch};
+    if (pill.right > pr.right) pill.right = pr.right;
+    UiShape s;
+    memset(&s, 0, sizeof(s));
+    s.r = -1;
+    s.fill = COL_PAPER_DARK;
+    s.fillA = 255;
+    s.border = ac_hair();
+    s.borderA = g_acBusyFx ? 255 : 0;
+    s.bw = 1.0f;
+    ui_shape(&cv, pill, &s);
+    SetTextColor(cv.dc, g_acBusyFx ? COL_INK : COL_MUTED);
+    RECT ct = pill;
+    InflateRect(&ct, -10, 0);
+    DrawTextW(cv.dc, chip, -1, &ct, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+  }
+  if (of) SelectObject(cv.dc, of);
+  ui_canvas_end(&cv, dis->hDC);
+}
+
+/* мелкие кнопки под полем ввода: значок и короткая подпись, без рамки */
+static wchar_t ac_tool_icon(int id) {
+  switch (id) {
+  case ID_AC_SHOT: return 0xE722;
+  case ID_AC_CLEAR: return 0xE74D;
+  case ID_AC_COPY: return 0xE8C8;
+  case ID_AC_LEARN: return 0xE734;
+  case ID_AC_AVATAR: return 0xE99A;
+  case ID_AC_SET: return 0xE713;
+  }
+  return 0;
+}
+static BOOL ac_is_tool(int id) { return ac_tool_icon(id) != 0; }
+
+static void ac_draw_tool(const DRAWITEMSTRUCT *dis) {
+  HWND btn = dis->hwndItem;
+  RECT pr;
+  GetWindowRect(btn, &pr);
+  MapWindowPoints(HWND_DESKTOP, g_acWnd, (POINT *)&pr, 2);
+  UiCanvas cv;
+  if (!ui_canvas_begin(&cv, dis->hDC, pr, dis->rcItem.left, dis->rcItem.top, FALSE)) return;
+  SetBrushOrgEx(cv.dc, -pr.left, -pr.top, NULL);
+  FillRect(cv.dc, &pr, bg_brush(FALSE)); /* поверхность карточки */
+  BOOL press = (dis->itemState & ODS_SELECTED) != 0, disab = (dis->itemState & ODS_DISABLED) != 0;
+  BOOL on = dis->CtlID == ID_AC_AVATAR && ac_avatar_here(); /* помощник на столе — кнопка «нажата» */
+  int hot = disab ? 0 : ui_hover_level(btn);
+  int shade = press ? 30 : hot * 14 / 255 + (on ? 14 : 0);
+  UiShape s;
+  memset(&s, 0, sizeof(s));
+  s.r = 6.0f;
+  if (shade) {
+    s.fill = blend_rgb(COL_PAPER, COL_INK, shade);
+    s.fillA = 255;
+    ui_shape(&cv, pr, &s);
+  }
+  COLORREF fg = disab ? COL_MUTED : COL_INK;
+  wchar_t icon = ac_tool_icon((int)dis->CtlID);
+  HFONT ifont = ui_icon_font(ui_px(btn, 14));
+  wchar_t t[48] = {0};
+  GetWindowTextW(btn, t, 48);
+  int x = pr.left + 10;
+  if (ifont) {
+    HGDIOBJ of = SelectObject(cv.dc, ifont);
+    SetTextColor(cv.dc, on ? COL_SAGE : fg);
+    RECT ir = g_acToolIcons ? pr : (RECT){x, pr.top, x + ui_px(btn, 16), pr.bottom};
+    DrawTextW(cv.dc, &icon, 1, &ir, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    SelectObject(cv.dc, of);
+    x += ui_px(btn, 22);
+  }
+  if (!g_acToolIcons || !ifont) {
+    HGDIOBJ of = g_fontUi ? SelectObject(cv.dc, g_fontUi) : NULL;
+    SetTextColor(cv.dc, fg);
+    RECT tr = {ifont ? x : pr.left, pr.top, pr.right - (ifont ? 8 : 0), pr.bottom};
+    DrawTextW(cv.dc, t, -1, &tr, (ifont ? DT_LEFT : DT_CENTER) | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    if (of) SelectObject(cv.dc, of);
+  }
+  if ((dis->itemState & ODS_FOCUS) && !(dis->itemState & ODS_NOFOCUSRECT)) {
+    UiShape f;
+    memset(&f, 0, sizeof(f));
+    f.r = 6.0f;
+    f.border = COL_SAGE;
+    f.borderA = 230;
+    f.bw = 1.5f;
+    ui_shape(&cv, pr, &f);
+  }
+  ui_canvas_end(&cv, dis->hDC);
+}
+
+/* ширина мелкой кнопки: значок, подпись, поля */
+static int ac_tool_width(HWND b) {
+  if (g_acToolIcons) return 34;
+  wchar_t t[48] = {0};
+  GetWindowTextW(b, t, 48);
+  SIZE sz = {60, 0};
+  HDC dc = GetDC(b);
+  if (dc) {
+    HGDIOBJ of = g_fontUi ? SelectObject(dc, g_fontUi) : NULL;
+    GetTextExtentPoint32W(dc, t, (int)wcslen(t), &sz);
+    if (of) SelectObject(dc, of);
+    ReleaseDC(b, dc);
+  }
+  return sz.cx + (ui_icon_font(14) ? 22 : 0) + 20;
+}
+
+/* «Помощник»: подсказка — что сделает щелчок (призвать / отозвать) */
+static void ac_avatar_tip(void) {
+  if (!g_acTip || !g_acAvatarBtn) return;
+  ac_avatar_menu_label();
+  TOOLINFOW ti;
+  memset(&ti, 0, sizeof(ti));
+  ti.cbSize = sizeof(ti);
+  ti.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
+  ti.hwnd = g_acWnd;
+  ti.uId = (UINT_PTR)g_acAvatarBtn;
+  ti.lpszText = g_acAvatarMenuText;
+  SendMessageW(g_acTip, TTM_UPDATETIPTEXTW, 0, (LPARAM)&ti);
+  InvalidateRect(g_acAvatarBtn, NULL, FALSE);
+}
+
+/* цвета чата — по теме, спокойные: вопрос — на сером, ответ — на светлом
+   с тонкой серой линией слева, код — на сером */
+static void ac_rtf_begin_ui(AcRtf *b) {
+  COLORREF c[8] = {COL_INK,
+                   COL_INK,
+                   COL_MUTED,
+                   COL_PAPER,
+                   COL_PAPER_DARK,
+                   blend_rgb(COL_LINE, COL_INK, 40),
+                   COL_INK,
+                   blend_rgb(COL_PAPER_DARK, COL_INK, 10)};
+  char head[700];
+  int n = snprintf(head, sizeof(head), "{\\rtf1\\ansi\\deff0\\uc1{\\fonttbl{\\f0 Segoe UI;}{\\f1 Consolas;}}{\\colortbl;");
+  for (int i = 0; i < 8 && n > 0 && n < (int)sizeof(head); i++)
+    n += snprintf(head + n, sizeof(head) - (size_t)n, "\\red%d\\green%d\\blue%d;", GetRValue(c[i]), GetGValue(c[i]),
+                  GetBValue(c[i]));
+  if (n > 0 && n < (int)sizeof(head)) n += snprintf(head + n, sizeof(head) - (size_t)n, "}\\viewkind4\\f0\\fs22\\cf1 ");
+  if (n <= 0 || n >= (int)sizeof(head)) {
+    ac_rtf_begin(b); /* не уложились — прежняя палитра */
+    return;
+  }
+  ac_rtf_add(b, head);
+}
+
+static void ac_rtf_addn(AcRtf *b, const char *s, size_t n) {
+  char chunk[257];
+  while (n) {
+    size_t k = n > 256 ? 256 : n;
+    memcpy(chunk, s, k);
+    chunk[k] = 0;
+    ac_rtf_add(b, chunk);
+    s += k;
+    n -= k;
+  }
+}
+
+/* Реплика — «пузырём»: одна ячейка таблицы RichEdit с заливкой. Разметку
+   самой реплики строит ac_rtf_message (ai_chat_format.h, её проверяет
+   chat_format_test.c); здесь её абзацы переносятся в ячейку: \pard →
+   \pard\intbl, последний \par → \cell\row, отступ над подписью меньше,
+   у кода — подложка. Экранированные «\\», «\{», «\}» из текста не трогаем. */
+static void ac_rtf_bubble(AcRtf *out, const AcTurn *t, int widthTw) {
+  AcRtf one = {0};
+  ac_rtf_message(&one, t->text, t->assistant, t->png != NULL);
+  if (one.failed || !one.text) {
+    out->failed = TRUE;
+    free(one.text);
+    return;
+  }
+  /* вопрос — справа, на сером; ответ — слева во всю ширину, тонкая линия слева */
+  int left = t->assistant ? 0 : widthTw * 22 / 100, right = t->assistant ? widthTw * 96 / 100 : widthTw;
+  char row[640];
+  snprintf(row, sizeof(row),
+           "\\trowd\\trgaph120\\trleft%d\\trpaddl200\\trpaddr200\\trpaddt60\\trpaddb120"
+           "\\trpaddfl3\\trpaddfr3\\trpaddft3\\trpaddfb3%s\\clcbpat%d\\cellx%d ",
+           left, t->assistant ? "\\clbrdrl\\brdrs\\brdrw20\\brdrcf6" : "", t->assistant ? 4 : 5, right);
+  ac_rtf_add(out, row);
+  const char *s = one.text;
+  size_t end = one.size;
+  if (end >= 5 && !memcmp(s + end - 5, "\\par ", 5)) end -= 5;
+  size_t from = 0;
+  for (size_t i = 0; i < end;) {
+    if (s[i] != '\\') {
+      i++;
+      continue;
+    }
+    if (i + 1 < end && (s[i + 1] == '\\' || s[i + 1] == '{' || s[i + 1] == '}')) {
+      i += 2;
+      continue;
+    }
+    size_t j = i + 1;
+    while (j < end && ((s[j] >= 'a' && s[j] <= 'z') || (s[j] >= 'A' && s[j] <= 'Z'))) j++;
+    size_t nameLen = j - i - 1, k = j;
+    if (k < end && s[k] == '-') k++;
+    while (k < end && s[k] >= '0' && s[k] <= '9') k++;
+    const char *name = s + i + 1;
+    const char *add = NULL;
+    if (nameLen == 4 && !memcmp(name, "pard", 4) && k == j) add = "\\pard\\intbl";
+    else if (nameLen == 2 && !memcmp(name, "sb", 2) && k - j == 3 && !memcmp(s + j, "180", 3)) add = "\\sb40";
+    else if (nameLen == 1 && name[0] == 'f' && k - j == 1 && s[j] == '1') add = "\\f1\\highlight8\\cf7";
+    else if (nameLen == 1 && name[0] == 'f' && k - j == 1 && s[j] == '0') add = "\\f0\\highlight0\\cf1";
+    if (add) {
+      ac_rtf_addn(out, s + from, i - from);
+      ac_rtf_add(out, add);
+      from = k;
+    }
+    i = k > i + 1 ? k : i + 1;
+  }
+  ac_rtf_addn(out, s + from, end - from);
+  ac_rtf_add(out, "\\cell\\row \\pard\\sa0\\sb0\\fs8\\par\\fs22 ");
+  free(one.text);
+}
+
+/* ширина ленты в твипах — по ней пузыри */
+static int ac_log_twips(void) {
+  RECT lc;
+  GetClientRect(g_acLog, &lc);
+  int px = lc.right - 24 - 8;
+  if (px < 120) px = 120;
+  HDC dc = GetDC(g_acLog);
+  int dpi = dc ? GetDeviceCaps(dc, LOGPIXELSX) : 96;
+  if (dc) ReleaseDC(g_acLog, dc);
+  if (dpi <= 0) dpi = 96;
+  return MulDiv(px, 1440, dpi);
+}
+
 static void ac_redraw(void) {
   if (g_acRich) {
-    AcRtf rtf = {0}; ac_rtf_begin(&rtf);
-    for (int i = 0; i < g_acN; i++) ac_rtf_message(&rtf, g_acTurns[i].text, g_acTurns[i].assistant, g_acTurns[i].png != NULL);
+    AcRtf rtf = {0}; ac_rtf_begin_ui(&rtf);
+    int tw = ac_log_twips();
+    for (int i = 0; i < g_acN; i++) ac_rtf_bubble(&rtf, &g_acTurns[i], tw);
     ac_rtf_add(&rtf, "}");
     if (!rtf.failed) {
       SCROLLINFO si = {0}; si.cbSize = sizeof(si); si.fMask = SIF_RANGE | SIF_POS | SIF_PAGE;
@@ -201,11 +563,14 @@ static void ac_redraw(void) {
   free(s);
 }
 
-static void ac_status(const wchar_t *t) { SetWindowTextW(g_acStat, t ? t : L""); }
+static void ac_status(const wchar_t *t) { SetWindowTextW(g_acStat, t ? t : L""); ac_avatar_say(t); }
 
 static void ac_busy(BOOL on) {
   EnableWindow(g_acSend, !on);
   EnableWindow(g_acStop, on);
+  ac_busy_fx(on); /* рамка ленты переливается, пока ИИ думает */
+  ac_avatar_busy(on);
+  ac_avatar_set(on ? (g_agActive ? AC_AV_FILES : AC_AV_THINKING) : AC_AV_IDLE);
 }
 
 /* план ждёт ответа: «Применить» и «Отмена» над полем ввода, вместо «С экрана» */
@@ -648,7 +1013,8 @@ static BOOL ac_mk_bad_name(const wchar_t *n) {
 
 static void ac_mk_go(const wchar_t *parent, const wchar_t *name) {
   wchar_t full[MAX_PATH], msg[MAX_PATH + 80];
-  if (ac_mk_bad_name(name)) {
+  /* путь длиннее MAX_PATH: _snwprintf ниже не поставил бы 0, а обрезанное имя — не та папка */
+  if (ac_mk_bad_name(name) || wcslen(parent) + wcslen(name) + 2 > MAX_PATH) {
     _snwprintf(msg, MAX_PATH + 80, L"Имя «%s» для папки не годится.", name);
     ac_push(1, msg);
     return;
@@ -1487,6 +1853,7 @@ static void ac_send(void) {
     free(in);
     return;
   }
+  ac_avatar_set(AC_AV_LISTENING);
   if (g_acImg) ag_stop(); /* A new picture starts visual chat, not an old file clarification. */
   if (!g_acRouteDispatch && !g_acImg && !ac_picture_context(a) && ai_ready()) {
     ac_route_start(a); free(in); return;
@@ -1844,9 +2211,13 @@ static void ac_take(IWICImagingFactory *f, IWICBitmapSource *src) {
   free(g_acImg);
   g_acImg = png;
   g_acImgLen = pl;
-  if (g_acThumbBmp) DeleteObject(g_acThumbBmp);
+  HBITMAP oldThumb = g_acThumbBmp;
   g_acThumbBmp = hb;
-  SendMessageW(g_acThumb, STM_SETIMAGE, IMAGE_BITMAP, (LPARAM)hb);
+  /* STATIC с картинкой, где есть альфа, хранит свою копию и отдаёт её здесь —
+     её удаляем сами, иначе каждая картинка оставляет утечку GDI */
+  HBITMAP prevThumb = (HBITMAP)SendMessageW(g_acThumb, STM_SETIMAGE, IMAGE_BITMAP, (LPARAM)hb);
+  if (prevThumb && prevThumb != oldThumb) DeleteObject(prevThumb);
+  if (oldThumb) DeleteObject(oldThumb);
   ac_relayout();
   ac_status(L"Картинка прикреплена к следующему вопросу. Клик по миниатюре — убрать.");
 }
@@ -1879,7 +2250,8 @@ static void ac_paste_img(void) {
   HBITMAP clip = (HBITMAP)GetClipboardData(CF_BITMAP);
   IWICImagingFactory *f = clip ? ac_factory() : NULL;
   IWICBitmap *bmp = NULL;
-  if (f && SUCCEEDED(f->lpVtbl->CreateBitmapFromHBITMAP(f, clip, NULL, WICBitmapUseAlpha, &bmp)))
+  /* у CF_BITMAP и снимка экрана альфа — нули: с UseAlpha PNG выходил полностью прозрачным */
+  if (f && SUCCEEDED(f->lpVtbl->CreateBitmapFromHBITMAP(f, clip, NULL, WICBitmapIgnoreAlpha, &bmp)))
     ac_take(f, (IWICBitmapSource *)bmp);
   if (bmp) bmp->lpVtbl->Release(bmp);
   if (f) f->lpVtbl->Release(f);
@@ -1904,7 +2276,7 @@ static void ac_shot_done(RECT r) {
   ReleaseDC(NULL, s);
   IWICImagingFactory *f = ac_factory();
   IWICBitmap *bmp = NULL;
-  if (f && SUCCEEDED(f->lpVtbl->CreateBitmapFromHBITMAP(f, hb, NULL, WICBitmapUseAlpha, &bmp)))
+  if (f && SUCCEEDED(f->lpVtbl->CreateBitmapFromHBITMAP(f, hb, NULL, WICBitmapIgnoreAlpha, &bmp))) /* см. ac_paste_img */
     ac_take(f, (IWICBitmapSource *)bmp);
   if (bmp) bmp->lpVtbl->Release(bmp);
   if (f) f->lpVtbl->Release(f);
@@ -1929,8 +2301,9 @@ static void ac_result(AiResult *r) {
     ai_result_free(r);
     return;
   }
-  if (g_acRouting) { ac_route_result(r); return; }
+  if (g_acRouting) { ac_avatar_set(AC_AV_THINKING); ac_route_result(r); return; }
   if (g_agActive) {
+    ac_avatar_set(AC_AV_FILES);
     ag_result(r);
     ai_result_free(r);
     return;
@@ -1970,6 +2343,7 @@ static void ac_result(AiResult *r) {
     if (g_acReviewStage == 3) { ac_review_finish(r->text); ai_result_free(r); return; }
     ac_push_with_foot(r->text);
     ac_redraw();
+    ac_avatar_answer(r->text);
     ac_status(L"");
   } else {
     ac_review_reset();
@@ -1979,6 +2353,8 @@ static void ac_result(AiResult *r) {
     ac_status(r->status == AI_CANCELLED ? L"Остановлено, вопрос вернулся в поле ввода"
                                         : (r->text && r->text[0] ? r->text : ai_status_text(r->status)));
   }
+  if (r->status != AI_OK) ac_avatar_set(AC_AV_ERROR);
+  else if (g_acAvatarState != AC_AV_TALKING) ac_avatar_set(AC_AV_SUCCESS);
   ai_result_free(r);
 }
 
@@ -2036,39 +2412,79 @@ static LRESULT CALLBACK AcEditProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
 }
 
 static void ac_layout(int W, int H) {
-  int pad = 12, gap = 8, btnH = 32, inH = 88, statH = 20;
-  BOOL narrow = W < 680;
-  int btnY = H - pad - btnH * (narrow ? 2 : 1) - (narrow ? gap : 0);
-  int inY = btnY - gap - inH;
-  int thumbH = g_acImg ? 84 : 0;
-  int cmdY = inY - 4 - 22 - thumbH;
-  int stY = cmdY - 4 - statH;
-  int logY = 46;
-  int logH = stY - 6 - logY;
-  if (logH < 40) logH = 40;
-  MoveWindow(g_acTitle, pad, 10, W - 2 * pad - 70, 24, TRUE);
-  MoveWindow(GetDlgItem(g_acWnd, ID_PANEL_MIN), W - pad - 66, 8, 30, 26, TRUE);
-  MoveWindow(GetDlgItem(g_acWnd, ID_PANEL_CLOSE), W - pad - 30, 8, 30, 26, TRUE);
-  MoveWindow(g_acLog, pad, logY, W - 2 * pad, logH, TRUE);
-  MoveWindow(g_acStat, pad, stY, W - 2 * pad, statH, TRUE);
+  int pad = AC_PAD, gap = 8, inH = 76, statH = 20, sendW = 116, btnH = 32;
+  /* шапка: название с чипом, «свернуть» и «закрыть» справа */
+  MoveWindow(g_acTitle, pad, 6, W - 2 * pad - 84, AC_HEAD_H - 12, TRUE);
+  MoveWindow(GetDlgItem(g_acWnd, ID_PANEL_MIN), W - pad - 76, (AC_HEAD_H - 30) / 2, 36, 30, TRUE);
+  MoveWindow(GetDlgItem(g_acWnd, ID_PANEL_CLOSE), W - pad - 36, (AC_HEAD_H - 30) / 2, 36, 30, TRUE);
+  /* карточка ввода внизу: поле, справа «Стоп» и «Отправить», под ними —
+     строка мелких кнопок */
+  int cardH = 10 + inH + 6 + AC_TOOL_H;
+  int cardY = H - pad - cardH;
+  SetRect(&g_acInCard, pad, cardY, W - pad, H - pad);
+  int inX = pad + 12, inW = W - 2 * pad - 24 - sendW - 12;
+  MoveWindow(g_acIn, inX, cardY + 10, inW, inH, TRUE);
+  int sx = W - pad - 12 - sendW;
+  MoveWindow(g_acSend, sx, cardY + 10 + inH - btnH, sendW, btnH, TRUE);
+  MoveWindow(g_acStop, sx, cardY + 10, sendW, 28, TRUE);
+  g_acToolTop = cardY + 10 + inH + 6;
+  {
+    HWND tools[6] = {g_acShot, g_acClear, g_acCopy, g_acLearn, g_acAvatarBtn, g_acSet};
+    BOOL showShot = !g_acPlanOn;
+    int need = 0, avail = W - 2 * pad - 16;
+    g_acToolIcons = FALSE;
+    for (int i = 0; i < 6; i++)
+      if (tools[i] && (i || showShot)) need += ac_tool_width(tools[i]) + 4;
+    if (need > avail) g_acToolIcons = TRUE; /* узкое окно — только значки */
+    int x = pad + 8, ty = g_acToolTop + 4, th = AC_TOOL_H - 8;
+    for (int i = 0; i < 5; i++) {
+      if (!tools[i] || (!i && !showShot)) continue;
+      int w = ac_tool_width(tools[i]);
+      MoveWindow(tools[i], x, ty, w, th, TRUE);
+      x += w + 4;
+    }
+    if (g_acSet) { /* «Настройки» — у правого края */
+      int w = ac_tool_width(g_acSet);
+      MoveWindow(g_acSet, W - pad - 8 - w, ty, w, th, TRUE);
+    }
+    for (int i = 0; i < 6; i++)
+      if (tools[i]) InvalidateRect(tools[i], NULL, FALSE);
+  }
+  /* над вводом: полоса подтверждения плана, картинка к вопросу, строка состояния */
+  int y = cardY - gap;
   if (g_acPlanOn) {
-    int half = (W - 2 * pad - gap) / 2;
-    if (half < 80) half = 80;
-    MoveWindow(g_acApply, pad, cmdY, half, 26, TRUE);
-    MoveWindow(g_acCancel, pad + half + gap, cmdY, half, 26, TRUE);
-  } else
-    MoveWindow(g_acShot, pad, cmdY, 120, 22, TRUE);
-  MoveWindow(g_acThumb, pad, inY - 84, 80, 80, TRUE);
+    SetRect(&g_acConfirm, pad, y - AC_CONFIRM_H, W - pad, y);
+    int bw = 116;
+    MoveWindow(g_acCancel, W - pad - 10 - bw, y - AC_CONFIRM_H + 8, bw, AC_CONFIRM_H - 16, TRUE);
+    MoveWindow(g_acApply, W - pad - 10 - bw * 2 - 8, y - AC_CONFIRM_H + 8, bw, AC_CONFIRM_H - 16, TRUE);
+    y -= AC_CONFIRM_H + gap;
+  } else {
+    SetRectEmpty(&g_acConfirm);
+  }
+  if (g_acImg) {
+    MoveWindow(g_acThumb, pad, y - 80, 80, 80, TRUE);
+    y -= 80 + gap;
+  }
   ShowWindow(g_acThumb, g_acImg ? SW_SHOW : SW_HIDE);
-  MoveWindow(g_acIn, pad, inY, W - 2 * pad, inH, TRUE);
-  HWND row[6] = {g_acSend, g_acStop, g_acClear, g_acCopy, g_acLearn, g_acSet};
-  int columns = narrow ? 3 : 6;
-  int bw = (W - 2 * pad - (columns - 1) * gap) / columns;
-  for (int i = 0; i < 6; i++) MoveWindow(row[i], pad + (i % columns) * (bw + gap), btnY + (i / columns) * (btnH + gap), bw, btnH, TRUE);
+  MoveWindow(g_acStat, pad + 4, y - statH, W - 2 * pad - 8, statH, TRUE);
+  y -= statH + 4;
+  /* лента — белая карточка между шапкой и тем, что над вводом */
+  int logY = AC_HEAD_H + 12, logH = y - logY;
+  if (logH < 60) logH = 60;
+  SetRect(&g_acLogCard, pad, logY, W - pad, logY + logH);
+  MoveWindow(g_acLog, pad + AC_CARD_IN, logY + AC_CARD_IN, W - 2 * pad - 2 * AC_CARD_IN, logH - 2 * AC_CARD_IN, TRUE);
   if (g_acRich) {
     RECT bounds; GetClientRect(g_acLog, &bounds); InflateRect(&bounds, -12, -8);
     SendMessageW(g_acLog, EM_SETRECT, 0, (LPARAM)&bounds);
+    /* реплики шириной в ленту: ширина сменилась — переложить, когда тянуть перестанут */
+    RECT lc;
+    GetClientRect(g_acLog, &lc);
+    if (lc.right != g_acLogW) {
+      g_acLogW = lc.right;
+      if (g_acN) SetTimer(g_acWnd, AC_TIMER_REFLOW, 150, NULL);
+    }
   }
+  InvalidateRect(g_acWnd, NULL, FALSE); /* карточки переехали */
 }
 
 static LRESULT CALLBACK AcProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -2082,12 +2498,55 @@ static LRESULT CALLBACK AcProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
     {
       LRESULT hit = panel_hittest(hwnd, lParam);
       POINT point = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)}; ScreenToClient(hwnd, &point);
-      if (hit == HTCLIENT && point.y >= 0 && point.y < 38 && ChildWindowFromPoint(hwnd, point) == g_acTitle) return HTCAPTION;
+      if (hit == HTCLIENT && point.y >= 0 && point.y < AC_HEAD_H) { /* за шапку окно тянут */
+        HWND child = ChildWindowFromPoint(hwnd, point);
+        if (!child || child == hwnd || child == g_acTitle) return HTCAPTION;
+      }
       return hit;
     }
-  case WM_DRAWITEM:
-    draw_pad_button((const DRAWITEMSTRUCT *)lParam);
+  case WM_DRAWITEM: {
+    const DRAWITEMSTRUCT *dis = (const DRAWITEMSTRUCT *)lParam;
+    if (dis->CtlType == ODT_STATIC) ac_draw_title(dis);
+    else if (ac_is_tool((int)dis->CtlID)) ac_draw_tool(dis);
+    else draw_pad_button(dis);
     return TRUE;
+  }
+  case WM_ERASEBKGND:
+    return 1;
+  case WM_PAINT:
+    ac_paint(hwnd);
+    return 0;
+  case WM_CTLCOLOREDIT: /* поле ввода — светлое, на своей карточке */
+    if ((HWND)lParam == g_acIn) {
+      SetBkColor((HDC)wParam, COL_PAPER);
+      SetTextColor((HDC)wParam, COL_INK);
+      return (LRESULT)g_paper;
+    }
+    break;
+  case WM_CTLCOLORSTATIC: {
+    HDC dc = (HDC)wParam;
+    if ((HWND)lParam == g_acLog) { /* лента без RichEdit: только чтение */
+      SetBkColor(dc, ac_log_bg());
+      SetTextColor(dc, COL_INK);
+      return (LRESULT)ac_log_brush();
+    }
+    /* строка состояния — мелко и серым, на фоне страницы */
+    SetTextColor(dc, COL_MUTED);
+    SetBkColor(dc, COL_PAPER_DARK);
+    RECT cr;
+    GetWindowRect((HWND)lParam, &cr);
+    MapWindowPoints(HWND_DESKTOP, hwnd, (POINT *)&cr, 2);
+    SetBrushOrgEx(dc, -cr.left, -cr.top, NULL);
+    if (knight_on()) SetBkMode(dc, TRANSPARENT);
+    return (LRESULT)bg_brush(TRUE);
+  }
+  case WM_TIMER:
+    if (wParam == AC_TIMER_REFLOW) {
+      KillTimer(hwnd, AC_TIMER_REFLOW);
+      if (g_acN) ac_redraw();
+      return 0;
+    }
+    break;
   case WM_SIZE:
     ac_layout(LOWORD(lParam), HIWORD(lParam));
     return 0;
@@ -2101,6 +2560,12 @@ static LRESULT CALLBACK AcProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
   case WM_COMMAND:
     if (LOWORD(wParam) == ID_AC_THUMB && HIWORD(wParam) == STN_CLICKED) {
       ac_drop_img();
+      return 0;
+    }
+    if (LOWORD(wParam) == ID_AC_IN && (HIWORD(wParam) == EN_SETFOCUS || HIWORD(wParam) == EN_KILLFOCUS)) {
+      RECT r = g_acInCard; /* карточка поля ввода светится, пока в нём курсор */
+      InflateRect(&r, 12, 12);
+      InvalidateRect(hwnd, &r, FALSE);
       return 0;
     }
     if (HIWORD(wParam) != BN_CLICKED) break;
@@ -2159,6 +2624,10 @@ static LRESULT CALLBACK AcProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
     case ID_AC_SET:
       ac_open_settings();
       break;
+    case ID_AC_AVATAR: /* «Помощник»: призвать или отозвать аватар */
+      ac_avatar_toggle();
+      ac_avatar_tip();
+      break;
     }
     return 0;
   case WM_AC_SEND:
@@ -2204,22 +2673,32 @@ static void ac_create(void) {
                             wa.left + (wa.right - wa.left - w) / 2, wa.top + (wa.bottom - wa.top - h) / 2, w, h,
                             NULL, NULL, g_inst, NULL);
   if (!g_acWnd) return;
+  /* все кнопки окна стоят на светлых поверхностях (шапка, карточки) — фон под
+     ними светлый; шапка-полоса темы здесь своя, светлая (ui_theme.c) */
+  SetPropW(g_acWnd, L"CpUiHead", (HANDLE)(INT_PTR)-1);
+  SetPropW(g_acWnd, L"CpUiBg", (HANDLE)(INT_PTR)1);
   round_corners(g_acWnd);
   mk_btn(g_acWnd, L"×", ID_PANEL_CLOSE);
   mk_btn(g_acWnd, L"–", ID_PANEL_MIN);
-  g_acTitle = CreateWindowExW(0, L"STATIC", g_aiProvider ? L"Мини-ИИ · Z.ai API" : L"Мини-ИИ · на этом компьютере", WS_CHILD | WS_VISIBLE | SS_LEFT,
+  /* заголовок рисует окно (ac_draw_title): название и «чип» с источником */
+  g_acTitle = CreateWindowExW(0, L"STATIC", g_aiProvider ? L"Мини-ИИ · Z.ai API" : L"Мини-ИИ · на этом компьютере", WS_CHILD | WS_VISIBLE | SS_OWNERDRAW,
                               0, 0, 10, 10, g_acWnd, (HMENU)(INT_PTR)ID_AC_TITLE, g_inst, NULL);
   g_acRich = LoadLibraryW(L"Msftedit.dll") != NULL;
-  g_acLog = CreateWindowExW(WS_EX_CLIENTEDGE, g_acRich ? L"RICHEDIT50W" : L"EDIT", L"",
+  /* лента и поле ввода — без объёмной рамки: их карточки рисует окно */
+  g_acLog = CreateWindowExW(0, g_acRich ? L"RICHEDIT50W" : L"EDIT", L"",
                             WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY,
                             0, 0, 10, 10, g_acWnd, (HMENU)(INT_PTR)ID_AC_LOG, g_inst, NULL);
   if (g_acRich && !g_acLog) {
     g_acRich = FALSE;
-    g_acLog = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY,
+    g_acLog = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY,
                              0, 0, 10, 10, g_acWnd, (HMENU)(INT_PTR)ID_AC_LOG, g_inst, NULL);
   }
-  if (g_acRich) { SendMessageW(g_acLog, EM_EXLIMITTEXT, 0, 16000000); SendMessageW(g_acLog, EM_SETBKGNDCOLOR, 0, RGB(255,255,255)); }
-  g_acIn = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+  if (g_acRich) {
+    SendMessageW(g_acLog, EM_EXLIMITTEXT, 0, 16000000);
+    SendMessageW(g_acLog, EM_SETBKGNDCOLOR, 0, ac_log_bg());
+    SendMessageW(g_acLog, EM_SETEDITSTYLE, SES_HIDEGRIDLINES, SES_HIDEGRIDLINES); /* у пузырей — только свои рамки */
+  }
+  g_acIn = CreateWindowExW(0, L"EDIT", L"",
                            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN,
                            0, 0, 10, 10, g_acWnd, (HMENU)(INT_PTR)ID_AC_IN, g_inst, NULL);
   g_acStat = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_LEFT, 0, 0, 10, 10, g_acWnd,
@@ -2235,27 +2714,57 @@ static void ac_create(void) {
   g_acCancel = mk_btn(g_acWnd, L"Отмена", ID_AC_CANCEL);
   ShowWindow(g_acApply, SW_HIDE);
   ShowWindow(g_acCancel, SW_HIDE);
+  /* «Помощник» — призвать или отозвать аватар; подсказка говорит, что будет */
+  g_acAvatarBtn = mk_btn(g_acWnd, L"Помощник", ID_AC_AVATAR);
+  g_acTip = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, NULL, WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX, CW_USEDEFAULT,
+                            CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, g_acWnd, NULL, g_inst, NULL);
+  if (g_acTip && g_acAvatarBtn) {
+    ac_avatar_menu_label();
+    TOOLINFOW ti;
+    memset(&ti, 0, sizeof(ti));
+    ti.cbSize = sizeof(ti);
+    ti.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
+    ti.hwnd = g_acWnd;
+    ti.uId = (UINT_PTR)g_acAvatarBtn;
+    ti.lpszText = g_acAvatarMenuText;
+    SendMessageW(g_acTip, TTM_ADDTOOLW, 0, (LPARAM)&ti);
+  }
   g_acThumb = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | SS_BITMAP | SS_NOTIFY, 0, 0, 10, 10, g_acWnd,
                               (HMENU)(INT_PTR)ID_AC_THUMB, g_inst, NULL);
   DragAcceptFiles(g_acWnd, TRUE);
   for (HWND c = GetWindow(g_acWnd, GW_CHILD); c; c = GetWindow(c, GW_HWNDNEXT))
     if (c != g_acSend && c != g_acStop && c != g_acClear && c != g_acCopy && c != g_acLearn && c != g_acSet &&
-        c != g_acShot) SendMessageW(c, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
+        c != g_acShot && c != g_acTip) SendMessageW(c, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
   SendMessageW(g_acLog, WM_SETFONT, (WPARAM)g_fontBody, TRUE);
   SendMessageW(g_acIn, WM_SETFONT, (WPARAM)g_fontBody, TRUE);
   g_acEditOld = (WNDPROC)SetWindowLongPtrW(g_acIn, GWLP_WNDPROC, (LONG_PTR)AcEditProc);
   g_acLogOld = (WNDPROC)SetWindowLongPtrW(g_acLog, GWLP_WNDPROC, (LONG_PTR)AcEditProc);
   SendMessageW(g_acIn, EM_SETCUEBANNER, FALSE, (LPARAM)L"Напишите задачу. Enter — отправить, Shift+Enter — новая строка");
+  ui_explorer_theme(g_acIn); /* тонкие полосы прокрутки, как в Проводнике */
+  ui_explorer_theme(g_acLog);
   RECT rc;
   GetClientRect(g_acWnd, &rc);
   ac_layout(rc.right, rc.bottom);
 }
 
+/* тема сменилась (apply_theme): фон ленты, цвета пузырей, шапка */
+static void ac_retheme(void) {
+  if (!g_acWnd) return;
+  if (g_acLogBrush) DeleteObject(g_acLogBrush);
+  g_acLogBrush = NULL;
+  if (g_acRich) SendMessageW(g_acLog, EM_SETBKGNDCOLOR, 0, ac_log_bg());
+  if (g_acN) ac_redraw();
+  RedrawWindow(g_acWnd, NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
+}
+
 /* пункт «Спросить ИИ» в «Ещё» */
 static void aichat_show(void) {
+  ac_avatar_startup(); /* отозванного помощника чат обратно не зовёт */
   if (!g_acWnd) ac_create();
   if (!g_acWnd) return;
+  BOOL wasVisible = IsWindowVisible(g_acWnd);
   ShowWindow(g_acWnd, IsIconic(g_acWnd) ? SW_RESTORE : SW_SHOW);
+  if (!wasVisible) ac_avatar_set(AC_AV_WAVE);
   SetForegroundWindow(g_acWnd);
   SetFocus(g_acIn);
   if (!g_acId) {

@@ -4,3 +4,10 @@
 *.res
 __pycache__/
 native/CursorPadOcr.exe
+
+# local leftovers — not part of the release
+public/CursorPad*.before-*
+public/CursorPad.exe.old
+public/CursorPad.exe.interim*
+native/CursorPad.exe
+*.blend1

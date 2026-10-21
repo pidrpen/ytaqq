@@ -91,7 +91,7 @@ static void xp_status(const wchar_t *fmt, ...) {
   if (g_xpWnd) {
     RECT rc;
     GetClientRect(g_xpWnd, &rc);
-    RECT st = {0, XS(118), rc.right, XS(153)};
+    RECT st = {0, XS(130), rc.right, XS(165)}; /* строка состояния и полоса хода (xp_paint) */
     InvalidateRect(g_xpWnd, &st, FALSE);
   }
 }
@@ -597,10 +597,12 @@ static int xp_permille(const XpJob *x) {
   return p < 0 ? 0 : p > 1000 ? 1000 : p;
 }
 
+/* с 2026.10.21 — рамка окна-инструмента (tool_frame_paint): поля, флажки и
+   таблица — на карточке, «Сохранить в Excel…» — справа в подвале */
 static void xp_layout(void) {
   RECT rc;
   GetClientRect(g_xpWnd, &rc);
-  int pad = XS(14), y = PANEL_TITLE_H + XS(24), h = XS(26);
+  int pad = XS(26), y = PANEL_TITLE_H + XS(36), h = XS(26);
   place_panel_close(g_xpWnd);
   MoveWindow(g_xpDes, pad, y, XS(320), h, TRUE);
   MoveWindow(GetDlgItem(g_xpWnd, ID_XP_BUILD), pad + XS(332), y - XS(1), XS(110), h + XS(2), TRUE);
@@ -612,33 +614,37 @@ static void xp_layout(void) {
     MoveWindow(g_xpChk[k], cx, cy, XS(cw[k]), XS(22), TRUE);
     cx += XS(cw[k] + 8);
   }
-  int by = rc.bottom - pad - XS(30);
-  int vy = XS(158);
+  int foot = rc.bottom - XS(TOOL_FOOT_H), by = foot + (XS(TOOL_FOOT_H) - XS(30)) / 2;
+  int vy = XS(170);
   MoveWindow(g_xpView, pad, vy, XS(260), XS(300), TRUE);
   int ly = vy + XS(32);
-  MoveWindow(g_xpList, pad, ly, rc.right - pad * 2, by - XS(10) - ly, TRUE);
-  MoveWindow(GetDlgItem(g_xpWnd, ID_XP_SAVE), pad, by, XS(170), XS(30), TRUE);
-  MoveWindow(GetDlgItem(g_xpWnd, ID_XP_LOG), pad + XS(180), by, XS(120), XS(30), TRUE);
-  MoveWindow(GetDlgItem(g_xpWnd, ID_XP_PKG), pad + XS(310), by, XS(210), XS(30), TRUE);
+  MoveWindow(g_xpList, pad, ly, rc.right - pad * 2, foot - XS(26) - ly, TRUE);
+  /* подвал: второстепенные — слева, главное «Сохранить в Excel…» — справа */
+  MoveWindow(GetDlgItem(g_xpWnd, ID_XP_LOG), XS(16), by, XS(120), XS(30), TRUE);
+  MoveWindow(GetDlgItem(g_xpWnd, ID_XP_PKG), XS(16) + XS(128), by, XS(210), XS(30), TRUE);
+  MoveWindow(GetDlgItem(g_xpWnd, ID_XP_SAVE), rc.right - XS(16) - XS(180), by, XS(180), XS(30), TRUE);
+  InvalidateRect(g_xpWnd, NULL, FALSE); /* карточка и подвал — по новому размеру */
 }
 
 static void xp_paint(HWND hwnd, HDC hdc) {
   RECT rc;
   GetClientRect(hwnd, &rc);
-  FillRect(hdc, &rc, bg_brush(FALSE));
-  draw_panel_header(hwnd, hdc, L"Выгрузка из PLM");
+  int foot = rc.bottom - XS(TOOL_FOOT_H);
+  RECT card = {XS(12), PANEL_TITLE_H + XS(12), rc.right - XS(12), foot - XS(12)};
+  tool_frame_paint(hwnd, hdc, L"Выгрузка из PLM", L"ЭСИ, техпроцессы, материалы и извещения — одной книгой Excel",
+                   card, foot);
   SetBkMode(hdc, TRANSPARENT);
   if (g_fontSmall) SelectObject(hdc, g_fontSmall);
   SetTextColor(hdc, COL_MUTED);
-  int pad = XS(14), y = PANEL_TITLE_H + XS(6);
+  int pad = XS(26), y = PANEL_TITLE_H + XS(18);
   RECT a = {pad, y, pad + XS(500), y + XS(18)};
   DrawTextW(hdc, L"Обозначение изделия — или выберите строку в поиске PLM", -1, &a,
             DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
   if (g_fontUi) SelectObject(hdc, g_fontUi);
   SetTextColor(hdc, g_xpBusy ? COL_SAGE : COL_INK);
-  RECT st = {pad, XS(118), rc.right - pad, XS(140)};
+  RECT st = {pad, XS(130), rc.right - pad, XS(152)};
   if (g_xpBusy && g_xpRun) { /* полоса хода */
-    RECT tr = {pad, XS(143), rc.right - pad, XS(150)};
+    RECT tr = {pad, XS(155), rc.right - pad, XS(162)};
     HBRUSH bt = CreateSolidBrush(COL_LINE);
     FillRect(hdc, &tr, bt);
     DeleteObject(bt);
@@ -857,6 +863,7 @@ static void export_show(void) {
     round_corners(g_xpWnd);
     mk_btn(g_xpWnd, L"×", ID_PANEL_CLOSE);
     mk_btn(g_xpWnd, L"–", ID_PANEL_MIN);
+    tool_frame_init(g_xpWnd); /* шапка, карточка и подвал — общие (cursorpad.c) */
     g_xpDes = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL, 0, 0,
                               10, 10, g_xpWnd, NULL, g_inst, NULL);
     if (g_fontBody) SendMessageW(g_xpDes, WM_SETFONT, (WPARAM)g_fontBody, FALSE);

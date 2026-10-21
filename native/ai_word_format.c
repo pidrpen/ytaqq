@@ -57,6 +57,8 @@ done:
 static BOOL ag_word_apply(AgFs *fs, const AgAction *a, wchar_t *out, int cap) {
   wchar_t hash[65], parent[MAX_PATH], temp[MAX_PATH]; GUID id;
   if (!ag_word_hash(a->src, hash) || wcscmp(hash, a->sheet)) { lstrcpynW(out, L"Word изменился после предпросмотра. Форматирование не применено.", cap); return FALSE; }
+  /* The two early refusals below must explain themselves too: ag_apply shows out as is. */
+  lstrcpynW(out, L"Не удалось подготовить временную копию Word: путь к документу слишком длинный. Исходник не изменён.", cap);
   lstrcpynW(parent, a->src, MAX_PATH); wchar_t *slash = wcsrchr(parent, L'\\'); if (!slash) return FALSE; *slash = 0;
   if (FAILED(CoCreateGuid(&id)) || wcslen(parent) + 55 >= MAX_PATH) return FALSE;
   swprintf(temp, MAX_PATH, L"%ls\\cpw-%08lx-%04x-%04x-%08lx.docx", parent, (unsigned long)id.Data1, id.Data2, id.Data3, (unsigned long)GetTickCount());
