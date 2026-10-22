@@ -1,7 +1,10 @@
-2026102203
-2026.10.22.3
-sha256 76f1265f5431db27815aed5149ed03ce85e05688b43bd11441b5cb122679bb5e
-== 0 signature-rsa-sha256 K0R3gzo5wN+uVAcGYy4IGH1q0spscGkPR45wTjpk/yicBqi9ZEzL1tjeg79xO08QLazQtss+FNO2pJJmfRqOcI3Dqz+3O24++z0tq8S/br3209W6Fs0a6h9IGACdWm/XAsXA8cUM2eMhalBro6BSLODia2EaY8TbcTKN0syTeJdxVgVbT0WnpOppb2GpCXpcaOhrUNRpviKYtJh9ZQbo+lFtlB4X/up1KFyVVotRcPb/KKXspiVdbr51d0oQzbiECL1b3esWpKB1dJ/NmAK2AtSzBWIU1etD8mVXCQhbik3BZy5IpxbupGoUDy0wXYpucZtFkbG8Rlk3zWN7DuRYiM52oiHmwnofxv8+Lz0Xj3eDSE+pSfCjrSdACAv3kgUwxpbKeicjmUopJp4W/pn9ZETrh0C+nzTUO3ukGPxSs4Cx2Dgj5k32R8wuFFZmLV4hcrPq5L/MU4xeh1NBVeh/FoFW4rJ1Z2oWFISUZ3pvtrAMIMAvFZSUCFSqPqvGJ7Gn
+2026102204
+2026.10.22.4
+sha256 ad624709b681072c671e06fea3380016378c049d94de14965053be9608f15290
+== 0 signature-rsa-sha256 FKbdz04S9wo12UjKqoTAiJ2onO+3gXKgN8hxxL2X09UtWEDoU5BiV0+/+xs15IPYmaHS8BpIgFnT8az4eyHq0J2a7aoV6fGSbWgx2muXzh8x/5uQR3htshp49NUc9y5FBjTg/0lY5SmxpRABxs5pR+2NXE0miCaZFSvsUh2LoYlc3y4ftQ9WgVMYhjuMchXvdB15m3prISKxHr//4i3sFtKR/eDeuMVISL1fFmA/oat4adgXj0EnCq3Fma6kueoJYCFTJjSL1+Bx3o3bXoIVO7lLdE9TuttAd3uRgzQBACT+rV7wZO+0cwFvy6M8qJ/NB8HEK62bq3Ejv4WrQ6nkjybCaasMOvFb9AYqb4Zphu6NhqigRXf/RGNh+BCxFcgExvcXVo2D3kt8S5+EPSrz2Yz8FYKiVVtJU+TpSJ3DXJOzYFXrlcWzeV55nLbAUPn14A5ryeCieK4UKNSeSORu8ElTOina3fDb6lUJjsU3mvoRTt2RO8/kT3yXwcGWsXme
+== 2026.10.22.4
+Маршрут обработки по чертежу. В «Распознать чертёж» — кнопка «Маршрут обработки»: лист читается целиком (технические требования, шероховатость, допуски, резьбы, отверстия, твёрдость, покрытие), и правила опытного технолога выдают вид детали, материал, заготовку и операции по порядку — у каждой операции причина. Если на чертеже только материал, заготовка подбирается сама: круг по ГОСТ 2590 с припуском, пруток, лист или отливка. То же в чате ИИ: «маршрут» или «техпроцесс» с картинкой чертежа или словами («маршрут: вал, сталь 40Х, Ra 0,4»). Что не прочиталось — в строке «Уточнить»; маршрут — черновик, его проверяет технолог.
+
 == 2026.10.22.3
 Обновления CursorPad снова ставятся только с подписью разработчика: подменённая на зеркале или в сети версия не установится. Новые версии теперь собираются на GitHub и выходят после одобрения разработчика.
 
