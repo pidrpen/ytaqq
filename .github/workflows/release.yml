@@ -1,7 +1,8 @@
 # Релиз на GitHub: после каждого слияния в main, где поменялась готовая
 # программа, появляется (или обновляется) релиз с номером версии,
 # CursorPad.zip, CursorPad.exe и комплектом QwenPaw. Собирать ничего не нужно:
-# берутся файлы из public/, их кладёт туда native/build.sh.
+# берутся файлы из public/, их кладёт туда native/build.sh (выпуск с ПК).
+# Выпуск, собранный в GitHub, выкладывает build-release.yml сам.
 name: Релиз
 
 on:
@@ -18,6 +19,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Проверить подпись
+        # неподписанный version.txt программа не поставит — такой выпуск не выкладываем
+        run: python3 native/update_sign.py --verify public/version.txt
       - name: Выложить релиз
         env:
           GH_TOKEN: ${{ github.token }}

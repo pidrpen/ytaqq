@@ -8,7 +8,7 @@ import sys
 import zipfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import update_sign  # noqa: E402 — подпись для старых версий (RELEASE_SIGNING.md)
+import update_sign  # noqa: E402 — подпись выпуска (RELEASE_SIGNING.md)
 
 pub, native = map(Path, sys.argv[1:3])
 version = (native / 'version.txt').read_text(encoding='utf-8').splitlines()[:2]
@@ -16,10 +16,13 @@ header = (native / 'version.h').read_text(encoding='utf-8')
 assert re.search(r'#define APP_VERSION (\d+)', header)[1] == version[0]
 assert re.search(r'#define APP_VERSION_A "([^"]+)"', header)[1] == version[1]
 date = tuple(map(int, version[1].split('.')[:3])) + (0, 0, 0)
-# Подпись нужна только 2026.10.21.2–2026.10.22.1; нет ключа — выпуск без неё.
-signing_key = update_sign.load_key()
-if not signing_key:
-    print('Ключа подписи нет: выпуск без подписи, 2026.10.21.2–2026.10.22.1 сами на него не обновятся')
+# Без подписи программа выпуск не поставит. Нет ключа (сборка в GitHub Actions) —
+# version.txt без неё: подписывает отдельный шаг (update_sign.py --sign) после одобрения.
+signing_key = update_sign.load_key(required=False)
+if signing_key:
+    update_sign.check_header(signing_key)
+else:
+    print('Ключа подписи нет: выпуск НЕ подписан — до публикации: python native/update_sign.py --sign public/version.txt')
 # Пакет Tesseract принимается только закреплённый в exe (tess.c, tess_pack.h).
 tess_list = native.parent / 'public' / 'tess' / 'pack.txt'
 if tess_list.exists():
