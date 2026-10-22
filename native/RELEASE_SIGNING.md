@@ -69,16 +69,16 @@ powershell -File native/build.ps1
 | Откуда | Что |
 | --- | --- |
 | GitHub → Settings → Environments → `release` | секрет `CURSORPAD_UPDATE_KEY_PEM` — для «Сборки выпуска»; виден только шагу подписи и только после одобрения |
-| `%LOCALAPPDATA%\CursorPad-release\update-signing-key.pem` | ПК владельца |
+| `%USERPROFILE%\CursorPad-release\update-signing-key.pem` | ПК владельца. Не в `AppData`: программы из магазина (Claude и др.) пишут туда в свою скрытую копию (`AppData\Local\Packages\…\LocalCache`), из обычного терминала её не видно, а с удалением программы она пропадает. Старое место `%LOCALAPPDATA%\CursorPad-release` ещё читается |
 | `CURSORPAD_UPDATE_KEY_PEM` / `CURSORPAD_UPDATE_KEY` | текст ключа / путь к нему в переменной окружения |
 
 Положить ключ в GitHub (один раз, с ПК владельца):
 
 ```
 # PowerShell
-Get-Content -Raw "$env:LOCALAPPDATA\CursorPad-release\update-signing-key.pem" | gh secret set CURSORPAD_UPDATE_KEY_PEM --env release --repo pidrpen/ytaqq
+Get-Content -Raw "$env:USERPROFILE\CursorPad-release\update-signing-key.pem" -ErrorAction Stop | gh secret set CURSORPAD_UPDATE_KEY_PEM --env release --repo pidrpen/ytaqq
 # Git Bash
-gh secret set CURSORPAD_UPDATE_KEY_PEM --env release --repo pidrpen/ytaqq < "$LOCALAPPDATA/CursorPad-release/update-signing-key.pem"
+gh secret set CURSORPAD_UPDATE_KEY_PEM --env release --repo pidrpen/ytaqq < "$USERPROFILE/CursorPad-release/update-signing-key.pem"
 ```
 
 Проверка: `gh secret list --env release --repo pidrpen/ytaqq` — в списке

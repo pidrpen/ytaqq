@@ -13,7 +13,7 @@ raw.githubusercontent.com, github.com, api.github.com). Кто подменит 
 Закрытый ключ НЕ хранится в репозитории. Где он:
   CURSORPAD_UPDATE_KEY_PEM — сам ключ (PEM) в переменной окружения, или
   CURSORPAD_UPDATE_KEY     — путь к файлу, иначе
-  %LOCALAPPDATA%\\CursorPad-release\\update-signing-key.pem
+  %USERPROFILE%\\CursorPad-release\\update-signing-key.pem (раньше — в %LOCALAPPDATA%)
 Подробнее — RELEASE_SIGNING.md.
 """
 import base64, hashlib, os, pathlib, re, subprocess, sys
@@ -30,8 +30,12 @@ def key_path():
     p = os.environ.get("CURSORPAD_UPDATE_KEY")
     if p:
         return pathlib.Path(p)
+    # Не AppData: программы из магазина (например, Claude) пишут туда в свою
+    # скрытую копию, и из обычного терминала файла не видно.
+    home = pathlib.Path.home() / "CursorPad-release" / "update-signing-key.pem"
     base = os.environ.get("LOCALAPPDATA") or str(pathlib.Path.home() / ".local" / "share")
-    return pathlib.Path(base) / "CursorPad-release" / "update-signing-key.pem"
+    old = pathlib.Path(base) / "CursorPad-release" / "update-signing-key.pem"
+    return old if old.exists() and not home.exists() else home
 
 
 def _der(b, i):
