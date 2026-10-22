@@ -15,6 +15,7 @@ static const GUID kAcBgra = {0x6fddc324, 0x4e03, 0x4bfe, {0xb1, 0x85, 0x3d, 0x77
 #define WM_AC_SEND (WM_APP + 73) /* из поля ввода: отправить */
 #define WM_AG_TOOL (WM_APP + 74) /* результат файлового инструмента из рабочего потока */
 #define WM_AC_WEB (WM_APP + 75)  /* lParam — AcWebDone*, страницы для Qwen */
+#define WM_AC_TP (WM_APP + 77)   /* lParam — wchar_t*: маршрут по чертежу (techno.c), free */
 #define ID_AC_LOG 4701
 #define ID_AC_IN 4702
 #define ID_AC_SEND 4703
@@ -44,6 +45,8 @@ static HWND g_acWnd, g_acLog, g_acIn, g_acSend, g_acStop, g_acClear, g_acCopy, g
     g_acShot, g_acThumb, g_acLearn, g_acApply, g_acCancel;
 static BYTE *g_acImg;      /* картинка, ждёт отправки */
 static DWORD g_acImgLen;
+static BYTE *g_acImgFull;  /* она же до 3300 px — для маршрута по чертежу: в 768 px текст не прочитать */
+static DWORD g_acImgFullLen;
 static HBITMAP g_acThumbBmp; /* миниатюра ждущей картинки (и той, что не ушла) */
 static void ac_relayout(void);
 static void ac_layout(int W, int H);
@@ -1819,6 +1822,145 @@ static BOOL ac_provider_change(int provider) {
   SetWindowTextW(g_acTitle, provider ? L"Мини-ИИ · Z.ai API" : L"Мини-ИИ · на этом компьютере");
   return TRUE;
 }
+/* ---- маршрут обработки по чертежу (techno.c) --------------------------------------
+   «маршрут», «техпроцесс», «как обрабатывать» — операции и заготовку решают правила
+   технолога, а не модель: она их не выдумывает. С картинкой — лист читается целиком
+   (drawrec.c) в фоне; без неё — по словам вопроса («маршрут: вал, сталь 40Х, Ra 0,4»). */
+static BOOL ac_tp_wanted(const wchar_t *q) {
+  wchar_t low[600];
+  lstrcpynW(low, q, 600);
+  CharLowerBuffW(low, (DWORD)wcslen(low));
+  return wcsstr(low, L"маршрут") || wcsstr(low, L"техпроц") || wcsstr(low, L"тех процесс") ||
+         wcsstr(low, L"как обрабат") || wcsstr(low, L"механообработ") || wcsstr(low, L"какие операц") ||
+         !wcsncmp(low, L"тп ", 3) || wcsstr(low, L" тп ");
+}
+
+typedef struct {
+  BYTE *png;
+  DWORD len;
+} AcTpJob;
+
+/* картинка (PNG/JPG в памяти) → весь лист → маршрут; текст — free() */
+static wchar_t *ac_tp_build(const BYTE *png, DWORD len) {
+  IWICImagingFactory *f = NULL;
+  CoCreateInstance(&kTmClsidFactory, NULL, CLSCTX_INPROC_SERVER, &kTmIidFactory, (void **)&f);
+  wchar_t tmp[MAX_PATH], path[MAX_PATH];
+  GetTempPathW(MAX_PATH, tmp);
+  _snwprintf(path, MAX_PATH, L"%scursorpad-route-%lu-%lu.png", tmp, GetCurrentThreadId(), GetTickCount());
+  path[MAX_PATH - 1] = 0;
+  HANDLE h = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
+  DWORD wr = 0;
+  BOOL ok = h != INVALID_HANDLE_VALUE && WriteFile(h, png, len, &wr, NULL) && wr == len;
+  if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+  DrPage *pg = (DrPage *)calloc(1, sizeof(DrPage));
+  TnRoute *r = (TnRoute *)malloc(sizeof(TnRoute));
+  wchar_t *out = (wchar_t *)malloc(sizeof(wchar_t) * 9000);
+  if (out) out[0] = 0;
+  if (ok && f && pg && r && out) {
+    lstrcpynW(pg->path, path, MAX_PATH);
+    pg->wantText = TRUE;
+    dr_recognize(f, pg);
+    tn_route(pg->f[DF_NAME], pg->f[DF_MAT], pg->text, r);
+    int n = 0;
+    if (!pg->text)
+      n = _snwprintf(out, 9000, L"Текст листа не прочитан (%s) — маршрут только по штампу.\n\n",
+                     pg->note[0] ? pg->note : L"нет Tesseract — «Проверить обновления» докачает его");
+    if (n < 0) n = 0;
+    out[n] = 0;
+    tn_text(r, out + n, 9000 - n);
+  } else if (out) {
+    lstrcpynW(out, L"Не вышло прочитать картинку для маршрута.", 9000);
+  }
+  DeleteFileW(path);
+  if (pg) dr_page_free(pg);
+  free(pg);
+  free(r);
+  if (f) IWICImagingFactory_Release(f);
+  return out;
+}
+
+static DWORD WINAPI ac_tp_thread(LPVOID arg) {
+  AcTpJob *j = (AcTpJob *)arg;
+  CoInitializeEx(NULL, COINIT_MULTITHREADED);
+  wchar_t *out = ac_tp_build(j->png, j->len);
+  free(j->png);
+  free(j);
+  CoUninitialize();
+  if (out && !(g_acWnd && PostMessageW(g_acWnd, WM_AC_TP, 0, (LPARAM)out))) free(out);
+  return 0;
+}
+
+#ifdef SET_TEST
+/* проверочная сборка: --tpchat картинка итог.txt — как маршрут в чате */
+static void ac_tp_test(const wchar_t *img, const wchar_t *outPath) {
+  CoInitializeEx(NULL, COINIT_MULTITHREADED);
+  char *data = NULL;
+  DWORD n = 0;
+  wchar_t *out = read_file_bytes(img, &data, &n, 64 * 1024 * 1024) ? ac_tp_build((const BYTE *)data, n) : NULL;
+  free(data);
+  if (out) share_write_ex(outPath, out, TRUE);
+  free(out);
+  ExitProcess(0);
+}
+#endif
+
+static BOOL ac_tp_start(const wchar_t *a) {
+  const BYTE *src = g_acImgFull ? g_acImgFull : g_acImg;
+  DWORD len = g_acImgFull ? g_acImgFullLen : g_acImgLen;
+  if (!src) {
+    TnRoute *r = (TnRoute *)malloc(sizeof(TnRoute));
+    wchar_t *txt = (wchar_t *)malloc(sizeof(wchar_t) * 9000);
+    BOOL any = FALSE;
+    if (r && txt) {
+      tn_route(L"", L"", a, r);
+      any = r->cls != TN_UNK || r->s.mat; /* в вопросе нет ни вида детали, ни материала — пусть ответит модель */
+      if (any) {
+        tn_text(r, txt, 9000);
+        ac_push(0, a);
+        ac_push(1, txt);
+        ac_redraw();
+        ac_status(L"Маршрут — по правилам технолога; что не указано — в «Уточнить»");
+      }
+    }
+    free(r);
+    free(txt);
+    return any;
+  }
+  AcTpJob *j = (AcTpJob *)calloc(1, sizeof(AcTpJob));
+  BYTE *copy = (BYTE *)malloc(len);
+  if (!j || !copy) {
+    free(j);
+    free(copy);
+    return FALSE;
+  }
+  memcpy(copy, src, len);
+  j->png = copy;
+  j->len = len;
+  ac_push(0, a);
+  if (g_acImg && g_acN) { /* миниатюра вопроса — как обычно: модель увидит её в следующих вопросах */
+    g_acTurns[g_acN - 1].png = g_acImg;
+    g_acTurns[g_acN - 1].pngLen = g_acImgLen;
+    g_acImg = NULL;
+    g_acImgLen = 0;
+  }
+  free(g_acImgFull);
+  g_acImgFull = NULL;
+  g_acImgFullLen = 0;
+  ac_relayout();
+  HANDLE th = CreateThread(NULL, 0, ac_tp_thread, j, 0, NULL);
+  if (!th) {
+    free(j->png);
+    free(j);
+    ac_push(1, L"Не вышло запустить чтение чертежа.");
+    ac_redraw();
+    return TRUE;
+  }
+  CloseHandle(th);
+  ac_redraw();
+  ac_status(L"Читаю чертёж целиком и строю маршрут по правилам технолога…");
+  return TRUE;
+}
+
 static void ac_send(void) {
   SetWindowTextW(g_acTitle, g_aiProvider ? L"Мини-ИИ · Z.ai API" : L"Мини-ИИ · на этом компьютере");
   if (g_acPlanOn) {
@@ -1857,6 +1999,11 @@ static void ac_send(void) {
     return;
   }
   ac_avatar_set(AC_AV_LISTENING);
+  if (ac_tp_wanted(a) && ac_tp_start(a)) {
+    SetWindowTextW(g_acIn, L"");
+    free(in);
+    return;
+  }
   if (g_acImg) ag_stop(); /* A new picture starts visual chat, not an old file clarification. */
   if (!g_acRouteDispatch && !g_acImg && !ac_picture_context(a) && ai_ready()) {
     int quick = g_agPending ? 0 : ac_quick_route(a); /* явное — без лишнего вызова модели */
@@ -1920,6 +2067,9 @@ static void ac_send(void) {
     g_acImgLen = 0;
     ac_relayout();
   }
+  free(g_acImgFull);
+  g_acImgFull = NULL;
+  g_acImgFullLen = 0;
   SetWindowTextW(g_acIn, L"");
   if (cmd) {
     AiTurn *t = (AiTurn *)malloc(g_acN * sizeof(AiTurn));
@@ -2217,6 +2367,15 @@ static void ac_take(IWICImagingFactory *f, IWICBitmapSource *src) {
   free(g_acImg);
   g_acImg = png;
   g_acImgLen = pl;
+  free(g_acImgFull);
+  g_acImgFull = NULL;
+  g_acImgFullLen = 0;
+  UINT fw = 0, fh = 0;
+  IWICBitmapSource *full = ac_scaled(f, src, 3300, &fw, &fh);
+  if (full) {
+    if (!ac_png(f, full, fw, fh, &g_acImgFull, &g_acImgFullLen)) g_acImgFull = NULL, g_acImgFullLen = 0;
+    full->lpVtbl->Release(full);
+  }
   HBITMAP oldThumb = g_acThumbBmp;
   g_acThumbBmp = hb;
   /* STATIC с картинкой, где есть альфа, хранит свою копию и отдаёт её здесь —
@@ -2232,6 +2391,9 @@ static void ac_drop_img(void) {
   free(g_acImg);
   g_acImg = NULL;
   g_acImgLen = 0;
+  free(g_acImgFull);
+  g_acImgFull = NULL;
+  g_acImgFullLen = 0;
   ac_relayout();
   ac_status(L"Картинка убрана");
 }
@@ -2378,6 +2540,9 @@ static void ac_clear(void) {
   free(g_acImg);
   g_acImg = NULL;
   g_acImgLen = 0;
+  free(g_acImgFull);
+  g_acImgFull = NULL;
+  g_acImgFullLen = 0;
   ac_relayout();
   SetWindowTextW(g_acLog, L"");
   ac_status(L"");
@@ -2648,6 +2813,16 @@ static LRESULT CALLBACK AcProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
   case WM_AC_WEB:
     ac_web_ready((AcWebDone *)lParam);
     return 0;
+  case WM_AC_TP: {
+    wchar_t *txt = (wchar_t *)lParam;
+    if (txt) {
+      ac_push(1, txt);
+      free(txt);
+      ac_redraw();
+      ac_status(L"Маршрут — по правилам технолога; что не прочиталось — в «Уточнить»");
+    }
+    return 0;
+  }
   case WM_AG_TOOL:
     ag_tool_ready((void *)lParam);
     return 0;
@@ -2793,6 +2968,15 @@ static void aichat_show(void) {
     return;
   }
   aichat_show_full();
+}
+
+/* маршрут из окна чертежа (techno.c) — в полный чат: он длинный, а дальше его
+   можно обсудить с моделью, она видит его в истории */
+static void ac_route_show(const wchar_t *text) {
+  aichat_show_full();
+  if (!g_acWnd) return;
+  ac_push(1, text);
+  ac_redraw();
 }
 
 /* поиск с вопросом (мини-ИИ): открыть чат и сразу спросить */

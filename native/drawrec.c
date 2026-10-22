@@ -64,6 +64,8 @@ typedef struct {
   wchar_t note[300];  /* что не так — в столбец «Заметки» */
   DrSpecRow *rows;
   int nrows;
+  wchar_t *text;      /* весь лист (ТТ, Ra, допуски, резьбы) — для маршрута, techno.c; NULL — не читали */
+  BOOL wantText;      /* прочитать и весь лист (кнопка «Маршрут обработки») */
   double secs;
 } DrPage;
 
@@ -1465,6 +1467,51 @@ static BOOL dr_whole_text(const DrImg *m, wchar_t *text, int cap, int *conf, wch
   return ok;
 }
 
+/* Текст всего листа для маршрута: размеры, резьбы и Ra на чертеже часто стоят
+   вертикально, поэтому лист читается ещё повёрнутым на 90° в обе стороны.
+   psm 11 — разрозненный текст: надписи чертежа не складываются в абзацы. */
+static BOOL g_drText; /* читать ли весь лист у чертежей (маршрут); пакетное распознавание — нет */
+
+static BOOL dr_img_rot(const DrImg *m, BOOL cw, DrImg *out) {
+  if (!dr_img_new(out, m->h, m->w)) return FALSE;
+  for (int y = 0; y < m->h; y++)
+    for (int x = 0; x < m->w; x++)
+      out->px[cw ? (size_t)x * out->w + (m->h - 1 - y) : (size_t)(m->w - 1 - x) * out->w + y] =
+          m->px[(size_t)y * m->w + x];
+  return TRUE;
+}
+
+static BOOL dr_sheet_text(const DrImg *m, wchar_t *text, int cap, wchar_t *why, int wcap) {
+  int lng = m->w > m->h ? m->w : m->h;
+  int s = lng > 3300 ? (lng + 3299) / 3300 : 1;
+  DrImg im[3];
+  memset(im, 0, sizeof(im));
+  BOOL ok = dr_img_new(&im[0], m->w / s, m->h / s);
+  if (ok) {
+    for (int y = 0; y < im[0].h; y++)
+      for (int x = 0; x < im[0].w; x++) {
+        int sum = 0;
+        for (int dy = 0; dy < s; dy++)
+          for (int dx = 0; dx < s; dx++) sum += m->px[(size_t)(y * s + dy) * m->w + x * s + dx];
+        im[0].px[(size_t)y * im[0].w + x] = (BYTE)(sum / (s * s));
+      }
+    ok = dr_img_rot(&im[0], TRUE, &im[1]) && dr_img_rot(&im[0], FALSE, &im[2]);
+  }
+  DrWords ws;
+  memset(&ws, 0, sizeof(ws));
+  ok = ok && dr_tess(im, 3, 11, &ws, why, wcap);
+  for (int i = 0; i < 3; i++) dr_img_free(&im[i]);
+  text[0] = 0;
+  for (int pgn = 1, n = 0; ok && pgn <= 3 && n < cap - 2; pgn++) {
+    int conf;
+    if (n) text[n++] = L'\n', text[n] = 0;
+    dr_page_text(&ws, pgn, L"\n", text + n, cap - n, &conf);
+    n += (int)wcslen(text + n);
+  }
+  dr_words_free(&ws);
+  return ok;
+}
+
 static BOOL dr_has(const wchar_t *low, const wchar_t *w) { return wcsstr(low, w) != NULL; }
 
 /* ---- одна страница ----------------------------------------------------------------- */
@@ -1473,6 +1520,8 @@ static void dr_page_free(DrPage *pg) {
   free(pg->rows);
   pg->rows = NULL;
   pg->nrows = 0;
+  free(pg->text);
+  pg->text = NULL;
 }
 
 static void dr_recognize(IWICImagingFactory *f, DrPage *pg) {
@@ -1573,6 +1622,14 @@ static void dr_recognize(IWICImagingFactory *f, DrPage *pg) {
     }
     free(text);
   }
+  if ((g_drText || pg->wantText) && (pg->type == DRT_DRAW || pg->type == DRT_OTHER)) {
+    pg->text = (wchar_t *)malloc(sizeof(wchar_t) * 32768);
+    wchar_t why3[200] = {0};
+    if (pg->text && !dr_sheet_text(&m, pg->text, 32768, why3, 200)) {
+      free(pg->text);
+      pg->text = NULL;
+    }
+  }
   if (!pg->f[DF_DES][0] && pg->type != DRT_OTHER) pg->doubt[DF_DES] = 1;
   /* формат листа: по масштабу штампа, без него — по dpi файла */
   if (k > 0) {
@@ -1623,6 +1680,7 @@ static void dr_test(int argc, wchar_t **argv) {
   DrPages l;
   memset(&l, 0, sizeof(l));
   for (int i = 3; i < argc && f; i++) tm_probe(f, argv[i], FALSE, dr_pages_cb, &l);
+  g_drText = getenv("CP_DRTEXT") != NULL; /* и текст всего листа */
   ShareBuf b;
   memset(&b, 0, sizeof(b));
   for (int i = 0; i < l.n; i++) {
@@ -1632,6 +1690,7 @@ static void dr_test(int argc, wchar_t **argv) {
            kDrType[pg->type], pg->form, pg->fmt, pg->secs, g_drAng, g_drAngV, pg->note[0] ? L" · " : L"", pg->note);
     for (int k = 0; k < DF_N; k++)
       if (pg->f[k][0] || pg->doubt[k]) sb_add(&b, L"  %s%s: %s\n", pg->doubt[k] ? L"? " : L"", kDrField[k], pg->f[k]);
+    if (pg->text) sb_add(&b, L"  -- лист --\n%s\n  -- конец --\n", pg->text);
     for (int r = 0; r < pg->nrows; r++) {
       sb_add(&b, L"  |");
       for (int c = 0; c < DS_N; c++) sb_add(&b, L" %s%s |", pg->rows[r].doubt[c] ? L"?" : L"", pg->rows[r].c[c]);

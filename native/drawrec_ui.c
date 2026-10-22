@@ -27,6 +27,7 @@
 #define ID_DR_OPEN 931
 #define ID_DR_TIMER 932
 #define ID_DR_SORT 933 /* «Разложить по папкам…» — drawrec_sort.c */
+#define ID_DR_ROUTE 934 /* «Маршрут обработки» — techno.c, итог в чат ИИ */
 #define WM_DR_ADD (WM_APP + 140)  /* lParam — DrItem*: новая страница (ещё не прочитана) */
 #define WM_DR_DONE (WM_APP + 141) /* lParam — DrItem*: страница прочитана */
 /* вызвать один раз, когда очередь распознавания опустела (окно чата: команда «разложить») */
@@ -44,10 +45,14 @@ typedef struct DrJob {
   int id;   /* 0 — файл целиком (страницы ещё не известны) */
   LONG gen; /* «Стоп» меняет g_drGen — задания прежнего поколения не делаются */
   UINT frame;
+  BOOL text; /* и весь лист — для маршрута */
   wchar_t path[MAX_PATH];
 } DrJob;
 
 enum { DR_TAB_PAGES, DR_TAB_SPEC, DR_NTAB };
+/* «Маршрут обработки» ждёт, пока эта строка дочитается целиком (0 — не ждёт) */
+static int g_drRouteId;                  /* строка, для которой дочитывается лист */
+static wchar_t g_drRouteF[DF_N][DR_CELL]; /* её поля штампа — с правками пользователя */
 #define DR_PCOLS 12
 static const wchar_t *const kDrPageHead[DR_PCOLS] = {L"Файл",  L"Стр.",    L"Тип",  L"Обозначение",
                                                      L"Наименование", L"Материал", L"Масса", L"Масштаб",
@@ -100,12 +105,13 @@ static void dr_post_item(UINT msg, DrItem *it) {
   }
 }
 
-static void dr_work_page(IWICImagingFactory *f, int id, const wchar_t *path, UINT frame) {
+static void dr_work_page(IWICImagingFactory *f, int id, const wchar_t *path, UINT frame, BOOL text) {
   DrItem *it = (DrItem *)calloc(1, sizeof(DrItem));
   if (!it) return;
   it->id = id;
   lstrcpynW(it->pg.path, path, MAX_PATH);
   it->pg.frame = frame;
+  it->pg.wantText = text;
   if (f) dr_recognize(f, &it->pg);
   else lstrcpynW(it->pg.note, L"не запустился WIC — картинки не открыть", 300), it->pg.done = TRUE;
   dr_post_item(WM_DR_DONE, it);
@@ -152,7 +158,7 @@ static void dr_work_file(IWICImagingFactory *f, const DrJob *j) {
     it->pg.frame = l.p[i].frame;
     dr_post_item(WM_DR_ADD, it);
   }
-  for (int i = 0; i < l.n && ids && j->gen == g_drGen; i++) dr_work_page(f, ids[i], l.p[i].path, l.p[i].frame);
+  for (int i = 0; i < l.n && ids && j->gen == g_drGen; i++) dr_work_page(f, ids[i], l.p[i].path, l.p[i].frame, FALSE);
   free(ids);
   free(l.p);
 }
@@ -174,7 +180,7 @@ static DWORD WINAPI dr_worker(LPVOID arg) {
     LeaveCriticalSection(&g_drLock);
     if (!j) break;
     if (j->gen == g_drGen) {
-      if (j->id) dr_work_page(f, j->id, j->path, j->frame);
+      if (j->id) dr_work_page(f, j->id, j->path, j->frame, j->text);
       else dr_work_file(f, j);
     }
     free(j);
@@ -185,7 +191,7 @@ static DWORD WINAPI dr_worker(LPVOID arg) {
   return 0;
 }
 
-static void dr_enqueue(int id, const wchar_t *path, UINT frame) {
+static void dr_enqueue(int id, const wchar_t *path, UINT frame, BOOL text) {
   if (!g_drLockInit) {
     InitializeCriticalSection(&g_drLock);
     g_drLockInit = TRUE;
@@ -195,6 +201,7 @@ static void dr_enqueue(int id, const wchar_t *path, UINT frame) {
   j->id = id;
   j->gen = g_drGen;
   j->frame = frame;
+  j->text = text;
   lstrcpynW(j->path, path, MAX_PATH);
   EnterCriticalSection(&g_drLock);
   if (g_drQTail) g_drQTail->next = j;
@@ -214,6 +221,7 @@ static void dr_enqueue(int id, const wchar_t *path, UINT frame) {
 /* «Стоп»: очередь — прочь, текущая страница дочитается */
 static void dr_stop(void) {
   InterlockedIncrement(&g_drGen);
+  g_drRouteId = 0;
   if (g_drLockInit) {
     EnterCriticalSection(&g_drLock);
     while (g_drQ) {
@@ -368,7 +376,7 @@ static void dr_run_status(void) {
 
 static void dr_add_paths(TmPaths *l) {
   for (int i = 0; i < l->n; i++) {
-    dr_enqueue(0, l->p[i], 0);
+    dr_enqueue(0, l->p[i], 0, FALSE);
     g_drTodo++; /* файл — пока как один лист; страницы уточнит WM_DR_ADD */
   }
   if (l->n) dr_run_status();
@@ -442,6 +450,7 @@ static int dr_sel_items(int *out, int cap) {
 }
 
 static void dr_again(void) {
+  g_drRouteId = 0;
   int sel[512], n = dr_sel_items(sel, 512);
   BOOL all = n == 0;
   if (all) n = g_drn < 512 ? g_drn : 512;
@@ -453,13 +462,66 @@ static void dr_again(void) {
     it->busy = TRUE;
     it->pg.done = FALSE;
     it->pg.note[0] = 0;
-    dr_enqueue(it->id, it->pg.path, it->pg.frame);
+    dr_enqueue(it->id, it->pg.path, it->pg.frame, FALSE);
     q++;
   }
   g_drTodo += q;
   dr_fill();
   if (q) dr_run_status();
   else dr_status(L"Нечего распознавать — добавьте файлы");
+}
+
+/* «Маршрут обработки»: выбранный лист → techno.c → в чат ИИ, где маршрут можно
+   обсудить с моделью. Весь лист читается только здесь: пакетное распознавание
+   его не читает (это ещё 1–10 с на лист). */
+static void ac_route_show(const wchar_t *text); /* ai_chat.c */
+
+static void dr_route_push(int i) {
+  DrPage *pg = &g_dri[i].pg;
+  TnRoute *r = (TnRoute *)malloc(sizeof(TnRoute));
+  wchar_t *txt = (wchar_t *)malloc(sizeof(wchar_t) * 9000);
+  if (r && txt) {
+    tn_route(pg->f[DF_NAME], pg->f[DF_MAT], pg->text, r);
+    int n = _snwprintf(txt, 9000, L"Лист: %s%s%s\n\n", tm_base(pg->path), pg->f[DF_DES][0] ? L" · " : L"",
+                       pg->f[DF_DES]);
+    if (n < 0) n = 0;
+    txt[n] = 0;
+    tn_text(r, txt + n, 9000 - n);
+    ac_route_show(txt);
+    dr_status(L"Маршрут — в чате ИИ: там его можно обсудить и поправить");
+  }
+  free(r);
+  free(txt);
+}
+
+static void dr_route(void) {
+  int sel[1];
+  if (!dr_sel_items(sel, 1)) {
+    dr_status(L"Выберите лист чертежа в списке");
+    return;
+  }
+  DrItem *it = &g_dri[sel[0]];
+  if (it->busy && !it->pg.done) {
+    dr_status(L"Лист ещё распознаётся — подождите");
+    return;
+  }
+  if (it->pg.type == DRT_SPEC || it->pg.type == DRT_TP) {
+    dr_status(L"Маршрут строится по чертежу детали, а это лист «%s»", kDrType[it->pg.type]);
+    return;
+  }
+  if (it->pg.text) {
+    dr_route_push(sel[0]);
+    return;
+  }
+  g_drRouteId = it->id;
+  memcpy(g_drRouteF, it->pg.f, sizeof(g_drRouteF));
+  it->busy = TRUE;
+  it->pg.done = FALSE;
+  it->pg.note[0] = 0;
+  dr_enqueue(it->id, it->pg.path, it->pg.frame, TRUE);
+  g_drTodo++;
+  dr_fill();
+  dr_status(L"Читаю весь лист — ТТ, шероховатость, допуски, резьбы — для маршрута…");
 }
 
 static void dr_remove_sel(void) {
@@ -1056,7 +1118,7 @@ static void dr_layout(void) {
   MoveWindow(g_drList, pad, ly, rc.right - pad * 2, by - DRS(10) - ly, TRUE);
   static const struct {
     int id, w;
-  } bot[] = {{ID_DR_COPY, 190}, {ID_DR_PKG, 130}, {ID_DR_CSV, 160}, {ID_DR_SORT, 200}, {ID_DR_OPEN, 130}};
+  } bot[] = {{ID_DR_COPY, 190}, {ID_DR_PKG, 130}, {ID_DR_CSV, 160}, {ID_DR_SORT, 200}, {ID_DR_ROUTE, 170}, {ID_DR_OPEN, 130}};
   x = pad;
   for (size_t i = 0; i < sizeof(bot) / sizeof(bot[0]); i++) {
     MoveWindow(GetDlgItem(g_drWnd, bot[i].id), x, by, DRS(bot[i].w), DRS(30), TRUE);
@@ -1195,6 +1257,11 @@ static LRESULT CALLBACK DrProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
       free(it);
       dr_fill();
       dr_run_status();
+      if (g_drRouteId && g_dri[i].id == g_drRouteId) {
+        g_drRouteId = 0;
+        memcpy(g_dri[i].pg.f, g_drRouteF, sizeof(g_drRouteF)); /* правки полей штампа — не терять */
+        dr_route_push(i);
+      }
     } else { /* строку убрали или остановили — ответ не нужен */
       dr_page_free(&it->pg);
       free(it);
@@ -1248,6 +1315,7 @@ static LRESULT CALLBACK DrProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
     if (id == ID_DR_CSV) dr_csv();
     if (id == ID_DR_OPEN) dr_open_sheet();
     if (id == ID_DR_SORT) drs_show();
+    if (id == ID_DR_ROUTE) dr_route();
     return 0;
   }
   case WM_KEYDOWN:
@@ -1300,6 +1368,7 @@ static void drawrec_show(void) {
     mk_btn(g_drWnd, L"В пакет PLM", ID_DR_PKG);
     mk_btn(g_drWnd, L"CSV для Союза…", ID_DR_CSV);
     mk_btn(g_drWnd, L"Разложить по папкам…", ID_DR_SORT);
+    mk_btn(g_drWnd, L"Маршрут обработки", ID_DR_ROUTE);
     mk_btn(g_drWnd, L"Открыть лист", ID_DR_OPEN);
     g_drList = CreateWindowExW(0, WC_LISTVIEWW, L"",
                                WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP | LVS_REPORT | LVS_OWNERDATA |
@@ -1315,6 +1384,39 @@ static void drawrec_show(void) {
   SetForegroundWindow(g_drWnd);
   SetFocus(g_drList);
 }
+
+#ifdef SET_TEST
+/* только проверочная сборка: --techno итог.txt файл… — весь лист и маршрут по каждому */
+static void dr_techno_test(int argc, wchar_t **argv) {
+  CoInitializeEx(NULL, COINIT_MULTITHREADED);
+  IWICImagingFactory *f = NULL;
+  CoCreateInstance(&kTmClsidFactory, NULL, CLSCTX_INPROC_SERVER, &kTmIidFactory, (void **)&f);
+  DrPages l;
+  memset(&l, 0, sizeof(l));
+  for (int i = 3; i < argc && f; i++) tm_probe(f, argv[i], FALSE, dr_pages_cb, &l);
+  ShareBuf b;
+  memset(&b, 0, sizeof(b));
+  TnRoute *r = (TnRoute *)malloc(sizeof(TnRoute));
+  wchar_t *txt = (wchar_t *)malloc(sizeof(wchar_t) * 9000);
+  for (int i = 0; i < l.n && r && txt; i++) {
+    DrPage *pg = &l.p[i];
+    pg->wantText = TRUE;
+    dr_recognize(f, pg);
+    tn_route(pg->f[DF_NAME], pg->f[DF_MAT], pg->text, r);
+    tn_text(r, txt, 9000);
+    sb_add(&b, L"==== %s · %.1f с · штамп: %s / %s\n%s\n\n", tm_base(pg->path), pg->secs, pg->f[DF_NAME],
+           pg->f[DF_MAT], txt);
+    dr_page_free(pg);
+  }
+  if (b.w) share_write_ex(argv[2], b.w, TRUE);
+  free(b.w);
+  free(r);
+  free(txt);
+  free(l.p);
+  if (f) IWICImagingFactory_Release(f);
+  ExitProcess(0);
+}
+#endif
 
 #ifdef SET_TEST
 /* только проверочная сборка: --drawui снимок файл… — окно, распознать, снять
