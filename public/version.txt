@@ -1,7 +1,10 @@
-2026102204
-2026.10.22.4
-sha256 ad624709b681072c671e06fea3380016378c049d94de14965053be9608f15290
-== 0 signature-rsa-sha256 FKbdz04S9wo12UjKqoTAiJ2onO+3gXKgN8hxxL2X09UtWEDoU5BiV0+/+xs15IPYmaHS8BpIgFnT8az4eyHq0J2a7aoV6fGSbWgx2muXzh8x/5uQR3htshp49NUc9y5FBjTg/0lY5SmxpRABxs5pR+2NXE0miCaZFSvsUh2LoYlc3y4ftQ9WgVMYhjuMchXvdB15m3prISKxHr//4i3sFtKR/eDeuMVISL1fFmA/oat4adgXj0EnCq3Fma6kueoJYCFTJjSL1+Bx3o3bXoIVO7lLdE9TuttAd3uRgzQBACT+rV7wZO+0cwFvy6M8qJ/NB8HEK62bq3Ejv4WrQ6nkjybCaasMOvFb9AYqb4Zphu6NhqigRXf/RGNh+BCxFcgExvcXVo2D3kt8S5+EPSrz2Yz8FYKiVVtJU+TpSJ3DXJOzYFXrlcWzeV55nLbAUPn14A5ryeCieK4UKNSeSORu8ElTOina3fDb6lUJjsU3mvoRTt2RO8/kT3yXwcGWsXme
+2026102205
+2026.10.22.5
+sha256 5609af8331662d9410111ed6a037a6f039326fc0d7a312573ad2b4cec127b219
+== 0 signature-rsa-sha256 TIviaKtB/7taup9uhCjsrj0i6BSm6yCj54902LahCZDQQSv/gsY3wuV7R0UTsQ5ZAPyOst8uWnmX8XbiSMZ8C6BAdW7ybcpmev9qMD3T8DJT9bm7tIiRO5dKyYmseAwSa4ogovgZm0VTL+9MSzXWBu4QgZk6O0g2zIkwUwSaux4TZxNnzcs3s2sc0aJMVszDwXrrPcE9w103qWlCpOUF3CXiR3aWl+lMPoh3Dn0E84RrVF9UX91QFl6txPlmg71+2VgJ9oKOsz14mDtneEmdL+7z7GHq1Icw9bKD5x6+yFhmqhz1xjmYCorNPPq6GqS9mqOfwBAqiTbt9OpvMEIzxfb8sA2XSo6a/50oj/C95mdzF6dsAJnkNAMc0R+jnlmEw1+eVF5JqmkwdNhEKJdyfNGDH01l17W3PfDzo1Mh34JUoWAHsuM4L2Km+zog1fYk7JiA/AIkUCLga7QJSPh5YbrkCba3KZq3yWnG7Vfbl+29rWZ0xKQeJInR1qNJkDJ4
+== 2026.10.22.5
+Помощник живее: дышит, покачивается, прыгает, 7 эмоций (удивление, сердечки, смущение, грусть, злость, подмигивание, кружится голова). Навели курсор — подпрыгивает и строит рожицу; взяли мышью — держится лапкой за курсор и раскачивается, отпустили — приземляется с отскоком. В меню помощника — «Садиться на окна»: сидит на активном окне, едет вместе с ним и падает, если окно закрыли. Характер помощника — в Настройках → ИИ: обычный, южный, интеллигент, неуверенный.
+
 == 2026.10.22.4
 Маршрут обработки по чертежу. В «Распознать чертёж» — кнопка «Маршрут обработки»: лист читается целиком (технические требования, шероховатость, допуски, резьбы, отверстия, твёрдость, покрытие), и правила опытного технолога выдают вид детали, материал, заготовку и операции по порядку — у каждой операции причина. Если на чертеже только материал, заготовка подбирается сама: круг по ГОСТ 2590 с припуском, пруток, лист или отливка. То же в чате ИИ: «маршрут» или «техпроцесс» с картинкой чертежа или словами («маршрут: вал, сталь 40Х, Ra 0,4»). Что не прочиталось — в строке «Уточнить»; маршрут — черновик, его проверяет технолог.
 
