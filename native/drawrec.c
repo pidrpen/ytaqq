@@ -937,56 +937,8 @@ static void dr_page_text(const DrWords *ws, int page, const wchar_t *sep, wchar_
 
 /* ---- проверка полей ---------------------------------------------------------------- */
 
-static BOOL dr_isupper_cyr(wchar_t c) { return (c >= L'А' && c <= L'Я') || c == L'Ё'; }
-static BOOL dr_isdig(wchar_t c) { return c >= L'0' && c <= L'9'; }
-
-static int dr_digits(const wchar_t *s, int i, int mn, int mx) {
-  int j = i;
-  while (dr_isdig(s[j]) && j - i < mx) j++;
-  if (j - i < mn || dr_isdig(s[j])) return -1;
-  return j;
-}
-
-/* ядро обозначения с позиции i: «3422-682.01.01.02» или «АБВГ.123456.001»;
-   возвращает конец или -1 */
-static int dr_des_core(const wchar_t *s, int i) {
-  int j = dr_digits(s, i, 3, 5);
-  if (j > 0 && s[j] == L'-') {
-    int k = dr_digits(s, j + 1, 1, 5), dots = 0;
-    if (k < 0) return -1;
-    if (s[k] == L'-') { /* «830-01-сб115», «830-01-77» */
-      int q = k + 1;
-      if ((s[q] == L'с' || s[q] == L'С') && (s[q + 1] == L'б' || s[q + 1] == L'Б')) q += 2;
-      int e = dr_digits(s, q, 1, 4);
-      if (e > 0) return e;
-    }
-    while (s[k] == L'.' && dr_isdig(s[k + 1])) {
-      int q = dr_digits(s, k + 1, 1, 3);
-      if (q < 0) break;
-      k = q;
-      dots++;
-    }
-    return dots ? k : -1; /* без точек — это номер ГОСТ («14637-89»), не обозначение */
-  }
-  int l = 0;
-  while (dr_isupper_cyr(s[i + l]) && l < 5) l++;
-  /* классификационное: 4 буквы . 6 цифр . 3 цифры */
-  if (l == 4 && s[i + 4] == L'.') {
-    int k = dr_digits(s, i + 5, 6, 6);
-    if (k > 0 && s[k] == L'.') return dr_digits(s, k + 1, 3, 3);
-  }
-  /* документ ведомости: «АДЕ.830.МК», «АДЕ.830.01.ЗК» */
-  if (l >= 2 && s[i + l] == L'.') {
-    int k = dr_digits(s, i + l + 1, 2, 6);
-    while (k > 0 && s[k] == L'.' && dr_isdig(s[k + 1])) k = dr_digits(s, k + 1, 1, 4);
-    if (k > 0 && s[k] == L'.' && dr_isupper_cyr(s[k + 1])) {
-      int q = k + 1;
-      while (dr_isupper_cyr(s[q]) || dr_isdig(s[q])) q++;
-      if (q - k - 1 <= 4) return q;
-    }
-  }
-  return -1;
-}
+/* шаблон обозначения (dr_des_core и его буквы-цифры) — в search_route.c: по нему же
+   поле поиска узнаёт обозначение в запросе */
 
 /* всё обозначение целиком: [буквы ]ядро[-исп][ шифр] */
 static BOOL dr_des_ok(const wchar_t *s) {

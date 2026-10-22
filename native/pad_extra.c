@@ -59,6 +59,7 @@ static void ans_printf(wchar_t *out, int cap, const wchar_t *fmt, ...) {
   out[cap - 1] = 0;
 }
 
+#include "search_route.c" /* где искать без ярлыков; слова запроса в любом порядке */
 #include "files.c"
 #include "update.c"
 #include "ai_local.c" /* локальный ИИ: llama.cpp на этом компьютере (ai.h) */
@@ -1116,17 +1117,106 @@ static void share_card(long id, BOOL verbose, wchar_t *out, int cap);
   L"JOIN InfoObjects AS o2 WITH(NOLOCK) ON o2.InfoObjectId=ea.Link AND o2.Erased=0 "        \
   L"WHERE la.OwnerId=" card L" AND la.Outdated=0) AS pf "
 
+/* Слово для LIKE: «%слово%»; «е» и «ё» в базе пишут как придётся — годится любая */
+static void plm_like_word(const wchar_t *s, wchar_t *out, int cap) {
+  int o = 0;
+  out[o++] = L'%';
+  for (; *s && o < cap - 7; s++) {
+    wchar_t c = *s;
+    if (c == L'е' || c == L'ё' || c == L'Е' || c == L'Ё') {
+      memcpy(out + o, L"[её]", 4 * sizeof(wchar_t));
+      o += 4;
+      continue;
+    }
+    if (c == L'\\' || c == L'%' || c == L'_' || c == L'[') out[o++] = L'\\';
+    if (c == L'\'') out[o++] = L'\'';
+    out[o++] = c;
+  }
+  out[o++] = L'%';
+  out[o] = 0;
+}
+
+#define PLM_WORDS 6
+
+/* Условие отбора: каждое слово запроса — в имени объекта или в его
+   обозначении, в любом порядке («насоса корпус» найдёт «Корпус насоса»).
+   Из одного слова выходит прежнее условие. Возвращает число слов. */
+static int plm_cond(const wchar_t *query, wchar_t *out, int cap) {
+  SrWords w;
+  sr_db_words(query, &w, PLM_WORDS);
+  if (!w.n) {
+    w.n = 1;
+    lstrcpynW(w.w[0], query, SR_WORD);
+  }
+  int o = 0;
+  out[0] = 0;
+  for (int i = 0; i < w.n; i++) {
+    wchar_t pat[260];
+    plm_like_word(w.w[i], pat, 260);
+    int k = _snwprintf(out + o, cap - o,
+                       L"%s(o0.Name LIKE N'%s' ESCAPE '\\' COLLATE Cyrillic_General_CI_AS "
+                       /* обозначение живёт не в объекте, а его атрибутом — по имени его не найти */
+                       L"OR EXISTS (SELECT 1 FROM InfoObjectAttributes AS ad WITH(NOLOCK) "
+                       L"JOIN NameKeys AS nkd WITH(NOLOCK) ON nkd.NameKeyId=ad.NameKeyId "
+                       L"WHERE ad.OwnerId=o0.InfoObjectId AND ad.Outdated=0 AND nkd.Value=N'Designation' "
+                       L"AND ad.ShortText LIKE N'%s' ESCAPE '\\' COLLATE Cyrillic_General_CI_AS))",
+                       i ? L" AND " : L"", pat, pat);
+    if (k < 0 || k >= cap - o) {
+      out[o] = 0; /* лишние слова не влезли — ищем по тем, что влезли */
+      return i;
+    }
+    o += k;
+  }
+  return w.n;
+}
+
+/* Лучшие сверху, как в архиве: запрос целиком, потом его начало, потом
+   слова вразброс. Строки, где слово нашлось только в обозначении-атрибуте,
+   остаются на своих местах в хвосте. */
+static void plm_rank(const wchar_t *query, int n) {
+  SrWords w;
+  wchar_t whole[SR_Q];
+  sr_words(query, &w, whole, SR_Q);
+  if (n < 2 || !w.n) return;
+  int s[PLM_ROWS];
+  for (int i = 0; i < n; i++) {
+    s[i] = sr_score(g_plmEsi[i], g_plmTp[i], &w, whole);
+    if (s[i] < 0) s[i] = 0;
+  }
+  wchar_t *tmp = (wchar_t *)malloc(PLM_LINK * sizeof(wchar_t));
+  if (!tmp) return;
+  for (int i = 1; i < n; i++)
+    for (int j = i; j > 0 && s[j] > s[j - 1]; j--) {
+      plm_swap_rows(j, j - 1, tmp);
+      int t = s[j];
+      s[j] = s[j - 1];
+      s[j - 1] = t;
+    }
+  free(tmp);
+}
+
 static BOOL plm_lookup(const wchar_t *query, wchar_t *out, int cap) {
   if (share_client_on()) return share_lookup(query, out, cap);
   g_plmLastLink[0] = 0;
   g_plmCount = 0;
   memset(g_plmTpId, 0, sizeof(g_plmTpId));
   memset(g_plmRealId, 0, sizeof(g_plmRealId));
-  wchar_t pat[420];
-  like_escape(query, pat, 420);
-  wchar_t sql[3800];
-  _snwprintf(
-      sql, 3800,
+  wchar_t cond[4600], whole[420], prepped[SR_Q];
+  int words = plm_cond(query, cond, 4600);
+  sr_prep(query, prepped, SR_Q);
+  plm_like_word(prepped, whole, 420);
+  /* слов несколько — строки с запросом целиком в имени идут первыми,
+     иначе шестьдесят первых попавшихся могут их не захватить */
+  wchar_t order[600] = L"";
+  if (words > 1)
+    _snwprintf(order, 600,
+               L"ORDER BY CASE WHEN o0.Name LIKE N'%s' ESCAPE '\\' COLLATE Cyrillic_General_CI_AS "
+               L"THEN 0 ELSE 1 END ",
+               whole);
+  order[599] = 0;
+  wchar_t sql[7000];
+  int sqlLen = _snwprintf(
+      sql, 7000,
       /* ищут обычно не целиком обозначение, а его начало: двадцать строк
          режут семейство пополам, и техпроцесс остаётся без своего изделия */
       L"SELECT TOP 60 "
@@ -1141,14 +1231,12 @@ static BOOL plm_lookup(const wchar_t *query, wchar_t *out, int cap) {
       L"SELECT a0.OwnerId FROM InfoObjectAttributes AS a0 WITH(NOLOCK) "
       L"WHERE a0.DataType=3 AND a0.Outdated=0 AND a0.CollectionElementId IS NULL "
       L"AND a0.NameKeyId=1739 AND a0.Indexed=1 AND a0.BoolValue=1))"
-      L") AND (o0.Name LIKE N'%s' ESCAPE '\\' COLLATE Cyrillic_General_CI_AS "
-      /* обозначение живёт не в объекте, а его атрибутом — по имени его не найти */
-      L"OR EXISTS (SELECT 1 FROM InfoObjectAttributes AS ad WITH(NOLOCK) "
-      L"JOIN NameKeys AS nkd WITH(NOLOCK) ON nkd.NameKeyId=ad.NameKeyId "
-      L"WHERE ad.OwnerId=o0.InfoObjectId AND ad.Outdated=0 AND nkd.Value=N'Designation' "
-      L"AND ad.ShortText LIKE N'%s' ESCAPE '\\' COLLATE Cyrillic_General_CI_AS)) "
-      L"OPTION(MAXDOP 0)",
-      pat, pat);
+      L") AND %s %sOPTION(MAXDOP 0)",
+      cond, order);
+  if (sqlLen < 0 || sqlLen >= 7000) {
+    ans_printf(out, cap, L"PLM\r\n\r\nСлишком длинный запрос — сократите его.");
+    return FALSE;
+  }
 
   SQLHENV env = SQL_NULL_HENV;
   SQLHDBC dbc = SQL_NULL_HDBC;
@@ -1296,6 +1384,7 @@ static BOOL plm_lookup(const wchar_t *query, wchar_t *out, int cap) {
       w++;
     }
     n = w;
+    plm_rank(query, n);
     /* текстовый список ссылок собирался до сведения и остался бы с уже
        убранными строками. Пересобираем по тому, что видно на экране. */
     linkLen = 0;
@@ -4108,30 +4197,85 @@ static void pf_apply(PfJob *j) {
   free(j);
 }
 
-static void compose_answer(const wchar_t *query, wchar_t *out, int cap) {
-  wchar_t a[1200] = {0};
-  const wchar_t *src = L"";
-  if (g_engine != 4 && g_engine != 5) g_plmCount = 0;
-  g_resultFiles = FALSE;
-  if (g_engine == 5) {
-    files_search(query, out, cap);
-    return;
+/* Где искать, решает сам поиск по тексту запроса (search_route.c). Ярлык —
+   это «здесь, на один поиск»: с текстом в поле ищет его там сразу, при пустом
+   поле — повторяет там последний запрос, а если и его нет, отмечает «●»
+   и ждёт следующего. */
+static int g_engineForce;         /* 0 — сам; 3, 4, 5 — на один поиск */
+static wchar_t g_lastQuery[400];  /* последний запрос: ярлык ищет его же в другом месте */
+static SrRoute g_route;           /* как понят последний поиск */
+static wchar_t g_routeTitle[120]; /* шапка «Находок»: где искали и почему */
+
+static BOOL plm_ready(void) { return (g_sqlUser[0] && g_sqlPass[0]) || share_client_on(); }
+
+static const wchar_t *route_why(int why) {
+  switch (why) {
+  case SR_WHY_CHIP: return L"выбрано ярлыком";
+  case SR_WHY_PREFIX: return L"по знаку в начале";
+  case SR_WHY_PATH: return L"похоже на имя файла";
+  case SR_WHY_TALK: return L"похоже на разговор";
+  case SR_WHY_DES: return L"похоже на обозначение";
+  case SR_WHY_ASK: return L"похоже на вопрос";
+  case SR_WHY_FILE: return L"просили файл";
+  case SR_WHY_MAT: return L"похоже на материал";
+  default: return L"по названию";
   }
-  if (g_engine == 4) {
-    plm_lookup(query, out, cap);
-    return;
-  }
-  if (internet_ask(query, a, 1200) && a[0]) {
-    ans_printf(out, cap, L"Мини-ИИ\r\n\r\n%s", a);
-    return;
-  }
-  src = mini_ai_ask(query, a, 1200);
-  ans_printf(out, cap, L"%s (офлайн)\r\n\r\n%s", src, a);
 }
 
 typedef struct {
   wchar_t q[400];
+  int engine;     /* 4 — PLM, 5 — архив */
+  BOOL fallback;  /* выбран сам: пусто — заглянуть и в другое место */
 } SearchJob;
+
+/* Поиск в PLM или в архиве. Если место выбрано само и там пусто (или PLM
+   без связи), тот же запрос идёт в другое место: человеку всё равно, где
+   лежит, лишь бы нашлось. Возвращает 1, если нашлось во втором месте. */
+static int compose_answer(const SearchJob *job, wchar_t *out, int cap) {
+  int engine = job->engine;
+  g_resultFiles = FALSE;
+  if (engine != 4 && engine != 5) {
+    /* мини-ИИ без окна чата: сеть, а нет её — офлайн-справка */
+    wchar_t a[1200] = {0};
+    g_plmCount = 0;
+    if (internet_ask(job->q, a, 1200) && a[0]) {
+      ans_printf(out, cap, L"Мини-ИИ\r\n\r\n%s", a);
+      return 0;
+    }
+    const wchar_t *src = mini_ai_ask(job->q, a, 1200);
+    ans_printf(out, cap, L"%s (офлайн)\r\n\r\n%s", src, a);
+    return 0;
+  }
+  BOOL ok = engine == 5 ? files_search(job->q, out, cap) : plm_lookup(job->q, out, cap);
+  if (ok || !job->fallback) return 0;
+  int other = engine == 5 ? 4 : 5;
+  if (other == 4 ? !plm_ready() : !g_filesRoot[0]) {
+    int l = (int)wcslen(out);
+    _snwprintf(out + l, cap - l,
+               L"\r\n\r\nНе то искали? В начале запроса «?» — спросить мини-ИИ, «#» — PLM, «/» — файлы.");
+    out[cap - 1] = 0;
+    return 0;
+  }
+  wchar_t *first = (wchar_t *)malloc((size_t)cap * sizeof(wchar_t));
+  if (!first) return 0;
+  lstrcpynW(first, out, cap);
+  out[0] = 0;
+  g_resultFiles = FALSE;
+  ok = other == 5 ? files_search(job->q, out, cap) : plm_lookup(job->q, out, cap);
+  if (!ok) {
+    wchar_t *second = (wchar_t *)malloc((size_t)cap * sizeof(wchar_t));
+    if (second) {
+      lstrcpynW(second, out, cap);
+      ans_printf(out, cap,
+                 L"%.700s\r\n\r\n%.700s\r\n\r\nНе то искали? В начале запроса «?» — спросить мини-ИИ, "
+                 L"«#» — PLM, «/» — файлы.",
+                 first, second);
+      free(second);
+    }
+  }
+  free(first);
+  return ok ? 1 : 0;
+}
 
 static void show_answer_text(const wchar_t *text);
 static void ans_zoom(int delta);
@@ -4144,8 +4288,8 @@ static DWORD WINAPI search_thread(LPVOID param) {
   wchar_t *out = (wchar_t *)malloc(1800 * sizeof(wchar_t));
   if (out) {
     out[0] = 0;
-    compose_answer(job->q, out, 1800);
-    if (!PostMessageW(g_hwnd, WM_SEARCH_DONE, 0, (LPARAM)out)) free(out);
+    int moved = compose_answer(job, out, 1800);
+    if (!PostMessageW(g_hwnd, WM_SEARCH_DONE, (WPARAM)moved, (LPARAM)out)) free(out);
   }
   free(job);
   InterlockedExchange(&g_netBusy, 0);
@@ -5638,10 +5782,13 @@ static wchar_t *g_quickDraw;
 
 static void aichat_ask(const wchar_t *q); /* ai_chat.c: «Спросить ИИ» с этим вопросом */
 
+static void refresh_search_cue(void);
+static void update_engine_buttons(void);
+
 static void start_lookup(const wchar_t *q) {
   if (!q) return;
   /* пароль ввели и сразу ищут, не уходя из поля, — берём его и так */
-  if (g_engine == 4) save_plm_pref();
+  save_plm_pref();
   g_ansTitle = NULL;
   g_ansPlain = FALSE;
   g_selDraw[0] = 0;
@@ -5652,9 +5799,36 @@ static void start_lookup(const wchar_t *q) {
     show_status(L"Нечего искать — скопируйте текст");
     return;
   }
+  /* где искать — по самому запросу; ярлык решает за него один раз */
+  SrRoute r;
+  sr_route(q, &r);
+  if (g_engineForce) {
+    if (r.why != SR_WHY_PREFIX) lstrcpynW(r.q, q, SR_Q);
+    r.engine = g_engineForce;
+    r.why = SR_WHY_CHIP;
+    g_engineForce = 0;
+    update_engine_buttons();
+    refresh_search_cue();
+  } else if (r.engine == 4 && r.why != SR_WHY_PREFIX && !plm_ready() && g_filesRoot[0]) {
+    r.engine = 5; /* PLM не настроен — есть только архив */
+  }
+  if (!r.q[0]) {
+    show_status(L"Нечего искать — допишите, что найти");
+    return;
+  }
+  lstrcpynW(g_lastQuery, q, 400);
+  g_route = r;
+  g_engine = r.engine;
+  {
+    wchar_t st[200];
+    _snwprintf(st, 200, L"%s: %s «%.60s»",
+               r.engine == 4 ? L"PLM" : (r.engine == 5 ? L"Файлы" : L"Мини-ИИ"), route_why(r.why), r.q);
+    st[199] = 0;
+    show_status(st);
+  }
   /* мини-ИИ из поиска — это чат «Спросить ИИ»; PLM и файлы ищут как раньше, в «Находках» */
-  if (g_engine != 4 && g_engine != 5) {
-    aichat_ask(q);
+  if (r.engine != 4 && r.engine != 5) {
+    aichat_ask(r.q);
     return;
   }
   /* сперва — не идёт ли уже поиск: раньше «Ищу…» затирало окно, а потом
@@ -5672,18 +5846,17 @@ static void start_lookup(const wchar_t *q) {
     InterlockedExchange(&g_netBusy, 0);
     return;
   }
-  int wl = _snwprintf(wait, 440,
-                      g_engine == 4 ? L"Ищу в PLM «%.80s»…" :
-                      (g_engine == 5 ? L"Ищу файлы «%.80s»…" : L"Мини-ИИ «%.80s»…"), q);
+  int wl = _snwprintf(wait, 440, r.engine == 4 ? L"Ищу в PLM «%.80s» (%s)…" : L"Ищу файлы «%.80s» (%s)…", r.q,
+                      route_why(r.why));
   /* Чертёж находится быстрее всего: он в индексе архива, в памяти. Пока PLM
      ищет, показываем найденные чертежи сразу — список PLM потом встанет
      на их место. */
   free(g_quickDraw);
   g_quickDraw = NULL;
-  if (g_engine == 4 && wl > 0) {
+  if (r.engine == 4 && wl > 0) {
     wchar_t *dr = (wchar_t *)malloc(3800 * sizeof(wchar_t));
     if (dr) {
-      int nd = files_quick_list(q, dr, 3800, 20);
+      int nd = files_quick_list(r.q, dr, 3800, 20);
       if (nd > 0) {
         _snwprintf(wait + wl, 4400 - wl,
                    L"\r\n\r\nЧертежи в архиве — уже нашлись (двойной щелчок по строке открывает):\r\n%s",
@@ -5695,6 +5868,7 @@ static void start_lookup(const wchar_t *q) {
       free(dr);
     }
   }
+  wait[4399] = 0;
   show_answer_text(wait);
   free(wait);
   ans_draw_from_text(g_quickDraw);
@@ -5703,13 +5877,52 @@ static void start_lookup(const wchar_t *q) {
     InterlockedExchange(&g_netBusy, 0);
     return;
   }
-  lstrcpynW(job->q, q, 400);
+  lstrcpynW(job->q, r.q, 400);
+  job->engine = r.engine;
+  /* место выбрано само — пусто там, заглянем и в другое; имя файла
+     с расширением в PLM искать незачем */
+  job->fallback = r.why != SR_WHY_CHIP && r.why != SR_WHY_PREFIX && r.why != SR_WHY_PATH;
   HANDLE th = CreateThread(NULL, 0, search_thread, job, 0, NULL);
   if (th) CloseHandle(th);
   else {
     free(job);
     InterlockedExchange(&g_netBusy, 0);
   }
+}
+
+/* ответ пришёл: в шапке «Находок» — где искали и почему так решили */
+static void route_done(int moved) {
+  const wchar_t *where = g_resultFiles ? L"Найденные файлы" : L"Находки в PLM";
+  g_engine = g_resultFiles ? 5 : 4; /* заготовки досчитываются и к PLM, найденному вторым */
+  if (g_plmCount == 0 && !(g_quickDraw && g_quickDraw[0])) {
+    _snwprintf(g_routeTitle, 120, L"Ничего не нашлось · %s", route_why(g_route.why));
+  } else if (moved) {
+    _snwprintf(g_routeTitle, 120, L"%s · в %s пусто", where, g_resultFiles ? L"PLM" : L"архиве");
+    show_status(g_resultFiles ? L"В PLM не нашлось — показываю архив" : L"В архиве не нашлось — показываю PLM");
+  } else {
+    _snwprintf(g_routeTitle, 120, L"%s · %s", where, route_why(g_route.why));
+  }
+  g_routeTitle[119] = 0;
+  g_ansTitle = g_routeTitle;
+}
+
+/* Ярлык «Мини-ИИ», «PLM» или «Файлы»: искать здесь, один раз */
+static void engine_chip(int engine) {
+  wchar_t q[400] = {0};
+  if (g_searchEdit) GetWindowTextW(g_searchEdit, q, 400);
+  flatten_clip_line(q);
+  if (!q[0]) lstrcpynW(q, g_lastQuery, 400);
+  if (engine == 5) files_apply_root(FALSE);
+  if (!q[0]) {
+    g_engineForce = g_engineForce == engine ? 0 : engine;
+    update_engine_buttons();
+    refresh_search_cue();
+    show_status(g_engineForce ? L"Следующий поиск — только здесь" : L"Где искать — решу сам по запросу");
+    if (g_searchEdit && !g_follow) SetFocus(g_searchEdit);
+    return;
+  }
+  g_engineForce = engine;
+  start_lookup(q);
 }
 
 /* Распознаванию Windows нужна буква высотой от двадцати пяти точек, а на
@@ -6205,10 +6418,12 @@ static void start_ocr_pick(void) {
   show_status(L"OCR: выделите область");
 }
 
+/* «●» — только у ярлыка, выбранного на следующий поиск; без него место
+   выбирается по запросу */
 static void update_engine_buttons(void) {
-  if (g_btnAi) SetWindowTextW(g_btnAi, g_engine == 3 ? L"● Мини-ИИ" : L"Мини-ИИ");
-  if (g_btnPlm) SetWindowTextW(g_btnPlm, g_engine == 4 ? L"● PLM" : L"PLM");
-  if (g_btnFiles) SetWindowTextW(g_btnFiles, g_engine == 5 ? L"● Файлы" : L"Файлы");
+  if (g_btnAi) SetWindowTextW(g_btnAi, g_engineForce == 3 ? L"● Мини-ИИ" : L"Мини-ИИ");
+  if (g_btnPlm) SetWindowTextW(g_btnPlm, g_engineForce == 4 ? L"● PLM" : L"PLM");
+  if (g_btnFiles) SetWindowTextW(g_btnFiles, g_engineForce == 5 ? L"● Файлы" : L"Файлы");
 }
 
 static BOOL ensure_single_instance(void) {

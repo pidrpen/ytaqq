@@ -4138,8 +4138,10 @@ static void place_settings(void) {
 
 static void refresh_search_cue(void) {
   if (!g_searchEdit) return;
-  const wchar_t *c = g_engine == 4 ? L"найти в PLM" :
-                     (g_engine == 5 ? L"имя файла" : L"спросить мини-ИИ");
+  const wchar_t *c = g_engineForce == 4   ? L"найти в PLM"
+                     : g_engineForce == 5 ? L"имя файла"
+                     : g_engineForce == 3 ? L"спросить мини-ИИ"
+                                          : L"обозначение, название или вопрос";
   SendMessageW(g_searchEdit, 0x1501, TRUE, (LPARAM)c);
 }
 
@@ -4175,14 +4177,9 @@ static void toggle_ask(void);
 /* «Спросить» и выбор, где искать — из окна курсора (режим «Поиск») */
 static void ask_command(int id) {
   if (id == ID_SEARCH_GO) search_clipboard_or_edit();
-  if (id == ID_ENG_AI || id == ID_ENG_PLM || id == ID_ENG_FILES) {
-    g_engine = id == ID_ENG_AI ? 3 : (id == ID_ENG_PLM ? 4 : 5);
-    save_cursor_pref();
-    if (g_engine == 5) files_apply_root(FALSE);
-    update_engine_buttons();
-    refresh_search_cue();
-    if (g_searchEdit && !g_follow) SetFocus(g_searchEdit);
-  }
+  /* ярлык — «здесь, один раз»; без него место выбирается по запросу */
+  if (id == ID_ENG_AI || id == ID_ENG_PLM || id == ID_ENG_FILES)
+    engine_chip(id == ID_ENG_AI ? 3 : (id == ID_ENG_PLM ? 4 : 5));
 }
 
 static void set_pad_mode(int mode) {
@@ -4955,6 +4952,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
           text = both;
         }
       }
+      route_done((int)wParam);
       show_answer_text(text);
       free(text);
       ans_draw_from_text(g_quickDraw); /* PLM строк не дал — кнопки чертежа по первому из архива */

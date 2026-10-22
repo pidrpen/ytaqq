@@ -792,6 +792,7 @@ static BOOL share_lookup(const wchar_t *query, wchar_t *out, int cap) {
       if (r >= 0 && r < n) lstrcpynW(g_plmPf[r], f[2], PLM_COL1);
     }
   }
+  plm_rank(q, n); /* у раздающего старой версии порядка по словам нет */
   g_plmCount = n;
   if (n > 0) lstrcpynW(g_plmLastLink, g_plmLinks[0], PLM_LINK);
   ans_printf(out, cap, L"%s\r\n\r\nPLM через компьютер: %s", p ? p : L"", via[0] ? via : L"коллеги");

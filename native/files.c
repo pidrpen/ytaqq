@@ -1739,8 +1739,72 @@ static BOOL wcs_istr(const wchar_t *hay, const wchar_t *needle) {
   return FALSE;
 }
 
+/* Находка в архиве: номер записи, очки по словам запроса, дата файла */
+typedef struct {
+  int i, s;
+  ULONGLONG t;
+} FileHit;
+
+/* хуже: меньше очков, при равных — старее */
+static BOOL fh_less(const FileHit *a, const FileHit *b) { return a->s != b->s ? a->s < b->s : a->t < b->t; }
+
+/* лучшие cap находок: куча, сверху худшая из взятых */
+static void fh_push(FileHit *h, int *n, int cap, FileHit v) {
+  int k;
+  if (*n < cap) {
+    k = (*n)++;
+    while (k > 0 && fh_less(&v, &h[(k - 1) / 2])) {
+      h[k] = h[(k - 1) / 2];
+      k = (k - 1) / 2;
+    }
+    h[k] = v;
+    return;
+  }
+  if (!fh_less(&h[0], &v)) return;
+  k = 0;
+  for (;;) {
+    int c = 2 * k + 1;
+    if (c >= *n) break;
+    if (c + 1 < *n && fh_less(&h[c + 1], &h[c])) c++;
+    if (!fh_less(&h[c], &v)) break;
+    h[k] = h[c];
+    k = c;
+  }
+  h[k] = v;
+}
+
+/* Слова запроса в любом порядке, без учёта регистра, «ё» и похожих латинских
+   букв; каждое — в имени файла или в папке (nameOnly — только в имени). Лучшие
+   сверху: имя целиком, потом начало имени, потом слова в имени, потом свежие.
+   Вызывать под files_lock. */
+static int files_find(const wchar_t *query, BOOL nameOnly, FileHit *h, int cap, int *total) {
+  SrWords w;
+  wchar_t whole[SR_Q];
+  sr_words(query, &w, whole, SR_Q);
+  int n = 0;
+  *total = 0;
+  FileIdx *ix = g_idx;
+  if (!ix || !w.n) return 0;
+  for (int i = 0; i < ix->n; i++) {
+    const wchar_t *dir = ix->ent[i].dir < ix->dirsN ? ix->dirs[ix->ent[i].dir] : L"";
+    int s = sr_score(ix->ent[i].name, nameOnly ? NULL : dir, &w, whole);
+    if (s < 0) continue;
+    (*total)++;
+    FileHit v = {i, s, ix->ent[i].t};
+    fh_push(h, &n, cap, v);
+  }
+  for (int i = 1; i < n; i++) {
+    FileHit v = h[i];
+    int j = i;
+    for (; j > 0 && fh_less(&h[j - 1], &v); j--) h[j] = h[j - 1];
+    h[j] = v;
+  }
+  return n;
+}
+
 static BOOL files_search(const wchar_t *query, wchar_t *out, int cap) {
   g_plmCount = 0;
+  g_plmLastLink[0] = 0;
   g_resultFiles = TRUE;
   save_files_pref();
   files_lock_init();
@@ -1764,32 +1828,29 @@ static BOOL files_search(const wchar_t *query, wchar_t *out, int cap) {
   int n = 0, total = 0;
   wchar_t links[1800] = {0};
   size_t linkLen = 0;
+  FileHit hits[PLM_ROWS];
   files_lock();
   FileIdx *ix = g_idx;
-  if (ix) {
-    for (int i = 0; i < ix->n; i++) {
-      const wchar_t *dir = ix->ent[i].dir < ix->dirsN ? ix->dirs[ix->ent[i].dir] : L"";
-      if (!wcs_istr(ix->ent[i].name, q) && !wcs_istr(dir, q)) continue;
-      total++;
-      if (n >= PLM_ROWS) continue;
-      wchar_t full[PLM_LINK];
-      _snwprintf(full, PLM_LINK, L"%s\\%s", dir, ix->ent[i].name);
-      full[PLM_LINK - 1] = 0;
-      lstrcpynW(g_plmEsi[n], ix->ent[i].name, PLM_COL1);
-      lstrcpynW(g_plmTp[n], dir, PLM_COL2);
-      lstrcpynW(g_plmLinks[n], full, PLM_LINK);
-      if (!g_plmLastLink[0]) lstrcpynW(g_plmLastLink, full, PLM_LINK);
-      /* the separator has to fit too, or a long result list walks off the end */
-      size_t add = wcslen(full);
-      if (linkLen + (n ? 2 : 0) + add + 1 < 1800) {
-        if (n) {
-          links[linkLen++] = L'\r';
-          links[linkLen++] = L'\n';
-        }
-        memcpy(links + linkLen, full, (add + 1) * sizeof(wchar_t));
-        linkLen += add;
+  if (ix) n = files_find(q, FALSE, hits, PLM_ROWS, &total);
+  for (int k = 0; k < n; k++) {
+    const FileEnt *e = &ix->ent[hits[k].i];
+    const wchar_t *dir = e->dir < ix->dirsN ? ix->dirs[e->dir] : L"";
+    wchar_t full[PLM_LINK];
+    _snwprintf(full, PLM_LINK, L"%s\\%s", dir, e->name);
+    full[PLM_LINK - 1] = 0;
+    lstrcpynW(g_plmEsi[k], e->name, PLM_COL1);
+    lstrcpynW(g_plmTp[k], dir, PLM_COL2);
+    lstrcpynW(g_plmLinks[k], full, PLM_LINK);
+    if (!g_plmLastLink[0]) lstrcpynW(g_plmLastLink, full, PLM_LINK);
+    /* the separator has to fit too, or a long result list walks off the end */
+    size_t add = wcslen(full);
+    if (linkLen + (k ? 2 : 0) + add + 1 < 1800) {
+      if (k) {
+        links[linkLen++] = L'\r';
+        links[linkLen++] = L'\n';
       }
-      n++;
+      memcpy(links + linkLen, full, (add + 1) * sizeof(wchar_t));
+      linkLen += add;
     }
   }
   files_unlock();
@@ -1809,7 +1870,8 @@ static BOOL files_search(const wchar_t *query, wchar_t *out, int cap) {
 /* Чертежи из архива (JSON-индекс в памяти) по тексту поиска — сразу, пока
    PLM ещё думает: индекс в памяти, перебор занимает миллисекунды. Общие
    массивы находок не трогаем (их в это время заполняет поток PLM) — только
-   текст: по строке на файл, полный путь, двойной щелчок его открывает. */
+   текст: по строке на файл, полный путь, двойной щелчок его открывает.
+   Слова ищутся только в имени: папка «Корпуса» не должна тянуть всё подряд. */
 static int files_quick_list(const wchar_t *query, wchar_t *out, int cap, int maxn) {
   out[0] = 0;
   if (!g_filesRoot[0] || g_filesN == 0 || !query || !query[0]) return 0;
@@ -1817,29 +1879,28 @@ static int files_quick_list(const wchar_t *query, wchar_t *out, int cap, int max
   lstrcpynW(q, query, 200);
   flatten_clip_line(q);
   if (!q[0]) return 0;
-  int n = 0, total = 0, l = 0;
+  FileHit hits[64];
+  if (maxn > 64) maxn = 64;
+  int n = 0, total = 0, l = 0, shown = 0;
   files_lock();
   FileIdx *ix = g_idx;
-  if (ix) {
-    for (int i = 0; i < ix->n; i++) {
-      if (!wcs_istr(ix->ent[i].name, q)) continue;
-      total++;
-      if (n >= maxn || l >= cap - 1) continue;
-      const wchar_t *dir = ix->ent[i].dir < ix->dirsN ? ix->dirs[ix->ent[i].dir] : L"";
-      int w = _snwprintf(out + l, cap - l, L"%s\\%s\r\n", dir, ix->ent[i].name);
-      if (w < 0) {
-        out[l] = 0;
-        break;
-      }
-      l += w;
-      n++;
+  if (ix) n = files_find(q, TRUE, hits, maxn, &total);
+  for (int k = 0; k < n && l < cap - 1; k++) {
+    const FileEnt *e = &ix->ent[hits[k].i];
+    const wchar_t *dir = e->dir < ix->dirsN ? ix->dirs[e->dir] : L"";
+    int w = _snwprintf(out + l, cap - l, L"%s\\%s\r\n", dir, e->name);
+    if (w < 0) {
+      out[l] = 0;
+      break;
     }
+    l += w;
+    shown++;
   }
   files_unlock();
   out[cap - 1] = 0;
-  if (total > n && l < cap - 40) _snwprintf(out + l, cap - l, L"… и ещё %d\r\n", total - n);
+  if (total > shown && l < cap - 40) _snwprintf(out + l, cap - l, L"… и ещё %d\r\n", total - shown);
   out[cap - 1] = 0;
-  return n;
+  return shown;
 }
 
 /* ---- preferences --------------------------------------------------------- */
