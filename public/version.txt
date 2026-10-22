@@ -1,7 +1,10 @@
-2026102202
-2026.10.22.2
-sha256 c3a40ece3723aa04512ef72b82b2b4e6962bdc906220b9c6eaf8dc97e092ffdc
-== 0 signature-rsa-sha256 TzVj0rS7HHaTyKAtlue00oMVS/EwgE9DPeCH28j52p4Z+MQ2sSUq13Hios7B15kKhuHdJgQAV0QiWq51yYHAAseE8n4jxoEJ7J2b06tbWy9YMSA4CSCRJ6yeudVuX7GcE9pENkC2dncVQicwUD6I4M4MQFLQvrwnYHDiiRcpqNwaq6C8Q+oF42qJHE4syRO3ggZtGJp5P/phPRtkbw3C0UnSjnc3vpzAGi/jW2jkI4C+JrpxlCkq3DANJXzKTklCKu5FM+U824cDvbKY62beehpfMxIAFp+0LnKzl4EPP4nDuVc1MSS+tL4uHaUe4/sqRlrFeRJypoqYj7U0mOdMvGJbqPjlriHWUjIVR/cwavC2fMVT7vT3J7lw8L3/JxuRSNSE1zfDycVBA0+hmdwQXJDSUqP0CbmRWXyL2Z36GefaCUU6qI81T67EadYGp4bYFCSl/sUpIMb3F+dryDMUDG4tLjzEMmuwVKz+YfuNIwH24wCCfnDeY/vFrDVCy5fR
+2026102203
+2026.10.22.3
+sha256 76f1265f5431db27815aed5149ed03ce85e05688b43bd11441b5cb122679bb5e
+== 0 signature-rsa-sha256 K0R3gzo5wN+uVAcGYy4IGH1q0spscGkPR45wTjpk/yicBqi9ZEzL1tjeg79xO08QLazQtss+FNO2pJJmfRqOcI3Dqz+3O24++z0tq8S/br3209W6Fs0a6h9IGACdWm/XAsXA8cUM2eMhalBro6BSLODia2EaY8TbcTKN0syTeJdxVgVbT0WnpOppb2GpCXpcaOhrUNRpviKYtJh9ZQbo+lFtlB4X/up1KFyVVotRcPb/KKXspiVdbr51d0oQzbiECL1b3esWpKB1dJ/NmAK2AtSzBWIU1etD8mVXCQhbik3BZy5IpxbupGoUDy0wXYpucZtFkbG8Rlk3zWN7DuRYiM52oiHmwnofxv8+Lz0Xj3eDSE+pSfCjrSdACAv3kgUwxpbKeicjmUopJp4W/pn9ZETrh0C+nzTUO3ukGPxSs4Cx2Dgj5k32R8wuFFZmLV4hcrPq5L/MU4xeh1NBVeh/FoFW4rJ1Z2oWFISUZ3pvtrAMIMAvFZSUCFSqPqvGJ7Gn
+== 2026.10.22.3
+Обновления CursorPad снова ставятся только с подписью разработчика: подменённая на зеркале или в сети версия не установится. Новые версии теперь собираются на GitHub и выходят после одобрения разработчика.
+
 == 2026.10.22.2
 Обновления CursorPad больше не требуют подписи разработчика: новую версию можно собрать и выпустить где угодно, в том числе в облаке. Скачанная программа по-прежнему сверяется с отпечатком sha256 из version.txt — недокачанный или повреждённый файл не установится. Пакет Tesseract, как и раньше, принимается только закреплённый в программе.
 
