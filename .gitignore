@@ -11,3 +11,6 @@ public/CursorPad.exe.old
 public/CursorPad.exe.interim*
 native/CursorPad.exe
 *.blend1
+
+# проверочные сборки (build.sh --dev, build.ps1 -Dev)
+build/

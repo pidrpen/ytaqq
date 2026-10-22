@@ -10,6 +10,11 @@
 #   Debian/Ubuntu: apt install gcc-mingw-w64-x86-64 binutils-mingw-w64-x86-64
 #
 # Запуск из любого места:  sh native/build.sh
+# Проверочная сборка без подписи и без файлов выпуска (облако, проверка кода):
+#   sh native/build.sh --dev   → build/dev/CursorPad.exe, public/ не трогается.
+#   Ключ подписи для неё не нужен; несходство комплектов QwenPaw и tools —
+#   только предупреждение (перед выпуском их пересобирают). Выпуск — без --dev,
+#   с ключом подписи (RELEASE_SIGNING.md), у того, кто выпускает.
 # Номер выпуска правится в двух местах — version.h и version.txt; скрипт
 # проверяет, что они совпадают, иначе программа будет врать о своей версии.
 # Номер — ГГГГ.ММ.ДД.N, число — ГГГГММДДNN: на N всего две цифры, поэтому
@@ -29,6 +34,10 @@ PY=${PY:-python3}
 # У WinLibs свой default-manifest.o спорит с нашим манифестом («multiple
 # non-default manifests»): переименуйте его в mingw64/x86_64-w64-mingw32/lib.
 LDX=${LDX:-}
+DEV=0
+[ "${1:-}" = "--dev" ] && DEV=1
+OUT="$PUB"
+[ "$DEV" = 1 ] && OUT="$ROOT/build/dev" && mkdir -p "$OUT"
 # предупреждение компилятора — это ошибка: сейчас их ноль, пусть так и будет
 CFLAGS="-O2 -Wall -Werror -Wno-unknown-pragmas"
 # -s при сборке: без отладочных символов exe меньше примерно на 0,7 МБ — быстрее качается обновление
@@ -50,13 +59,22 @@ TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
 cd "$HERE"
-"$PY" "$HERE/build_agent_pack.py"
-"$PY" "$HERE/build_addons_pack.py"
+if [ "$DEV" = 1 ]; then
+  "$PY" "$HERE/build_agent_pack.py" || echo "ВНИМАНИЕ: комплект QwenPaw не сходится с native/agent — перед выпуском пересоберите его"
+  "$PY" "$HERE/build_addons_pack.py" || echo "ВНИМАНИЕ: комплект tools не сходится — перед выпуском пересоберите его"
+else
+  "$PY" "$HERE/build_agent_pack.py"
+  "$PY" "$HERE/build_addons_pack.py"
+fi
 # помощник распознавания зашит в exe ресурсом, поэтому собирается первым
 $CC $CFLAGS -o CursorPadOcr.exe ocr_module.c -lole32 -lruntimeobject -luser32 -municode -s -Wl,--no-insert-timestamp $LDX
 $RC cursorpad.rc -O coff -o "$TMP/cursorpad.res"
-$CC $CFLAGS -finput-charset=UTF-8 -o "$PUB/CursorPad.exe" cursorpad.c "$TMP/cursorpad.res" \
+$CC $CFLAGS -finput-charset=UTF-8 -o "$OUT/CursorPad.exe" cursorpad.c "$TMP/cursorpad.res" \
   -luser32 -lgdi32 -lshell32 -lole32 -loleaut32 -luuid -lcomctl32 -lwinhttp -ladvapi32 -lodbc32 -lcrypt32 -lcomdlg32 -lmsimg32 \
   -Wl,--subsystem,windows -municode -s -Wl,--no-insert-timestamp $LDX
 
+if [ "$DEV" = 1 ]; then
+  echo "Проверочная сборка (без подписи, не выпуск): $OUT/CursorPad.exe"
+  exit 0
+fi
 "$PY" "$HERE/package_release.py" "$PUB" "$HERE"
