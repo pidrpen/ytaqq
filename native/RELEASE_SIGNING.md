@@ -75,8 +75,15 @@ powershell -File native/build.ps1
 Положить ключ в GitHub (один раз, с ПК владельца):
 
 ```
+# PowerShell
+Get-Content -Raw "$env:LOCALAPPDATA\CursorPad-release\update-signing-key.pem" | gh secret set CURSORPAD_UPDATE_KEY_PEM --env release --repo pidrpen/ytaqq
+# Git Bash
 gh secret set CURSORPAD_UPDATE_KEY_PEM --env release --repo pidrpen/ytaqq < "$LOCALAPPDATA/CursorPad-release/update-signing-key.pem"
 ```
+
+Проверка: `gh secret list --env release --repo pidrpen/ytaqq` — в списке
+`CURSORPAD_UPDATE_KEY_PEM`. Если подпись упала с «нет секрета», после этого:
+Actions → запуск → **Re-run failed jobs** и снова **Approve**.
 
 Одобрять может только `pidrpen` (окружение `release`, только ветка `main`).
 Облачным исполнителям ключ не передаётся, и личный токен GitHub владельца у
