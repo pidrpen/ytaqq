@@ -38,7 +38,7 @@ typedef struct {
   int kind;     /* 0 — пункт, 1 — заголовок раздела, 2 — опасный (красный), 3 — пока не работает (серый) */
 } MoreItem;
 
-enum { MORE_OCR = 20, MORE_NARDY, MORE_CHANGES, MORE_CLEAR, MORE_LAYOUT, MORE_MSG, MORE_ROUTE, MORE_SHASHKI, MORE_EXPORT, MORE_PACKAGE, MORE_MATCH, MORE_DRAWREC, MORE_AICHAT, MORE_CONVERT };
+enum { MORE_OCR = 20, MORE_NARDY, MORE_CHANGES, MORE_CLEAR, MORE_LAYOUT, MORE_MSG, MORE_ROUTE, MORE_SHASHKI, MORE_EXPORT, MORE_PACKAGE, MORE_MATCH, MORE_DRAWREC, MORE_AICHAT, MORE_CONVERT, MORE_MORSKOY };
 static const MoreItem kMore[] = {
     {0, L"Расчёты и чертежи", NULL, 0, 1},
     {1, L"Расчёт резки и газов", NULL, 0xE8C6, 0},
@@ -63,6 +63,7 @@ static const MoreItem kMore[] = {
     {MORE_MSG, L"Чат с коллегами", L"пока не работает", 0xE8F2, 3}, /* с .68; с .75 выключен */
     {MORE_NARDY, L"Нарды", NULL, 0xE7FC, 0},
     {MORE_SHASHKI, L"Шашки", NULL, 0xE7FC, 0}, /* с 2026.09.23.65: по сети, как нарды */
+    {MORE_MORSKOY, L"Морской бой", NULL, 0xE7FC, 0}, /* с 2026.10.22: по сети, на той же связи */
     {MORE_CHANGES, L"Что нового в папке", NULL, 0xE8B7, 0},
     {-1, NULL, NULL, 0, 0}, /* черта */
     {MORE_CLEAR, L"Очистить блокнот…", NULL, 0xE74D, 2},
@@ -168,6 +169,7 @@ static void tools_menu(HWND owner, HWND btn) {
   else if (cmd == MORE_MSG) msg_compose_show();
   else if (cmd == MORE_NARDY) nardy_show();
   else if (cmd == MORE_SHASHKI) shashki_show();
+  else if (cmd == MORE_MORSKOY) morskoy_show();
   else if (cmd == MORE_CHANGES) files_show_changes();
   else if (cmd == MORE_CLEAR) clear_copied();
 }
@@ -216,7 +218,7 @@ static void upd_idle_tick(void) {
   if (g_tmExporting || g_tsExporting || g_tmLoadPending || g_tsLoadPending || g_rtBusy) return;
   for (int i = 0; i < 8; i++)
     if (g_msgInSlots[i]) return; /* на экране сообщение коллеги — перезапуск стёр бы его */
-  HWND busy[] = {g_cutWnd, g_tmWnd, g_tsWnd, g_ndWnd, g_shWnd, g_msgOut, g_pnWnd, g_rtWnd, g_hkWnd, g_drWnd, g_cvxWnd};
+  HWND busy[] = {g_cutWnd, g_tmWnd, g_tsWnd, g_ndWnd, g_shWnd, g_mbWnd, g_msgOut, g_pnWnd, g_rtWnd, g_hkWnd, g_drWnd, g_cvxWnd};
   for (size_t i = 0; i < sizeof(busy) / sizeof(busy[0]); i++)
     if (busy[i] && IsWindowVisible(busy[i]) && !IsIconic(busy[i])) return; /* открыто — не мешаем */
   KillTimer(g_hwnd, TIMER_UPD_IDLE);

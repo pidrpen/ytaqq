@@ -112,6 +112,16 @@
 #define ID_SH_BACK 237
 #define ID_SH_CANCEL 238
 #define ID_SHASHKI_BTN 239 /* «Шашки» — в Настройках, рядом с «Нардами» */
+#define ID_MB_LIST 340 /* морской бой, см. morskoy.c */
+#define ID_MB_INVITE 341
+#define ID_MB_ACCEPT 342
+#define ID_MB_DECLINE 343
+#define ID_MB_CANCEL 344
+#define ID_MB_SHUFFLE 345
+#define ID_MB_READY 346
+#define ID_MB_RESIGN 347
+#define ID_MB_BACK 348
+#define ID_MORSKOY_BTN 349 /* «Морской бой» — в Настройках, рядом с «Шашками» */
 #define ID_HOTKEYS 240     /* «Горячие клавиши…» — в Настройках */
 #define ID_ANSPIN 154
 #define TIMER_FOLLOW 1
@@ -290,6 +300,7 @@ static HWND g_btnSet;
 static HWND g_btnAsk;
 static HWND g_btnNd; /* кнопка «Нарды» в Настройках */
 static HWND g_btnSh; /* и «Шашки» рядом с ней */
+static HWND g_btnMb; /* и «Морской бой» */
 static HWND g_btnNotes; /* «Блокнот» внизу окна */
 static HWND g_btnMore;  /* «Ещё» внизу окна: страницы из giriaja-hall */
 /* Режим окна: 0 — блокнот (заметки), 1 — поиск (поле, «Спросить» и где
@@ -404,7 +415,7 @@ static int g_idleSize = 1;
 /* режим просмотра: бой идёт поверх экрана всё время и не прячется от мыши и клавиш
    (окно боя пропускает щелчки — работать он не мешает); 0 — обычный бой при бездействии */
 static int g_idleWatch = 0;
-static int g_balloonKind; /* куда ведёт щелчок по всплывашке: 0 — изменения в папке, 1 — нарды */
+static int g_balloonKind; /* куда ведёт щелчок по всплывашке: 0 — изменения в папке, 1 — нарды, 5 — шашки, 7 — морской бой */
 static HCURSOR g_staticCur[5];
 static HCURSOR g_ibeamCur[5];
 static HCURSOR g_handCur[5];
@@ -457,6 +468,7 @@ static void set_skin(int skin);
 static void fx_sync(void); /* fairy_fx.c: звёздочки у «Феи», пламя у «Дракона» */
 static void nardy_show(void); /* nardy.c: короткие нарды через общую папку */
 static void shashki_show(void); /* shashki.c: русские шашки — так же */
+static void morskoy_show(void); /* morskoy.c: морской бой — так же */
 static void start_lookup(const wchar_t *q);
 static BOOL clipboard_text(wchar_t *out, int n);
 static void search_web(const wchar_t *q);
@@ -2668,6 +2680,7 @@ static void draw_pad_button(const DRAWITEMSTRUCT *dis) {
                  id == ID_ANS_OPEN || id == ID_ANS_OPENTP || (id == ID_ASK_TAB && g_padMode == 1) || (id == ID_NOTES_TAB && g_padMode == 0) ||
                  id == ID_ND_INVITE || id == ID_ND_ACCEPT || id == ID_ND_ROLL || id == ID_ND_DONE ||
                  id == ID_SH_INVITE || id == ID_SH_ACCEPT || id == ID_SH_DRAWOK ||
+                 id == ID_MB_INVITE || id == ID_MB_ACCEPT || id == ID_MB_READY ||
                  id == ID_ANS_DRAW || id == ID_ANS_SHOW || /* чертёж нашёлся — кнопки синие */
                  id == ID_MSG_SEND || id == ID_MSG_REPLY || id == ID_RT_BUILD || id == ID_RT_SAVE ||
                  id == 4714 || /* «Применить» в окне «Спросить ИИ» */
@@ -2936,6 +2949,7 @@ static void tray_menu(HWND hwnd) {
   AppendMenuW(menu, MF_STRING | MF_GRAYED, 23, L"Чат с коллегами — пока не работает");
   AppendMenuW(menu, MF_STRING, 21, L"Нарды");
   AppendMenuW(menu, MF_STRING, 24, L"Шашки");
+  AppendMenuW(menu, MF_STRING, 26, L"Морской бой");
   AppendMenuW(menu, MF_STRING | (g_idleWatch ? MF_CHECKED : 0), 25, L"Бой Годжо и Сукуны: смотреть, не пряча");
   AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
   AppendMenuW(menu, MF_STRING, 13, mCur);
@@ -2967,6 +2981,7 @@ static void tray_menu(HWND hwnd) {
   else if (cmd == 18) files_show_changes();
   else if (cmd == 21) nardy_show();
   else if (cmd == 24) shashki_show();
+  else if (cmd == 26) morskoy_show();
   else if (cmd == 25) set_idle_watch(!g_idleWatch);
   else if (cmd == 16) {
     if (g_follow) toggle_follow();
@@ -3645,18 +3660,19 @@ static void layout_settings(void) {
       sd_card_end();
       break;
     }
-    default: { /* общая папка (нарды и шашки идут через неё), распознавание, программа */
+    default: { /* общая папка (через неё идут и игры), распознавание, программа */
       sd_group(L"Общая папка отдела");
       sd_card_begin();
-      int y = sd_stack(L"Общая папка", L"Через неё коллеги получают PLM, идут нарды и шашки");
+      int y = sd_stack(L"Общая папка", L"Через неё коллеги получают PLM и играют: нарды, шашки, морской бой");
       set_place(g_shareEdit, x0, y, iw - browseW - gap, btnH);
       set_place(GetDlgItem(g_setHwnd, ID_SHARE_BROWSE), x1 - browseW, y, browseW, btnH);
       sd_stack_end(y + btnH);
       sd_full(g_chkServe, btnH);
       {
-        HWND c[2] = {g_btnNd, g_btnSh};
-        int w[2] = {96, 96};
-        sd_row(L"Игры с коллегами", L"Партия идёт через общую папку", c, w, 2, btnH);
+        /* три игры — рядом не помещаются с подписью: подпись сверху, кнопки во всю ширину */
+        HWND c[3] = {g_btnNd, g_btnSh, g_btnMb};
+        int gy = sd_stack(L"Игры с коллегами", L"Партия идёт через общую папку");
+        sd_stack_end(gy + set_grid(c, 3, 3, x0, gy, iw, btnH, gap) - gap);
       }
       sd_card_end();
       sd_group(L"Распознавание текста");
@@ -4025,6 +4041,10 @@ static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
       shashki_show();
       return 0;
     }
+    if (LOWORD(wParam) == ID_MORSKOY_BTN) {
+      morskoy_show();
+      return 0;
+    }
     if (LOWORD(wParam) == ID_SHARE_SERVE) {
       save_plm_pref(); /* логин могли вписать только что */
       BOOL want = SendMessageW(g_chkServe, BM_GETCHECK, 0, 0) == BST_CHECKED;
@@ -4382,6 +4402,7 @@ static void create_settings(HWND owner) {
                                g_setHwnd, (HMENU)(INT_PTR)ID_SHARE_SERVE, NULL, NULL);
   g_btnNd = mk_btn(g_setHwnd, L"Нарды", ID_NARDY_BTN);
   g_btnSh = mk_btn(g_setHwnd, L"Шашки", ID_SHASHKI_BTN);
+  g_btnMb = mk_btn(g_setHwnd, L"Морской бой", ID_MORSKOY_BTN);
   g_btnK2 = mk_btn(g_setHwnd, L"Мечник", ID_CUR_K2);
   g_btnK3 = mk_btn(g_setHwnd, L"Рукавица", ID_CUR_K3);
   g_btnK4 = mk_btn(g_setHwnd, L"Фея", ID_CUR_K4);
@@ -4489,8 +4510,10 @@ static void create_settings(HWND owner) {
 #include "drawrec_ui.c" /* окно «Распознать чертёж» */
 #include "drawrec_sort.c" /* «Разложить по папкам»: имена по штампу, копия, журнал, отмена */
 #include "ai_chat.c" /* «Спросить ИИ»: чат с локальной моделью, после окон чертежа */
+#include "game_net.c" /* связь игр с коллегами: приглашения, файлы партии, копии ходов */
 #include "nardy.c"
 #include "shashki.c" /* после нард: общий список «кто в сети» и мелочи работы с папкой */
+#include "morskoy.c" /* морской бой — на той же связи */
 #include "hotkeys.c"    /* F8, F6, Pause… — какие назначены в Настройках */
 #include "layout_fix.c" /* Pause: «ghbdtn» → «привет» */
 #include "msg.c"        /* исчезающие сообщения коллегам — через ту же папку, что нарды */
@@ -4561,6 +4584,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     share_start();
     nardy_start(); /* «я в сети» для нард и приглашения — пока задана общая папка */
     shashki_start(); /* приглашения и партии в шашки — там же */
+    morskoy_start(); /* и в морской бой */
     /* чат с 2026.09.23.75 выключен (пока не работает): его поток каждую
        секунду-три читал и удалял файлы в общей папке — после .73 сработал
        «Анализ поведения» Kaspersky */
@@ -5043,6 +5067,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     if (lParam == NIN_BALLOONUSERCLICK) {
       if (g_balloonKind == 1) nardy_show();
       else if (g_balloonKind == 5) shashki_show();
+      else if (g_balloonKind == 7) morskoy_show();
       else if (g_balloonKind == 6) cv_reveal();
       else if (g_balloonKind == 2) { /* «вышла новая версия» — поставить сейчас */
         if (g_updReady && g_updPath[0]) {
@@ -5076,9 +5101,16 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     nd_on_poll((NdPoll *)lParam);
     msg_refresh_list(); /* «кто в сети» — и для сообщений */
     shashki_online_changed(); /* и для шашек */
+    morskoy_online_changed(); /* и для морского боя */
     return 0;
   case WM_SHASHKI_POLL:
-    sh_on_poll((ShPoll *)lParam);
+    sh_on_poll((GnPoll *)lParam);
+    return 0;
+  case WM_NARDY_GAME:
+    nd_on_game((GnPoll *)lParam);
+    return 0;
+  case WM_MORSKOY_POLL:
+    mb_on_poll((GnPoll *)lParam);
     return 0;
   case WM_MSG_IN:
     msg_show_in((MsgIn *)lParam);
@@ -5378,8 +5410,9 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
     if (argv && argc >= 5 && !wcscmp(argv[1], L"--aifiles")) ai_files_test(argc, argv);
     if (argv && argc >= 4 && !wcscmp(argv[1], L"--airoute")) ai_route_test(argv);
     if (argv && argc >= 4 && !wcscmp(argv[1], L"--aidl")) ai_dltest(argv[2], (int)wcstol(argv[3], NULL, 10), argc >= 5);
-    if (argv && argc >= 3 && !wcscmp(argv[1], L"--panel")) { /* проверка шапок окон: 1 карточка, 2 текст, 3 выгрузка, 4 маршрут, 5 нарды, 6 шашки, 7 пакет */
+    if (argv && argc >= 3 && !wcscmp(argv[1], L"--panel")) { /* проверка шапок окон: 1 карточка, 2 текст, 3 выгрузка, 4 маршрут, 5 нарды, 6 шашки, 7 пакет, 8 морской бой */
       int n = (int)wcstol(argv[2], NULL, 10);
+      if (n >= 5 && g_follow) toggle_follow(); /* игры: окошко не бегает за мышью и не закрывает доску */
       if (n == 1) { create_card(NULL); show_card_text(L"проверка"); }
       if (n == 2) { create_ocr(NULL); show_ocr_text(L"проверка"); }
       if (n == 3) export_show();
@@ -5387,6 +5420,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
       if (n == 5) nardy_show();
       if (n == 6) shashki_show();
       if (n == 7) package_show(FALSE);
+      if (n == 8) morskoy_show();
     }
     if (argv && argc >= 3 && !wcscmp(argv[1], L"--settings")) {
       g_tab = (int)wcstol(argv[2], NULL, 10) % SEC_COUNT;
