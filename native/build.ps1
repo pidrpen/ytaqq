@@ -20,6 +20,10 @@ $resourceObject = Join-Path $releaseDir 'cursorpad-build.res'
 $flags = @('-O2', '-Wall', '-Werror', '-Wno-unknown-pragmas', '-finput-charset=UTF-8')
 Push-Location $PSScriptRoot
 try {
+  if (-not $Dev) { # a release needs the signing key: check before anything is written to public\
+    & $python update_sign.py --check
+    if ($LASTEXITCODE -ne 0) { throw 'No release signing key (see native/RELEASE_SIGNING.md); for a code check use -Dev' }
+  }
   # A dev build only warns: an edited native/agent needs a rebuilt pack before a release, not before a code check.
   & $python build_agent_pack.py
   if ($LASTEXITCODE -ne 0) { if ($Dev) { Write-Warning 'Agent pack does not match native/agent: rebuild it before a release' } else { throw 'Agent pack verification failed' } }

@@ -59,6 +59,10 @@ TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
 cd "$HERE"
+if [ "$DEV" != 1 ]; then
+  # выпуску нужен ключ подписи: проверить до того, как что-то запишется в public/
+  "$PY" "$HERE/update_sign.py" --check || { echo "нет ключа подписи выпусков (RELEASE_SIGNING.md); проверочная сборка — sh native/build.sh --dev"; exit 1; }
+fi
 if [ "$DEV" = 1 ]; then
   "$PY" "$HERE/build_agent_pack.py" || echo "ВНИМАНИЕ: комплект QwenPaw не сходится с native/agent — перед выпуском пересоберите его"
   "$PY" "$HERE/build_addons_pack.py" || echo "ВНИМАНИЕ: комплект tools не сходится — перед выпуском пересоберите его"

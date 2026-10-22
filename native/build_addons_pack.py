@@ -38,7 +38,8 @@ def main():
             raise SystemExit('Tools companion missing or corrupt')
         if {k:sha(v) for k,v in own.items()} != lock['application_sources']:
             raise SystemExit('Rebuild tools companion after editing native/addons')
-        if sha((HERE / 'addons_npm_lock.json').read_bytes()) != lock['npm_lock_sha256']:
+        # Git on Windows may check the lock out as CRLF; the pin is over LF bytes.
+        if sha((HERE / 'addons_npm_lock.json').read_bytes().replace(b'\r\n', b'\n')) != lock['npm_lock_sha256']:
             raise SystemExit('Tools npm lock mismatch')
         print('Verified tools companion: ' + pack.name)
         return

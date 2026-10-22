@@ -144,5 +144,8 @@ def make_key():
 if __name__ == "__main__":
     if sys.argv[1:] == ["--make-key"]:
         make_key()
+    elif sys.argv[1:] == ["--check"]:  # сборка выпуска: ключ есть и от него update_key.h — до компиляции
+        check_header(load_key())
+        print("Ключ подписи выпусков на месте")
     else:
         sys.exit(__doc__)
