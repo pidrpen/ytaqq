@@ -51,6 +51,7 @@ jobs:
     env:
       WINLIBS_URL: https://github.com/brechtsanders/winlibs_mingw/releases/download/16.2.0posix-14.0.0-ucrt-r1/winlibs-x86_64-posix-seh-gcc-16.2.0-mingw-w64ucrt-14.0.0-r1.zip
       WINLIBS_SHA256: c1f52294597c0b73786b2a78eb5d176d89226d2f21875eab75e783a8b1cefcc4
+      PYTHONUTF8: 1 # консоль сервера — cp1252, а скрипты пишут по-русски
     steps:
       # файлы как в репозитории, без замены переводов строк (комплекты сверяются по байтам)
       - run: git config --global core.autocrlf false
@@ -69,6 +70,10 @@ jobs:
           7z x -y -o'C:\winlibs' 'C:\winlibs.zip' > /dev/null
       - shell: bash
         run: |
+          # как на ПК (шапка build.sh): свой default-manifest.o WinLibs спорит с
+          # манифестом CursorPad («multiple non-default manifests»)
+          lib=/c/winlibs/mingw64/x86_64-w64-mingw32/lib
+          if [ -f "$lib/default-manifest.o" ]; then mv "$lib/default-manifest.o" "$lib/default-manifest.o.bak"; fi
           echo 'C:\winlibs\mingw64\bin' >> "$GITHUB_PATH"
       - name: Собрать (без ключа — version.txt не подписан)
         shell: pwsh
