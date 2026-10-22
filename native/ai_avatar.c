@@ -46,6 +46,32 @@ static wchar_t g_acAvatarMenuText[40] = L"Призвать помощника"; 
 static float g_acAvatarLookX, g_acAvatarLookY;
 static RECT g_acAvatarDragFrom;
 
+/* Живость поверх кадров: дыхание, покачивание, прыжки и «пружинка» при
+   приземлении считаются кодом 30 раз в секунду. Эмоции — выражение лица
+   на время. Держат мышью — висит, держась лапой за курсор, и раскачивается. */
+enum { AC_EMO_NONE, AC_EMO_SURPRISED, AC_EMO_LOVE, AC_EMO_SHY, AC_EMO_SAD, AC_EMO_ANGRY, AC_EMO_WINK, AC_EMO_DIZZY };
+static int g_acEmo;
+static DWORD g_acEmoUntil;
+static DWORD g_acHopAt, g_acLandAt;      /* прыжок; приземление — сжатие с отскоком */
+static BOOL g_acHeld, g_acHover, g_acHoverShy;
+static DWORD g_acHoverAt, g_acHoverOff, g_acHeldAt;
+static POINT g_acGrip;                     /* где держат, в координатах окна */
+static float g_acSwing, g_acSwingV;        /* наклон, рад, и его скорость */
+static int g_acLastX;
+static DWORD g_acNextAct;                  /* следующая мелочь в покое */
+/* «Садиться на окна»: сидит на верхнем краю окна и едет вместе с ним,
+   окно закрыли или свернули — падает вниз до другого окна или панели задач */
+static BOOL g_acAvatarWindows;
+static HWND g_acPerch, g_acPerchNext;
+static int g_acPerchDx;
+static BOOL g_acFalling;
+static float g_acFallV;
+
+static void ac_emo(int emo, DWORD ms) {
+  g_acEmo = emo;
+  g_acEmoUntil = (GetTickCount() + ms) | 1;
+}
+
 static wchar_t g_acBubbleText[200];
 static BOOL g_acBubbleThought;       /* облачко-мысль (ИИ занят) или реплика с хвостиком */
 static BOOL g_acBubbleFading;
@@ -162,6 +188,7 @@ static void ac_avatar_set(int state) {
     ac_avatar_present();
     return;
   }
+  if (state == AC_AV_SUCCESS && (ac_avatar_random() & 1)) ac_emo(AC_EMO_LOVE, 1300); /* иногда — сердечки */
   g_acAvatarState = state;
   g_acAvatarFrame = 0;
   g_acAvatarStateAt = now;
@@ -282,29 +309,142 @@ static unsigned ac_bilerp(size_t r0, size_t r1, int x0, int x1, int wx, int wy, 
   return (top * (65536 - wy) + bottom * wy) >> 16;
 }
 
-/* Глаза и рот поверх кадра: выражение по состоянию, моргание, взгляд за курсором. */
-static void ac_avatar_face(DWORD now, float zoom) {
-  int S = g_acAvatarSize, state = g_acAvatarState;
+/* Поза кадра в окне: точка кадра q → p = опора + сдвиг + поворот(масштаб·(q − опора)). */
+typedef struct { float pvx, pvy, ox, oy, sx, sy, c, s; } AcXf;
+static void ac_xf(const AcXf *x, float qx, float qy, float *px, float *py) {
+  float dx = (qx - x->pvx) * x->sx, dy = (qy - x->pvy) * x->sy;
+  *px = x->pvx + x->ox + dx * x->c - dy * x->s;
+  *py = x->pvy + x->oy + dx * x->s + dy * x->c;
+}
+
+static void ac_avatar_pose(DWORD now, float zoom, AcXf *x) {
+  int S = g_acAvatarSize;
+  float sx = zoom, sy = zoom, ox = 0.0f, oy = 0.0f, ang = g_acSwing;
+  float pvx = S * 0.5f, pvy = S * 0.84f; /* «ноги» — над кольцом */
+  float br = sinf(now / (g_acAvatarState == AC_AV_SLEEP ? 1150.0f : 640.0f)) * 0.016f; /* дыхание */
+  sy *= 1.0f + br;
+  sx *= 1.0f - br * 0.6f;
+  if (!g_acHeld) ang += 0.024f * sinf(now / 1750.0f) + g_acAvatarLookX * 0.04f; /* покачивание, тянется к курсору */
+  if (g_acHopAt) {
+    float t = (now - g_acHopAt) / 420.0f;
+    if (t < 1.0f) {
+      float a = sinf(t * 3.14159265f);
+      oy -= a * S * 0.09f;
+      sy *= 1.0f + 0.06f * a;
+      sx *= 1.0f - 0.04f * a;
+    } else {
+      g_acHopAt = 0;
+      g_acLandAt = now | 1;
+    }
+  }
+  if (g_acLandAt) { /* сжатие с затухающим отскоком */
+    float t = (float)(now - g_acLandAt);
+    if (t < 650.0f) {
+      float a = 0.13f * expf(-t / 150.0f) * cosf(t / 55.0f);
+      sy *= 1.0f - a;
+      sx *= 1.0f + a * 0.7f;
+    } else g_acLandAt = 0;
+  }
+  if (g_acHeld) { /* висит за точку, где взяли, и чуть вытягивается */
+    pvx = (float)g_acGrip.x;
+    pvy = (float)g_acGrip.y;
+    sy *= 1.035f;
+    sx *= 0.975f;
+  }
+  x->pvx = pvx; x->pvy = pvy; x->ox = ox; x->oy = oy; x->sx = sx; x->sy = sy;
+  x->c = cosf(ang); x->s = sinf(ang);
+}
+
+static int ac_emo_now(DWORD now) {
+  if (g_acEmoUntil && ac_due(now, g_acEmoUntil)) { g_acEmo = AC_EMO_NONE; g_acEmoUntil = 0; }
+  return g_acEmo;
+}
+
+/* замкнутая кривая вокруг (cx, cy) в осях лица: n+1 точек */
+static int ac_face_ring(const AcFaceAxes *ax, float cx, float cy, float ra, float rb, float *pts, int n) {
+  for (int i = 0; i <= n; i++) {
+    float a = 6.2831853f * i / n;
+    ac_face_pt(ax, cx, cy, ra * cosf(a), rb * sinf(a), pts + 2 * i);
+  }
+  return n + 1;
+}
+
+/* Глаза и рот поверх кадра: выражение по состоянию и эмоции, моргание, взгляд за курсором. */
+static void ac_avatar_face(DWORD now, const AcXf *xf) {
+  int S = g_acAvatarSize, state = g_acAvatarState, emo = ac_emo_now(now);
+  if (state == AC_AV_SLEEP || state == AC_AV_ERROR) emo = AC_EMO_NONE;
   const short *fa = kAcAvatarFace[state][g_acAvatarFrame], *fb = kAcAvatarFace[state][g_acAvatarNext];
   float f[6], m = g_acAvatarMix / 256.0f;
   for (int i = 0; i < 6; i++) f[i] = fa[i] + (fb[i] - fa[i]) * m;
-  float k = (float)S / AC_AVATAR_FRAME / 8.0f, pvx = S * 0.5f, pvy = S * 0.78f;
-  float lx = pvx + (f[0] * k - pvx) * zoom, ly = pvy + (f[1] * k - pvy) * zoom;
-  float rx = pvx + (f[2] * k - pvx) * zoom, ry = pvy + (f[3] * k - pvy) * zoom;
-  float mx = pvx + (f[4] * k - pvx) * zoom, my = pvy + (f[5] * k - pvy) * zoom;
+  float k = (float)S / AC_AVATAR_FRAME / 8.0f;
+  float lx, ly, rx, ry, mx, my;
+  ac_xf(xf, f[0] * k, f[1] * k, &lx, &ly);
+  ac_xf(xf, f[2] * k, f[3] * k, &rx, &ry);
+  ac_xf(xf, f[4] * k, f[5] * k, &mx, &my);
   float ux = rx - lx, uy = ry - ly, d = sqrtf(ux * ux + uy * uy);
   if (d < 4.0f) return;
   AcFaceAxes ax = {ux / d, uy / d, -uy / d, ux / d};
   float lookA = g_acAvatarLookX * d * 0.17f, lookB = g_acAvatarLookY * d * 0.11f;
   COLORREF mood = kAcAvatarMood[state];
+  if (emo == AC_EMO_LOVE || emo == AC_EMO_SHY) mood = RGB(0xFF, 0x6E, 0xB4);
+  else if (emo == AC_EMO_ANGRY) mood = RGB(0xFF, 0x5C, 0x7A);
+  else if (emo == AC_EMO_SAD) mood = RGB(0x7A, 0xA8, 0xFF);
   COLORREF core = ac_mix(mood, RGB(255, 255, 255), 0.55f);
   float glowR = d * 0.10f + 0.6f, w = d * 0.27f, h = d * 0.50f, line = d * 0.065f + 0.45f;
   BOOL joy = g_acAvatarJoyUntil || state == AC_AV_SUCCESS || state == AC_AV_WAVE;
-  float pts[8];
+  float pts[64];
   for (int side = -1; side <= 1; side += 2) {
     float c0[2];
     ac_face_pt(&ax, side < 0 ? lx : rx, side < 0 ? ly : ry, lookA, lookB, c0);
     float cx = c0[0], cy = c0[1];
+    float in = -side * 0.6f * w; /* внутренний край глаза — к переносице */
+    if (emo == AC_EMO_SURPRISED) { /* круглые глаза */
+      int n = ac_face_ring(&ax, cx, cy, w * 0.62f, h * 0.42f, pts, 20);
+      ac_paint_stroke(g_acAvatarFramePixels, S, S, pts, n, line, core, mood, glowR, 1.0f);
+      ac_paint_stroke(g_acAvatarFramePixels, S, S, c0, 1, w * 0.16f, core, mood, glowR, 1.0f);
+      continue;
+    }
+    if (emo == AC_EMO_LOVE) { /* сердечки */
+      for (int i = 0; i <= 24; i++) {
+        float t = 6.2831853f * i / 24, st = sinf(t);
+        float hx = 16.0f * st * st * st, hy = -(13.0f * cosf(t) - 5.0f * cosf(2 * t) - 2.0f * cosf(3 * t) - cosf(4 * t));
+        ac_face_pt(&ax, cx, cy, hx * w * 0.042f, hy * w * 0.042f, pts + 2 * i);
+      }
+      ac_paint_stroke(g_acAvatarFramePixels, S, S, pts, 25, line, core, mood, glowR * 1.3f, 1.0f);
+      continue;
+    }
+    if (emo == AC_EMO_DIZZY) { /* спирали */
+      for (int i = 0; i < 24; i++) {
+        float t = i / 23.0f, a = t * 15.7f * (float)side;
+        ac_face_pt(&ax, cx, cy, cosf(a) * w * 0.6f * t, sinf(a) * h * 0.4f * t, pts + 2 * i);
+      }
+      ac_paint_stroke(g_acAvatarFramePixels, S, S, pts, 24, line * 0.8f, core, mood, glowR, 1.0f);
+      continue;
+    }
+    if (emo == AC_EMO_SHY || (emo == AC_EMO_WINK && side > 0)) { /* дужки, у стеснения — румянец */
+      ac_face_pt(&ax, cx, cy, -0.5f * w, 0.1f * h, pts);
+      ac_face_pt(&ax, cx, cy, 0.0f, -0.12f * h, pts + 2);
+      ac_face_pt(&ax, cx, cy, 0.5f * w, 0.1f * h, pts + 4);
+      ac_paint_stroke(g_acAvatarFramePixels, S, S, pts, 3, line, core, mood, glowR, 1.0f);
+      if (emo == AC_EMO_SHY) {
+        float blush[2];
+        ac_face_pt(&ax, cx, cy, -in * 0.4f, 0.62f * h, blush);
+        ac_paint_stroke(g_acAvatarFramePixels, S, S, blush, 1, w * 0.32f, RGB(255, 130, 170), RGB(255, 90, 150),
+                        w * 0.3f, 0.45f);
+      }
+      continue;
+    }
+    if (emo == AC_EMO_SAD || emo == AC_EMO_ANGRY) { /* глаз поменьше и «бровь»-веко наискось */
+      float r = w * 0.42f, half = h * 0.18f;
+      ac_face_pt(&ax, cx, cy, 0.0f, -half + 0.08f * h, pts);
+      ac_face_pt(&ax, cx, cy, 0.0f, half + 0.08f * h, pts + 2);
+      ac_paint_stroke(g_acAvatarFramePixels, S, S, pts, 2, r, core, mood, glowR, 1.0f);
+      float hiIn = emo == AC_EMO_SAD ? -0.62f : -0.32f, hiOut = emo == AC_EMO_SAD ? -0.3f : -0.6f;
+      ac_face_pt(&ax, cx, cy, in, hiIn * h, pts);
+      ac_face_pt(&ax, cx, cy, -in, hiOut * h, pts + 2);
+      ac_paint_stroke(g_acAvatarFramePixels, S, S, pts, 2, line * 0.8f, core, mood, glowR, 1.0f);
+      continue;
+    }
     if (state == AC_AV_SLEEP) {
       ac_face_pt(&ax, cx, cy, -0.55f * w, -0.02f * h, pts);
       ac_face_pt(&ax, cx, cy, 0.0f, 0.12f * h, pts + 2);
@@ -346,7 +486,25 @@ static void ac_avatar_face(DWORD now, float zoom) {
   COLORREF mouth = ac_mix(mood, RGB(255, 255, 255), 0.3f);
   float mr = d * 0.045f + 0.4f, mg = d * 0.06f + 0.4f;
   int n = 3;
-  if (state == AC_AV_TALKING) {
+  if (emo == AC_EMO_SURPRISED) { /* «о» */
+    n = ac_face_ring(&ax, cx, cy, d * 0.07f, d * 0.08f, pts, 12);
+  } else if (emo == AC_EMO_SAD) { /* уголки вниз */
+    ac_face_pt(&ax, cx, cy, -0.13f * d, 0.04f * d, pts);
+    ac_face_pt(&ax, cx, cy, 0.0f, -0.02f * d, pts + 2);
+    ac_face_pt(&ax, cx, cy, 0.13f * d, 0.04f * d, pts + 4);
+  } else if (emo == AC_EMO_ANGRY) {
+    ac_face_pt(&ax, cx, cy, -0.1f * d, 0.01f * d, pts);
+    ac_face_pt(&ax, cx, cy, 0.1f * d, 0.01f * d, pts + 2);
+    n = 2;
+  } else if (emo == AC_EMO_DIZZY || emo == AC_EMO_SHY) { /* волной */
+    for (int i = 0; i < 6; i++)
+      ac_face_pt(&ax, cx, cy, (-0.13f + 0.052f * i) * d, (i & 1 ? -0.022f : 0.022f) * d, pts + 2 * i);
+    n = 6;
+  } else if (emo == AC_EMO_LOVE || emo == AC_EMO_WINK) {
+    ac_face_pt(&ax, cx, cy, -0.17f * d, -0.03f * d, pts);
+    ac_face_pt(&ax, cx, cy, 0.0f, 0.06f * d, pts + 2);
+    ac_face_pt(&ax, cx, cy, 0.17f * d, -0.03f * d, pts + 4);
+  } else if (state == AC_AV_TALKING) {
     float open = 0.25f + 0.75f * fabsf(sinf(now / 90.0f)) * (0.55f + 0.45f * sinf(now / 237.0f));
     ac_face_pt(&ax, cx, cy, 0.0f, -d * 0.06f * open, pts);
     ac_face_pt(&ax, cx, cy, 0.0f, d * 0.06f * open, pts + 2);
@@ -379,8 +537,22 @@ static void ac_avatar_face(DWORD now, float zoom) {
     ac_face_pt(&ax, cx, cy, 0.0f, 0.03f * d, pts + 2);
     ac_face_pt(&ax, cx, cy, 0.11f * d, -0.015f * d, pts + 4);
   }
-  float thick = n == 1 || state == AC_AV_TALKING ? mr : line * 0.8f;
+  float thick = n == 1 || (state == AC_AV_TALKING && !emo) ? mr : line * 0.8f;
   ac_paint_stroke(g_acAvatarFramePixels, S, S, pts, n, thick, mouth, mood, mg, state == AC_AV_SLEEP ? 0.6f : 0.85f);
+
+  /* держат мышью — лапка вцепилась в курсор: рука от края головы до точки хвата */
+  if (g_acHeld) {
+    float sh[2], arm[4], grip[2] = {(float)g_acGrip.x, (float)g_acGrip.y};
+    ac_face_pt(&ax, rx, ry, d * 0.95f, d * 0.55f, sh);
+    arm[0] = sh[0]; arm[1] = sh[1]; arm[2] = grip[0]; arm[3] = grip[1];
+    COLORREF pearl = RGB(238, 241, 247), edge = RGB(20, 24, 44), cuff = RGB(123, 92, 255);
+    ac_paint_stroke(g_acAvatarFramePixels, S, S, arm, 2, d * 0.15f + 1.2f, edge, edge, 0.0f, 0.75f);
+    ac_paint_stroke(g_acAvatarFramePixels, S, S, arm, 2, d * 0.15f, pearl, pearl, 0.0f, 1.0f);
+    ac_paint_stroke(g_acAvatarFramePixels, S, S, grip, 1, d * 0.3f + 1.2f, edge, edge, 0.0f, 0.75f);
+    ac_paint_stroke(g_acAvatarFramePixels, S, S, grip, 1, d * 0.3f, pearl, pearl, 0.0f, 1.0f);
+    float ring[2] = {grip[0] + (sh[0] - grip[0]) * 0.18f, grip[1] + (sh[1] - grip[1]) * 0.18f};
+    ac_paint_stroke(g_acAvatarFramePixels, S, S, ring, 1, d * 0.17f, cuff, cuff, d * 0.05f, 0.9f);
+  }
 }
 
 static void ac_avatar_present(void) {
@@ -404,29 +576,28 @@ static void ac_avatar_present(void) {
   float zoom = ac_avatar_zoom(now, &alpha);
   ac_avatar_frame(now);
   int S = g_acAvatarSize;
-  float scale = (float)AC_AVATAR_FRAME / S, inv = 1.0f / zoom, pvx = S * 0.5f, pvy = S * 0.78f;
+  AcXf xf;
+  ac_avatar_pose(now, zoom, &xf);
+  float scale = (float)AC_AVATAR_FRAME / S, isx = 1.0f / xf.sx, isy = 1.0f / xf.sy;
   int frameX = g_acAvatarFrame * AC_AVATAR_FRAME, nextX = g_acAvatarNext * AC_AVATAR_FRAME;
   unsigned mix = (unsigned)g_acAvatarMix;
   int frameY = g_acAvatarState * AC_AVATAR_FRAME;
   int atlasW = AC_AVATAR_FRAME * AC_AVATAR_COLS;
   for (int y = 0; y < S; y++) {
-    /* точка кадра под пикселем окна; при призыве кадр масштабируется вокруг (pvx, pvy) */
-    float sy = (pvy + (y + 0.5f - pvy) * inv) * scale - 0.5f;
-    if (sy <= -1.0f || sy >= AC_AVATAR_FRAME) {
-      memset(g_acAvatarFramePixels + (size_t)y * S * 4, 0, (size_t)S * 4);
-      continue;
-    }
-    if (sy < 0.0f) sy = 0.0f;
-    int y0 = (int)sy;
-    int wy = (int)((sy - y0) * 65535.0f);
-    if (y0 >= AC_AVATAR_FRAME - 1) { y0 = AC_AVATAR_FRAME - 1; wy = 0; }
-    int y1 = y0 + (wy ? 1 : 0);
     for (int x = 0; x < S; x++) {
-      float sx = (pvx + (x + 0.5f - pvx) * inv) * scale - 0.5f;
-      if (sx <= -1.0f || sx >= AC_AVATAR_FRAME) {
+      /* точка кадра под пикселем окна: поза в обратную сторону */
+      float dx = x + 0.5f - xf.pvx - xf.ox, dy = y + 0.5f - xf.pvy - xf.oy;
+      float qx = xf.pvx + (dx * xf.c + dy * xf.s) * isx, qy = xf.pvy + (-dx * xf.s + dy * xf.c) * isy;
+      float sx = qx * scale - 0.5f, sy = qy * scale - 0.5f;
+      if (sx <= -1.0f || sx >= AC_AVATAR_FRAME || sy <= -1.0f || sy >= AC_AVATAR_FRAME) {
         memset(g_acAvatarFramePixels + ((size_t)y * S + x) * 4, 0, 4);
         continue;
       }
+      if (sy < 0.0f) sy = 0.0f;
+      int y0 = (int)sy;
+      int wy = (int)((sy - y0) * 65535.0f);
+      if (y0 >= AC_AVATAR_FRAME - 1) { y0 = AC_AVATAR_FRAME - 1; wy = 0; }
+      int y1 = y0 + (wy ? 1 : 0);
       if (sx < 0.0f) sx = 0.0f;
       int x0 = (int)sx;
       int wx = (int)((sx - x0) * 65535.0f);
@@ -441,7 +612,7 @@ static void ac_avatar_present(void) {
       }
     }
   }
-  ac_avatar_face(now, zoom);
+  ac_avatar_face(now, &xf);
 
   HDC screen = GetDC(NULL);
   HDC memory = screen ? CreateCompatibleDC(screen) : NULL;
@@ -825,6 +996,7 @@ static void ac_avatar_save_settings(void) {
   WritePrivateProfileStringW(L"Avatar", L"Visible", IsWindowVisible(g_acAvatar) ? L"1" : L"0", path);
   WritePrivateProfileStringW(L"Avatar", L"Wander", g_acAvatarWander ? L"1" : L"0", path);
   WritePrivateProfileStringW(L"Avatar", L"Bubbles", g_acAvatarBubbles ? L"1" : L"0", path);
+  WritePrivateProfileStringW(L"Avatar", L"Windows", g_acAvatarWindows ? L"1" : L"0", path);
 }
 
 /* Новый размер окна. Робот растёт и уменьшается «от ног»: середина низа
@@ -896,7 +1068,7 @@ static void ac_avatar_hide(void) {
    как пузырь, — шапка с состоянием, чат, ползунок размера, переключатели,
    «Отозвать». Закрывается щелчком мимо и Esc, ходит стрелками. */
 
-enum { ACM_HEAD, ACM_CHAT, ACM_SIZE, ACM_BUBBLES, ACM_WANDER, ACM_SEP, ACM_DISMISS, ACM_N };
+enum { ACM_HEAD, ACM_CHAT, ACM_SIZE, ACM_BUBBLES, ACM_WANDER, ACM_WINDOWS, ACM_SEP, ACM_DISMISS, ACM_N };
 #define AC_MENU_TIMER 0xA172
 static HWND g_acMenu;
 static RECT g_acMenuRow[ACM_N];
@@ -909,7 +1081,9 @@ static int g_acMenuBmpW, g_acMenuBmpH;
 static HFONT g_acMenuFont, g_acMenuBold, g_acMenuSmall, g_acMenuIcons;
 
 static int ac_mpx(int v) { return v * g_acMenuK / 100; }
-static BOOL ac_menu_pick(int i) { return i == ACM_CHAT || i == ACM_SIZE || i == ACM_BUBBLES || i == ACM_WANDER || i == ACM_DISMISS; }
+static BOOL ac_menu_pick(int i) {
+  return i == ACM_CHAT || i == ACM_SIZE || i == ACM_BUBBLES || i == ACM_WANDER || i == ACM_WINDOWS || i == ACM_DISMISS;
+}
 
 static HFONT ac_menu_font(int px, int weight, const wchar_t *face) {
   return CreateFontW(-ac_mpx(px), 0, 0, 0, weight, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
@@ -933,7 +1107,7 @@ static void ac_menu_close(void) {
 }
 
 static void ac_menu_layout(void) {
-  static const int kRowH[ACM_N] = {56, 38, 62, 38, 38, 9, 38};
+  static const int kRowH[ACM_N] = {56, 38, 62, 38, 38, 38, 9, 38};
   int m = ac_mpx(14), w = ac_mpx(292), pad = ac_mpx(6), y = m + pad;
   for (int i = 0; i < ACM_N; i++) {
     SetRect(&g_acMenuRow[i], m + pad, y, m + w - pad, y + ac_mpx(kRowH[i]));
@@ -1065,6 +1239,8 @@ static void ac_menu_render(void) {
   ac_menu_switch(pix, W, H, g_acMenuRow[ACM_BUBBLES], g_acAvatarBubbles);
   ac_menu_line(pix, W, H, dc, g_acMenuRow[ACM_WANDER], 0xE805, L"Гулять рядом с местом", NULL, ink, cyan, lineH);
   ac_menu_switch(pix, W, H, g_acMenuRow[ACM_WANDER], g_acAvatarWander);
+  ac_menu_line(pix, W, H, dc, g_acMenuRow[ACM_WINDOWS], 0xE737, L"Садиться на окна", NULL, ink, cyan, lineH);
+  ac_menu_switch(pix, W, H, g_acMenuRow[ACM_WINDOWS], g_acAvatarWindows);
   RECT sp = g_acMenuRow[ACM_SEP];
   float sep[4] = {(float)sp.left + ac_mpx(8), (sp.top + sp.bottom) * 0.5f, (float)sp.right - ac_mpx(8),
                   (sp.top + sp.bottom) * 0.5f};
@@ -1113,6 +1289,13 @@ static void ac_menu_activate(int i) {
   case ACM_WANDER:
     g_acAvatarWander = !g_acAvatarWander;
     g_acAvatarMoving = FALSE;
+    ac_avatar_save_settings();
+    ac_menu_render();
+    break;
+  case ACM_WINDOWS:
+    g_acAvatarWindows = !g_acAvatarWindows;
+    g_acPerch = g_acPerchNext = NULL;
+    g_acFalling = FALSE;
     ac_avatar_save_settings();
     ac_menu_render();
     break;
@@ -1273,6 +1456,8 @@ static void ac_avatar_poke(void) {
   };
   DWORD now = GetTickCount();
   g_acAvatarJoyUntil = (now + 1600) | 1; /* 0 — «не радуется» */
+  g_acHopAt = now | 1;
+  if (ac_avatar_random() % 3 == 0) ac_emo((ac_avatar_random() & 1) ? AC_EMO_LOVE : AC_EMO_WINK, 1300);
   if (g_acAvatarState == AC_AV_IDLE || g_acAvatarState == AC_AV_SLEEP) {
     ac_avatar_set(AC_AV_IDLE);
     g_acAvatarState = AC_AV_WAVE;
@@ -1351,12 +1536,34 @@ static LRESULT CALLBACK AcAvatarProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
   case WM_CONTEXTMENU: ac_avatar_menu(hwnd); return 0;
   case WM_NCLBUTTONDBLCLK:
   case WM_LBUTTONDBLCLK: aichat_show(); return 0;
-  case WM_ENTERSIZEMOVE: GetWindowRect(hwnd, &g_acAvatarDragFrom); g_acAvatarMoving = FALSE; return 0;
+  case WM_ENTERSIZEMOVE: { /* взяли мышью: висит за точку хвата */
+    POINT p;
+    GetCursorPos(&p);
+    GetWindowRect(hwnd, &g_acAvatarDragFrom);
+    g_acGrip.x = p.x - g_acAvatarDragFrom.left;
+    g_acGrip.y = p.y - g_acAvatarDragFrom.top;
+    g_acLastX = g_acAvatarDragFrom.left;
+    g_acHeld = TRUE;
+    g_acHeldAt = GetTickCount();
+    g_acAvatarMoving = FALSE;
+    g_acPerch = g_acPerchNext = NULL;
+    g_acFalling = FALSE;
+    g_acHopAt = 0;
+    return 0;
+  }
   case WM_EXITSIZEMOVE: {
     RECT rc;
     GetWindowRect(hwnd, &rc);
+    g_acHeld = FALSE;
+    g_acLandAt = GetTickCount() | 1;
     if (abs(rc.left - g_acAvatarDragFrom.left) + abs(rc.top - g_acAvatarDragFrom.top) < 4) ac_avatar_poke();
-    else { g_acAvatarHome.x = rc.left; g_acAvatarHome.y = rc.top; }
+    else {
+      g_acAvatarHome.x = rc.left;
+      g_acAvatarHome.y = rc.top;
+      if (fabsf(g_acSwingV) > 0.06f || fabsf(g_acSwing) > 0.3f) ac_emo(AC_EMO_DIZZY, 1400); /* раскачали — кружится голова */
+      else g_acAvatarJoyUntil = (GetTickCount() + 900) | 1;
+      if (g_acAvatarWindows) { g_acFalling = TRUE; g_acFallV = 0.0f; } /* отпустили в воздухе — падает */
+    }
     ac_avatar_save_settings();
     return 0;
   }
@@ -1406,6 +1613,7 @@ static void ac_avatar_show(void) {
     g_acAvatarY = value[0] ? _wtoi(value) : -1;
     g_acAvatarWander = GetPrivateProfileIntW(L"Avatar", L"Wander", 1, path) != 0;
     g_acAvatarBubbles = GetPrivateProfileIntW(L"Avatar", L"Bubbles", 1, path) != 0;
+    g_acAvatarWindows = GetPrivateProfileIntW(L"Avatar", L"Windows", 0, path) != 0;
   }
   /* сохранённое место — если оно на каком-нибудь мониторе */
   RECT saved = {g_acAvatarX, g_acAvatarY, g_acAvatarX + g_acAvatarSize, g_acAvatarY + g_acAvatarSize};
@@ -1475,6 +1683,14 @@ static void ac_avatar_move(void) {
     SetWindowPos(g_acAvatar, HWND_TOPMOST, g_acAvatarTarget.x, g_acAvatarTarget.y,
                  g_acAvatarSize, g_acAvatarSize, SWP_NOACTIVATE);
     g_acAvatarMoving = FALSE;
+    if (g_acPerchNext && IsWindow(g_acPerchNext)) { /* дошёл до окна — садится на край */
+      RECT r;
+      GetWindowRect(g_acPerchNext, &r);
+      g_acPerch = g_acPerchNext;
+      g_acPerchDx = g_acAvatarTarget.x - r.left;
+      g_acLandAt = GetTickCount() | 1;
+    }
+    g_acPerchNext = NULL;
     g_acAvatarNextMove = GetTickCount() + 20000 + (ac_avatar_random() % 22000);
     return;
   }
@@ -1484,6 +1700,90 @@ static void ac_avatar_move(void) {
   if (!stepY && dy) stepY = dy > 0 ? 1 : -1;
   SetWindowPos(g_acAvatar, HWND_TOPMOST, x + stepX, y + stepY,
                g_acAvatarSize, g_acAvatarSize, SWP_NOACTIVATE);
+}
+
+/* окно, на котором можно сидеть: видимое, не развёрнутое, не наше, не рабочий стол */
+static BOOL ac_perch_ok(HWND h) {
+  if (!h || !IsWindowVisible(h) || IsIconic(h) || IsZoomed(h)) return FALSE;
+  DWORD pid = 0;
+  GetWindowThreadProcessId(h, &pid);
+  if (pid == GetCurrentProcessId()) return FALSE;
+  if (GetWindowLongW(h, GWL_EXSTYLE) & WS_EX_TOOLWINDOW) return FALSE;
+  wchar_t cls[64];
+  if (!GetClassNameW(h, cls, 64) || !wcscmp(cls, L"Progman") || !wcscmp(cls, L"WorkerW") ||
+      !wcscmp(cls, L"Shell_TrayWnd") || !wcscmp(cls, L"Shell_SecondaryTrayWnd")) return FALSE;
+  RECT r;
+  GetWindowRect(h, &r);
+  return r.right - r.left > g_acAvatarSize && r.bottom - r.top > 60;
+}
+
+/* верх окна под точкой (x, y) экрана; 0 — нет такого */
+static HWND ac_window_below(int x, int y) {
+  POINT p = {x, y};
+  HWND h = WindowFromPoint(p);
+  h = h ? GetAncestor(h, GA_ROOT) : NULL;
+  return ac_perch_ok(h) ? h : NULL;
+}
+
+#define AC_FEET 0.86f /* где у кадра «ноги» (кольцо), доля высоты окна */
+
+/* Окна: едет на своём окне, падает, если опоры нет, иногда перебирается
+   на активное окно. Только при включённом «Садиться на окна». */
+static void ac_avatar_windows(DWORD now, RECT wr, BOOL idle) {
+  int S = g_acAvatarSize, feet = (int)(S * AC_FEET);
+  if (g_acHeld) return;
+  if (g_acPerch) {
+    if (!ac_perch_ok(g_acPerch)) { g_acPerch = NULL; g_acFalling = TRUE; g_acFallV = 0.0f; ac_emo(AC_EMO_SURPRISED, 800); }
+    else {
+      RECT r;
+      GetWindowRect(g_acPerch, &r);
+      int x = r.left + g_acPerchDx, y = r.top - feet;
+      if (x > r.right - S / 2) x = r.right - S / 2;
+      if (x < r.left - S / 2) x = r.left - S / 2;
+      if (x != wr.left || y != wr.top) SetWindowPos(g_acAvatar, HWND_TOPMOST, x, y, S, S, SWP_NOACTIVATE);
+      return;
+    }
+  }
+  if (g_acFalling) {
+    MONITORINFO mi = {sizeof(mi)};
+    GetMonitorInfoW(MonitorFromWindow(g_acAvatar, MONITOR_DEFAULTTONEAREST), &mi);
+    g_acFallV += 1.5f;
+    if (g_acFallV > 38.0f) g_acFallV = 38.0f;
+    int x = wr.left, y = wr.top + (int)g_acFallV, floorY = mi.rcWork.bottom - feet - 2;
+    /* край окна между старыми и новыми «ногами» — встаёт на него */
+    for (int py = wr.top + feet + 1; py <= y + feet && py < mi.rcWork.bottom; py += 3) {
+      HWND h = ac_window_below(x + S / 2, py);
+      RECT r;
+      if (h && GetWindowRect(h, &r) && r.top >= wr.top + feet - 2 && r.top <= py) {
+        g_acPerch = h;
+        g_acPerchDx = x - r.left;
+        y = r.top - feet;
+        break;
+      }
+    }
+    if (!g_acPerch && y >= floorY) y = floorY;
+    if (g_acPerch || y >= floorY) {
+      g_acFalling = FALSE;
+      g_acLandAt = now | 1;
+      if (g_acFallV > 12.0f && !g_acEmo) ac_emo(AC_EMO_DIZZY, 900);
+      g_acAvatarHome.x = x;
+      g_acAvatarHome.y = y;
+    }
+    SetWindowPos(g_acAvatar, HWND_TOPMOST, x, y, S, S, SWP_NOACTIVATE);
+    return;
+  }
+  /* в покое иногда перебирается на активное окно */
+  if (idle && !g_acAvatarMoving && !ac_mini_open() && ac_due(now, g_acAvatarNextMove) && (ac_avatar_random() % 3) == 0) {
+    HWND fg = GetForegroundWindow();
+    RECT r;
+    if (ac_perch_ok(fg) && GetWindowRect(fg, &r) && r.top - feet > 0) {
+      int span = r.right - r.left - S;
+      g_acAvatarTarget.x = r.left + (span > 0 ? (int)(ac_avatar_random() % (DWORD)span) : 0);
+      g_acAvatarTarget.y = r.top - feet;
+      g_acPerchNext = fg;
+      g_acAvatarMoving = TRUE;
+    }
+  }
 }
 
 static void ac_avatar_tick(void) {
@@ -1522,6 +1822,44 @@ static void ac_avatar_tick(void) {
     g_acAvatarActiveAt = now;
   }
 
+  /* навели курсор — подпрыгивает навстречу и строит рожицу; держат дольше — смущается */
+  BOOL over = !g_acHeld && WindowFromPoint(cur) == g_acAvatar;
+  if (over && !g_acHover) {
+    g_acHover = TRUE;
+    g_acHoverAt = now;
+    g_acHoverShy = FALSE;
+    if (now - g_acHoverOff > 1500 && g_acAvatarState != AC_AV_SLEEP && !g_acEmo) {
+      static const int kHi[] = {AC_EMO_SURPRISED, AC_EMO_LOVE, AC_EMO_WINK, AC_EMO_SHY};
+      g_acHopAt = now | 1;
+      ac_emo(kHi[ac_avatar_random() % 4], 1100);
+    }
+  } else if (!over && g_acHover) {
+    g_acHover = FALSE;
+    g_acHoverOff = now;
+  }
+  if (g_acHover && !g_acHoverShy && now - g_acHoverAt > 2600 && !g_acEmo) {
+    g_acHoverShy = TRUE;
+    ac_emo(AC_EMO_SHY, 1800);
+  }
+
+  /* раскачивание: держат — тянет за курсором и отстаёт, отпустили — успокаивается */
+  {
+    float target = 0.0f;
+    if (g_acHeld) {
+      int vx = wr.left - g_acLastX;
+      g_acLastX = wr.left;
+      target = vx * 0.03f;
+      if (target > 0.38f) target = 0.38f;
+      if (target < -0.38f) target = -0.38f;
+      if (now - g_acHeldAt < 700) { if (!g_acEmo) ac_emo(AC_EMO_SURPRISED, 700); }
+      else if (fabsf(g_acSwingV) > 0.09f) ac_emo(AC_EMO_DIZZY, 900);
+      else if (!g_acEmo) g_acAvatarJoyUntil = (now + 300) | 1;
+    }
+    g_acSwingV += (target - g_acSwing) * 0.16f;
+    g_acSwingV *= 0.84f;
+    g_acSwing += g_acSwingV;
+  }
+
   if (g_acAvatarJoyUntil && ac_due(now, g_acAvatarJoyUntil)) g_acAvatarJoyUntil = 0;
   if (ac_due(now, g_acAvatarNextBlink)) {
     g_acAvatarBlinkAt = now | 1;
@@ -1532,6 +1870,7 @@ static void ac_avatar_tick(void) {
     ac_avatar_set(AC_AV_IDLE);
   } else if (g_acAvatarState == AC_AV_ERROR && now - g_acAvatarStateAt > 1800) {
     ac_avatar_set(AC_AV_IDLE);
+    ac_emo(AC_EMO_SAD, 1600); /* после ошибки ещё погрустит */
   } else if (g_acAvatarState == AC_AV_TALKING && ac_due(now, g_acAvatarTalkUntil)) {
     ac_avatar_set(AC_AV_IDLE);
   } else if (g_acAvatarAmbient && ac_due(now, g_acAvatarTransientUntil)) {
@@ -1551,8 +1890,23 @@ static void ac_avatar_tick(void) {
     idle = FALSE;
   }
   if (idle && ac_due(now, g_acAvatarNextIdle)) ac_avatar_ambient((ac_avatar_random() & 1) ? AC_AV_WAVE : AC_AV_THINKING, now);
+  /* мелочи в покое: прыжок, подмигнёт, улыбнётся, удивится */
+  if (idle && !g_acHover && !g_acHeld && ac_due(now, g_acNextAct)) {
+    if (g_acNextAct) {
+      switch (ac_avatar_random() % 5) {
+      case 0: g_acHopAt = now | 1; break;
+      case 1: ac_emo(AC_EMO_WINK, 900); break;
+      case 2: ac_emo(AC_EMO_LOVE, 1100); break;
+      case 3: g_acHopAt = now | 1; g_acAvatarJoyUntil = (now + 900) | 1; break;
+      default: ac_emo(AC_EMO_SURPRISED, 600); break;
+      }
+    }
+    g_acNextAct = now + 9000 + ac_avatar_random() % 12000;
+  }
+  if (g_acAvatarWindows) ac_avatar_windows(now, wr, idle);
   BOOL bubble = g_acBubble && IsWindowVisible(g_acBubble);
-  if (idle && g_acAvatarWander && !g_acAvatarMoving && !bubble && !ac_mini_open() && ac_due(now, g_acAvatarNextMove)) {
+  if (idle && g_acAvatarWander && !g_acAvatarMoving && !bubble && !ac_mini_open() && !g_acPerch && !g_acFalling &&
+      ac_due(now, g_acAvatarNextMove)) {
     MONITORINFO mi = {sizeof(mi)};
     if (GetMonitorInfoW(MonitorFromWindow(g_acAvatar, MONITOR_DEFAULTTONEAREST), &mi)) {
       int x = g_acAvatarHome.x - AC_AVATAR_ROAM + (int)(ac_avatar_random() % (2 * AC_AVATAR_ROAM + 1));
