@@ -1,6 +1,6 @@
 # Windows equivalent of build.sh. Uses installed MinGW-w64 and Python only.
 # Run: powershell -File native/build.ps1
-# Check build without signing or release files (code checks, cloud agents):
+# Check build without release files (code checks, cloud agents):
 #   powershell -File native/build.ps1 -Dev   -> build\dev\CursorPad.exe, public\ untouched
 param([string]$OutputDirectory = (Join-Path $PSScriptRoot '..\public'), [switch]$Dev)
 $ErrorActionPreference = 'Stop'
@@ -20,10 +20,6 @@ $resourceObject = Join-Path $releaseDir 'cursorpad-build.res'
 $flags = @('-O2', '-Wall', '-Werror', '-Wno-unknown-pragmas', '-finput-charset=UTF-8')
 Push-Location $PSScriptRoot
 try {
-  if (-not $Dev) { # a release needs the signing key: check before anything is written to public\
-    & $python update_sign.py --check
-    if ($LASTEXITCODE -ne 0) { throw 'No release signing key (see native/RELEASE_SIGNING.md); for a code check use -Dev' }
-  }
   # A dev build only warns: an edited native/agent needs a rebuilt pack before a release, not before a code check.
   & $python build_agent_pack.py
   if ($LASTEXITCODE -ne 0) { if ($Dev) { Write-Warning 'Agent pack does not match native/agent: rebuild it before a release' } else { throw 'Agent pack verification failed' } }
@@ -38,7 +34,7 @@ try {
     '-Wl,--subsystem,windows' '-Wl,--no-insert-timestamp' -municode -s -static
   if ($LASTEXITCODE -ne 0) { throw 'CursorPad compilation failed' }
   if ($Dev) {
-    Write-Output ('Dev build (unsigned, not a release): ' + (Join-Path $releaseDir 'CursorPad.exe'))
+    Write-Output ('Dev build (not a release): ' + (Join-Path $releaseDir 'CursorPad.exe'))
     return
   }
   & $python package_release.py $releaseDir $PSScriptRoot

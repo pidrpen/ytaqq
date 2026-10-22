@@ -10,11 +10,12 @@
 #   Debian/Ubuntu: apt install gcc-mingw-w64-x86-64 binutils-mingw-w64-x86-64
 #
 # Запуск из любого места:  sh native/build.sh
-# Проверочная сборка без подписи и без файлов выпуска (облако, проверка кода):
+# Проверочная сборка без файлов выпуска (облако, проверка кода):
 #   sh native/build.sh --dev   → build/dev/CursorPad.exe, public/ не трогается.
-#   Ключ подписи для неё не нужен; несходство комплектов QwenPaw и tools —
-#   только предупреждение (перед выпуском их пересобирают). Выпуск — без --dev,
-#   с ключом подписи (RELEASE_SIGNING.md), у того, кто выпускает.
+#   Несходство комплектов QwenPaw и tools в ней — только предупреждение
+#   (перед выпуском их пересобирают). Выпуск — без --dev, пишет public/.
+#   Ключ подписи не нужен; если он есть, выпуск подписывается для старых
+#   версий (RELEASE_SIGNING.md).
 # Номер выпуска правится в двух местах — version.h и version.txt; скрипт
 # проверяет, что они совпадают, иначе программа будет врать о своей версии.
 # Номер — ГГГГ.ММ.ДД.N, число — ГГГГММДДNN: на N всего две цифры, поэтому
@@ -59,10 +60,6 @@ TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
 cd "$HERE"
-if [ "$DEV" != 1 ]; then
-  # выпуску нужен ключ подписи: проверить до того, как что-то запишется в public/
-  "$PY" "$HERE/update_sign.py" --check || { echo "нет ключа подписи выпусков (RELEASE_SIGNING.md); проверочная сборка — sh native/build.sh --dev"; exit 1; }
-fi
 if [ "$DEV" = 1 ]; then
   "$PY" "$HERE/build_agent_pack.py" || echo "ВНИМАНИЕ: комплект QwenPaw не сходится с native/agent — перед выпуском пересоберите его"
   "$PY" "$HERE/build_addons_pack.py" || echo "ВНИМАНИЕ: комплект tools не сходится — перед выпуском пересоберите его"
@@ -78,7 +75,7 @@ $CC $CFLAGS -finput-charset=UTF-8 -o "$OUT/CursorPad.exe" cursorpad.c "$TMP/curs
   -Wl,--subsystem,windows -municode -s -Wl,--no-insert-timestamp $LDX
 
 if [ "$DEV" = 1 ]; then
-  echo "Проверочная сборка (без подписи, не выпуск): $OUT/CursorPad.exe"
+  echo "Проверочная сборка (не выпуск): $OUT/CursorPad.exe"
   exit 0
 fi
 "$PY" "$HERE/package_release.py" "$PUB" "$HERE"

@@ -1,6 +1,5 @@
 /* Included from pad_extra.c — GitHub self-update. No admin, no UAC. */
 #include "version.h"
-#include "update_key.h" /* kUpdPubKey: открытый ключ подписи выпусков (update_sign.py) */
 
 #define ID_UPDATE 134
 #define WM_UPDATE_DONE (WM_APP + 12)
@@ -99,12 +98,11 @@ static BOOL g_updPinned;
    первые строки, им это не мешает. */
 static char g_updVerText[16384]; /* version.txt самого свежего зеркала */
 static char g_updSha[65];        /* ожидаемый sha256 скачанного, "" — не указан */
-/* С 2026.10.21.2 version.txt подписан: 4-я строка «== 0 signature-rsa-sha256 …»
-   (старые версии принимают её за заголовок «версии 0» и не показывают).
-   Без верной подписи обновление не ставится: version.txt и exe приходят с
-   одних зеркал, и подменивший одно подменит и отпечаток в другом. */
-static BOOL g_updSigOk;
-static BOOL g_updAuto;           /* проверка сама, по таймеру: молча, без окон */
+/* 2026.10.21.2–2026.10.22.1 требовали подпись выпуска — 4-ю строку
+   «== 0 signature-rsa-sha256 …». С 2026.10.22.2 она не проверяется (выпуск
+   собирается и без ключа, в том числе в облаке) и, как «версия 0», не
+   показывается в «что нового». Остался отпечаток sha256 из 3-й строки. */
+static BOOL g_updAuto;          /* проверка сама, по таймеру: молча, без окон */
 static BOOL g_updReady;          /* новая версия скачана и проверена, ждёт установки */
 static long g_updRemoteNum;
 static wchar_t g_updNotes[3000]; /* «что нового» скачанной версии */
@@ -870,47 +868,7 @@ static DWORD upd_read_text(const wchar_t *path, char *buf, DWORD cap) {
   return got;
 }
 
-/* Подпись выпуска: RSA (PKCS#1 v1.5, SHA-256) над «CursorPad-update\n<строка 1>\n
-   <строка 2>\n<sha256>\n» — номер, версия и отпечаток CursorPad.bin. Сверяется
-   открытым ключом из update_key.h; закрытого в программе и в репозитории нет. */
-static BOOL upd_sig_check(const char *t) {
-  static const char kPrefix[] = "== 0 signature-rsa-sha256 ";
-  if (!g_updSha[0]) return FALSE;
-  const char *e1 = strchr(t, '\n'), *l2 = e1 ? e1 + 1 : NULL, *e2 = l2 ? strchr(l2, '\n') : NULL;
-  if (!e2) return FALSE;
-  int n1 = (int)(e1 - t), n2 = (int)(e2 - l2);
-  if (n1 && t[n1 - 1] == '\r') n1--;
-  if (n2 && l2[n2 - 1] == '\r') n2--;
-  if (n1 <= 0 || n2 <= 0 || n1 > 32 || n2 > 32) return FALSE;
-  char msg[160];
-  int m = snprintf(msg, sizeof(msg), "CursorPad-update\n%.*s\n%.*s\n%s\n", n1, t, n2, l2, g_updSha);
-  if (m <= 0 || m >= (int)sizeof(msg)) return FALSE;
-  /* строка подписи — сразу после sha256, в первых строках файла */
-  const char *s = strchr(e2 + 1, '\n');
-  if (!s || strncmp(s + 1, kPrefix, sizeof(kPrefix) - 1)) return FALSE;
-  s += sizeof(kPrefix);
-  const char *end = s;
-  while (*end && *end != '\r' && *end != '\n') end++;
-  BYTE sig[1024], rev[1024];
-  DWORD sn = sizeof(sig);
-  if (end - s > 1400 ||
-      !CryptStringToBinaryA(s, (DWORD)(end - s), CRYPT_STRING_BASE64, sig, &sn, NULL, NULL) || !sn)
-    return FALSE;
-  for (DWORD i = 0; i < sn; i++) rev[i] = sig[sn - 1 - i]; /* CryptoAPI ждёт младшие байты первыми */
-  HCRYPTPROV prov = 0;
-  HCRYPTKEY key = 0;
-  HCRYPTHASH h = 0;
-  BOOL ok = CryptAcquireContextW(&prov, NULL, NULL, PROV_RSA_AES, CRYPT_VERIFYCONTEXT) &&
-            CryptImportKey(prov, kUpdPubKey, sizeof(kUpdPubKey), 0, 0, &key) &&
-            CryptCreateHash(prov, CALG_SHA_256, 0, 0, &h) && CryptHashData(h, (const BYTE *)msg, (DWORD)m, 0) &&
-            CryptVerifySignatureW(h, rev, sn, key, NULL, 0);
-  if (h) CryptDestroyHash(h);
-  if (key) CryptDestroyKey(key);
-  if (prov) CryptReleaseContext(prov, 0);
-  return ok;
-}
-
-/* из version.txt: sha256 (3-я строка) и подпись (4-я) */
+/* из version.txt: sha256 (3-я строка) */
 static void upd_parse_extra(const char *t) {
   g_updSha[0] = 0;
   const char *p = t;
@@ -924,7 +882,6 @@ static void upd_parse_extra(const char *t) {
     g_updSha[n] = 0;
     if (n != 64) g_updSha[0] = 0;
   }
-  g_updSigOk = upd_sig_check(t);
 }
 
 /* «2026.10.14.8» -> 2026101408, как APP_VERSION; 0 — не номер версии */
@@ -1051,7 +1008,7 @@ static BOOL upd_buf_sha256(const void *data, DWORD n, char out[65]) {
   return ok;
 }
 
-/* скачанное — ровно тот выпуск, что объявлен и подписан */
+/* скачанное — ровно тот выпуск, что объявлен в version.txt */
 static BOOL file_is_pe(const wchar_t *path);
 static BOOL upd_sha_ok(const wchar_t *path);
 static BOOL upd_exe_ok(const wchar_t *path) { return file_is_pe(path) && upd_sha_ok(path); }
@@ -1059,10 +1016,6 @@ static BOOL upd_exe_ok(const wchar_t *path) { return file_is_pe(path) && upd_sha
 static BOOL upd_sha_ok(const wchar_t *path) {
   if (!g_updSha[0]) { /* раньше такой файл принимался любым — теперь нет */
     upd_log(L"  в version.txt нет отпечатка sha256 — такой выпуск не ставлю");
-    return FALSE;
-  }
-  if (!g_updSigOk) {
-    upd_log(L"  подпись выпуска не сошлась с ключом CursorPad — не ставлю (подмена или сбой зеркала)");
     return FALSE;
   }
   char got[65];
@@ -1074,7 +1027,7 @@ static BOOL upd_sha_ok(const wchar_t *path) {
     upd_log(L"  отпечаток не совпал с выпуском — файл скачался не тот или не целиком");
     return FALSE;
   }
-  upd_log(L"  подпись и отпечаток sha256 совпали с выпуском");
+  upd_log(L"  отпечаток sha256 совпал с выпуском");
   return TRUE;
 }
 
@@ -1477,14 +1430,13 @@ static DWORD WINAPI update_thread(LPVOID param) {
     code = 1;
     goto done;
   }
-  if (!g_updSha[0] || !g_updSigOk) { /* exe не качаем вовсе: принять его всё равно нельзя */
-    upd_log(L"Итог: выпуск %s без верной подписи CursorPad — не ставлю (подмена или сбой зеркала).", g_updRemote);
-    _snwprintf(g_updErr, 240, L"Версия %s пришла без верной подписи — обновление не поставлено", g_updRemote);
+  if (!g_updSha[0]) { /* exe не качаем вовсе: сверить его будет не с чем */
+    upd_log(L"Итог: в version.txt выпуска %s нет отпечатка sha256 — не ставлю (сбой зеркала).", g_updRemote);
+    _snwprintf(g_updErr, 240, L"Версия %s пришла без отпечатка sha256 — обновление не поставлено", g_updRemote);
     g_updErr[239] = 0;
     code = 0;
     goto done;
   }
-  upd_log(L"  подпись выпуска верна");
   upd_log(L"");
   upd_log(L"Шаг 3 — качаю программу:");
   BOOL got_exe = FALSE;

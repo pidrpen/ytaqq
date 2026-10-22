@@ -1,7 +1,13 @@
-2026102103
-2026.10.21.3
-sha256 f24a1484bf3cb9fb1d4867488c26ec316caffc20cb05ecda95b696b62473fa45
-== 0 signature-rsa-sha256 iouDNesja9/5y8+P0fpV0zp94PBQ/jG6l/a8RwlEiKCiAp5CrAL7HOb0KXn3u/9FA7pxio9LRSh6w6KYLkNzqbuFR20aR+dkAaZ6bQPdFdeZtwJBR78maa8QoLqqTlmG5sXlCAcPVwz2P4xDjzEh1gVZZ5diHE8WBH6gfU0FlBYLrTwyDTFOhukbI+t6eHgFpeQAjVYFznKOXC7visf2MDMLiQYjPwuu7DvRBYOw8Qx+WLQohmrM2Ce0UK6I0j9h470EceOp7qEM8XOIlmzmPDj6zv/lV1nmZp/WrikTc7jFHAbKz4Ylc/Ljlu3EREtBEzRXrkw92ksLanxXMq29mpkwIEA1+8dO7jpz8FKOBht9A27m4NU0N08jdvnedsvn47GcGWxV9Edi859f5HRuTj80tS83QawGgAZlBNWrZB4E2cuFKM3D6jdzBLhQ/E8BratoIBby9Yr4sljCsaTfLMXRW7ZS3nNv/F/FBtje2WzyIbuX1BMcPvOcEct+S0/K
+2026102202
+2026.10.22.2
+sha256 c3a40ece3723aa04512ef72b82b2b4e6962bdc906220b9c6eaf8dc97e092ffdc
+== 0 signature-rsa-sha256 TzVj0rS7HHaTyKAtlue00oMVS/EwgE9DPeCH28j52p4Z+MQ2sSUq13Hios7B15kKhuHdJgQAV0QiWq51yYHAAseE8n4jxoEJ7J2b06tbWy9YMSA4CSCRJ6yeudVuX7GcE9pENkC2dncVQicwUD6I4M4MQFLQvrwnYHDiiRcpqNwaq6C8Q+oF42qJHE4syRO3ggZtGJp5P/phPRtkbw3C0UnSjnc3vpzAGi/jW2jkI4C+JrpxlCkq3DANJXzKTklCKu5FM+U824cDvbKY62beehpfMxIAFp+0LnKzl4EPP4nDuVc1MSS+tL4uHaUe4/sqRlrFeRJypoqYj7U0mOdMvGJbqPjlriHWUjIVR/cwavC2fMVT7vT3J7lw8L3/JxuRSNSE1zfDycVBA0+hmdwQXJDSUqP0CbmRWXyL2Z36GefaCUU6qI81T67EadYGp4bYFCSl/sUpIMb3F+dryDMUDG4tLjzEMmuwVKz+YfuNIwH24wCCfnDeY/vFrDVCy5fR
+== 2026.10.22.2
+Обновления CursorPad больше не требуют подписи разработчика: новую версию можно собрать и выпустить где угодно, в том числе в облаке. Скачанная программа по-прежнему сверяется с отпечатком sha256 из version.txt — недокачанный или повреждённый файл не установится. Пакет Tesseract, как и раньше, принимается только закреплённый в программе.
+
+== 2026.10.22.1
+Морской бой с коллегами через общую папку: расстановка мышью (взять, повернуть колесом или правой кнопкой, поставить) или «Случайно», выстрелы по полю соперника, всплески, огонь и потопленные корабли, полоски «что на плаву». Флоты честные: до боя уходит только отпечаток расстановки, в конце программа соперника сверяет её со всеми ответами. Шашки — новый вид: деревянная доска, объёмные шашки и дамки с короной, свечение тех, кем можно ходить, подсветка последнего хода и взятых, плавные ходы с прыжком через битую, счёт под доской. Нарды переведены на ту же связь, что шашки: копии ходов, журнал партии и строка «связь» — ход больше не теряется на рабочей сети. Начатые партии продолжаются.
+
 == 2026.10.21.3
 Мини-чат у помощника: пока робот на рабочем столе, «Спросить ИИ» и двойной щелчок по нему открывают маленький тёмный чат у его головы — последние реплики пузырями, поле ввода, «отправить» (пока ИИ думает — «стоп»), для плана файловой задачи — «Применить» и «Отмена». Беседа та же, что в полном чате: кнопка ⤢ открывает его со всей историей. Мини-чат ездит за роботом, а если тянуть его за шапку — робот идёт следом. Своё меню помощника вместо строк Windows: правая кнопка по роботу — его состояние, «Открыть чат», ползунок размера, переключатели «Мысли ИИ рядом» и «Гулять рядом с местом», «Отозвать помощника»; закрывается щелчком мимо или Esc. Исправлен обрывок строки внизу ленты чата после прокрутки.
 

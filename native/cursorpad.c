@@ -5354,13 +5354,13 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
       upd_data_file(p, L"sha-test.txt");
       write_all(p, h, (DWORD)strlen(h));
     }
-    /* --upd-verify version.txt отчёт — разобрать version.txt: отпечаток и подпись выпуска */
+    /* --upd-verify version.txt отчёт — разобрать version.txt: отпечаток выпуска */
     if (argv && argc >= 4 && !wcscmp(argv[1], L"--upd-verify")) {
       char *t = NULL, line[160] = "unreadable";
       DWORD n = 0;
       if (read_file_bytes(argv[2], &t, &n, 256 * 1024)) {
         upd_parse_extra(t);
-        snprintf(line, sizeof(line), "sha=%s sig=%d", g_updSha[0] ? g_updSha : "-", g_updSigOk);
+        snprintf(line, sizeof(line), "sha=%s", g_updSha[0] ? g_updSha : "-");
         free(t);
       }
       write_all(argv[3], line, (DWORD)strlen(line));
