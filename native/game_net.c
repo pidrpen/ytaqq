@@ -1,11 +1,11 @@
 /* ---- Игры с коллегами через общую папку: общая связь -----------------------
 
-   Шашки, нарды и морской бой ходят одинаково. До 2026.10.22 эта часть жила
+   Шашки, нарды, морской бой и шахматы ходят одинаково. До 2026.10.22 эта часть жила
    в shashki.c, а у нард была своя, старая: без копий ходов и без записи на
    своём компьютере — на рабочей сети их ходы не доходили, партия вставала на
    «Готовим кубики» или «Ходит …». Теперь у каждой игры свой GnNet и своя
-   папка в общей (CursorPad-Shashki, CursorPad-Nardy, CursorPad-Morskoy), а
-   код один:
+   папка в общей (CursorPad-Shashki, CursorPad-Nardy, CursorPad-Morskoy,
+   CursorPad-Shahmaty), а код один:
 
      inv\<кому>\<партия>.txt   — приглашение: from, name, game
      games\<партия>\p0.txt     — пишет пригласивший (сторона 0)
@@ -51,7 +51,7 @@ typedef struct {
   int mvTaken;
 } GnPoll;
 
-/* кто в сети (ведёт поток нард): тот же список у шашек, морского боя и чата */
+/* кто в сети (ведёт поток нард): тот же список у шашек, морского боя, шахмат и чата */
 typedef struct {
   int nOnline;
   wchar_t onId[ND_MAXONLINE][96], onName[ND_MAXONLINE][128];
@@ -477,7 +477,7 @@ static const wchar_t *gn_parse_copy(const wchar_t *t, wchar_t *game, int *side) 
   return q && q[1] ? q + 1 : NULL;
 }
 
-/* что поток помнит между проходами — своё у каждой игры (потоков три) */
+/* что поток помнит между проходами — своё у каждой игры (поток у каждой) */
 typedef struct {
   wchar_t *good[2]; /* последнее целое содержимое файлов партии */
   wchar_t goodGame[96];
@@ -1411,4 +1411,64 @@ static float gn_wood(float x, float y, float scale, unsigned seed) {
   float ring = sinf((y / scale + n * 9.0f) * 0.9f) * 0.5f + 0.5f;
   float fine = gn_noise(x / (2.5f * scale), y / (0.7f * scale), seed + 3);
   return 0.86f + ring * 0.12f + fine * 0.07f;
+}
+
+/* Доска шашек и шахмат: дерево с волокнами. Рама — орех, волокна вдоль
+   сторон и «на ус» в углах, по внутреннему краю — золотая нить; поля — клён
+   и палисандр, у каждого поля свой рисунок; у края поля — лёгкая тень.
+   q — поле, fr — рама; flip — доска повёрнута (чёрные внизу): рисунок
+   полей свой, а a1 — тёмное снизу слева при любом повороте. */
+static void gn_render_board(GnSprite *s, int q, int fr, BOOL flip) {
+  int bp = q * 8, W = bp + fr * 2;
+  if (!gn_sprite_alloc(s, W, W)) return;
+  float sc = q / 50.0f;
+  for (int y = 0; y < W; y++)
+    for (int x = 0; x < W; x++) {
+      float r, g, b;
+      int ix = x - fr, iy = y - fr;
+      if (ix >= 0 && iy >= 0 && ix < bp && iy < bp) {
+        int sc0 = ix / q, sr0 = iy / q;
+        BOOL dark = ((sr0 + sc0) & 1) == 1; /* a1 — тёмное снизу слева при любом повороте */
+        unsigned seed = (unsigned)(sr0 * 8 + sc0) * 7919u + (flip ? 13u : 0u);
+        /* волокна полей: у соседних — поперёк, как в наборной доске */
+        BOOL across = ((sr0 + sc0) >> 1 & 1) != 0;
+        float wx = across ? (float)y : (float)x, wy = across ? (float)x : (float)y;
+        float wd = gn_wood(wx + seed % 97, wy + seed % 89, sc * 0.8f, seed);
+        if (dark) r = 112 * wd, g = 64 * wd, b = 38 * wd;
+        else r = 236 * wd, g = 212 * wd, b = 166 * wd;
+        /* тень от рамы на поле */
+        int ed = ix < iy ? ix : iy, ed2 = (bp - 1 - ix) < (bp - 1 - iy) ? (bp - 1 - ix) : (bp - 1 - iy);
+        float sh = 1.0f;
+        float lim = 7 * sc;
+        if (ed < lim) sh -= 0.28f * (1 - ed / lim) * (1 - ed / lim);
+        if (ed2 < lim * 0.5f) sh -= 0.10f * (1 - ed2 / (lim * 0.5f));
+        r *= sh, g *= sh, b *= sh;
+        /* тонкий шов между полями */
+        if (ix % q == 0 || iy % q == 0) r *= 0.9f, g *= 0.9f, b *= 0.9f;
+      } else {
+        /* рама: какая сторона ближе — вдоль неё волокна */
+        int dl = x, dt = y, drt = W - 1 - x, db = W - 1 - y;
+        int m = dl, side = 0;
+        if (dt < m) m = dt, side = 1;
+        if (drt < m) m = drt, side = 2;
+        if (db < m) m = db, side = 3;
+        float wd = (side & 1) ? gn_wood((float)x, (float)y, sc, 41u + side) : gn_wood((float)y, (float)x, sc, 53u + side);
+        r = 98 * wd, g = 58 * wd, b = 32 * wd;
+        /* скос: наружный край светлее сверху-слева, внутренний — тёмная канавка */
+        float k = m / (float)fr;
+        if (k < 0.12f) {
+          float f = side == 0 || side == 1 ? 1.22f : 0.72f;
+          r *= f, g *= f, b *= f;
+        } else if (k > 0.80f) {
+          float f = side == 0 || side == 1 ? 0.70f : 1.12f;
+          r *= f, g *= f, b *= f;
+        } else {
+          float bev = 1.0f + 0.10f * (0.5f - fabsf(k - 0.46f));
+          r *= bev, g *= bev, b *= bev;
+        }
+        /* золотая нить */
+        if (m == fr - (int)(4 * sc + 0.5f)) r = 214, g = 170, b = 88;
+      }
+      s->px[(size_t)y * W + x] = gn_pm(r, g, b, 1.0f);
+    }
 }

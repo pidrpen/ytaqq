@@ -38,7 +38,7 @@ typedef struct {
   int kind;     /* 0 — пункт, 1 — заголовок раздела, 2 — опасный (красный), 3 — пока не работает (серый) */
 } MoreItem;
 
-enum { MORE_OCR = 20, MORE_NARDY, MORE_CHANGES, MORE_CLEAR, MORE_LAYOUT, MORE_MSG, MORE_ROUTE, MORE_SHASHKI, MORE_EXPORT, MORE_PACKAGE, MORE_MATCH, MORE_DRAWREC, MORE_AICHAT, MORE_CONVERT, MORE_MORSKOY, MORE_MEMORY };
+enum { MORE_OCR = 20, MORE_NARDY, MORE_CHANGES, MORE_CLEAR, MORE_LAYOUT, MORE_MSG, MORE_ROUTE, MORE_SHASHKI, MORE_EXPORT, MORE_PACKAGE, MORE_MATCH, MORE_DRAWREC, MORE_AICHAT, MORE_CONVERT, MORE_MORSKOY, MORE_MEMORY, MORE_SHAHMATY };
 static const MoreItem kMore[] = {
     {0, L"Расчёты и чертежи", NULL, 0, 1},
     {1, L"Расчёт резки и газов", NULL, 0xE8C6, 0},
@@ -65,6 +65,7 @@ static const MoreItem kMore[] = {
     {MORE_NARDY, L"Нарды", NULL, 0xE7FC, 0},
     {MORE_SHASHKI, L"Шашки", NULL, 0xE7FC, 0}, /* с 2026.09.23.65: по сети, как нарды */
     {MORE_MORSKOY, L"Морской бой", NULL, 0xE7FC, 0}, /* с 2026.10.22: по сети, на той же связи */
+    {MORE_SHAHMATY, L"Шахматы", NULL, 0xE7FC, 0},    /* с 2026.10.23: по сети, на той же связи */
     {MORE_CHANGES, L"Что нового в папке", NULL, 0xE8B7, 0},
     {-1, NULL, NULL, 0, 0}, /* черта */
     {MORE_CLEAR, L"Очистить блокнот…", NULL, 0xE74D, 2},
@@ -172,6 +173,7 @@ static void tools_menu(HWND owner, HWND btn) {
   else if (cmd == MORE_NARDY) nardy_show();
   else if (cmd == MORE_SHASHKI) shashki_show();
   else if (cmd == MORE_MORSKOY) morskoy_show();
+  else if (cmd == MORE_SHAHMATY) shahmaty_show();
   else if (cmd == MORE_CHANGES) files_show_changes();
   else if (cmd == MORE_CLEAR) clear_copied();
 }

@@ -174,12 +174,6 @@ static void sh_replay(const wchar_t *p0, const wchar_t *p1) {
     g_sh.board = bd;
     g_sh.ply = ply;
     g_sh.quiet = quiet;
-    if (nd_has_line(file[0], L"resign") || nd_has_line(file[1], L"resign")) {
-      int loser = nd_has_line(file[0], L"resign") ? 0 : 1;
-      g_sh.resigned = TRUE;
-      sh_over(1 - loser, NULL);
-      return;
-    }
     /* ничья по согласию: один предложил на этом полуходе, другой согласился */
     for (int s = 0; s < 2; s++)
       if (gn_has_num(file[s], L"draw", ply) && gn_has_num(file[1 - s], L"drawok", ply)) {
@@ -195,6 +189,14 @@ static void sh_replay(const wchar_t *p0, const wchar_t *p1) {
     }
     char path[80];
     if (!gn_num_line(file[side], L"m", ply, path, 80)) {
+      /* сдались — партия кончена на этой позиции (раньше проверялось до
+         первого хода, и после сдачи доска вставала в начальную расстановку) */
+      if (nd_has_line(file[0], L"resign") || nd_has_line(file[1], L"resign")) {
+        int loser = nd_has_line(file[0], L"resign") ? 0 : 1;
+        g_sh.resigned = TRUE;
+        sh_over(1 - loser, NULL);
+        return;
+      }
       g_sh.oppOffersDraw = gn_has_num(theirs, L"draw", ply) && !gn_has_num(mine, L"drawok", ply);
       g_sh.iOffered = gn_has_num(mine, L"draw", ply);
       return; /* этот ход ещё не сделан */
@@ -585,65 +587,6 @@ static void sh_render_piece(GnSprite *s, int D, int thick, int kind) {
     }
 }
 
-/* Рама и поля: дерево с волокнами. Рама — орех, волокна вдоль сторон и
-   «на ус» в углах, по внутреннему краю — золотая нить; поля — клён и
-   палисандр, у каждого поля свой рисунок; у края поля — лёгкая тень. */
-static void sh_render_board(GnSprite *s, int q, int fr) {
-  int bp = q * 8, W = bp + fr * 2;
-  if (!gn_sprite_alloc(s, W, W)) return;
-  float sc = q / 50.0f;
-  BOOL flip = sh_my_color() < 0;
-  for (int y = 0; y < W; y++)
-    for (int x = 0; x < W; x++) {
-      float r, g, b;
-      int ix = x - fr, iy = y - fr;
-      if (ix >= 0 && iy >= 0 && ix < bp && iy < bp) {
-        int sc0 = ix / q, sr0 = iy / q;
-        BOOL dark = ((sr0 + sc0) & 1) == 1; /* a1 — тёмное снизу слева при любом повороте */
-        unsigned seed = (unsigned)(sr0 * 8 + sc0) * 7919u + (flip ? 13u : 0u);
-        /* волокна полей: у соседних — поперёк, как в наборной доске */
-        BOOL across = ((sr0 + sc0) >> 1 & 1) != 0;
-        float wx = across ? (float)y : (float)x, wy = across ? (float)x : (float)y;
-        float wd = gn_wood(wx + seed % 97, wy + seed % 89, sc * 0.8f, seed);
-        if (dark) r = 112 * wd, g = 64 * wd, b = 38 * wd;
-        else r = 236 * wd, g = 212 * wd, b = 166 * wd;
-        /* тень от рамы на поле */
-        int ed = ix < iy ? ix : iy, ed2 = (bp - 1 - ix) < (bp - 1 - iy) ? (bp - 1 - ix) : (bp - 1 - iy);
-        float sh = 1.0f;
-        float lim = 7 * sc;
-        if (ed < lim) sh -= 0.28f * (1 - ed / lim) * (1 - ed / lim);
-        if (ed2 < lim * 0.5f) sh -= 0.10f * (1 - ed2 / (lim * 0.5f));
-        r *= sh, g *= sh, b *= sh;
-        /* тонкий шов между полями */
-        if (ix % q == 0 || iy % q == 0) r *= 0.9f, g *= 0.9f, b *= 0.9f;
-      } else {
-        /* рама: какая сторона ближе — вдоль неё волокна */
-        int dl = x, dt = y, drt = W - 1 - x, db = W - 1 - y;
-        int m = dl, side = 0;
-        if (dt < m) m = dt, side = 1;
-        if (drt < m) m = drt, side = 2;
-        if (db < m) m = db, side = 3;
-        float wd = (side & 1) ? gn_wood((float)x, (float)y, sc, 41u + side) : gn_wood((float)y, (float)x, sc, 53u + side);
-        r = 98 * wd, g = 58 * wd, b = 32 * wd;
-        /* скос: наружный край светлее сверху-слева, внутренний — тёмная канавка */
-        float k = m / (float)fr;
-        if (k < 0.12f) {
-          float f = side == 0 || side == 1 ? 1.22f : 0.72f;
-          r *= f, g *= f, b *= f;
-        } else if (k > 0.80f) {
-          float f = side == 0 || side == 1 ? 0.70f : 1.12f;
-          r *= f, g *= f, b *= f;
-        } else {
-          float bev = 1.0f + 0.10f * (0.5f - fabsf(k - 0.46f));
-          r *= bev, g *= bev, b *= bev;
-        }
-        /* золотая нить */
-        if (m == fr - (int)(4 * sc + 0.5f)) r = 214, g = 170, b = 88;
-      }
-      s->px[(size_t)y * W + x] = gn_pm(r, g, b, 1.0f);
-    }
-}
-
 static void sh_art_build(void) {
   int q = SS_(SH_SQ);
   if (g_shArt.q == q && g_shArt.board.px) return;
@@ -662,7 +605,7 @@ static void sh_art_build(void) {
   gn_make_ring(&g_shArt.dot, q * 0.15f, q * 0.15f, (float)SS_(3), RGB(110, 226, 150), 0.80f);
   gn_make_ring(&g_shArt.dotHi, q * 0.22f, q * 0.22f, (float)SS_(5), RGB(140, 240, 170), 0.85f);
   gn_make_ring(&g_shArt.flash, D / 2.0f + SS_(10), (float)SS_(4), (float)SS_(10), RGB(255, 222, 120), 1.0f);
-  sh_render_board(&g_shArt.board, q, SS_(SH_FRAME));
+  gn_render_board(&g_shArt.board, q, SS_(SH_FRAME), sh_my_color() < 0);
 }
 
 /* доска собрана для другой стороны (поворот меняет рисунок полей) */
