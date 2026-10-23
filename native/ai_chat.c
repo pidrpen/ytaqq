@@ -2143,7 +2143,7 @@ static void ac_send(void) {
     ag_stop();
     g_acRouteDispatch = quick;
   }
-  BOOL files = g_acRouteDispatch == 1;
+  BOOL files = g_acRouteDispatch == 1 || g_acRouteDispatch == 6; /* 6 — данные PLM и архива: тот же помощник с инструментами */
   BOOL forceWeb = g_acRouteDispatch == 2;
   BOOL forceLocal = g_acRouteDispatch == 3;
   g_acRouteDispatch = 0;

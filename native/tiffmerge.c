@@ -925,12 +925,13 @@ static TmJob *tm_job_paths(int type, TmPaths *l) {
 
 static void tm_relayout(void);
 
-static void tm_load_paths(TmPaths *l) {
+/* sort — по имени; пакет из карточки PLM идёт в порядке состава, без него */
+static void tm_load_paths_ex(TmPaths *l, BOOL sort) {
   if (!l->n || g_tmExporting) { /* пока сохраняется — не добавляем: окно под полосой хода */
     free(l->p);
     return;
   }
-  tm_paths_sort(l);
+  if (sort) tm_paths_sort(l);
   TmJob *j = tm_job_paths(TJ_LOAD, l);
   if (!j) return;
   g_tmLoadPending++;
@@ -938,6 +939,8 @@ static void tm_load_paths(TmPaths *l) {
   tm_submit(j);
   tm_relayout();
 }
+
+static void tm_load_paths(TmPaths *l) { tm_load_paths_ex(l, TRUE); }
 
 /* окно выбора файлов (несколько сразу) */
 static BOOL tm_pick(HWND owner, TmPaths *l, const wchar_t *title) {
@@ -1016,6 +1019,8 @@ static void tm_start_export(TmJob *j, BOOL pdf) {
   tm_relayout();
 }
 
+static wchar_t g_tmSuggest[MAX_PATH]; /* имя файла, предложенное пакетом из карточки */
+
 static void tm_export(BOOL pdf) {
   if (!g_tmN || g_tmExporting || g_tmLoadPending) return;
   wchar_t file[MAX_PATH], base[MAX_PATH];
@@ -1023,6 +1028,7 @@ static void tm_export(BOOL pdf) {
   wchar_t *dot = wcsrchr(base, L'.');
   if (dot) *dot = 0;
   _snwprintf(file, MAX_PATH, L"%s_объединено", base);
+  if (g_tmSuggest[0]) lstrcpynW(file, g_tmSuggest, MAX_PATH);
   file[MAX_PATH - 1] = 0;
   if (!tm_save_as(g_tmWnd, file, pdf, g_tmPages[0].path)) return;
   TmJob *j = (TmJob *)calloc(1, sizeof(TmJob));
@@ -1089,15 +1095,20 @@ static void tm_move(int from, int to) { /* to — место в списке п�
   tm_relayout();
 }
 
-static void tm_clear(void) {
-  if (!g_tmN) return;
-  if (MessageBoxW(g_tmWnd, L"Очистить все страницы?", L"Объединение TIFF / PDF", MB_YESNO | MB_ICONQUESTION) != IDYES)
-    return;
+static void tm_clear_pages(void) {
   for (int i = 0; i < g_tmN; i++)
     if (g_tmPages[i].thumb) DeleteObject(g_tmPages[i].thumb);
   g_tmN = 0;
   g_tmSel = -1;
+  g_tmSuggest[0] = 0;
   tm_relayout();
+}
+
+static void tm_clear(void) {
+  if (!g_tmN) return;
+  if (MessageBoxW(g_tmWnd, L"Очистить все страницы?", L"Объединение TIFF / PDF", MB_YESNO | MB_ICONQUESTION) != IDYES)
+    return;
+  tm_clear_pages();
 }
 
 static void tm_open_file(const wchar_t *path) {
@@ -2609,4 +2620,29 @@ static void tiffmerge_show(void) {
   ShowWindow(g_tmWnd, IsIconic(g_tmWnd) ? SW_RESTORE : SW_SHOW);
   SetForegroundWindow(g_tmWnd);
   SetFocus(g_tmCanvas);
+}
+
+/* «PDF-пакет» из карточки PLM (pad_extra.c): сканы чертежей сборки и её
+   состава — сюда, в порядке состава. Сохраняет человек сам, кнопкой PDF:
+   до неё на диске ничего не появляется. Свои страницы в окне без спроса
+   не выбрасываем. */
+static BOOL tm_open_pack(wchar_t (*paths)[MAX_PATH], int n, const wchar_t *name) {
+  tiffmerge_show();
+  if (!g_tmWnd || !n) return FALSE;
+  if (g_tmExporting || g_tmLoadPending) {
+    MessageBoxW(g_tmWnd, L"Окно объединения сейчас занято — дождитесь конца и нажмите «PDF-пакет» ещё раз.",
+                L"PDF-пакет", MB_OK | MB_ICONINFORMATION);
+    return FALSE;
+  }
+  if (g_tmN) {
+    int r = MessageBoxW(g_tmWnd, L"В окне уже есть страницы. Заменить их пакетом из карточки?\n\n«Нет» — добавить пакет в конец.",
+                        L"PDF-пакет", MB_YESNOCANCEL | MB_ICONQUESTION);
+    if (r == IDCANCEL) return FALSE;
+    if (r == IDYES) tm_clear_pages();
+  }
+  TmPaths l = {0};
+  for (int i = 0; i < n; i++) tm_paths_add(&l, paths[i]);
+  lstrcpynW(g_tmSuggest, name ? name : L"", MAX_PATH);
+  tm_load_paths_ex(&l, FALSE);
+  return TRUE;
 }

@@ -346,6 +346,18 @@ static int share_serve_child(const wchar_t *reqPath, const wchar_t *ansPath) {
       sb_field(&b, g_cardDraw);
       sb_add(&b, L"\n");
     }
+    /* «PDF-пакет»: чертежи сборки и состава; старая версия у коллеги эти
+       строки пропустит, как и «pf» */
+    if (g_cardDes[0]) {
+      sb_add(&b, L"des");
+      sb_field(&b, g_cardDes);
+      sb_add(&b, L"\n");
+    }
+    for (int i = 0; i < g_cardPackN; i++) {
+      sb_add(&b, L"pack");
+      sb_field(&b, g_cardPack[i]);
+      sb_add(&b, L"\n");
+    }
   } else if (!wcscmp(kind, L"pf") && idl[0]) {
     /* столбец «Заготовка» для находок коллеги — отдельно от самого поиска */
     PfJob *j = (PfJob *)calloc(1, sizeof(PfJob));
@@ -821,6 +833,9 @@ static void share_card(long id, BOOL verbose, wchar_t *out, int cap) {
     /* путь к чертежу — из индекса коллеги; берём, только если файл виден и отсюда */
     else if (!wcscmp(f[0], L"draw") && GetFileAttributesW(f[1]) != INVALID_FILE_ATTRIBUTES)
       lstrcpynW(g_cardDraw, f[1], PLM_LINK);
+    else if (!wcscmp(f[0], L"des")) lstrcpynW(g_cardDes, f[1], 200);
+    else if (!wcscmp(f[0], L"pack") && GetFileAttributesW(f[1]) != INVALID_FILE_ATTRIBUTES)
+      card_pack_add(f[1]);
   }
   ans_printf(out, cap, L"%s\r\n\r\n  PLM через компьютер: %s", p ? p : L"", via[0] ? via : L"коллеги");
   free(a);

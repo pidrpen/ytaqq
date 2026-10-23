@@ -31,6 +31,7 @@
 #define ID_OCR_CLOSE 167
 #define ID_OCR_NOTES 198 /* «В блокнот»: распознанное — в заметки, только если попросили */
 #define ID_CARD_1C 168
+#define ID_CARD_PACK 171 /* «PDF-пакет»: сканы сборки и состава — в окно объединения */
 #define ID_ANS_OPENTP 170
 #define TIMER_1C 21
 
@@ -506,6 +507,18 @@ static LRESULT CALLBACK AnsListProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
 static RECT g_ansPrev;
 static BOOL g_ansBig; /* окно находок развёрнуто на весь экран */
 static wchar_t g_cardDraw[PLM_LINK]; /* чертёж, найденный для карточки */
+/* «PDF-пакет» (с 2026.10.23): чертёж самой карточки и по одному на каждую
+   позицию состава сборки, в порядке состава. Пишет поток карточки, читает
+   кнопка — когда карточка уже собрана, как и g_cardDraw. */
+#define CARD_PACK 120
+static wchar_t g_cardPack[CARD_PACK][MAX_PATH];
+static int g_cardPackN;
+static wchar_t g_cardDes[200]; /* обозначение карточки: имя пакета */
+/* позиции состава из техсостава: их чертежи ищутся в архиве по обозначению */
+#define CARD_KIDS 120
+static wchar_t g_cardKid[CARD_KIDS][200];
+static wchar_t g_cardKidName[CARD_KIDS][120];
+static int g_cardKidN;
 /* Чертёж выбранной строки находок. Ищется в индексе файлов сразу,
    без отдельного поиска «Файлы»: иначе кнопка «Открыть чертёж» не знает,
    гореть ей или быть потухшей. */
@@ -2845,8 +2858,158 @@ static long card_tp_by_designation(SQLHDBC dbc, const wchar_t *des, CardOut *c, 
   return rows[0].n1;
 }
 
+/* скан, который склеит окно «Объединение TIFF / PDF» (tiffmerge.c) */
+static BOOL card_is_scan(const wchar_t *name) {
+  static const wchar_t *ext[] = {L"tif", L"tiff", L"jpg", L"jpeg", L"png", L"bmp", L"gif"};
+  const wchar_t *dot = wcsrchr(name, L'.');
+  if (!dot || !dot[1]) return FALSE;
+  for (int i = 0; i < (int)(sizeof(ext) / sizeof(ext[0])); i++)
+    if (_wcsicmp(dot + 1, ext[i]) == 0) return TRUE;
+  return FALSE;
+}
+
+/* в пакет — скан, если он есть среди чертежей: PDF и КОМПАС окно не склеит */
+static const wchar_t *card_pack_pick(const CardFiles *f) {
+  for (int i = 0; i < f->nd; i++)
+    if (card_is_scan(f->draw[i])) return f->draw[i];
+  return f->nd ? f->draw[0] : NULL;
+}
+
+static void card_pack_add(const wchar_t *path) {
+  if (!path || !path[0] || wcslen(path) >= MAX_PATH || g_cardPackN >= CARD_PACK) return;
+  for (int i = 0; i < g_cardPackN; i++)
+    if (!_wcsicmp(g_cardPack[i], path)) return;
+  lstrcpynW(g_cardPack[g_cardPackN++], path, MAX_PATH);
+}
+
+/* Позиция техсостава — деталь или сборка, если в имени, на которое ссылается
+   строка, есть обозначение по шаблону штампа (search_route.c). Материалы и
+   нормали («Круг 45 ГОСТ 2590-2006», «Болт М8 ГОСТ 7798-70») шаблон отсеивает. */
+static void card_kid_add(const wchar_t *linkName) {
+  if (g_cardKidN >= CARD_KIDS) return;
+  wchar_t des[200], p[SR_Q], u[SR_Q];
+  card_des_from_name(linkName, des, 200);
+  /* имя детали и сборки начинается с обозначения («АДЕ 3422-…», «682.01…»),
+     покупного — со слова («Подшипник 6205-2RS»): строчная буква в первом
+     слове — не наше */
+  for (int k = 0; !dr_isdig(des[0]) && des[k] && des[k] != L' ' && des[k] != L'.'; k++) {
+    wchar_t ch = des[k];
+    if ((ch >= L'а' && ch <= L'я') || ch == L'ё' || (ch >= L'a' && ch <= L'z')) return;
+  }
+  sr_prep(des, p, SR_Q);
+  int i = 0;
+  for (; p[i]; i++) u[i] = sr_upper(p[i]);
+  u[i] = 0;
+  int b, e;
+  if (!sr_find_des(p, u, &b, &e)) return;
+  for (int k = 0; k < g_cardKidN; k++)
+    if (!_wcsicmp(g_cardKid[k], des)) return;
+  lstrcpynW(g_cardKid[g_cardKidN], des, 200);
+  card_title_from_name(linkName, g_cardKidName[g_cardKidN], 120);
+  g_cardKidN++;
+}
+
+/* Обозначение ЭСИ бывает длиннее имени файла: впереди буквенный код
+   («АДЕ 3422-…»), которого в имени скана нет, сзади исполнение или «-01ТП».
+   Пробуем как есть, потом голое обозначение (plm_core_des), потом без
+   короткого хвоста. Длинный хвост не режем: «АДЕ 3422» нашёл бы всё подряд. */
+static BOOL card_find_files(const wchar_t *des, CardFiles *f, wchar_t *used, int cap) {
+  wchar_t key[PLM_COL1], core[PLM_COL1];
+  memset(f, 0, sizeof(*f));
+  lstrcpynW(key, des, PLM_COL1);
+  for (int attempt = 0; attempt < 4; attempt++) {
+    if (attempt == 1) {
+      plm_core_des(des, core, PLM_COL1);
+      if (!core[0] || !_wcsicmp(core, key)) continue;
+      lstrcpynW(key, core, PLM_COL1);
+    } else if (attempt > 1) {
+      wchar_t *cut = wcsrchr(key, L'-');
+      if (!cut || cut == key || wcslen(cut + 1) > 5) break;
+      *cut = 0;
+    }
+    if (wcslen(key) < 4) break;
+    card_scan_files(key, f);
+    if (f->total) break;
+  }
+  lstrcpynW(used, key, cap);
+  return f->total > 0;
+}
+
+/* Чертежи позиций состава: один проход по индексу на все позиции сразу —
+   индекс большой, а позиций у сборки бывает сотня. Ключ — голое обозначение;
+   не нашлось — второй проход без короткого хвоста (исполнение «-01»). */
+typedef struct {
+  wchar_t key[PLM_COL1];
+  wchar_t best[MAX_PATH];
+  int nd;
+  BOOL scan, want; /* want — искать в этом проходе */
+} CardKidHit;
+
+static void card_scan_kids(CardKidHit *h, int n) {
+  files_lock();
+  FileIdx *ix = g_idx;
+  if (ix) {
+    for (int i = 0; i < ix->n; i++) {
+      const wchar_t *name = ix->ent[i].name;
+      if (!card_is_drawing(name)) continue;
+      const wchar_t *dir = ix->ent[i].dir < ix->dirsN ? ix->dirs[ix->ent[i].dir] : L"";
+      for (int k = 0; k < n; k++) {
+        if (!h[k].want || h[k].scan || !wcs_istr(name, h[k].key)) continue;
+        h[k].nd++;
+        wchar_t full[MAX_PATH];
+        if (_snwprintf(full, MAX_PATH, L"%s\\%s", dir, name) < 0) continue;
+        full[MAX_PATH - 1] = 0;
+        BOOL scan = card_is_scan(name);
+        if (scan || !h[k].best[0]) lstrcpynW(h[k].best, full, MAX_PATH);
+        if (scan) h[k].scan = TRUE;
+      }
+    }
+  }
+  files_unlock();
+}
+
+static void card_kid_drawings(CardOut *c) {
+  CardKidHit *h = (CardKidHit *)calloc((size_t)g_cardKidN, sizeof(CardKidHit));
+  if (!h) return;
+  for (int k = 0; k < g_cardKidN; k++) {
+    plm_core_des(g_cardKid[k], h[k].key, PLM_COL1);
+    if (wcslen(h[k].key) < 5) lstrcpynW(h[k].key, g_cardKid[k], PLM_COL1);
+    h[k].want = TRUE;
+  }
+  card_scan_kids(h, g_cardKidN);
+  /* второй проход — только по тем, кого не нашли */
+  int again = 0;
+  for (int k = 0; k < g_cardKidN; k++) {
+    h[k].want = FALSE;
+    if (h[k].nd) continue;
+    wchar_t *cut = wcsrchr(h[k].key, L'-');
+    if (cut && cut != h[k].key && wcslen(cut + 1) <= 5 && cut - h[k].key >= 5) {
+      *cut = 0;
+      h[k].want = TRUE;
+      again++;
+    }
+  }
+  if (again) card_scan_kids(h, g_cardKidN);
+  int found = 0;
+  for (int k = 0; k < g_cardKidN; k++)
+    if (h[k].nd) found++;
+  card_add(c, L"\r\nЧЕРТЕЖИ СОСТАВА: в архиве %d из %d\r\n", found, g_cardKidN);
+  for (int k = 0; k < g_cardKidN; k++) {
+    BOOL have = h[k].nd && h[k].best[0];
+    card_add(c, L"  %s %s%s%s%s\r\n", have ? L"●" : L"○", g_cardKid[k], g_cardKidName[k][0] ? L"  " : L"",
+             g_cardKidName[k], have ? L"" : L" — нет в архиве");
+    if (!have) continue;
+    card_add(c, L"       %s\r\n", h[k].best);
+    card_pack_add(h[k].best);
+  }
+  free(h);
+}
+
+/* Блок «Файлы в архиве»: файлы в PLM не лежат — там только ссылка на
+   объект-документ, а сами чертежи на сетевом диске, уже проиндексированном.
+   По обозначению карточки, а у сборки — и по каждой позиции её состава. */
 static void card_drawings(const wchar_t *designation, CardOut *c) {
-  card_add(c, g_cardVerbose ? L"\r\nЧЕРТЁЖ И ФАЙЛЫ" : L"ЧЕРТЁЖ");
+  card_add(c, g_cardVerbose ? L"\r\nФАЙЛЫ В АРХИВЕ" : L"ФАЙЛЫ В АРХИВЕ");
   if (!designation || !designation[0]) {
     card_add(c, L": у объекта нет обозначения, искать нечего.\r\n");
     return;
@@ -2856,44 +3019,26 @@ static void card_drawings(const wchar_t *designation, CardOut *c) {
     card_add(c, L": индекс файлов пуст — нажмите «Обновить JSON» в Настройках.\r\n");
     return;
   }
-  /* Обозначение ЭСИ бывает длиннее имени файла: у техпроцесса на конце -01ТП,
-     а чертёж назван по самой детали. Не нашли — отрезаем хвост и пробуем ещё. */
-  wchar_t key[200];
-  lstrcpynW(key, designation, 200);
+  wchar_t key[PLM_COL1];
   CardFiles f;
-  memset(&f, 0, sizeof(f));
-  for (int attempt = 0; attempt < 3; attempt++) {
-    if (attempt) {
-      wchar_t *cut = wcsrchr(key, L'-');
-      if (!cut || cut == key) break;
-      *cut = 0;
-    }
-    card_scan_files(key, &f);
-    if (f.total) break;
-  }
-  if (!f.total) {
+  if (!card_find_files(designation, &f, key, PLM_COL1)) {
     card_add(c, L": по «%s» в индексе ничего нет.\r\n", designation);
-    return;
-  }
-  if (!g_cardVerbose) {
-    /* по делу — один чертёж; остальные файлы по Shift */
-    card_add(c, L"\r\n");
-    if (f.nd) {
-      card_show_file(c, f.draw[0]);
-      lstrcpynW(g_cardDraw, f.draw[0], PLM_LINK);
-    } else {
-      card_add(c, L"  чертежа не нашлось\r\n");
+  } else {
+    card_add(c, L" (по «%s», найдено %d)\r\n", key, f.total);
+    for (int i = 0; i < f.nd; i++) {
+      card_show_file(c, f.draw[i]);
+      if (!g_cardDraw[0]) lstrcpynW(g_cardDraw, f.draw[i], PLM_LINK);
     }
-    if (f.total > 1) card_add(c, L"  ещё файлов: %d\r\n", f.total - (f.nd ? 1 : 0));
-    return;
+    if (!f.nd) card_add(c, L"  чертежей не нашлось\r\n");
+    if (g_cardVerbose)
+      for (int i = 0; i < f.no; i++) card_show_file(c, f.other[i]);
+    else if (f.total > f.nd)
+      card_add(c, L"  ещё файлов не-чертежей: %d (Shift + «Все данные»)\r\n", f.total - f.nd);
+    card_pack_add(card_pack_pick(&f));
   }
-  card_add(c, L" (по «%s», найдено %d)\r\n", key, f.total);
-  for (int i = 0; i < f.nd; i++) {
-    card_show_file(c, f.draw[i]);
-    if (!g_cardDraw[0]) lstrcpynW(g_cardDraw, f.draw[i], PLM_LINK);
-  }
-  if (!f.nd) card_add(c, L"  чертежей не нашлось\r\n");
-  for (int i = 0; i < f.no; i++) card_show_file(c, f.other[i]);
+  if (g_cardKidN) card_kid_drawings(c);
+  if (g_cardPackN)
+    card_add(c, L"\r\nPDF-пакет: чертежей %d — кнопка «PDF-пакет» склеит сканы в один PDF.\r\n", g_cardPackN);
 }
 
 /* У техпроцесса есть прямая ссылка на изделие — ManufacturedProducts.
@@ -3802,6 +3947,14 @@ static void card_techcomp(SQLHDBC dbc, long tcCard, long prodConf, CardOut *c, C
              L"ORDER BY a.CollectionElementId, a.DataType DESC, nk.Value",
              CARD_ROWS, ids);
   n = card_query(dbc, sql, rows, CARD_ROWS, err, 280);
+  /* детали и сборки состава — для чертежей в архиве (card_drawings): строка
+     ссылается на них первой ссылкой; материалы и нормали отсеивает шаблон */
+  for (int e = 0; e < used; e++)
+    for (int i = 0; i < n; i++)
+      if (rows[i].n1 == els[e] && rows[i].n3 == 6 && rows[i].s2[0]) {
+        card_kid_add(rows[i].s2);
+        break;
+      }
   if (g_cardVerbose) card_add(c, L"ТЕХСОСТАВ (%d)%s\r\n", used, verNote);
   else card_add(c, L"ТЕХСОСТАВ%s\r\n", verNote);
   for (int e = 0; e < used; e++) {
@@ -3849,6 +4002,8 @@ static void card_techcomp(SQLHDBC dbc, long tcCard, long prodConf, CardOut *c, C
 
 static void plm_card(long id, wchar_t *out, int cap) {
   g_opsPendN = 0;
+  g_cardPackN = g_cardKidN = 0;
+  g_cardDes[0] = 0;
   if (share_client_on()) {
     share_card(id, g_cardVerbose, out, cap);
     return;
@@ -4113,6 +4268,7 @@ freed:
   else if (!actualVer) card_add(&c, L"ТЕХСОСТАВ: карточки техсостава у изделия не нашлось.\r\n\r\n");
   g_qTimeout = 0;
   g_cardTUsed = card_lap();
+  lstrcpynW(g_cardDes, designation, 200);
   card_drawings(designation, &c);
   g_cardTFiles = card_lap();
   if (g_cardVerbose)
@@ -4378,7 +4534,7 @@ static int btn_row_width(HWND parent, const int *ids, int n) {
 
 static const int kAnsBtns[6] = {ID_ANS_OPEN, ID_ANS_OPENTP, ID_ANS_CARD, ID_ANS_DRAW, ID_ANS_SHOW,
                                 ID_ANS_CLOSE};
-static const int kCardBtns[5] = {ID_CARD_OPEN, ID_CARD_DRAW, ID_CARD_SHOW, ID_CARD_1C, ID_CARD_CLOSE};
+static const int kCardBtns[6] = {ID_CARD_OPEN, ID_CARD_DRAW, ID_CARD_SHOW, ID_CARD_PACK, ID_CARD_1C, ID_CARD_CLOSE};
 static const int kOcrBtns[5] = {ID_OCR_COPY, ID_OCR_NOTES, ID_OCR_FIND, ID_OCR_AGAIN, ID_OCR_CLOSE};
 
 /* Дотянуть открытое окно до ширины ряда кнопок — сразу после смены темы.
@@ -4400,7 +4556,7 @@ static void widen_to_row(HWND w, const int *ids, int n) {
 
 static void theme_fit_windows(void) {
   widen_to_row(g_answer, kAnsBtns, 6);
-  widen_to_row(g_card, kCardBtns, 5);
+  widen_to_row(g_card, kCardBtns, 6);
   widen_to_row(g_ocrWnd, kOcrBtns, 5);
 }
 
@@ -5141,9 +5297,11 @@ static void card_sync_buttons(void) {
   HWND show = GetDlgItem(g_card, ID_CARD_SHOW);
   BOOL haveFile = g_cardDraw[0] != 0;
   HWND onec = GetDlgItem(g_card, ID_CARD_1C);
+  HWND pack = GetDlgItem(g_card, ID_CARD_PACK);
   if (open) EnableWindow(open, g_ansObj[0] != 0);
   if (draw) EnableWindow(draw, haveFile);
   if (show) EnableWindow(show, haveFile);
+  if (pack) EnableWindow(pack, g_cardPackN > 0);
   if (onec) EnableWindow(onec, g_ops1cN > 0);
   layout_card();
 }
@@ -5166,17 +5324,13 @@ static void layout_card(void) {
   }
   if (g_drawPane) ShowWindow(g_drawPane, withPane ? SW_SHOW : SW_HIDE);
   if (g_cardEdit) MoveWindow(g_cardEdit, textLeft, top, textRight - textLeft, by - top - 6, TRUE);
-  HWND btns[5];
-  btns[0] = GetDlgItem(g_card, ID_CARD_OPEN);
-  btns[1] = GetDlgItem(g_card, ID_CARD_DRAW);
-  btns[2] = GetDlgItem(g_card, ID_CARD_SHOW);
-  btns[3] = GetDlgItem(g_card, ID_CARD_1C);
-  btns[4] = GetDlgItem(g_card, ID_CARD_CLOSE);
-  int bwid[5] = {0, 0, 0, 0, 0};
+  HWND btns[6];
+  for (int k = 0; k < 6; k++) btns[k] = GetDlgItem(g_card, kCardBtns[k]);
+  int bwid[6] = {0, 0, 0, 0, 0, 0};
   int total = 0, vis = 0;
   HDC dc = GetDC(g_card);
   HGDIOBJ oldFont = (dc && g_fontUi) ? SelectObject(dc, g_fontUi) : NULL;
-  for (int k = 0; k < 5; k++) {
+  for (int k = 0; k < 6; k++) {
     if (!btns[k]) continue;
     wchar_t t[96];
     t[0] = 0;
@@ -5196,9 +5350,9 @@ static void layout_card(void) {
     int avail = rc.right - pad * 2 - gap * (vis - 1);
     if (avail < vis * 40) avail = vis * 40;
     if (total > avail && total > 0)
-      for (int k = 0; k < 5; k++) bwid[k] = bwid[k] * avail / total;
+      for (int k = 0; k < 6; k++) bwid[k] = bwid[k] * avail / total;
     int bx = pad;
-    for (int k = 0; k < 5; k++) {
+    for (int k = 0; k < 6; k++) {
       if (!btns[k]) continue;
       MoveWindow(btns[k], bx, by, bwid[k], btnH, TRUE);
       ShowWindow(btns[k], SW_SHOW);
@@ -5229,6 +5383,61 @@ static void card_toggle_big(HWND hwnd) {
                  SWP_SHOWWINDOW);
   }
   layout_card();
+}
+
+/* «PDF-пакет»: сканы из блока «Файлы в архиве» — в окно «Объединение TIFF /
+   PDF» в порядке состава (сборка, потом позиции). Сохраняет человек сам
+   кнопкой PDF в том окне — до неё на диске ничего не появляется. PDF и
+   файлы КОМПАС окно не склеивает: их перечисляем, чтобы не потерялись. */
+static BOOL tm_open_pack(wchar_t (*paths)[MAX_PATH], int n, const wchar_t *name); /* tiffmerge.c */
+
+static void card_pack_pdf(void) {
+  if (g_netBusy) {
+    show_status(L"Карточка ещё собирается — пакет будет после неё");
+    return;
+  }
+  wchar_t(*scans)[MAX_PATH] = calloc(CARD_PACK, sizeof(*scans));
+  if (!scans) return;
+  int ns = 0, nother = 0, missing = 0;
+  wchar_t other[1200] = L"";
+  for (int i = 0; i < g_cardPackN; i++) {
+    if (GetFileAttributesW(g_cardPack[i]) == INVALID_FILE_ATTRIBUTES) {
+      missing++;
+      continue;
+    }
+    if (card_is_scan(g_cardPack[i])) {
+      lstrcpynW(scans[ns++], g_cardPack[i], MAX_PATH);
+      continue;
+    }
+    const wchar_t *slash = wcsrchr(g_cardPack[i], L'\\');
+    if (nother++ < 8 && wcslen(other) < 1000)
+      _snwprintf(other + wcslen(other), 1200 - wcslen(other), L"\n  %s", slash ? slash + 1 : g_cardPack[i]);
+  }
+  other[1199] = 0;
+  wchar_t note[1600];
+  _snwprintf(note, 1600, L"%s%s%s", nother ? L"Не сканы — в PDF не войдут, откройте их отдельно:" : L"", other,
+             missing ? L"\nЧасть файлов сейчас недоступна (сетевой диск?)." : L"");
+  note[1599] = 0;
+  if (!ns) {
+    wchar_t m[1800];
+    _snwprintf(m, 1800, L"Сканов (TIFF, JPG, PNG) для пакета не нашлось.\n%s", note);
+    m[1799] = 0;
+    MessageBoxW(g_card, m, L"PDF-пакет", MB_OK | MB_ICONINFORMATION);
+    free(scans);
+    return;
+  }
+  wchar_t name[240];
+  _snwprintf(name, 240, L"%s пакет", g_cardDes[0] ? g_cardDes : L"Чертежи");
+  name[239] = 0;
+  for (wchar_t *c = name; *c; c++)
+    if (wcschr(L"\\/:*?\"<>|", *c)) *c = L'_';
+  BOOL opened = tm_open_pack(scans, ns, name);
+  free(scans);
+  if (!opened) return;
+  wchar_t m[200];
+  _snwprintf(m, 200, L"В окне объединения листов: %d. Проверьте порядок и нажмите «PDF».", ns);
+  show_status(m);
+  if (nother || missing) MessageBoxW(g_card, note, L"PDF-пакет", MB_OK | MB_ICONINFORMATION);
 }
 
 static LRESULT CALLBACK CardProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -5278,6 +5487,7 @@ static LRESULT CALLBACK CardProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
     if (LOWORD(wParam) == ID_CARD_DRAW && g_cardDraw[0])
       ShellExecuteW(NULL, L"open", g_cardDraw, NULL, NULL, SW_SHOWNORMAL);
     if (LOWORD(wParam) == ID_CARD_SHOW && g_cardDraw[0]) show_in_explorer(g_cardDraw);
+    if (LOWORD(wParam) == ID_CARD_PACK) card_pack_pdf();
     if (LOWORD(wParam) == ID_CARD_1C) onec_start();
     return 0;
   case WM_CLOSE:
@@ -5351,6 +5561,7 @@ static void create_card(HWND owner) {
   HWND open = mk_btn(g_card, L"Открыть в СОЮЗ", ID_CARD_OPEN);
   HWND draw = mk_btn(g_card, L"Открыть чертёж", ID_CARD_DRAW);
   HWND show = mk_btn(g_card, L"Открыть файл в проводнике", ID_CARD_SHOW);
+  HWND pack = mk_btn(g_card, L"PDF-пакет", ID_CARD_PACK);
   /* перенос операций в 1С: после каждой вставки в буфере следующая */
   HWND onec = mk_btn(g_card, L"В 1С", ID_CARD_1C);
   HWND cls = mk_btn(g_card, L"Закрыть", ID_CARD_CLOSE);
@@ -5360,6 +5571,7 @@ static void create_card(HWND owner) {
     SendMessageW(open, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
     SendMessageW(draw, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
     SendMessageW(show, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
+    SendMessageW(pack, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
     SendMessageW(onec, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
     SendMessageW(cls, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
   }
@@ -5383,7 +5595,7 @@ static void show_card_text(const wchar_t *text) {
   if (aw <= 0 || ah <= 0) ans_fit(text, &wa, &aw, &ah, g_cardEdit, card_font());
   if (aw < ANS_W) aw = ANS_W;
   {
-    int row = btn_row_width(g_card, kCardBtns, 5);
+    int row = btn_row_width(g_card, kCardBtns, 6);
     if (aw < row) aw = row;
   }
   if (aw > wa.right - wa.left) aw = wa.right - wa.left;

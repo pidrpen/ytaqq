@@ -21,8 +21,9 @@
 #define ID_AI_ZSAVE 520
 #define ID_AI_ZFORGET 521
 #define ID_AI_PERSONA 522 /* характер помощника в чате */
+#define ID_AI_ZPLM 523    /* Z.ai может читать PLM и архив через инструменты ИИ */
 static HWND g_aiPersonaBox;
-static HWND g_aiSource, g_aiZModel, g_aiZKey, g_aiZSave, g_aiZForget, g_aiZInfo;
+static HWND g_aiSource, g_aiZModel, g_aiZKey, g_aiZSave, g_aiZForget, g_aiZInfo, g_aiChkZaiPlm;
 static BOOL ac_provider_change(int provider);
 static void ai_ui_zai_select(void) {
   wchar_t model[64]; MultiByteToWideChar(CP_UTF8, 0, g_aiZaiModel, -1, model, 64);
@@ -42,6 +43,7 @@ static void ai_ui_refresh(void) {
   SendMessageW(g_aiChkOn, BM_SETCHECK, g_aiOn ? BST_CHECKED : BST_UNCHECKED, 0);
   EnableWindow(g_aiBtnOff, g_aiOn || g_aiProc != NULL);
   SendMessageW(g_aiChkGpu, BM_SETCHECK, g_aiGpu ? BST_CHECKED : BST_UNCHECKED, 0);
+  SendMessageW(g_aiChkZaiPlm, BM_SETCHECK, g_aiZaiPlm ? BST_CHECKED : BST_UNCHECKED, 0);
   for (int i = 0; i < AI_TIERS; i++) set_mark(g_aiBtnTier[i], g_aiTier == i && !g_aiModel[0], kAiTiers[i].button);
   wchar_t cx[80];
   _snwprintf(cx, 80, L"Контекст: %d токенов (история чата)", g_aiCtx);
@@ -161,6 +163,8 @@ static void ai_ui_create(HWND p) {
   g_aiZSave = mk_btn(p, L"Сохранить ключ", ID_AI_ZSAVE);
   g_aiZForget = mk_btn(p, L"Удалить ключ", ID_AI_ZFORGET);
   g_aiZInfo = CreateWindowExW(0, L"STATIC", L"Сообщения, картинки и данные файлов из задач передаются Z.ai. Нужен стандартный API-ключ (не Coding Plan). Доступны только бесплатные GLM-4.5-Flash, GLM-4.7-Flash и GLM-4.6V-Flash. Одна задача делает несколько запросов. Модели на ПК не нужны. Изменения файлов — после «Применить».", WS_CHILD | SS_LEFT, 0, 0, 300, 100, p, NULL, NULL, NULL);
+  g_aiChkZaiPlm = CreateWindowExW(0, L"BUTTON", L"Z.ai может читать PLM «Союз» и архив (ответы по карточкам)",
+                                  WS_CHILD | BS_AUTOCHECKBOX, 0, 0, 300, 26, p, (HMENU)(INT_PTR)ID_AI_ZPLM, NULL, NULL);
   for (int i = 0; i < AI_TIERS; i++) g_aiBtnTier[i] = mk_btn(p, kAiTiers[i].button, ID_AI_TIER + i);
   g_aiBtnCtx = mk_btn(p, L"", ID_AI_CTX);
   g_aiChkGpu = CreateWindowExW(0, L"BUTTON", L"Считать на видеокарте (если в ней от 4 ГБ)",
@@ -185,19 +189,19 @@ static void ai_ui_create(HWND p) {
   for (int i = 0; i < AI_TIERS; i++) SendMessageW(g_aiBtnTier[i], WM_SETFONT, (WPARAM)g_fontUi, TRUE);
   SendMessageW(g_aiStat, WM_SETFONT, (WPARAM)g_fontSmall, TRUE);
   SendMessageW(g_aiPathEdit, WM_SETFONT, (WPARAM)g_fontBody, TRUE);
-  HWND cloud[] = {g_aiSource, g_aiZModel, g_aiZKey, g_aiZSave, g_aiZForget, g_aiZInfo};
-  for (int i = 0; i < 6; i++) SendMessageW(cloud[i], WM_SETFONT, (WPARAM)(i == 5 ? g_fontSmall : g_fontUi), TRUE);
+  HWND cloud[] = {g_aiSource, g_aiZModel, g_aiZKey, g_aiZSave, g_aiZForget, g_aiZInfo, g_aiChkZaiPlm};
+  for (int i = 0; i < 7; i++) SendMessageW(cloud[i], WM_SETFONT, (WPARAM)(i == 5 ? g_fontSmall : g_fontUi), TRUE);
   SendMessageW(g_aiPathEdit, 0x1501, TRUE, (LPARAM)L"своя модель .gguf — необязательно");
   ai_ui_refresh();
 }
 
 /* раскладка вкладки; возвращает новый y */
 static int ai_ui_layout(int pad, int y, int fullW, int cw, int btnH, int gap, int lab, int browseW) {
-  HWND cloud[] = {g_aiZModel, g_aiZKey, g_aiZSave, g_aiZForget, g_aiZInfo};
+  HWND cloud[] = {g_aiZModel, g_aiZKey, g_aiZSave, g_aiZForget, g_aiZInfo, g_aiChkZaiPlm};
   HWND local[] = {g_aiBtnTier[0], g_aiBtnTier[1], g_aiBtnTier[2], g_aiBtnTier[3], g_aiChkGpu, g_aiBtnDl, g_aiBtnDir, g_aiBtnLlama, g_aiPathEdit, g_aiBtnBrowse};
   ShowWindow(g_aiSource, g_layOpen ? SW_SHOW : SW_HIDE);
   ShowWindow(g_aiPersonaBox, g_layOpen ? SW_SHOW : SW_HIDE);
-  for (int i = 0; i < 5; i++) { ShowWindow(cloud[i], g_layOpen && g_aiProvider ? SW_SHOW : SW_HIDE); if (!g_aiProvider) MoveWindow(cloud[i], 0, -4000, 300, 26, FALSE); }
+  for (int i = 0; i < 6; i++) { ShowWindow(cloud[i], g_layOpen && g_aiProvider ? SW_SHOW : SW_HIDE); if (!g_aiProvider) MoveWindow(cloud[i], 0, -4000, 300, 26, FALSE); }
   for (int i = 0; i < 10; i++) { ShowWindow(local[i], g_layOpen && !g_aiProvider ? SW_SHOW : SW_HIDE); if (g_aiProvider) MoveWindow(local[i], 0, -4000, 300, 26, FALSE); }
   if (g_aiProvider) { ShowWindow(g_aiBar, SW_HIDE); MoveWindow(g_aiBar, 0, -4000, 300, 6, FALSE); }
   int halfOn = (fullW - gap) / 2;
@@ -214,6 +218,7 @@ static int ai_ui_layout(int pad, int y, int fullW, int cw, int btnH, int gap, in
     int half = (fullW - gap) / 2;
     set_place(g_aiZSave, pad, y, half, btnH); set_place(g_aiZForget, pad + half + gap, y, fullW - half - gap, btnH); y += btnH + gap;
     set_place(g_aiZInfo, pad, y, fullW, 96); y += 96 + gap;
+    set_place(g_aiChkZaiPlm, pad, y, fullW, btnH); y += btnH + gap;
     set_place(g_aiStat, pad, y, fullW, 56); y += 56 + gap;
     set_place(g_aiBtnTest, pad, y, half, btnH); set_place(g_aiBtnReport, pad + half + gap, y, fullW - half - gap, btnH); y += btnH + gap;
     set_place(g_aiBtnCtx, pad, y, fullW, btnH); return y + btnH + gap;
@@ -498,6 +503,11 @@ static BOOL ai_ui_command(HWND hwnd, int id, int code) {
     g_aiTestMsg[0] = 0;
     g_aiDl.msg[0] = 0;
     ai_ui_refresh();
+    return TRUE;
+  }
+  if (id == ID_AI_ZPLM && code == BN_CLICKED) {
+    g_aiZaiPlm = SendMessageW(g_aiChkZaiPlm, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    ai_save();
     return TRUE;
   }
   if (id == ID_AI_GPU && code == BN_CLICKED) {
