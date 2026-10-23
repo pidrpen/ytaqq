@@ -18,6 +18,7 @@ static const GUID kAcBgra = {0x6fddc324, 0x4e03, 0x4bfe, {0xb1, 0x85, 0x3d, 0x77
 #define WM_AG_TOOL (WM_APP + 74) /* результат файлового инструмента из рабочего потока */
 #define WM_AC_WEB (WM_APP + 75)  /* lParam — AcWebDone*, страницы для Qwen */
 #define WM_AC_TP (WM_APP + 77)   /* lParam — wchar_t*: маршрут по чертежу (techno.c), free */
+#define WM_AC_PC (WM_APP + 78)   /* сверка с Союзом (ai_plm_check.c): wParam 1 — строка состояния, 0 — итог */
 #define ID_AC_LOG 4701
 #define ID_AC_IN 4702
 #define ID_AC_SEND 4703
@@ -78,6 +79,12 @@ static void ag_apply_review(void);
 static void ag_tool_ready(void *result);
 static void ag_cancel_work(void);
 static BOOL ag_can_clear(void);
+/* сверка с PLM «Союз» без модели — ai_plm_check.c */
+static BOOL ac_pc_wanted(const wchar_t *q);
+static BOOL ac_pc_start(const wchar_t *a);
+static void ac_pc_ready(WPARAM wp, LPARAM lp);
+static BOOL ac_pc_busy(void);
+static BOOL ac_pc_cancel(void);
 static BOOL g_acRouting;
 static int g_acRouteDispatch; /* 0 classify, 1 file tools, 2 web, 3 ordinary reply */
 static BOOL ac_route_start(const wchar_t *q);
@@ -2126,11 +2133,17 @@ static void ac_send(void) {
       return;
     }
   }
-  if (g_acId || g_agActive || g_acWebOn) {
+  if (g_acId || g_agActive || g_acWebOn || ac_pc_busy()) {
     free(in);
     return;
   }
   ac_avatar_set(AC_AV_LISTENING);
+  /* «есть ли в Союзе…», «сверь с союзом список…» — сверку ведёт код, не модель */
+  if (!g_agPending && ac_pc_wanted(a) && ac_pc_start(a)) {
+    SetWindowTextW(g_acIn, L"");
+    free(in);
+    return;
+  }
   if (ac_tp_wanted(a) && ac_tp_start(a)) {
     SetWindowTextW(g_acIn, L"");
     free(in);
@@ -2894,7 +2907,8 @@ static LRESULT CALLBACK AcProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
     case ID_AC_STOP:
     case ID_AC_CANCEL:
       if (g_acPlanOn) ac_files_cancel();
-      else if (g_acWebOn) {
+      else if (ac_pc_cancel()) {
+      } else if (g_acWebOn) {
         ac_web_cancel();
         ac_unsend();
         ac_redraw();
@@ -2958,6 +2972,9 @@ static LRESULT CALLBACK AcProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
   }
   case WM_AG_TOOL:
     ag_tool_ready((void *)lParam);
+    return 0;
+  case WM_AC_PC:
+    ac_pc_ready(wParam, lParam);
     return 0;
   case WM_CLOSE:
     ShowWindow(hwnd, SW_HIDE);
@@ -3124,3 +3141,4 @@ static void aichat_ask(const wchar_t *q) {
 
 #include "ai_files.c" /* команды для файлов: копировать, переместить, переименовать, создать папку */
 #include "ai_agent.c" /* составные файловые задачи с реальными наблюдениями и общим планом */
+#include "ai_plm_check.c" /* сверка списка, файла или чертежа с PLM «Союз» — без модели */

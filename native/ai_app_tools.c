@@ -21,6 +21,7 @@ static const AgDataTool kAgDataTools[] = {
   {L"plm_card", L"карточка изделия из PLM: заготовка и материал, основной ТП с операциями, техсостав (состав сборки), файлы в архиве; text — обозначение или IO.номер из plm_search"},
   {L"plm_where_used", L"куда изделие входит по техсоставу (входимость); text — обозначение или IO.номер"},
   {L"archive_find", L"найти файлы и сканы чертежей в архиве (индекс files.json) по обозначению или словам; text — запрос; ответ — полные пути"},
+  {L"plm_check", L"сверить с PLM «Союз» список обозначений и наименований: что есть, чего нет, где наименование другое; text — сам список (строка на позицию) или «буфер»; либо path — файл .xlsx/.docx/.csv/.txt или скан чертежа .tif/.png/.jpg (штамп и спецификация); ответ — готовый итог"},
 };
 static BOOL ag_data_tool(const wchar_t *name) {
   for (size_t i = 0; i < sizeof(kAgDataTools) / sizeof(kAgDataTools[0]); i++)
@@ -102,6 +103,7 @@ static const wchar_t *ag_plm_text(const wchar_t *a) {
 
 typedef struct {
   long id;
+  int tmpl;
   wchar_t esi[PLM_COL1], tp[PLM_COL1];
 } AgPlmRow;
 
@@ -123,6 +125,7 @@ static int ag_plm_search(const wchar_t *q, AgPlmRow *rows, int max, volatile LON
     int k = share_split(line, f, 8);
     if (wcscmp(f[0], L"row") || k < 7 || n >= max) continue;
     rows[n].id = wcstol(f[1], NULL, 10);
+    rows[n].tmpl = (int)wcstol(f[2], NULL, 10);
     lstrcpynW(rows[n].esi, f[5], PLM_COL1);
     lstrcpynW(rows[n].tp, f[6], PLM_COL1);
     n++;
@@ -248,9 +251,348 @@ static int ag_archive_find(const wchar_t *text, wchar_t *out, int cap) {
   return n;
 }
 
+/* ---- сверка с Союзом (plm_check.c) -----------------------------------------------
+   Позиции уходят пачками по 20 запросом «check»: исполнитель (свой процесс или
+   раздающий коллега) держит одно соединение на пачку. Коллега со старой версией
+   «check» не знает — тогда каждая позиция обычным поиском, как plm_search. */
+#define AG_PC_PACK 20
+
+typedef void (*AgPcProgress)(int done, int total, void *ctx);
+
+/* Причина для человека: подсказки модели («не выдумывай их») ему не нужны */
+static void ag_pc_user_err(wchar_t *why) {
+  static const wchar_t *const tail[] = {L" Данные PLM не получены", L" Данные не получены", L"; не выдумывай"};
+  for (size_t i = 0; i < sizeof(tail) / sizeof(tail[0]); i++) {
+    wchar_t *t = wcsstr(why, tail[i]);
+    if (t) *t = 0;
+  }
+}
+
+/* Причина из ответа исполнителя одной строкой («Не удалось подключиться…») */
+static void ag_pc_why(const wchar_t *text, wchar_t *why, int cap) {
+  while (*text == L'P' || *text == L'L' || *text == L'M' || *text == L'\r' || *text == L'\n') text++;
+  lstrcpynW(why, text, cap);
+  for (wchar_t *c = why; *c; c++)
+    if (*c == L'\r' || *c == L'\n') *c = L' ';
+}
+
+/* Позиция обычным поиском (наименование всегда так, обозначение — у старого
+   коллеги). FALSE — PLM не ответил. */
+static BOOL ag_pc_search_one(PcItem *it, volatile LONG *cancel, wchar_t *why, int whyCap) {
+  AgPlmRow *rows = (AgPlmRow *)calloc(40, sizeof(AgPlmRow));
+  if (!rows) return FALSE;
+  wchar_t err[600] = L"";
+  int n = ag_plm_search(it->des[0] ? it->core : it->name, rows, 40, cancel, err, 600);
+  if (n < 0 || (!n && (wcsstr(err, L"подключиться") || wcsstr(err, L"не выполнился") || wcsstr(err, L"не настроен") ||
+                       wcsstr(err, L"никто не раздаёт") || wcsstr(err, L"не забрал") || wcsstr(err, L"не пришёл")))) {
+    lstrcpynW(why, err, whyCap);
+    free(rows);
+    return FALSE;
+  }
+  for (int i = 0; i < n; i++) pc_row_add(it, rows[i].id, rows[i].tmpl, rows[i].esi, L"", L"");
+  free(rows);
+  pc_judge(it);
+  return TRUE;
+}
+
+/* Сверить все позиции списка. why — почему что-то осталось непроверенным. */
+static void ag_pc_query(PcList *l, volatile LONG *cancel, AgPcProgress progress, void *ctx, wchar_t *why, int whyCap) {
+  int done = 0, legacy = 0, stuck = 0;
+  why[0] = 0;
+  wchar_t *body = (wchar_t *)malloc(sizeof(wchar_t) * (AG_PC_PACK * (PC_DES + 4) + 64));
+  if (!body) {
+    lstrcpynW(why, L"не хватило памяти", whyCap);
+    return;
+  }
+  for (;;) {
+    if (cancel && *cancel) {
+      lstrcpynW(why, L"остановлено", whyCap);
+      break;
+    }
+    int pack[AG_PC_PACK], np = 0;
+    for (int i = 0; i < l->n && np < AG_PC_PACK; i++)
+      if (l->it[i].state == PCS_TODO) pack[np++] = i;
+    if (!np) break;
+    /* по наименованию и у старого коллеги — по одной */
+    if (legacy || !l->it[pack[0]].des[0]) {
+      PcItem *it = &l->it[pack[0]];
+      if (!ag_pc_search_one(it, cancel, why, whyCap)) {
+        /* связи нет — дальше спрашивать бесполезно */
+        for (int i = 0; i < l->n; i++)
+          if (l->it[i].state == PCS_TODO) l->it[i].state = PCS_FAIL;
+        break;
+      }
+      done++;
+      if (progress) progress(done, l->n, ctx);
+      continue;
+    }
+    /* пачка — только позиции с обозначением */
+    int k = 0;
+    for (int i = 0; i < np; i++)
+      if (l->it[pack[i]].des[0]) pack[k++] = pack[i];
+    np = k;
+    size_t at = (size_t)swprintf(body, 64, L"kind\tcheck\n");
+    for (int i = 0; i < np; i++) {
+      wcscpy(body + at, L"d\t");
+      wcscat(body + at, l->it[pack[i]].core);
+      wcscat(body + at, L"\n");
+      at += wcslen(body + at);
+    }
+    wchar_t err[600] = L"";
+    wchar_t *a = ag_plm_ask(body, 95, cancel, err, 600);
+    if (!a) {
+      lstrcpynW(why, err, whyCap);
+      for (int i = 0; i < l->n; i++)
+        if (l->it[i].state == PCS_TODO) l->it[i].state = PCS_FAIL;
+      break;
+    }
+    BOOL got[AG_PC_PACK] = {0}, any = FALSE;
+    wchar_t *p = a, *line;
+    while ((line = share_next_line(&p)) != NULL) {
+      if (!wcscmp(line, L"text")) break;
+      wchar_t *f[8];
+      int nf = share_split(line, f, 8);
+      int kk = nf > 1 ? (int)wcstol(f[1], NULL, 10) : -1;
+      if (kk < 0 || kk >= np) continue;
+      PcItem *it = &l->it[pack[kk]];
+      if (!wcscmp(f[0], L"ck") && nf >= 7)
+        pc_row_add(it, wcstol(f[2], NULL, 10), (int)wcstol(f[3], NULL, 10), f[4], f[5], f[6]);
+      else if (!wcscmp(f[0], L"cke") && nf >= 3) {
+        it->state = PCS_FAIL;
+        if (!why[0]) lstrcpynW(why, f[2], whyCap);
+      } else if (!wcscmp(f[0], L"ckd")) {
+        got[kk] = any = TRUE;
+      }
+    }
+    if (!any) {
+      const wchar_t *t = p ? p : L"";
+      BOOL old = wcsstr(t, L"Непонятный запрос") != NULL; /* раздающий коллега на старой версии */
+      if (!old) ag_pc_why(t, why, whyCap);
+      free(a);
+      if (old) {
+        legacy = 1;
+        continue;
+      }
+      if (!why[0]) lstrcpynW(why, L"PLM не ответил", whyCap);
+      for (int i = 0; i < l->n; i++)
+        if (l->it[i].state == PCS_TODO) l->it[i].state = PCS_FAIL;
+      break;
+    }
+    free(a);
+    int now = 0;
+    for (int i = 0; i < np; i++) {
+      PcItem *it = &l->it[pack[i]];
+      if (got[i] && it->state != PCS_FAIL) pc_judge(it), now++;
+      else if (got[i]) now++;
+    }
+    done += now;
+    /* не успели всю пачку — остаток уйдёт следующей; дважды без толку — хватит */
+    stuck = now ? 0 : stuck + 1;
+    if (stuck >= 2) {
+      lstrcpynW(why, L"PLM отвечает слишком долго", whyCap);
+      for (int i = 0; i < l->n; i++)
+        if (l->it[i].state == PCS_TODO) l->it[i].state = PCS_FAIL;
+      break;
+    }
+    if (progress) progress(done, l->n, ctx);
+  }
+  if (cancel && *cancel)
+    for (int i = 0; i < l->n; i++)
+      if (l->it[i].state == PCS_TODO) l->it[i].state = PCS_FAIL;
+  ag_pc_user_err(why);
+  free(body);
+}
+
+static BOOL ag_pc_ext(const wchar_t *path, const wchar_t *const *list, int n) {
+  const wchar_t *d = wcsrchr(path, L'.');
+  for (int i = 0; d && i < n; i++)
+    if (!lstrcmpiW(d, list[i])) return TRUE;
+  return FALSE;
+}
+static const wchar_t *const kAgPcImg[] = {L".tif", L".tiff", L".png", L".jpg", L".jpeg", L".bmp", L".gif"};
+static const wchar_t *const kAgPcText[] = {L".txt", L".csv", L".tsv"};
+
+/* Текст Word вместе с таблицами. В тексте документа конец ячейки и конец
+   строки таблицы — одинаковый знак, и пустую ячейку от конца строки не
+   отличить. Поэтому таблицы в открытой только для чтения копии сначала
+   переводятся в текст с табуляциями (ConvertToText) — файл не сохраняется. */
+static wchar_t *ag_pc_docx(const wchar_t *path, wchar_t *err, int errCap) {
+  OfSession s;
+  if (!of_begin(&s, FALSE, path)) {
+    swprintf(err, errCap, L"Word не открыл файл (0x%08lx): нужен установленный Office.", (unsigned long)s.hr);
+    of_end(&s);
+    return NULL;
+  }
+  IDispatch *tables = of_obj(s.doc, L"Tables", 0, NULL);
+  int nt = tables ? (int)of_number(tables, L"Count") : 0;
+  for (int i = nt; i >= 1 && i > nt - 60; i--) {
+    VARIANT a = of_int(i), sep = of_int(1); /* wdSeparateByTabs */
+    IDispatch *t = of_obj(tables, L"Item", 1, &a);
+    if (t) of_call(t, L"ConvertToText", DISPATCH_METHOD, NULL, 1, &sep);
+    of_release(t);
+  }
+  of_release(tables);
+  IDispatch *content = of_obj(s.doc, L"Content", 0, NULL);
+  VARIANT v;
+  VariantInit(&v);
+  wchar_t *out = NULL;
+  if (SUCCEEDED(of_call(content, L"Text", DISPATCH_PROPERTYGET, &v, 0, NULL)) && v.vt == VT_BSTR) {
+    size_t n = SysStringLen(v.bstrVal), o = 0;
+    out = (wchar_t *)malloc((n + 1) * sizeof(wchar_t));
+    for (size_t i = 0; out && i < n; i++) {
+      wchar_t c = v.bstrVal[i];
+      if (c == L'\r' && i + 1 < n && v.bstrVal[i + 1] == 7) i++; /* остаток разметки ячейки */
+      out[o++] = c == L'\r' || c == 11 ? L'\n' : c == 7 ? L'\t' : c;
+    }
+    if (out) out[o] = 0;
+  } else {
+    lstrcpynW(err, L"Word не отдал текст документа.", errCap);
+  }
+  VariantClear(&v);
+  of_release(content);
+  of_end(&s);
+  return out;
+}
+
+/* Скан (TIFF, PNG, JPG…): штамп и спецификация каждой страницы — как в окне
+   «Распознать чертёж». Обозначение и наименование — из граф, не из модели. */
+static int ag_pc_drawing(PcList *l, const wchar_t *path, volatile LONG *cancel, wchar_t *err, int errCap) {
+  HRESULT co = CoInitializeEx(NULL, COINIT_MULTITHREADED);
+  IWICImagingFactory *f = NULL;
+  CoCreateInstance(&kTmClsidFactory, NULL, CLSCTX_INPROC_SERVER, &kTmIidFactory, (void **)&f);
+  DrPages pages;
+  memset(&pages, 0, sizeof(pages));
+  int found = 0, read = 0;
+  if (!f) {
+    lstrcpynW(err, L"Windows не открыл картинку (нет WIC).", errCap);
+  } else {
+    HRESULT hr = tm_probe(f, path, FALSE, dr_pages_cb, &pages);
+    if (FAILED(hr) || !pages.n) {
+      wchar_t w[120];
+      tm_why(hr, w, 120);
+      swprintf(err, errCap, L"Скан не открылся: %ls.", w);
+    }
+    for (int i = 0; i < pages.n && i < 12 && !(cancel && *cancel); i++) {
+      DrPage *pg = &pages.p[i];
+      dr_recognize(f, pg);
+      read++;
+      if (pg->f[DF_DES][0])
+        found += pc_add_field(l, pg->f[DF_DES], pg->f[DF_NAME], i + 1, pg->doubt[DF_DES] || pg->doubt[DF_NAME]);
+      for (int r = 0; r < pg->nrows; r++)
+        found += pc_add_field(l, pg->rows[r].c[DS_DES], pg->rows[r].c[DS_NAME], i + 1,
+                              pg->rows[r].doubt[DS_DES] || pg->rows[r].doubt[DS_NAME]);
+      if (!found && pg->note[0] && !err[0]) swprintf(err, errCap, L"Лист %d: %ls.", i + 1, pg->note);
+    }
+    if (pages.n > 12 && errCap > 0 && !err[0]) lstrcpynW(err, L"Прочитаны первые 12 страниц.", errCap);
+  }
+  for (int i = 0; i < pages.n; i++) dr_page_free(&pages.p[i]);
+  free(pages.p);
+  if (f) IWICImagingFactory_Release(f);
+  if (SUCCEEDED(co)) CoUninitialize();
+  if (read && !found && !err[0]) lstrcpynW(err, L"На скане не прочиталось ни одного обозначения (штамп или спецификация).", errCap);
+  return found;
+}
+
+/* Позиции из файла: таблица Excel, Word, CSV/TXT или скан чертежа. src — подпись
+   «откуда» для итога; FALSE — файл не прочитан (в err — почему). */
+static BOOL ag_pc_from_file(PcList *l, const wchar_t *path, volatile LONG *cancel, wchar_t *src, int srcCap,
+                            wchar_t *err, int errCap) {
+  const wchar_t *base = wcsrchr(path, L'\\');
+  base = base ? base + 1 : path;
+  DWORD at = GetFileAttributesW(path);
+  if (at == INVALID_FILE_ATTRIBUTES || (at & FILE_ATTRIBUTE_DIRECTORY)) {
+    swprintf(err, errCap, L"Файла %ls нет или это папка.", path);
+    return FALSE;
+  }
+  if (ag_pc_ext(path, kAgPcImg, (int)(sizeof(kAgPcImg) / sizeof(kAgPcImg[0])))) {
+    swprintf(src, srcCap, L"скан %ls (штамп и спецификация)", base);
+    ag_pc_drawing(l, path, cancel, err, errCap);
+    return l->n > 0;
+  }
+  wchar_t *text = NULL;
+  if (of_excel(path)) {
+    OfTable t;
+    if (of_table_load(path, NULL, &t, err, errCap)) {
+      size_t cap = 1;
+      for (int i = 0; i < t.rows * t.cols; i++) cap += wcslen(t.cell[i]) + 1;
+      text = (wchar_t *)malloc(cap * sizeof(wchar_t));
+      if (text) {
+        size_t o = 0;
+        for (int r = 0; r < t.rows; r++)
+          for (int c = 0; c < t.cols; c++) {
+            const wchar_t *v = t.cell[r * t.cols + c];
+            for (; *v; v++) text[o++] = *v == L'\t' || *v == L'\n' || *v == L'\r' ? L' ' : *v;
+            text[o++] = c + 1 < t.cols ? L'\t' : L'\n';
+          }
+        text[o] = 0;
+      }
+      of_table_free(&t);
+    }
+    swprintf(src, srcCap, L"Excel %ls, первый лист", base);
+  } else if (of_docx(path)) {
+    text = ag_pc_docx(path, err, errCap);
+    swprintf(src, srcCap, L"Word %ls", base);
+  } else if (ag_pc_ext(path, kAgPcText, (int)(sizeof(kAgPcText) / sizeof(kAgPcText[0])))) {
+    text = mtw_read_file(path);
+    swprintf(src, srcCap, L"файл %ls", base);
+    if (!text) swprintf(err, errCap, L"Файл %ls не прочитался.", base);
+  } else {
+    lstrcpynW(err, L"Сверяю списки из .xlsx, .docx, .csv, .txt и сканы .tif/.png/.jpg. PDF и .xls пока нет — сохраните лист в TIFF или таблицу в .xlsx/CSV.", errCap);
+    return FALSE;
+  }
+  if (!text) return FALSE;
+  pc_parse(l, text, 0);
+  free(text);
+  return TRUE;
+}
+
+/* plm_check для модели: итог целиком — в *report (его показывают как ответ),
+   модели — коротко сколько чего. */
+static int ag_plm_check(const AgJson *j, AgFs *fs, wchar_t *out, int cap, volatile LONG *cancel, wchar_t **report) {
+  const wchar_t *text = ag_get(j, L"text"), *path = ag_get(j, L"path");
+  PcList l = {(PcItem *)calloc(PC_MAX, sizeof(PcItem)), 0, 0, 0};
+  if (!l.it) return -1;
+  wchar_t src[400] = L"", err[600] = L"", why[600] = L"";
+  BOOL ok = TRUE;
+  if (path[0]) {
+    wchar_t actual[MAX_PATH];
+    if (!fs || !ag_path(fs, path, actual)) lstrcpynW(actual, path, MAX_PATH);
+    ok = ag_pc_from_file(&l, actual, cancel, src, 400, err, 600);
+  } else {
+    wchar_t low[40];
+    lstrcpynW(low, text, 40);
+    CharLowerBuffW(low, (DWORD)wcslen(low));
+    if (wcsstr(low, L"буфер") && wcslen(text) < 40) {
+      wchar_t *clip = mtw_clip_text();
+      if (clip) pc_parse(&l, clip, 0);
+      else lstrcpynW(err, L"В буфере обмена нет текста.", 600);
+      ok = clip != NULL;
+      free(clip);
+      lstrcpynW(src, L"буфер обмена", 400);
+    } else {
+      pc_parse(&l, text, 1);
+      lstrcpynW(src, L"список из задачи", 400);
+    }
+  }
+  if (!ok || !l.n) {
+    swprintf(out, cap, L"plm_check: %ls", err[0] ? err : L"в списке нет ни одного обозначения (шаблон штампа: «АДЕ 3424-123.01»).");
+    free(l.it);
+    return ok ? 0 : -1;
+  }
+  ag_pc_query(&l, cancel, NULL, NULL, why, 600);
+  *report = pc_report(&l, src, why[0] ? why : err);
+  int cnt[7] = {0};
+  for (int i = 0; i < l.n; i++) cnt[l.it[i].state]++;
+  swprintf(out, cap, L"Сверка с PLM «Союз» выполнена (только чтение): позиций %d — совпадает %d, наименование иначе %d, другое %d, похожие %d, нет %d, не проверено %d. Итог показан пользователю целиком.",
+           l.n, cnt[PCS_OK], cnt[PCS_NEAR], cnt[PCS_DIFF], cnt[PCS_SIMILAR], cnt[PCS_NONE], cnt[PCS_FAIL]);
+  free(l.it);
+  return 0;
+}
+
 /* Один инструмент данных. 0 — наблюдение для модели; *got — в нём настоящие
    данные PLM или архива (а не отказ или «не нашлось»). */
-static int ag_data_call(const AgJson *j, wchar_t *out, int cap, volatile LONG *cancel, BOOL *got) {
+static int ag_data_call(const AgJson *j, AgFs *fs, wchar_t *out, int cap, volatile LONG *cancel, BOOL *got,
+                        wchar_t **report) {
   const wchar_t *name = ag_get(j, L"name");
   const wchar_t *text = ag_get(j, L"text");
   *got = FALSE;
@@ -261,6 +603,15 @@ static int ag_data_call(const AgJson *j, wchar_t *out, int cap, volatile LONG *c
   if (g_aiProvider && !g_aiZaiPlm) {
     lstrcpynW(out, L"Данные PLM и архива не передаются в облачный Z.ai: разрешения нет (Настройки → ИИ → «Z.ai может читать PLM «Союз» и архив»). Скажи об этом пользователю; данных нет, не выдумывай их.", cap);
     return 0;
+  }
+  if (!wcscmp(name, L"plm_check")) {
+    if (!text[0] && !ag_get(j, L"path")[0]) {
+      lstrcpynW(out, L"plm_check: нужен text — список обозначений (или «буфер») — либо path — файл со списком или скан.", cap);
+      return -1;
+    }
+    int r = ag_plm_check(j, fs, out, cap, cancel, report);
+    *got = r == 0 && *report;
+    return r;
   }
   if (!text[0]) {
     swprintf(out, cap, L"%ls: нужен text — обозначение или слова запроса.", name);

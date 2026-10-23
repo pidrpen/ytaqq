@@ -39,6 +39,7 @@ typedef struct {
   wchar_t json[6000], observation[6000];
   int state, applying;
   BOOL data; /* инструмент PLM/архива вернул настоящие данные */
+  wchar_t *report; /* сверка с Союзом: готовый итог для чата, free */
   LONG generation;
   volatile LONG cancel;
   HWND notify;
@@ -247,9 +248,19 @@ static BOOL ag_data_answer(void) {
 
 static void ag_tool_ready(void *result) {
   AgToolJob *job = (AgToolJob *)result;
-  if (job->generation != g_agGeneration || !g_agActive) { free(job); return; }
+  if (job->generation != g_agGeneration || !g_agActive) { free(job->report); free(job); return; }
   ac_avatar_set(AC_AV_FILES);
   g_agTool = NULL;
+  if (job->report) {
+    /* сверка с Союзом: итог собран кодом целиком — он и есть ответ, модели
+       его не пересказывать (длинный список она бы переврала) */
+    wchar_t *report = job->report;
+    free(job);
+    ag_stop(); ac_busy(FALSE);
+    ac_avatar_set(AC_AV_SUCCESS);
+    af_say(report); free(report);
+    ac_status(L"Сверка с PLM «Союз» — только чтение, ничего не изменено"); return;
+  }
   if (job->applying) {
     if (job->state == 1 && job->fs.count) {
       af_set_last(job->fs.last);
@@ -315,11 +326,11 @@ static DWORD WINAPI ag_tool_thread(LPVOID param) {
   job->fs.cancel = &job->cancel;
   AgJson app;
   if (!job->applying && ag_json(job->json, &app) && !wcscmp(ag_get(&app, L"tool"), L"app"))
-    job->state = ag_data_call(&app, job->observation, 6000, &job->cancel, &job->data);
+    job->state = ag_data_call(&app, &job->fs, job->observation, 6000, &job->cancel, &job->data, &job->report);
   else
     job->state = job->applying ? (ag_apply(&job->fs, job->observation, 6000) ? 1 : -1)
                                : ag_tool(&job->fs, job->json, job->observation, 6000);
-  if (!PostMessageW(job->notify, WM_AG_TOOL, 0, (LPARAM)job)) free(job);
+  if (!PostMessageW(job->notify, WM_AG_TOOL, 0, (LPARAM)job)) { free(job->report); free(job); }
   return 0;
 }
 

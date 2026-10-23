@@ -61,6 +61,7 @@ static void ans_printf(wchar_t *out, int cap, const wchar_t *fmt, ...) {
 }
 
 #include "search_route.c" /* где искать без ярлыков; слова запроса в любом порядке */
+#include "plm_check.c"    /* сверка списка с Союзом: есть ли обозначение, то ли наименование */
 #include "files.c"
 #include "update.c"
 #include "ai_local.c" /* локальный ИИ: llama.cpp на этом компьютере (ai.h) */
@@ -1445,6 +1446,100 @@ static BOOL plm_lookup(const wchar_t *query, wchar_t *out, int cap, PlmRows *r) 
   ans_printf(out, cap,
              L"PLM · %d  (двойной клик — в уже открытый клиент)\r\n\r\n%s", n, links);
   return TRUE;
+}
+
+/* Сверка с Союзом (plm_check.c, запрос «check» в share.c): изделия, у которых
+   ядро обозначения core есть в имени объекта или в атрибуте Designation.
+   Первыми — те, где за ядром ничего не стоит (ни «.01» дочерней позиции, ни
+   «-01» исполнения): у сборки дочерних бывают десятки, и без такого порядка
+   сама сборка могла не попасть в первые строки. Те же шаблоны изделий, что
+   у поиска, без техпроцессов. Наименование — атрибут Name, если он есть.
+   Только чтение. Возвращает число строк или -1 (в err — почему). */
+typedef struct {
+  long id;
+  int tmpl;
+  wchar_t raw[404], des[204], name[404];
+} PlmChkRow;
+
+static int plm_check_query(SQLHDBC dbc, const wchar_t *core, PlmChkRow *rows, int max, wchar_t *err, int ecap) {
+  wchar_t pat[260], lit[200];
+  plm_like_word(core, pat, 260);
+  int o = 0;
+  for (const wchar_t *c = core; *c && o < 196; c++) {
+    if (*c == L'\'') lit[o++] = L'\'';
+    lit[o++] = *c;
+  }
+  lit[o] = 0;
+  int len = (int)wcslen(core);
+  wchar_t *sql = (wchar_t *)malloc(5200 * sizeof(wchar_t));
+  if (!sql) return -1;
+  int k = _snwprintf(
+      sql, 5200,
+      L"SELECT TOP %d o0.InfoObjectId, o0.TemplateId, nn.N, ISNULL(des.V,N''), ISNULL(nm.V,N'') "
+      L"FROM InfoObjects AS o0 WITH(NOLOCK) "
+      L"CROSS APPLY (SELECT CAST(o0.Name AS NVARCHAR(400)) AS N) AS nn "
+      L"OUTER APPLY (SELECT TOP 1 CAST(ad.ShortText AS NVARCHAR(200)) AS V "
+      L"FROM InfoObjectAttributes AS ad WITH(NOLOCK) "
+      L"JOIN NameKeys AS nkd WITH(NOLOCK) ON nkd.NameKeyId=ad.NameKeyId AND nkd.Value=N'Designation' "
+      L"WHERE ad.OwnerId=o0.InfoObjectId AND ad.Outdated=0) AS des "
+      L"OUTER APPLY (SELECT TOP 1 CASE an.DataType WHEN 24 THEN CAST(an.LargeText AS NVARCHAR(400)) "
+      L"ELSE CAST(an.ShortText AS NVARCHAR(400)) END AS V "
+      L"FROM InfoObjectAttributes AS an WITH(NOLOCK) "
+      L"JOIN NameKeys AS nkn WITH(NOLOCK) ON nkn.NameKeyId=an.NameKeyId AND nkn.Value=N'Name' "
+      L"WHERE an.OwnerId=o0.InfoObjectId AND an.Outdated=0 AND ISNULL(an.CollectionElementId,0)=0) AS nm "
+      L"WHERE o0.Erased=0 AND o0.TemplateId IN (1767,20,39,633) "
+      L"AND (o0.Name LIKE N'%s' ESCAPE '\\' COLLATE Cyrillic_General_CI_AS "
+      L"OR EXISTS (SELECT 1 FROM InfoObjectAttributes AS ad2 WITH(NOLOCK) "
+      L"JOIN NameKeys AS nk2 WITH(NOLOCK) ON nk2.NameKeyId=ad2.NameKeyId "
+      L"WHERE ad2.OwnerId=o0.InfoObjectId AND ad2.Outdated=0 AND nk2.Value=N'Designation' "
+      L"AND ad2.ShortText LIKE N'%s' ESCAPE '\\' COLLATE Cyrillic_General_CI_AS)) "
+      L"ORDER BY CASE WHEN CHARINDEX(N'%s', ISNULL(des.V,N'')) > 0 "
+      L"AND SUBSTRING(ISNULL(des.V,N'') + N' ', CHARINDEX(N'%s', ISNULL(des.V,N'')) + %d, 1) "
+      L"NOT LIKE N'[-.0-9]' THEN 0 "
+      L"WHEN CHARINDEX(N'%s', nn.N) > 0 AND SUBSTRING(nn.N + N' ', CHARINDEX(N'%s', nn.N) + %d, 1) "
+      L"NOT LIKE N'[-.0-9]' THEN 0 ELSE 1 END, "
+      L"CASE o0.TemplateId WHEN 1767 THEN 0 ELSE 1 END, o0.InfoObjectId DESC OPTION(MAXDOP 0)",
+      max, pat, pat, lit, lit, len, lit, lit, len);
+  if (k < 0 || k >= 5200) {
+    free(sql);
+    lstrcpynW(err, L"слишком длинное обозначение", ecap);
+    return -1;
+  }
+  SQLHSTMT st = SQL_NULL_HSTMT;
+  if (!SQL_SUCCEEDED(SQLAllocHandle(SQL_HANDLE_STMT, dbc, &st))) {
+    free(sql);
+    lstrcpynW(err, L"нет запроса ODBC", ecap);
+    return -1;
+  }
+  /* одна долгая позиция не должна съесть время всей пачки */
+  SQLSetStmtAttr(st, SQL_ATTR_QUERY_TIMEOUT, (SQLPOINTER)(SQLULEN)30, 0);
+  SQLRETURN r = SQLExecDirectW(st, (SQLWCHAR *)sql, SQL_NTS);
+  free(sql);
+  if (!SQL_SUCCEEDED(r)) {
+    odbc_err(st, SQL_HANDLE_STMT, err, ecap);
+    SQLFreeHandle(SQL_HANDLE_STMT, st);
+    return -1;
+  }
+  SQLINTEGER id = 0, tmpl = 0;
+  SQLWCHAR raw[404], des[204], nm[404];
+  SQLLEN i1 = 0, i2 = 0, i3 = 0, i4 = 0, i5 = 0;
+  SQLBindCol(st, 1, SQL_C_SLONG, &id, sizeof(id), &i1);
+  SQLBindCol(st, 2, SQL_C_SLONG, &tmpl, sizeof(tmpl), &i2);
+  SQLBindCol(st, 3, SQL_C_WCHAR, raw, sizeof(raw), &i3);
+  SQLBindCol(st, 4, SQL_C_WCHAR, des, sizeof(des), &i4);
+  SQLBindCol(st, 5, SQL_C_WCHAR, nm, sizeof(nm), &i5);
+  int n = 0;
+  while (n < max && SQL_SUCCEEDED(SQLFetch(st))) {
+    rows[n].id = i1 == SQL_NULL_DATA ? 0 : (long)id;
+    rows[n].tmpl = i2 == SQL_NULL_DATA ? 0 : (int)tmpl;
+    rows[n].raw[0] = rows[n].des[0] = rows[n].name[0] = 0;
+    if (i3 > 0) lstrcpynW(rows[n].raw, (wchar_t *)raw, 404);
+    if (i4 > 0) lstrcpynW(rows[n].des, (wchar_t *)des, 204);
+    if (i5 > 0) lstrcpynW(rows[n].name, (wchar_t *)nm, 404);
+    n++;
+  }
+  SQLFreeHandle(SQL_HANDLE_STMT, st);
+  return n;
 }
 
 static void load_plm_pref(void) {

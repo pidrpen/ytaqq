@@ -11,11 +11,13 @@
    не возьмут) и выполняет его отдельным процессом того же exe: у процесса свои
    списки находок, и то, что сейчас открыто у самого раздающего, не сбивается.
    В папку попадает только найденное. Пароль остаётся на компьютере раздающего,
-   запросы — только поиск по тексту и карточка по номеру: чужой SQL не выполнить. */
+   запросы — только поиск по тексту, карточка по номеру и сверка обозначений:
+   чужой SQL не выполнить. */
 
 #define SHARE_SUB L"CursorPad-PLM"
 #define SHARE_PATH 1024
 #define SHARE_OUT 520000 /* ответ раздающего, знаков */
+#define SHARE_CHK 40      /* позиций сверки в одном запросе */
 
 /* g_shareRoot, g_shareServe, g_shareEdit, g_chkServe — в cursorpad.c: их читают настройки */
 static CRITICAL_SECTION g_shareCs;
@@ -283,12 +285,18 @@ static int share_serve_child(const wchar_t *reqPath, const wchar_t *ansPath) {
   BOOL rdump = FALSE;
   unsigned rwhat = 0; /* выгрузка: какие листы */
   BOOL verbose = FALSE;
+  /* сверка: ядра обозначений, по строке «d» на каждое */
+  wchar_t(*chk)[PC_DES] = NULL;
+  int nchk = 0;
   wchar_t *p = req, *line;
   while ((line = share_next_line(&p)) != NULL) {
     wchar_t *f[4];
     int n = share_split(line, f, 4);
     if (n < 2) continue;
-    if (!wcscmp(f[0], L"kind")) lstrcpynW(kind, f[1], 16);
+    if (!wcscmp(f[0], L"d") && f[1][0]) {
+      if (!chk) chk = (wchar_t(*)[PC_DES])calloc(SHARE_CHK, sizeof(*chk));
+      if (chk && nchk < SHARE_CHK) lstrcpynW(chk[nchk++], f[1], PC_DES);
+    } else if (!wcscmp(f[0], L"kind")) lstrcpynW(kind, f[1], 16);
     else if (!wcscmp(f[0], L"q")) lstrcpynW(q, f[1], 400);
     else if (!wcscmp(f[0], L"id")) id = wcstol(f[1], NULL, 10);
     else if (!wcscmp(f[0], L"verbose")) verbose = f[1][0] == L'1';
@@ -358,6 +366,44 @@ static int share_serve_child(const wchar_t *reqPath, const wchar_t *ansPath) {
       sb_field(&b, g_cardPack[i]);
       sb_add(&b, L"\n");
     }
+  } else if (!wcscmp(kind, L"check") && nchk) {
+    /* сверка с Союзом (plm_check.c): одно соединение на всю пачку; не успели —
+       у позиции нет строки «ckd», и спросивший пришлёт её ещё раз */
+    SQLHENV env = SQL_NULL_HENV;
+    SQLHDBC dbc = SQL_NULL_HDBC;
+    wchar_t err[280];
+    PlmChkRow *rows = (PlmChkRow *)calloc(PC_ROWS + 2, sizeof(PlmChkRow));
+    ULONGLONG t0 = GetTickCount64();
+    int done = 0;
+    if (!rows) {
+      lstrcpynW(out, L"PLM\r\n\r\nНе хватило памяти для сверки.", SHARE_OUT);
+    } else if (!plm_connect(&env, &dbc, err, 280)) {
+      _snwprintf(out, SHARE_OUT, L"Не удалось подключиться к %s: %s", g_sqlHost, err);
+      out[SHARE_OUT - 1] = 0;
+    } else {
+      for (int k = 0; k < nchk && GetTickCount64() - t0 < 75000; k++) {
+        int n = plm_check_query(dbc, chk[k], rows, PC_ROWS + 2, err, 280);
+        if (n < 0) {
+          sb_add(&b, L"cke\t%d", k);
+          sb_field(&b, err);
+          sb_add(&b, L"\n");
+        }
+        for (int i = 0; i < n; i++) {
+          sb_add(&b, L"ck\t%d\t%ld\t%d", k, rows[i].id, rows[i].tmpl);
+          sb_field(&b, rows[i].raw);
+          sb_field(&b, rows[i].des);
+          sb_field(&b, rows[i].name);
+          sb_add(&b, L"\n");
+        }
+        sb_add(&b, L"ckd\t%d\n", k);
+        done++;
+      }
+      SQLDisconnect(dbc);
+      SQLFreeHandle(SQL_HANDLE_DBC, dbc);
+      SQLFreeHandle(SQL_HANDLE_ENV, env);
+      _snwprintf(out, SHARE_OUT, L"PLM\r\n\r\nСверка: проверено %d из %d.", done, nchk);
+    }
+    free(rows);
   } else if (!wcscmp(kind, L"pf") && idl[0]) {
     /* столбец «Заготовка» для находок коллеги — отдельно от самого поиска */
     PfJob *j = (PfJob *)calloc(1, sizeof(PfJob));
@@ -438,6 +484,7 @@ static int share_serve_child(const wchar_t *reqPath, const wchar_t *ansPath) {
   }
   sb_add(&b, L"text\n%s", out);
   free(out);
+  free(chk);
   BOOL ok = b.w && share_write(ansPath, b.w);
   free(b.w);
   return ok ? 0 : 1;
@@ -500,6 +547,7 @@ static void share_run_one(const wchar_t *work, const wchar_t *ans) {
   if (req) {
     wchar_t *p = req, *line;
     wchar_t kind[16] = L"";
+    int nchk = 0;
     while ((line = share_next_line(&p)) != NULL) {
       wchar_t *f[4];
       if (share_split(line, f, 4) < 2) continue;
@@ -508,6 +556,7 @@ static void share_run_one(const wchar_t *work, const wchar_t *ans) {
       else if (!wcscmp(f[0], L"q")) _snwprintf(what, 440, L"поиск «%.300s»", f[1]);
       else if (!wcscmp(f[0], L"id")) _snwprintf(what, 440, L"карточка IO.%.20s", f[1]);
       else if (!wcscmp(f[0], L"des")) _snwprintf(what, 440, L"маршрутная ведомость «%.200s»", f[1]);
+      else if (!wcscmp(f[0], L"d")) _snwprintf(what, 440, L"сверка с Союзом: позиций %d", ++nchk);
     }
     what[439] = 0;
     free(req);
