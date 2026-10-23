@@ -1,0 +1,58 @@
+# Автотесты на каждый push в ветку: проверочная сборка exe тем же MinGW, что на ПК
+# (native/build.sh --dev — файлы выпуска не пишутся, public/ не трогается), и тесты,
+# которым не нужны Windows, Office или модель QwenPaw. Остальные тесты (*_test.c
+# под Win32/COM и test_*.py с --probe/--runtime) здесь не запускаются.
+# Выпуск, подпись и релиз — build-release.yml и release.yml, их этот файл не меняет.
+name: Проверки
+
+on:
+  push:
+    branches: ['**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Сборка
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Компилятор MinGW-w64
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gcc-mingw-w64-x86-64 binutils-mingw-w64-x86-64
+      - name: Проверочная сборка (-Wall -Werror)
+        run: sh native/build.sh --dev
+
+  tests:
+    name: Тесты
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13' # как встроенный Python комплекта QwenPaw (3.13.16)
+      - name: Зависимости Python-тестов
+        # версии — из комплекта QwenPaw (public/CursorPad-paw-*.zip)
+        run: python -m pip install 'pillow==13.0.0' 'pypdf==6.21.0' 'jsonschema==4.26.0'
+      - name: C-тесты (gcc)
+        working-directory: native
+        run: |
+          set -eu
+          for t in search_route_test techno_test; do
+            gcc -O2 -Wall -Werror -o "$RUNNER_TEMP/$t" "$t.c"
+            "$RUNNER_TEMP/$t"
+          done
+      - name: Python-тесты
+        run: |
+          set -eu
+          python -I -B native/test_convert_files.py
+          python -I -B native/test_native_arguments.py
+          python -I -B native/test_windows_https.py native/agent/windows_https.py
+          python -I -B native/test_network_diagnostics.py native/agent/bridge.py --transport-only
