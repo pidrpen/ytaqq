@@ -1,7 +1,10 @@
-2026102303
-2026.10.23.3
-sha256 f61fc44f56ae862eb948b707376c1d71efeecde97648c28fc016a6417bb79e1e
-== 0 signature-rsa-sha256 CXbjyboay3X7A3g52WzcowW+rPhnomk30oxY4QdOiJ6zMZ2SA1uksUJycES4caTgceoRaKtJzHUmN+V0/PrTNTMdqEFy9YMDlZgfTKdyVgbKQsybBOMdHaMYKKjD4isq2MAcKt9Bv1Mz7TvNG2lytnXtf+wliRhZPTf6Jl6EytAngV7hSmH5s5BwGtWLWjg9x2tvB0RmOlivNDfRMtW7td5vf8odRhWjVK5q/3pV+QfieZ+9Nsnn8SJvQDYwIYpdp26cbqudYTkrMaVB3RQffTfoEj60BmbTJ8bKvtgqWVNWOvgLJIkX1OK2XVQhW+P8G6E1Nir73s86cSLJP1qmIwr8qpYtq1x9oOCc24Pq32gFt7KiO/5u2+X0fW7xsnDE9pZeE3+rRBw6yrTni/dNPYwjYBsTi0q3U22sl+EQquc9l7dGWmUG/BYu4vhZsA7XSG+zVcwEU831oX2WVvzLT6WZfL/e6v35tzEznQL84uazChxi63mHEtLd2WxKF/zP
+2026102304
+2026.10.23.4
+sha256 5ab76fefacd8e01be55f39b5de39fc709200c736448066b394c9963a6c06b2ee
+== 0 signature-rsa-sha256 QuNXaXBYGutlg4U+By15JCFhvGjlf/eNEDm6Bhq/+lyYJptUPttIoRhvNBpI6Rutw8nmLvBD9U9Qml6fZZZk73XzfcV/75d5KKYguonBII1GPQ+3x9DrRfYGXOaddOpXmFkn0L7urgK3QhcO5MwPhBpoc5cNsPmqQiCv1ALUFjPDUIZsSQfmJkR56Ylu1U9plIuuxnW4yV4sWNOZ1ux+nKlDdu2FupLE2Q5AUBAVi4sztXtcm/GX72fqv/+HUuMLARTqfAEc0u5/E10HddsTQiZRG3M/eTk08bUU59rB6enOVZ03V+X4LWaPyMjHcMmujzzK/Da8j2cB3sRb/b5eBpxctmfmGmdqEetxoQucDcpi2nmk2NgmQBc1IUzEgFXmtBLu3qjGhQXuyu3Ir9LMsoDmiXdBNEYzlou6XDeMgwMk/wkMvjEbOhpN6MdTvZvnzYnRNZFEgnNHHJiWxC7DT1G1X3tjKD8KTUZhbgAMlpV2xrZxbbR8Y+oHdOaTuC4q
+== 2026.10.23.4
+Чертежи читаются точнее. Если включена локальная модель с картинками («Средний» или «С картинками»), «Маршрут обработки» и чертёж в чате читаются ещё и ею: наименование и материал из штампа (в том числе от руки и дробью), технические требования, надписи отверстий и «Развертка». Tesseract остаётся в помощь, операции по-прежнему выбирают правила. Штамп находится и на заводских сканах с двойной рамкой. Модель можно дообучить на своих чертежах: файл draw-lora….gguf рядом с моделью CursorPad подключает сам и только для чертежей — чат не меняется. Характеры помощника (Настройки → ИИ): «Южный» стал карикатурным горцем с акцентом, «Без цензуры» теперь «Матерный», новые — прапорщик, старый мастер из цеха и зумер.
+
 == 2026.10.23.3
 Сверка с PLM «Союз» в «Спросить ИИ». Спросите «есть ли в Союзе АДЕ 3424-123.01», вставьте список, напишите «сверь с Союзом список из буфера», укажите путь к спецификации (Excel, Word, CSV) или приложите картинку чертежа — ИИ проверит каждую позицию и ответит списком: чего нет в Союзе, где наименование другое, что записано иначе или похоже, что совпадает. Модель для этого не нужна. Союз только читается, в нём ничего не меняется; «Стоп» останавливает сверку. Маршрут обработки по чертежу точнее — правила проверены на 37 чертежах завода: профильная труба и пруток в размер, гнутые детали, доработка готовой детали, шероховатость без «Ra», твёрдость HB и HRC, трапецеидальная резьба; обозначение «АДЕ3424-…» без пробела и масса в граммах читаются со штампа.
 
