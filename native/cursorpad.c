@@ -435,7 +435,6 @@ static int g_alphaPinned = 250;
 static BOOL g_cursorOn = FALSE;
 static int g_engine = 3; /* 0 wiki, 1 ddg, 2 yandex, 3 mini-ai, 4 plm, 5 files */
 static wchar_t g_filesRoot[MAX_PATH];
-static BOOL g_resultFiles = FALSE;
 static wchar_t g_plmHost[96] = L"um-splmsrv";
 static wchar_t g_sqlHost[96] = L"UM-SQLSRV";
 static wchar_t g_plmPort[16] = L"4450";
@@ -450,16 +449,36 @@ static HWND g_shareEdit, g_chkServe;
 #define PLM_LINK 4096 /* сетевые пути бывают длиннее тысячи знаков */
 #define PLM_COL1 260
 #define PLM_COL2 640
-static wchar_t g_plmLastLink[PLM_LINK];
-static wchar_t g_plmLinks[PLM_ROWS][PLM_LINK];
-static wchar_t g_plmEsi[PLM_ROWS][PLM_COL1];
-static wchar_t g_plmTp[PLM_ROWS][PLM_COL2];
-static long g_plmIds[PLM_ROWS];  /* InfoObjectId каждой строки — для карточки */
-static int g_plmTmpl[PLM_ROWS];  /* шаблон строки: по нему видно, где ТП */
-static long g_plmTpId[PLM_ROWS];  /* id техпроцесса, сведённого в эту строку */
-static long g_plmRealId[PLM_ROWS]; /* собственный id строки: у ТП он свой, а открывается родитель */
-static wchar_t g_plmPf[PLM_ROWS][PLM_COL1]; /* заготовки изделия строки (ProductPreformsCard) */
-static int g_plmCount = 0;
+/* Находки одного поиска целиком. Поток поиска (и раздача PLM коллегам)
+   собирает их в своей копии в куче; окно находок показывает g_plmView, и его
+   меняет только поток окон — целиком, по WM_SEARCH_DONE (search_done_take).
+   Раньше поток поиска писал прямо в строки, которые окно в это время рисовало
+   и сортировало: «рваные» строки и не та строка под щелчком. */
+typedef struct {
+  int count;
+  BOOL files; /* строки — файлы архива, а не объекты PLM */
+  wchar_t lastLink[PLM_LINK];
+  wchar_t links[PLM_ROWS][PLM_LINK];
+  wchar_t esi[PLM_ROWS][PLM_COL1];
+  wchar_t tp[PLM_ROWS][PLM_COL2];
+  long ids[PLM_ROWS];    /* InfoObjectId каждой строки — для карточки */
+  int tmpl[PLM_ROWS];    /* шаблон строки: по нему видно, где ТП */
+  long tpId[PLM_ROWS];   /* id техпроцесса, сведённого в эту строку */
+  long realId[PLM_ROWS]; /* собственный id строки: у ТП он свой, а открывается родитель */
+  wchar_t pf[PLM_ROWS][PLM_COL1]; /* заготовки изделия строки (ProductPreformsCard) */
+} PlmRows;
+static PlmRows g_plmView; /* что в окне находок — только для потока окон */
+#define g_plmCount g_plmView.count
+#define g_resultFiles g_plmView.files
+#define g_plmLastLink g_plmView.lastLink
+#define g_plmLinks g_plmView.links
+#define g_plmEsi g_plmView.esi
+#define g_plmTp g_plmView.tp
+#define g_plmIds g_plmView.ids
+#define g_plmTmpl g_plmView.tmpl
+#define g_plmTpId g_plmView.tpId
+#define g_plmRealId g_plmView.realId
+#define g_plmPf g_plmView.pf
 static BOOL g_autostart = FALSE;
 static void show_status(const wchar_t *text);
 static void toggle_settings(void);
@@ -4977,7 +4996,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     if (wParam == TIMER_IDLE_FIGHT) idle_fight_tick();
     return 0;
   case WM_SEARCH_DONE: {
-    wchar_t *text = (wchar_t *)lParam;
+    wchar_t *text = search_done_take((SearchDone *)lParam); /* строки находок — в окно */
     if (text) {
       /* PLM строк не дал — чертежи, найденные пока он искал, оставляем ниже */
       if (g_plmCount == 0 && g_quickDraw && g_quickDraw[0]) {

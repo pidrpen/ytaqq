@@ -315,22 +315,23 @@ static int share_serve_child(const wchar_t *reqPath, const wchar_t *ansPath) {
   if (!out) return 1;
   out[0] = 0;
   if (!wcscmp(kind, L"search") && q[0]) {
-    plm_lookup(q, out, 1800);
-    for (int i = 0; i < g_plmCount; i++) {
-      sb_add(&b, L"row\t%ld\t%d\t%ld\t%ld", g_plmIds[i], g_plmTmpl[i], g_plmTpId[i],
-             g_plmRealId[i]);
-      sb_field(&b, g_plmEsi[i]);
-      sb_field(&b, g_plmTp[i]);
-      sb_field(&b, g_plmLinks[i]);
+    PlmRows *r = (PlmRows *)calloc(1, sizeof(PlmRows));
+    if (r) plm_lookup(q, out, 1800, r);
+    for (int i = 0; r && i < r->count; i++) {
+      sb_add(&b, L"row\t%ld\t%d\t%ld\t%ld", r->ids[i], r->tmpl[i], r->tpId[i], r->realId[i]);
+      sb_field(&b, r->esi[i]);
+      sb_field(&b, r->tp[i]);
+      sb_field(&b, r->links[i]);
       sb_add(&b, L"\n");
       /* заготовка — отдельной строкой: старая версия у коллеги её пропустит,
          а не примет за часть ссылки */
-      if (g_plmPf[i][0]) {
+      if (r->pf[i][0]) {
         sb_add(&b, L"pf\t%d", i);
-        sb_field(&b, g_plmPf[i]);
+        sb_field(&b, r->pf[i]);
         sb_add(&b, L"\n");
       }
     }
+    free(r);
   } else if (!wcscmp(kind, L"card") && id > 0) {
     load_files_pref(); /* чертёж для карточки ищется в своём индексе */
     g_cardVerbose = verbose;
@@ -757,9 +758,10 @@ static wchar_t *share_ask(const wchar_t *body, const wchar_t *tag, int waitSec, 
   return NULL;
 }
 
-static BOOL share_lookup(const wchar_t *query, wchar_t *out, int cap) {
-  g_plmLastLink[0] = 0;
-  g_plmCount = 0;
+static BOOL share_lookup(const wchar_t *query, wchar_t *out, int cap, PlmRows *r) {
+  r->lastLink[0] = 0;
+  r->count = 0;
+  r->files = FALSE;
   wchar_t q[400];
   lstrcpynW(q, query, 400);
   for (wchar_t *c = q; *c; c++)
@@ -778,23 +780,23 @@ static BOOL share_lookup(const wchar_t *query, wchar_t *out, int cap) {
     int k = share_split(line, f, 8);
     if (!wcscmp(f[0], L"via") && k >= 2) lstrcpynW(via, f[1], 200);
     else if (!wcscmp(f[0], L"row") && k >= 8 && n < PLM_ROWS) {
-      g_plmIds[n] = wcstol(f[1], NULL, 10);
-      g_plmTmpl[n] = (int)wcstol(f[2], NULL, 10);
-      g_plmTpId[n] = wcstol(f[3], NULL, 10);
-      g_plmRealId[n] = wcstol(f[4], NULL, 10);
-      lstrcpynW(g_plmEsi[n], f[5], PLM_COL1);
-      lstrcpynW(g_plmTp[n], f[6], PLM_COL2);
-      lstrcpynW(g_plmLinks[n], f[7], PLM_LINK);
-      g_plmPf[n][0] = 0;
+      r->ids[n] = wcstol(f[1], NULL, 10);
+      r->tmpl[n] = (int)wcstol(f[2], NULL, 10);
+      r->tpId[n] = wcstol(f[3], NULL, 10);
+      r->realId[n] = wcstol(f[4], NULL, 10);
+      lstrcpynW(r->esi[n], f[5], PLM_COL1);
+      lstrcpynW(r->tp[n], f[6], PLM_COL2);
+      lstrcpynW(r->links[n], f[7], PLM_LINK);
+      r->pf[n][0] = 0;
       n++;
     } else if (!wcscmp(f[0], L"pf") && k >= 3) {
-      int r = (int)wcstol(f[1], NULL, 10);
-      if (r >= 0 && r < n) lstrcpynW(g_plmPf[r], f[2], PLM_COL1);
+      int row = (int)wcstol(f[1], NULL, 10);
+      if (row >= 0 && row < n) lstrcpynW(r->pf[row], f[2], PLM_COL1);
     }
   }
-  plm_rank(q, n); /* у раздающего старой версии порядка по словам нет */
-  g_plmCount = n;
-  if (n > 0) lstrcpynW(g_plmLastLink, g_plmLinks[0], PLM_LINK);
+  plm_rank(q, r, n); /* у раздающего старой версии порядка по словам нет */
+  r->count = n;
+  if (n > 0) lstrcpynW(r->lastLink, r->links[0], PLM_LINK);
   ans_printf(out, cap, L"%s\r\n\r\nPLM через компьютер: %s", p ? p : L"", via[0] ? via : L"коллеги");
   free(a);
   return n > 0;

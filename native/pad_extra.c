@@ -842,7 +842,7 @@ static void fill_plm_list(void) {
 /* Строка — это несколько параллельных массивов. Переставлять надо все:
    раньше сортировка меняла местами только имена, ссылки и номера, а номер
    ТП и шаблон оставались на старых местах — «Открыть ТП» брал чужой. */
-static void plm_swap_rows(int a, int b, wchar_t *tmp) {
+static void plm_swap_rows(PlmRows *r, int a, int b, wchar_t *tmp) {
 #define SWAP_STR(arr, n)                                   \
   do {                                                     \
     memcpy(tmp, arr[a], (n) * sizeof(wchar_t));            \
@@ -855,14 +855,14 @@ static void plm_swap_rows(int a, int b, wchar_t *tmp) {
     arr[a] = arr[b];                                       \
     arr[b] = t_;                                           \
   } while (0)
-  SWAP_STR(g_plmEsi, PLM_COL1);
-  SWAP_STR(g_plmTp, PLM_COL2);
-  SWAP_STR(g_plmPf, PLM_COL1);
-  SWAP_STR(g_plmLinks, PLM_LINK);
-  SWAP_NUM(g_plmIds);
-  SWAP_NUM(g_plmTpId);
-  SWAP_NUM(g_plmRealId);
-  SWAP_NUM(g_plmTmpl);
+  SWAP_STR(r->esi, PLM_COL1);
+  SWAP_STR(r->tp, PLM_COL2);
+  SWAP_STR(r->pf, PLM_COL1);
+  SWAP_STR(r->links, PLM_LINK);
+  SWAP_NUM(r->ids);
+  SWAP_NUM(r->tpId);
+  SWAP_NUM(r->realId);
+  SWAP_NUM(r->tmpl);
 #undef SWAP_STR
 #undef SWAP_NUM
 }
@@ -879,7 +879,7 @@ static void plm_sort(int col) {
       int cmp = _wcsicmp(a, b);
       if (g_sortDesc) cmp = -cmp;
       if (cmp >= 0) break;
-      plm_swap_rows(j, j - 1, tmp);
+      plm_swap_rows(&g_plmView, j, j - 1, tmp);
     }
   }
   free(tmp);
@@ -1080,7 +1080,7 @@ static BOOL plm_same_item(const wchar_t *a, const wchar_t *b) {
 
 /* share.c: PLM через компьютер коллеги, если своего логина нет */
 static BOOL share_client_on(void);
-static BOOL share_lookup(const wchar_t *query, wchar_t *out, int cap);
+static BOOL share_lookup(const wchar_t *query, wchar_t *out, int cap, PlmRows *r);
 static void share_card(long id, BOOL verbose, wchar_t *out, int cap);
 
 /* Где у изделия лежат его карточки (заготовок, техсостава, ТП). Не в самом
@@ -1186,21 +1186,21 @@ static int plm_cond(const wchar_t *query, wchar_t *out, int cap) {
 /* Лучшие сверху, как в архиве: запрос целиком, потом его начало, потом
    слова вразброс. Строки, где слово нашлось только в обозначении-атрибуте,
    остаются на своих местах в хвосте. */
-static void plm_rank(const wchar_t *query, int n) {
+static void plm_rank(const wchar_t *query, PlmRows *r, int n) {
   SrWords w;
   wchar_t whole[SR_Q];
   sr_words(query, &w, whole, SR_Q);
   if (n < 2 || !w.n) return;
   int s[PLM_ROWS];
   for (int i = 0; i < n; i++) {
-    s[i] = sr_score(g_plmEsi[i], g_plmTp[i], &w, whole);
+    s[i] = sr_score(r->esi[i], r->tp[i], &w, whole);
     if (s[i] < 0) s[i] = 0;
   }
   wchar_t *tmp = (wchar_t *)malloc(PLM_LINK * sizeof(wchar_t));
   if (!tmp) return;
   for (int i = 1; i < n; i++)
     for (int j = i; j > 0 && s[j] > s[j - 1]; j--) {
-      plm_swap_rows(j, j - 1, tmp);
+      plm_swap_rows(r, j, j - 1, tmp);
       int t = s[j];
       s[j] = s[j - 1];
       s[j - 1] = t;
@@ -1208,12 +1208,14 @@ static void plm_rank(const wchar_t *query, int n) {
   free(tmp);
 }
 
-static BOOL plm_lookup(const wchar_t *query, wchar_t *out, int cap) {
-  if (share_client_on()) return share_lookup(query, out, cap);
-  g_plmLastLink[0] = 0;
-  g_plmCount = 0;
-  memset(g_plmTpId, 0, sizeof(g_plmTpId));
-  memset(g_plmRealId, 0, sizeof(g_plmRealId));
+/* строки находок — в r: поиск идёт в своём потоке, окно их берёт целиком потом */
+static BOOL plm_lookup(const wchar_t *query, wchar_t *out, int cap, PlmRows *r) {
+  if (share_client_on()) return share_lookup(query, out, cap, r);
+  r->lastLink[0] = 0;
+  r->count = 0;
+  r->files = FALSE;
+  memset(r->tpId, 0, sizeof(r->tpId));
+  memset(r->realId, 0, sizeof(r->realId));
   wchar_t cond[4600], whole[420], prepped[SR_Q];
   int words = plm_cond(query, cond, 4600);
   sr_prep(query, prepped, SR_Q);
@@ -1263,8 +1265,8 @@ static BOOL plm_lookup(const wchar_t *query, wchar_t *out, int cap) {
   }
   SQLHSTMT st = SQL_NULL_HSTMT;
   SQLAllocHandle(SQL_HANDLE_STMT, dbc, &st);
-  SQLRETURN r = SQLExecDirectW(st, (SQLWCHAR *)sql, SQL_NTS);
-  if (!SQL_SUCCEEDED(r)) {
+  SQLRETURN sr = SQLExecDirectW(st, (SQLWCHAR *)sql, SQL_NTS);
+  if (!SQL_SUCCEEDED(sr)) {
     odbc_err(st, SQL_HANDLE_STMT, err, 280);
     ans_printf(out, cap, L"PLM\r\n\r\nЗапрос не выполнился.\r\n%s", err);
     SQLFreeHandle(SQL_HANDLE_STMT, st);
@@ -1287,30 +1289,30 @@ static BOOL plm_lookup(const wchar_t *query, wchar_t *out, int cap) {
   /* та же беда, что и в карточке: SQL_SUCCESS_WITH_INFO обрывал выдачу */
   while (SQL_SUCCEEDED(SQLFetch(st)) && n < 60) {
     long oid = (idInd == SQL_NULL_DATA || openId == 0) ? 0 : (long)openId;
-    make_plm_link(g_plmLinks[n], PLM_LINK, oid);
-    g_plmIds[n] = oid;
-    g_plmRealId[n] = (ownInd == SQL_NULL_DATA) ? 0 : (long)ownId;
-    g_plmTmpl[n] = (int)tmpl;
-    g_plmEsi[n][0] = 0;
-    g_plmTp[n][0] = 0;
+    make_plm_link(r->links[n], PLM_LINK, oid);
+    r->ids[n] = oid;
+    r->realId[n] = (ownInd == SQL_NULL_DATA) ? 0 : (long)ownId;
+    r->tmpl[n] = (int)tmpl;
+    r->esi[n][0] = 0;
+    r->tp[n][0] = 0;
     if (tmpl == 1794) {
-      if (pInd > 0 && pnm[0]) lstrcpynW(g_plmEsi[n], (wchar_t *)pnm, PLM_COL1);
-      else _snwprintf(g_plmEsi[n], PLM_COL1, L"IO.%ld", oid);
-      if (nmInd > 0) lstrcpynW(g_plmTp[n], (wchar_t *)nm, PLM_COL2);
+      if (pInd > 0 && pnm[0]) lstrcpynW(r->esi[n], (wchar_t *)pnm, PLM_COL1);
+      else _snwprintf(r->esi[n], PLM_COL1, L"IO.%ld", oid);
+      if (nmInd > 0) lstrcpynW(r->tp[n], (wchar_t *)nm, PLM_COL2);
     } else if (nmInd > 0) {
-      lstrcpynW(g_plmEsi[n], (wchar_t *)nm, PLM_COL1);
+      lstrcpynW(r->esi[n], (wchar_t *)nm, PLM_COL1);
     } else {
-      _snwprintf(g_plmEsi[n], PLM_COL1, L"IO.%ld", oid);
+      _snwprintf(r->esi[n], PLM_COL1, L"IO.%ld", oid);
     }
-    if (!g_plmLastLink[0]) lstrcpynW(g_plmLastLink, g_plmLinks[n], PLM_LINK);
+    if (!r->lastLink[0]) lstrcpynW(r->lastLink, r->links[n], PLM_LINK);
     /* the separator has to fit too, or a long result list walks off the end */
-    size_t add = wcslen(g_plmLinks[n]);
+    size_t add = wcslen(r->links[n]);
     if (linkLen + (n ? 2 : 0) + add + 1 < 4200) {
       if (n) {
         links[linkLen++] = L'\r';
         links[linkLen++] = L'\n';
       }
-      memcpy(links + linkLen, g_plmLinks[n], (add + 1) * sizeof(wchar_t));
+      memcpy(links + linkLen, r->links[n], (add + 1) * sizeof(wchar_t));
       linkLen += add;
     }
     n++;
@@ -1326,9 +1328,9 @@ static BOOL plm_lookup(const wchar_t *query, wchar_t *out, int cap) {
     size_t idl = 0;
     ids[0] = 0;
     for (int i = 0; i < n; i++) {
-      if (g_plmTmpl[i] != 1794 || !g_plmRealId[i]) continue;
+      if (r->tmpl[i] != 1794 || !r->realId[i]) continue;
       wchar_t one[24];
-      int k = _snwprintf(one, 24, idn ? L",%ld" : L"%ld", g_plmRealId[i]);
+      int k = _snwprintf(one, 24, idn ? L",%ld" : L"%ld", r->realId[i]);
       if (k <= 0 || idl + (size_t)k + 1 >= 800) break;
       memcpy(ids + idl, one, ((size_t)k + 1) * sizeof(wchar_t));
       idl += (size_t)k;
@@ -1340,86 +1342,86 @@ static BOOL plm_lookup(const wchar_t *query, wchar_t *out, int cap) {
     }
   }
   for (int i = 0; i < n; i++) {
-    if (g_plmTmpl[i] != 1794 || !g_plmTp[i][0]) continue;
+    if (r->tmpl[i] != 1794 || !r->tp[i][0]) continue;
     long prod = 0;
     const wchar_t *pname = NULL;
     for (int k = 0; k < tn; k++) {
-      if (tps[k].tp != g_plmRealId[i]) continue;
+      if (tps[k].tp != r->realId[i]) continue;
       prod = tps[k].prod;
       if (tps[k].name[0]) pname = tps[k].name;
       break;
     }
     /* изделие у техпроцесса теперь известно точно — показываем его
        в строке, даже если своей строки у изделия в находках нет */
-    if (pname) lstrcpynW(g_plmEsi[i], pname, PLM_COL1);
-    if (prod && !g_plmIds[i]) g_plmIds[i] = prod;
+    if (pname) lstrcpynW(r->esi[i], pname, PLM_COL1);
+    if (prod && !r->ids[i]) r->ids[i] = prod;
     int hit = -1;
     for (int j = 0; j < n && hit < 0; j++) {
-      if (j == i || g_plmTmpl[j] == 1794 || g_plmTp[j][0] || !g_plmEsi[j][0]) continue;
-      if (prod && (g_plmIds[j] == prod || g_plmRealId[j] == prod)) hit = j;
+      if (j == i || r->tmpl[j] == 1794 || r->tp[j][0] || !r->esi[j][0]) continue;
+      if (prod && (r->ids[j] == prod || r->realId[j] == prod)) hit = j;
     }
     if (hit < 0 && pname) {
       /* ссылка может вести на другую версию того же изделия — тогда
          сводим по обозначению самого изделия, а не техпроцесса */
       for (int j = 0; j < n && hit < 0; j++) {
-        if (j == i || g_plmTmpl[j] == 1794 || g_plmTp[j][0] || !g_plmEsi[j][0]) continue;
-        if (plm_same_item(pname, g_plmEsi[j])) hit = j;
+        if (j == i || r->tmpl[j] == 1794 || r->tp[j][0] || !r->esi[j][0]) continue;
+        if (plm_same_item(pname, r->esi[j])) hit = j;
       }
     }
     if (hit < 0) {
       /* ссылки нет вовсе — остаётся сверка обозначений */
       for (int j = 0; j < n && hit < 0; j++) {
-        if (j == i || g_plmTmpl[j] == 1794 || g_plmTp[j][0] || !g_plmEsi[j][0]) continue;
-        if (plm_same_item(g_plmTp[i], g_plmEsi[j])) hit = j;
+        if (j == i || r->tmpl[j] == 1794 || r->tp[j][0] || !r->esi[j][0]) continue;
+        if (plm_same_item(r->tp[i], r->esi[j])) hit = j;
       }
     }
     if (hit < 0) continue;
-    lstrcpynW(g_plmTp[hit], g_plmTp[i], PLM_COL2);
+    lstrcpynW(r->tp[hit], r->tp[i], PLM_COL2);
     /* номер техпроцесса нужен его собственный, а не родительский:
        раньше карточка брала из снимка чужой номер и операций не находила */
-    g_plmTpId[hit] = g_plmRealId[i] ? g_plmRealId[i] : g_plmIds[i];
-    g_plmTmpl[i] = -1;
+    r->tpId[hit] = r->realId[i] ? r->realId[i] : r->ids[i];
+    r->tmpl[i] = -1;
   }
   free(tps);
   {
     int w = 0;
     for (int i = 0; i < n; i++) {
-      if (g_plmTmpl[i] == -1) continue;
+      if (r->tmpl[i] == -1) continue;
       if (w != i) {
-        lstrcpynW(g_plmEsi[w], g_plmEsi[i], PLM_COL1);
-        lstrcpynW(g_plmTp[w], g_plmTp[i], PLM_COL2);
-        lstrcpynW(g_plmLinks[w], g_plmLinks[i], PLM_LINK);
-        g_plmIds[w] = g_plmIds[i];
-        g_plmTpId[w] = g_plmTpId[i];
-        g_plmRealId[w] = g_plmRealId[i];
-        g_plmTmpl[w] = g_plmTmpl[i];
+        lstrcpynW(r->esi[w], r->esi[i], PLM_COL1);
+        lstrcpynW(r->tp[w], r->tp[i], PLM_COL2);
+        lstrcpynW(r->links[w], r->links[i], PLM_LINK);
+        r->ids[w] = r->ids[i];
+        r->tpId[w] = r->tpId[i];
+        r->realId[w] = r->realId[i];
+        r->tmpl[w] = r->tmpl[i];
       }
       w++;
     }
     n = w;
-    plm_rank(query, n);
+    plm_rank(query, r, n);
     /* текстовый список ссылок собирался до сведения и остался бы с уже
        убранными строками. Пересобираем по тому, что видно на экране. */
     linkLen = 0;
     links[0] = 0;
     for (int i = 0; i < n; i++) {
-      size_t add = wcslen(g_plmLinks[i]);
+      size_t add = wcslen(r->links[i]);
       if (linkLen + (i ? 2 : 0) + add + 1 >= 4200) break;
       if (i) {
         links[linkLen++] = L'\r';
         links[linkLen++] = L'\n';
       }
-      memcpy(links + linkLen, g_plmLinks[i], (add + 1) * sizeof(wchar_t));
+      memcpy(links + linkLen, r->links[i], (add + 1) * sizeof(wchar_t));
       linkLen += add;
     }
-    g_plmLastLink[0] = 0;
-    if (n > 0) lstrcpynW(g_plmLastLink, g_plmLinks[0], PLM_LINK);
+    r->lastLink[0] = 0;
+    if (n > 0) lstrcpynW(r->lastLink, r->links[0], PLM_LINK);
   }
-  g_plmCount = n;
+  r->count = n;
   SQLFreeHandle(SQL_HANDLE_STMT, st);
   /* столбец «Заготовка» заполняется потом, в фоне (pf_start_async): раньше
      поиск ждал его, и результат приходил на десятки секунд позже */
-  for (int i = 0; i < n; i++) g_plmPf[i][0] = 0;
+  for (int i = 0; i < n; i++) r->pf[i][0] = 0;
   SQLDisconnect(dbc);
   SQLFreeHandle(SQL_HANDLE_DBC, dbc);
   SQLFreeHandle(SQL_HANDLE_ENV, env);
@@ -4244,13 +4246,13 @@ typedef struct {
 /* Поиск в PLM или в архиве. Если место выбрано само и там пусто (или PLM
    без связи), тот же запрос идёт в другое место: человеку всё равно, где
    лежит, лишь бы нашлось. Возвращает 1, если нашлось во втором месте. */
-static int compose_answer(const SearchJob *job, wchar_t *out, int cap) {
+static int compose_answer(const SearchJob *job, wchar_t *out, int cap, PlmRows *r) {
   int engine = job->engine;
-  g_resultFiles = FALSE;
+  r->files = FALSE;
   if (engine != 4 && engine != 5) {
     /* мини-ИИ без окна чата: сеть, а нет её — офлайн-справка */
     wchar_t a[1200] = {0};
-    g_plmCount = 0;
+    r->count = 0;
     if (internet_ask(job->q, a, 1200) && a[0]) {
       ans_printf(out, cap, L"Мини-ИИ\r\n\r\n%s", a);
       return 0;
@@ -4259,7 +4261,7 @@ static int compose_answer(const SearchJob *job, wchar_t *out, int cap) {
     ans_printf(out, cap, L"%s (офлайн)\r\n\r\n%s", src, a);
     return 0;
   }
-  BOOL ok = engine == 5 ? files_search(job->q, out, cap) : plm_lookup(job->q, out, cap);
+  BOOL ok = engine == 5 ? files_search(job->q, out, cap, r) : plm_lookup(job->q, out, cap, r);
   if (ok || !job->fallback) return 0;
   int other = engine == 5 ? 4 : 5;
   if (other == 4 ? !plm_ready() : !g_filesRoot[0]) {
@@ -4273,8 +4275,8 @@ static int compose_answer(const SearchJob *job, wchar_t *out, int cap) {
   if (!first) return 0;
   lstrcpynW(first, out, cap);
   out[0] = 0;
-  g_resultFiles = FALSE;
-  ok = other == 5 ? files_search(job->q, out, cap) : plm_lookup(job->q, out, cap);
+  r->files = FALSE;
+  ok = other == 5 ? files_search(job->q, out, cap, r) : plm_lookup(job->q, out, cap, r);
   if (!ok) {
     wchar_t *second = (wchar_t *)malloc((size_t)cap * sizeof(wchar_t));
     if (second) {
@@ -4296,13 +4298,48 @@ static void ans_toggle_big(HWND hwnd);
 static void show_card_selected(void);
 static void show_card_full(void);
 
+/* Итог поиска для потока окон: текст ответа и строки находок вместе */
+typedef struct {
+  wchar_t *text;
+  PlmRows rows;
+} SearchDone;
+
+/* Поток окон: строки находок — в окно, целиком; текст — тому, кто покажет
+   (освобождает он). */
+static wchar_t *search_done_take(SearchDone *d) {
+  if (!d) return NULL;
+  const PlmRows *r = &d->rows;
+  int n = r->count < 0 ? 0 : r->count > PLM_ROWS ? PLM_ROWS : r->count;
+  g_plmView.count = n;
+  g_plmView.files = r->files;
+  lstrcpynW(g_plmView.lastLink, r->lastLink, PLM_LINK);
+  memcpy(g_plmView.links, r->links, (size_t)n * sizeof(r->links[0]));
+  memcpy(g_plmView.esi, r->esi, (size_t)n * sizeof(r->esi[0]));
+  memcpy(g_plmView.tp, r->tp, (size_t)n * sizeof(r->tp[0]));
+  memcpy(g_plmView.ids, r->ids, (size_t)n * sizeof(r->ids[0]));
+  memcpy(g_plmView.tmpl, r->tmpl, (size_t)n * sizeof(r->tmpl[0]));
+  memcpy(g_plmView.tpId, r->tpId, (size_t)n * sizeof(r->tpId[0]));
+  memcpy(g_plmView.realId, r->realId, (size_t)n * sizeof(r->realId[0]));
+  memcpy(g_plmView.pf, r->pf, (size_t)n * sizeof(r->pf[0]));
+  wchar_t *text = d->text;
+  free(d);
+  return text;
+}
+
 static DWORD WINAPI search_thread(LPVOID param) {
   SearchJob *job = (SearchJob *)param;
-  wchar_t *out = (wchar_t *)malloc(1800 * sizeof(wchar_t));
+  SearchDone *d = (SearchDone *)calloc(1, sizeof(SearchDone));
+  wchar_t *out = d ? (wchar_t *)malloc(1800 * sizeof(wchar_t)) : NULL;
   if (out) {
     out[0] = 0;
-    int moved = compose_answer(job, out, 1800);
-    if (!PostMessageW(g_hwnd, WM_SEARCH_DONE, (WPARAM)moved, (LPARAM)out)) free(out);
+    d->text = out;
+    int moved = compose_answer(job, out, 1800, &d->rows);
+    if (!PostMessageW(g_hwnd, WM_SEARCH_DONE, (WPARAM)moved, (LPARAM)d)) {
+      free(out);
+      free(d);
+    }
+  } else {
+    free(d);
   }
   free(job);
   InterlockedExchange(&g_netBusy, 0);

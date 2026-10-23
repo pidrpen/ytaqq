@@ -1802,10 +1802,11 @@ static int files_find(const wchar_t *query, BOOL nameOnly, FileHit *h, int cap, 
   return n;
 }
 
-static BOOL files_search(const wchar_t *query, wchar_t *out, int cap) {
-  g_plmCount = 0;
-  g_plmLastLink[0] = 0;
-  g_resultFiles = TRUE;
+/* строки находок — в r: поиск идёт в своём потоке, окно их берёт целиком потом */
+static BOOL files_search(const wchar_t *query, wchar_t *out, int cap, PlmRows *r) {
+  r->count = 0;
+  r->lastLink[0] = 0;
+  r->files = TRUE;
   save_files_pref();
   files_lock_init();
   if (!g_filesRoot[0]) {
@@ -1838,10 +1839,10 @@ static BOOL files_search(const wchar_t *query, wchar_t *out, int cap) {
     wchar_t full[PLM_LINK];
     _snwprintf(full, PLM_LINK, L"%s\\%s", dir, e->name);
     full[PLM_LINK - 1] = 0;
-    lstrcpynW(g_plmEsi[k], e->name, PLM_COL1);
-    lstrcpynW(g_plmTp[k], dir, PLM_COL2);
-    lstrcpynW(g_plmLinks[k], full, PLM_LINK);
-    if (!g_plmLastLink[0]) lstrcpynW(g_plmLastLink, full, PLM_LINK);
+    lstrcpynW(r->esi[k], e->name, PLM_COL1);
+    lstrcpynW(r->tp[k], dir, PLM_COL2);
+    lstrcpynW(r->links[k], full, PLM_LINK);
+    if (!r->lastLink[0]) lstrcpynW(r->lastLink, full, PLM_LINK);
     /* the separator has to fit too, or a long result list walks off the end */
     size_t add = wcslen(full);
     if (linkLen + (k ? 2 : 0) + add + 1 < 1800) {
@@ -1854,7 +1855,7 @@ static BOOL files_search(const wchar_t *query, wchar_t *out, int cap) {
     }
   }
   files_unlock();
-  g_plmCount = n;
+  r->count = n;
   if (n == 0) {
     ans_printf(out, cap, L"Файлы\r\n\r\nВ JSON нет «%.80s» (%d записей).", q, g_filesN);
     return FALSE;
