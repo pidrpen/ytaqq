@@ -463,6 +463,8 @@ static BOOL g_aiWatchOn;
 static wchar_t g_aiSrvNote[200];    /* почему не запустился — для «Проверить» */
 static wchar_t g_aiRunNote[200];    /* как пришлось запустить (без видеокарты, малый контекст) */
 static int g_aiSlotCtx;             /* контекст ячейки у идущего сервера; 0 — как в настройках */
+static volatile LONG g_aiSrvUsers;  /* запросов, которые сейчас идут к поднятому серверу */
+static int g_aiSrvWaiters, g_aiSrvWant; /* под замком: сколько ждут перезапуска и какое окно им нужно */
 static int g_aiOutCap = 1024; /* длина ответа, токенов */
 
 void ai_out_cap(int n) { g_aiOutCap = (n >= 64 && n <= 1024) ? n : 1024; }
@@ -682,19 +684,54 @@ static void ai_short_path(wchar_t *p) {
   }
 }
 
-/* поднять сервер, если он не идёт. Ждёт загрузки модели до deadline. */
-static int ai_server_ensure(DWORD deadline, volatile LONG *cancel, int minimumContext) {
+/* поднять сервер, если он не идёт. Ждёт загрузки модели до deadline.
+   *held — запрос пошёл к своему серверу и записан в g_aiSrvUsers: по концу
+   запроса его оттуда снимают (ai_job_run). */
+static int ai_server_ensure(DWORD deadline, volatile LONG *cancel, int minimumContext, BOOL *held) {
+  *held = FALSE;
   if (!g_aiOn) return AI_OFF;
   if (ai_ext()) return AI_OK;
   AcquireSRWLockExclusive(&g_aiSrvLock);
-  if (!g_aiOn || (cancel && *cancel)) {
-    ReleaseSRWLockExclusive(&g_aiSrvLock); return !g_aiOn ? AI_OFF : AI_CANCELLED;
-  }
-  if (g_aiProc && WaitForSingleObject(g_aiProc, 0) == WAIT_TIMEOUT && g_aiPort && g_aiSlotCtx >= minimumContext &&
-      !g_aiSrvStale) {
+  /* Серверу нужно другое окно (агенту — 16384) или новые настройки, а через него
+     ещё идут ответы: раньше его гасили сразу, и соседний ответ чата или
+     распознавания чертежа обрывался ошибкой. Теперь ждём их конца, а новые
+     запросы встают за ждущим — иначе ответы один за другим не дали бы ему дождаться. */
+  BOOL waiting = FALSE;
+  for (int spin = 0;; spin++) {
+    int st = !g_aiOn                                               ? AI_OFF
+             : cancel && *cancel                                   ? AI_CANCELLED
+             : spin && (LONG)(GetTickCount() - deadline) >= 0      ? AI_TIMEOUT
+                                                                   : AI_OK;
+    if (st != AI_OK) {
+      if (st == AI_TIMEOUT) lstrcpynW(g_aiSrvNote, L"сервер занят другими ответами — не дождался их конца", 200);
+      if (waiting && --g_aiSrvWaiters == 0) g_aiSrvWant = 0;
+      ReleaseSRWLockExclusive(&g_aiSrvLock);
+      return st;
+    }
+    BOOL alive = g_aiProc && WaitForSingleObject(g_aiProc, 0) == WAIT_TIMEOUT && g_aiPort;
+    if (alive && g_aiSlotCtx >= minimumContext && !g_aiSrvStale) {
+      if (waiting || !g_aiSrvWaiters) {
+        if (waiting && --g_aiSrvWaiters == 0) g_aiSrvWant = 0;
+        InterlockedIncrement(&g_aiSrvUsers);
+        *held = TRUE;
+        ReleaseSRWLockExclusive(&g_aiSrvLock);
+        return AI_OK;
+      }
+    } else if (!alive || !g_aiSrvUsers) {
+      break; /* гасить можно: под ним никто не идёт */
+    } else if (!waiting) {
+      waiting = TRUE;
+      g_aiSrvWaiters++;
+      ai_log(L"Перезапуск сервера ждёт конца идущих ответов (%ld)", (long)g_aiSrvUsers);
+    }
+    if (waiting && minimumContext > g_aiSrvWant) g_aiSrvWant = minimumContext;
     ReleaseSRWLockExclusive(&g_aiSrvLock);
-    return AI_OK;
+    Sleep(200);
+    AcquireSRWLockExclusive(&g_aiSrvLock);
   }
+  /* окно — самое большое из нужных ждущим: иначе следующий перезапустил бы снова */
+  int need = minimumContext > g_aiSrvWant ? minimumContext : g_aiSrvWant;
+  if (waiting && --g_aiSrvWaiters == 0) g_aiSrvWant = 0;
   ai_server_stop_locked();
   InterlockedExchange(&g_aiSrvStale, 0); /* запускаем с текущими настройками */
   wchar_t exe[MAX_PATH], model[MAX_PATH], mm[MAX_PATH], log[MAX_PATH], dir[MAX_PATH];
@@ -743,7 +780,7 @@ static int ai_server_ensure(DWORD deadline, volatile LONG *cancel, int minimumCo
   g_aiSrvNote[0] = g_aiRunNote[0] = 0;
   /* если модель не влезла, пробуем проще: без видеокарты, затем с малым контекстом */
   int ngl = gpu ? 99 : 0, ctx = g_aiCtx * 2, np = 2, fail = -1;
-  if (minimumContext) { ctx = g_aiCtx > minimumContext ? g_aiCtx : minimumContext; np = 1; }
+  if (need) { ctx = g_aiCtx > need ? g_aiCtx : need; np = 1; }
   {
     int av, tot;
     ai_mem_mb(&av, &tot);
@@ -840,7 +877,7 @@ static int ai_server_ensure(DWORD deadline, volatile LONG *cancel, int minimumCo
           ngl = 0;
           lstrcpynW(g_aiRunNote, L"видеокарте не хватило памяти, модель идёт на процессоре", 200);
           ai_log(L"Повтор без видеокарты (-ngl 0)");
-        } else if (ctx > 2048 && !minimumContext) {
+        } else if (ctx > 2048 && !need) {
           ctx = 2048;
           np = 1;
           lstrcpynW(g_aiRunNote, L"памяти мало, контекст урезан до 2048", 200);
@@ -885,6 +922,8 @@ static int ai_server_ensure(DWORD deadline, volatile LONG *cancel, int minimumCo
     ai_log(L"Итог: %s", g_aiSrvNote);
   }
   if (rc == AI_OK) {
+    InterlockedIncrement(&g_aiSrvUsers);
+    *held = TRUE;
     g_aiLastUse = GetTickCount();
     if (!g_aiWatchOn) {
       HANDLE th = CreateThread(NULL, 0, ai_watch_thread, NULL, 0, NULL);
@@ -984,7 +1023,8 @@ static wchar_t *ai_sse_text(const char *s) {
 static void ai_job_run(AiJob *j) {
   DWORD t0 = GetTickCount(), deadline = t0 + j->timeout;
   InterlockedIncrement(&g_aiActive);
-  int st = j->provider != g_aiProvider ? AI_CANCELLED : j->provider ? (!g_aiOn ? AI_OFF : AI_OK) : ai_server_ensure(deadline, &j->cancel, j->agentTask ? 16384 : 0);
+  BOOL held = FALSE;
+  int st = j->provider != g_aiProvider ? AI_CANCELLED : j->provider ? (!g_aiOn ? AI_OFF : AI_OK) : ai_server_ensure(deadline, &j->cancel, j->agentTask ? 16384 : 0, &held);
   if (st == AI_NO_SERVER || st == AI_NO_MODEL) {
     AcquireSRWLockShared(&g_aiSrvLock);
     j->text = _wcsdup(g_aiSrvNote[0] ? g_aiSrvNote : ai_status_text(st));
@@ -1031,6 +1071,7 @@ static void ai_job_run(AiJob *j) {
     free(resp);
     g_aiLastUse = GetTickCount();
   }
+  if (held) InterlockedDecrement(&g_aiSrvUsers);
   InterlockedDecrement(&g_aiActive);
   j->status = st;
   j->ms = GetTickCount() - t0;
