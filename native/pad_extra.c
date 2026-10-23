@@ -437,12 +437,25 @@ static void open_plm_link(const wchar_t *link) {
 
 static void ans_zoom(int delta);
 static WNDPROC g_oldAnsEdit;
+static BOOL g_qhView; /* в «Находках» список истории поиска (search_history.c) */
+static void qh_add(const wchar_t *raw);
+static void qh_view_key(HWND edit, WPARAM key);
 
 static void ans_text_line_draw(HWND edit);
 static void place_panel_close(HWND hwnd);
 static LRESULT CALLBACK AnsEditProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
   if (msg == WM_KEYDOWN && wParam == VK_ESCAPE) {
     ShowWindow(GetParent(hwnd), SW_HIDE);
+    return 0;
+  }
+  /* список истории: Enter, Ctrl+D и Del — по строке под курсором */
+  if (g_qhView && msg == WM_KEYDOWN &&
+      (wParam == VK_RETURN || wParam == VK_DELETE || (wParam == L'D' && (GetKeyState(VK_CONTROL) & 0x8000)))) {
+    qh_view_key(hwnd, wParam);
+    return 0;
+  }
+  if (g_qhView && msg == WM_LBUTTONDBLCLK) {
+    qh_view_key(hwnd, VK_RETURN);
     return 0;
   }
   /* щелчок по строке-пути — это и есть «выбранный чертёж»: для кнопок
@@ -4865,6 +4878,7 @@ static void ans_toggle_big(HWND hwnd) {
 }
 
 static void show_answer_text(const wchar_t *text) {
+  g_qhView = FALSE;
   if (!g_answer) return;
   if (g_answerEdit) {
     SendMessageW(g_answerEdit, WM_SETFONT, (WPARAM)ans_font(), TRUE);
@@ -5817,6 +5831,7 @@ static void start_lookup(const wchar_t *q) {
     return;
   }
   lstrcpynW(g_lastQuery, q, 400);
+  qh_add(q); /* история поиска (search_history.c): каждый запрос, даже без ответа */
   g_route = r;
   g_engine = r.engine;
   {

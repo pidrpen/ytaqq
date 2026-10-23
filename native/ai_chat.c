@@ -4,11 +4,13 @@
    «запомни: …» и кнопка «Запомнить» пишут тетрадь ai_learn.txt: к похожему
    вопросу подмешиваются эти факты и встроенная карточка (mini_ai.c). Веса
    модели не меняются — свой LoRA по-прежнему файлом lora*.gguf рядом с моделью.
-   Ответ приходит сообщением WM_AI_CHAT с AiResult*. Беседа живёт в памяти окна. */
+   Ответ приходит сообщением WM_AI_CHAT с AiResult*. Беседа записана в ai_chat.txt
+   рядом с тетрадью (без картинок) и возвращается при следующем запуске. */
 
 /* GUID форматов WIC: без библиотеки wincodecsdk их нет в ссылке */
 #include <richedit.h>
 #include "ai_chat_format.h"
+#include "store_text.h"
 static const GUID kAcPngFormat = {0x1b7cfaf4, 0x713f, 0x473c, {0xbb, 0xcd, 0x61, 0x37, 0x42, 0x5f, 0xae, 0xaf}};
 static const GUID kAcBgra = {0x6fddc324, 0x4e03, 0x4bfe, {0xb1, 0x85, 0x3d, 0x77, 0x76, 0x8d, 0xc9, 0x0f}};
 #define WM_AI_CHAT (WM_APP + 72) /* lParam — AiResult*, освободить ai_result_free */
@@ -109,7 +111,8 @@ static void ac_review_reset(void) { free(g_acReviewDraft); g_acReviewDraft = NUL
 
 #include "ai_avatar.c"
 
-static void ac_push(int assistant, const wchar_t *text) {
+static void ac_hist_save(void);
+static void ac_append(int assistant, const wchar_t *text) {
   if (g_acN == g_acCap) {
     int cap = g_acCap ? g_acCap * 2 : 16;
     AcTurn *t = (AcTurn *)realloc(g_acTurns, cap * sizeof(AcTurn));
@@ -125,6 +128,11 @@ static void ac_push(int assistant, const wchar_t *text) {
   g_acTurns[g_acN].png = NULL;
   g_acTurns[g_acN].pngLen = 0;
   g_acN++;
+}
+
+static void ac_push(int assistant, const wchar_t *text) {
+  ac_append(assistant, text);
+  ac_hist_save();
 }
 
 /* снять последнюю реплику и вернуть её текст в поле ввода (вопрос не дошёл) */
@@ -143,6 +151,7 @@ static void ac_unsend(void) {
   }
   free(t->text);
   g_acN--;
+  ac_hist_save();
 }
 
 static void ac_clear_turns(void) {
@@ -678,6 +687,106 @@ static BOOL ac_write_utf8(const wchar_t *path, const wchar_t *text) {
     return FALSE;
   }
   return TRUE;
+}
+
+/* беседа на диске: %LOCALAPPDATA%\CursorPad\ai_chat.txt, по строке на реплику (store_text.h).
+   Картинки не пишем — только текст. Лимиты: последние AC_HIST_TURNS реплик и не больше
+   AC_HIST_CHARS знаков. Мини-чат у помощника показывает ту же беседу — отдельно не нужен. */
+#define AC_HIST_TURNS 200
+#define AC_HIST_CHARS 120000
+#define AC_HIST_BYTES (4u << 20)
+static BOOL g_acHistLoaded; /* пока не прочитано, не пишем: иначе старая беседа стёрлась бы */
+
+static void ac_hist_path(wchar_t *out) {
+  if (g_dataDir[0]) _snwprintf(out, MAX_PATH, L"%s\\ai_chat.txt", g_dataDir);
+  else out[0] = 0;
+}
+
+static void ac_hist_save(void) {
+  wchar_t path[MAX_PATH];
+  if (!g_acHistLoaded) return;
+  ac_hist_path(path);
+  if (!path[0]) return;
+  int from = g_acN;
+  size_t chars = 0;
+  while (from > 0 && g_acN - from < AC_HIST_TURNS) {
+    size_t k = g_acTurns[from - 1].text ? wcslen(g_acTurns[from - 1].text) : 0;
+    if (chars + k > AC_HIST_CHARS) break;
+    chars += k;
+    from--;
+  }
+  StBuf b = {0};
+  for (int i = from; i < g_acN; i++) {
+    const wchar_t *s = g_acTurns[i].text;
+    if (!s || !s[0]) continue;
+    st_char(&b, g_acTurns[i].assistant ? L'1' : L'0');
+    st_char(&b, L'\t');
+    st_quoted(&b, s);
+    st_char(&b, L'\n');
+  }
+  if (b.n) ac_write_utf8(path, b.s);
+  else DeleteFileW(path);
+  free(b.s);
+}
+
+/* читается при первом открытии чата. Старые реплики ставятся перед теми, что уже
+   набраны в этом сеансе; граница контекста для облака — после них */
+static void ac_hist_load(void) {
+  wchar_t path[MAX_PATH];
+  if (g_acHistLoaded) return;
+  g_acHistLoaded = TRUE;
+  ac_hist_path(path);
+  wchar_t *text = path[0] ? ac_read_utf8(path, AC_HIST_BYTES) : NULL;
+  if (!text) return;
+  AcTurn *t = NULL;
+  int n = 0, cap = 0;
+  for (const wchar_t *p = text; *p; p = st_next(p)) {
+    wchar_t tag = 0;
+    wchar_t *s = st_record(p, &tag);
+    if (!s) continue;
+    if (!s[0]) {
+      free(s);
+      continue;
+    }
+    if (n == cap) {
+      int nc = cap ? cap * 2 : 16;
+      AcTurn *nt = (AcTurn *)realloc(t, (size_t)nc * sizeof(AcTurn));
+      if (!nt) {
+        free(s);
+        break;
+      }
+      t = nt;
+      cap = nc;
+    }
+    t[n].assistant = tag == L'1';
+    t[n].text = s;
+    t[n].png = NULL;
+    t[n].pngLen = 0;
+    n++;
+  }
+  free(text);
+  if (!n) {
+    free(t);
+    return;
+  }
+  int total = g_acN + n;
+  if (total > g_acCap) {
+    AcTurn *nt = (AcTurn *)realloc(g_acTurns, (size_t)(total + 16) * sizeof(AcTurn));
+    if (!nt) {
+      for (int i = 0; i < n; i++) free(t[i].text);
+      free(t);
+      return;
+    }
+    g_acTurns = nt;
+    g_acCap = total + 16;
+  }
+  memmove(g_acTurns + n, g_acTurns, (size_t)g_acN * sizeof(AcTurn));
+  memcpy(g_acTurns, t, (size_t)n * sizeof(AcTurn));
+  g_acN = total;
+  free(t);
+  /* облако: прежнюю беседу в его запросы не отправляем — граница, как при смене провайдера */
+  if (g_aiProvider) g_acContextStart += n;
+  g_acRendered = 0;
 }
 
 /* «запомни», «запомни: текст». rest — что записать (может быть пустым). */
@@ -2537,6 +2646,7 @@ static void ac_clear(void) {
   ac_route_reset();
   ac_busy(FALSE);
   ac_clear_turns();
+  ac_hist_save(); /* беседа пуста — и файл на диске уходит */
   free(g_acImg);
   g_acImg = NULL;
   g_acImgLen = 0;
@@ -2929,6 +3039,8 @@ static void ac_create(void) {
   RECT rc;
   GetClientRect(g_acWnd, &rc);
   ac_layout(rc.right, rc.bottom);
+  ac_hist_load();
+  if (g_acN) ac_redraw();
 }
 
 /* тема сменилась (apply_theme): фон ленты, цвета пузырей, шапка */

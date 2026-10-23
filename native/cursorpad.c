@@ -3237,11 +3237,22 @@ static LRESULT CALLBACK EditProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
   return CallWindowProcW(g_oldEdit, hwnd, msg, wParam, lParam);
 }
 
+static void qh_show(void);
+static void qh_fav_edit(void);
+
 static LRESULT CALLBACK SearchEditProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
   if (msg == WM_KEYDOWN && wParam == VK_RETURN) {
     search_clipboard_or_edit();
     return 0;
   }
+  /* Ctrl+H — история поиска, Ctrl+D — избранное (search_history.c); коды 8 и 4 от
+     этих сочетаний в поле не пишем, иначе Ctrl+H сотрёт символ */
+  if (msg == WM_KEYDOWN && (wParam == L'H' || wParam == L'D') && (GetKeyState(VK_CONTROL) & 0x8000)) {
+    if (wParam == L'H') qh_show();
+    else qh_fav_edit();
+    return 0;
+  }
+  if (msg == WM_CHAR && (wParam == 8 || wParam == 4) && (GetKeyState(VK_CONTROL) & 0x8000)) return 0;
   return CallWindowProcW(g_oldSearch ? g_oldSearch : DefWindowProcW, hwnd, msg, wParam, lParam);
 }
 
@@ -4511,6 +4522,7 @@ static void create_settings(HWND owner) {
 #include "drawrec_ui.c" /* окно «Распознать чертёж» */
 #include "drawrec_sort.c" /* «Разложить по папкам»: имена по штампу, копия, журнал, отмена */
 #include "ai_chat.c" /* «Спросить ИИ»: чат с локальной моделью, после окон чертежа */
+#include "search_history.c" /* история поиска и избранное: Ctrl+H, Ctrl+D (после чата: та же запись файлов) */
 #include "game_net.c" /* связь игр с коллегами: приглашения, файлы партии, копии ходов */
 #include "nardy.c"
 #include "shashki.c" /* после нард: общий список «кто в сети» и мелочи работы с папкой */
