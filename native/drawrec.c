@@ -942,6 +942,18 @@ static void dr_page_text(const DrWords *ws, int page, const wchar_t *sep, wchar_
 /* шаблон обозначения (dr_des_core и его буквы-цифры) — в search_route.c: по нему же
    поле поиска узнаёт обозначение в запросе */
 
+/* короткое обозначение без точек «3424-895» — только за буквенным кодом («АДЕ 3424-895»):
+   без кода это номер ГОСТ; code — начало буквенного кода, «ГОСТ 1050-13» и «ОСТ …» не берём */
+static int dr_des_short(const wchar_t *s, int code, int i) {
+  static const wchar_t *const std[] = {L"ГОСТ ", L"ОСТ ", L"СТБ ", L"СТО ", L"СТП ", L"ТУ "};
+  for (int k = 0; k < (int)(sizeof(std) / sizeof(std[0])); k++)
+    if (!wcsncmp(s + code, std[k], wcslen(std[k]))) return -1;
+  int j = dr_digits(s, i, 4, 4);
+  if (j < 0 || s[j] != L'-') return -1;
+  int k = dr_digits(s, j + 1, 2, 4);
+  return k > 0 && s[k] != L'.' && s[k] != L'-' ? k : -1;
+}
+
 /* всё обозначение целиком: [буквы ]ядро[-исп][ шифр] */
 static BOOL dr_des_ok(const wchar_t *s) {
   int i = 0;
@@ -949,6 +961,7 @@ static BOOL dr_des_ok(const wchar_t *s) {
   while (dr_isupper_cyr(s[l])) l++;
   if (l >= 2 && l <= 5 && s[l] == L' ') i = l + 1;
   int e = dr_des_core(s, i);
+  if (e < 0 && i) e = dr_des_short(s, 0, i);
   if (e < 0) return FALSE;
   if (s[e] == L'-' && dr_isdig(s[e + 1])) {
     int q = dr_digits(s, e + 1, 2, 3);
@@ -986,6 +999,17 @@ static void dr_norm_des(const wchar_t *in, wchar_t *out, int cap) {
   for (int k = 0; t[k]; k++) {
     const wchar_t *q = wcschr(lat, t[k]);
     if (q) t[k] = cyr[q - lat];
+  }
+  /* буквенный код, прилипший к цифрам: «АДЕ3424-1074.00.00.02» → «АДЕ 3424-1074.00.00.02» */
+  for (int i = 0; t[i]; i++) {
+    if (i > 0 && t[i - 1] != L' ') continue;
+    int l = 0;
+    while (dr_isupper_cyr(t[i + l]) && l < 6) l++;
+    if (l < 2 || l > 5 || dr_digits(t, i + l, 3, 5) < 0 || t[dr_digits(t, i + l, 3, 5)] != L'-' || n + 1 >= DR_CELL)
+      continue;
+    memmove(t + i + l + 1, t + i + l, (size_t)(n - i - l + 1) * sizeof(wchar_t));
+    t[i + l] = L' ';
+    n++;
   }
   for (int i = 0; t[i];) {
     int j = i;
@@ -1029,6 +1053,12 @@ static BOOL dr_find_des(const wchar_t *text, wchar_t *out, int cap) {
     if (!dr_isdig(fx[i]) && !dr_isupper_cyr(fx[i])) continue;
     if (i > 0 && (dr_isdig(fx[i - 1]) || dr_isupper_cyr(fx[i - 1]) || fx[i - 1] == L'.')) continue;
     int e = dr_des_core(fx, i);
+    /* «АДЕ 3424-895»: короткое — только за буквенным кодом */
+    if (e < 0 && i >= 3 && fx[i - 1] == L' ' && dr_isupper_cyr(fx[i - 2])) {
+      int q = i - 1;
+      while (q > 0 && dr_isupper_cyr(fx[q - 1])) q--;
+      if (i - 1 - q >= 2 && i - 1 - q <= 5 && (q == 0 || fx[q - 1] == L' ')) e = dr_des_short(fx, q, i);
+    }
     if (e < 0) continue;
     int b = i;
     /* буквенный код перед ним */
@@ -1071,6 +1101,31 @@ static BOOL dr_number(const wchar_t *in, wchar_t *out, int cap, BOOL frac) {
   if (n && out[n - 1] == L',') n--;
   out[n] = 0;
   return dig;
+}
+
+/* масса в граммах «192.4 г» (бывает у мелких деталей) → килограммы «0,1924»;
+   raw — ячейка как прочитана, num — число из неё */
+static void dr_mass_kg(const wchar_t *raw, wchar_t *num, int cap) {
+  int d = -1;
+  for (int i = 0; raw[i]; i++)
+    if (dr_isdig(ocr_digitize(raw[i]))) d = i;
+  if (d < 0 || !num[0]) return;
+  const wchar_t *u = raw + d + 1;
+  while (*u == L' ') u++;
+  if (!(*u == L'г' || *u == L'Г') || (u[1] >= L'а' && u[1] <= L'я') || (u[1] >= L'А' && u[1] <= L'Я')) return;
+  wchar_t b[32];
+  lstrcpynW(b, num, 32);
+  wchar_t *c = wcschr(b, L',');
+  if (c) *c = L'.';
+  double kg = wcstod(b, NULL) / 1000;
+  if (kg <= 0) return;
+  _snwprintf(num, cap, L"%.6f", kg);
+  num[cap - 1] = 0;
+  int l = (int)wcslen(num);
+  while (l > 1 && num[l - 1] == L'0') num[--l] = 0;
+  if (l > 0 && num[l - 1] == L'.') num[--l] = 0;
+  c = wcschr(num, L'.');
+  if (c) *c = L',';
 }
 
 /* «Лист 2», «Листов 12» → «2», «12»: слово отбросить, взять цифры */
@@ -1192,8 +1247,13 @@ static void dr_field_set(DrPage *pg, int f, const wchar_t *raw, int conf) {
     if (!bad && conf < 50) bad = TRUE;
     break;
   case DF_MASS:
-    if (v[0] && wcscmp(v, L"-") && wcscmp(v, L"—")) bad = !dr_number(v, t, DR_CELL, TRUE) || bad, lstrcpyW(v, t);
-    else v[0] = 0, bad = FALSE;
+    if (v[0] && wcscmp(v, L"-") && wcscmp(v, L"—")) {
+      bad = !dr_number(v, t, DR_CELL, TRUE) || bad;
+      dr_mass_kg(v, t, DR_CELL);
+      lstrcpyW(v, t);
+    } else {
+      v[0] = 0, bad = FALSE;
+    }
     break;
   case DF_SCALE: {
     dr_norm_des(v, t, DR_CELL);
