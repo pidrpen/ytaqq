@@ -63,6 +63,15 @@ static const AiTier kAiTiers[AI_TIERS] = {
        "1b9f4e92f0fbda14d7d7b58baed86039b8a980fe503d9d6a9393f25c0028f1fc"}}},
 };
 
+/* Адаптер чертежей к «Среднему» (дообучен читать штамп и лист, native/train) — в репозитории
+   CursorPad, коммит закреплён, размер и sha256 сверяются. Качается сам, в фоне, и включается
+   при следующем запуске модели, только для чертежей (draw-lora*.gguf, ai_server_ensure). */
+#define AI_DRAW_LORA_TIER 1
+static const AiFile kAiDrawLora = {L"pidrpen/ytaqq", L"8ecdf3739eaa1647b638e9e4cf6b520b101ab543",
+                                   L"models/draw-lora-qwen3.5-4b.gguf", 42485376ULL,
+                                   "1772624ec0b9115d88671971e2bb4e073a59bacd560549f48fa28bd98250e4d5"};
+static void ai_lora_kick(const wchar_t *model);
+
 /* --- настройки ------------------------------------------------------------ */
 static volatile LONG g_aiOn;         /* по умолчанию выключен; виден рабочим потокам */
 static int g_aiTier = 1;             /* «Средний» */
@@ -756,6 +765,7 @@ static int ai_server_ensure(DWORD deadline, volatile LONG *cancel, int minimumCo
     ReleaseSRWLockExclusive(&g_aiSrvLock);
     return AI_NO_MODEL;
   }
+  if (!g_aiModel[0] && g_aiTier == AI_DRAW_LORA_TIER) ai_lora_kick(model);
   if (!g_aiJob) {
     g_aiJob = CreateJobObjectW(NULL, NULL);
     if (g_aiJob) {
@@ -1786,6 +1796,51 @@ static BOOL ai_fetch(HINTERNET ses, const wchar_t *host, const wchar_t *path, co
   }
   ai_dl_say(L"%s: не скачалось — нет связи?", what);
   return FALSE;
+}
+
+static volatile LONG g_aiLoraTried;
+static wchar_t g_aiLoraDest[MAX_PATH];
+
+static DWORD WINAPI ai_lora_thread(LPVOID p) {
+  (void)p;
+  const AiFile *a = &kAiDrawLora;
+  static const wchar_t *kHost[2] = {L"raw.githubusercontent.com", L"github.com"};
+  wchar_t part[MAX_PATH + 8], path[400];
+  _snwprintf(part, MAX_PATH + 8, L"%s.part", g_aiLoraDest);
+  HINTERNET ses = ai_net_open();
+  for (int i = 0; ses && i < 2; i++) {
+    _snwprintf(path, 400, i ? L"/%s/raw/%s/%s" : L"/%s/%s/%s", a->repo, a->rev, a->file);
+    HANDLE f = CreateFileW(part, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (f == INVALID_HANDLE_VALUE) break;
+    DWORD st = ai_net_get(ses, kHost[i], path, 0, f, NULL, 0);
+    CloseHandle(f);
+    ULONGLONG got = ai_file_size(part);
+    InterlockedExchangeAdd64(&g_aiDl.done, -(LONGLONG)got); /* счётчик — только для «Скачать» */
+    char sha[65];
+    if (st == 200 && got == a->size && ai_sha256(part, sha) && !_stricmp(sha, a->sha) &&
+        MoveFileExW(part, g_aiLoraDest, MOVEFILE_REPLACE_EXISTING)) {
+      ai_log(L"Адаптер чертежей скачан: %s — включится при следующем запуске модели", g_aiLoraDest);
+      WinHttpCloseHandle(ses);
+      return 0;
+    }
+    ai_log(L"Адаптер чертежей: https://%s%s — ответ %lu, %llu байт, не подошёл", kHost[i], path, st, got);
+  }
+  DeleteFileW(part);
+  if (ses) WinHttpCloseHandle(ses);
+  return 0;
+}
+
+/* модель уровня есть, а адаптера чертежей рядом нет — скачать в фоне, раз за запуск программы */
+static void ai_lora_kick(const wchar_t *model) {
+  wchar_t have[MAX_PATH];
+  if (ai_find_near(model, L"draw-lora*.gguf", have) || InterlockedExchange(&g_aiLoraTried, 1)) return;
+  const wchar_t *name = wcsrchr(kAiDrawLora.file, L'/');
+  lstrcpynW(g_aiLoraDest, model, MAX_PATH);
+  wchar_t *sl = wcsrchr(g_aiLoraDest, L'\\');
+  if (!name || !sl || (size_t)(sl - g_aiLoraDest) + wcslen(name) + 1 >= MAX_PATH) return;
+  wcscpy(sl + 1, name + 1);
+  HANDLE t = CreateThread(NULL, 0, ai_lora_thread, NULL, 0, NULL);
+  if (t) CloseHandle(t);
 }
 
 /* последний выпуск llama.cpp: ссылка на архив, размер и sha256 из GitHub */
