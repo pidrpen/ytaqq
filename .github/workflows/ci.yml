@@ -45,7 +45,7 @@ jobs:
         working-directory: native
         run: |
           set -eu
-          for t in search_route_test techno_test; do
+          for t in search_route_test techno_test store_text_test; do
             gcc -O2 -Wall -Werror -o "$RUNNER_TEMP/$t" "$t.c"
             "$RUNNER_TEMP/$t"
           done
