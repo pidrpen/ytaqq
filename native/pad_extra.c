@@ -6094,6 +6094,37 @@ static BOOL save_rect_bmp(int x, int y, int bw, int bh, const wchar_t *path) {
   return ok;
 }
 
+/* Помощник молчит дольше этого — висит: его снимают вместе со всем, что он
+   запустил. Настоящее распознавание (и пачка вырезок чертежа) укладывается с запасом. */
+#define RUN_CAPTURE_MS 300000
+
+/* Забрать из канала то, что в нём уже есть, не дожидаясь конца: ReadFile на
+   пустом канале ждал, пока его не закроет помощник — или его потомок, которому
+   достался тот же конец, а тот мог жить сколько угодно. grow — буфер из кучи,
+   его можно растить; не влезло или buf == NULL — лишнее читается впустую, чтобы
+   помощник не встал на полном канале. Возвращает, пришло ли что-то. */
+static BOOL pipe_take(HANDLE h, char **buf, DWORD *cap, DWORD *n, BOOL grow) {
+  DWORD avail = 0, got = 0;
+  if (!PeekNamedPipe(h, NULL, 0, NULL, &avail, NULL) || !avail) return FALSE;
+  if (grow && *buf && *n + avail + 1 > *cap) {
+    DWORD want = *cap;
+    while (*n + avail + 1 > want) want *= 2;
+    char *nb = (char *)realloc(*buf, want);
+    if (nb) {
+      *buf = nb;
+      *cap = want;
+    }
+  }
+  if (*buf && *n + 1 < *cap) {
+    DWORD room = *cap - *n - 1;
+    if (ReadFile(h, *buf + *n, avail < room ? avail : room, &got, NULL)) *n += got;
+  } else {
+    char skip[4096];
+    ReadFile(h, skip, avail < sizeof(skip) ? avail : sizeof(skip), &got, NULL);
+  }
+  return got > 0;
+}
+
 /* Spawn a helper and collect everything it writes. The old code stopped at a
    fixed 4 KB, which silently cut off anything past about a page.
    cwd — working folder of the helper, NULL — ours. */
@@ -6125,43 +6156,59 @@ static BOOL run_capture_in(wchar_t *cmd, const wchar_t *cwd, char **out, DWORD *
   si.wShowWindow = SW_HIDE;
   si.hStdOutput = owr;
   si.hStdError = ewr;
-  BOOL ok = CreateProcessW(NULL, cmd, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, cwd, &si, &pi);
+  /* помощник и всё, что он запустит, — в одном задании: по сроку снимаются
+     разом, а оставшиеся после него потомки — когда задание закрывается */
+  HANDLE job = CreateJobObjectW(NULL, NULL);
+  if (job) {
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION li;
+    memset(&li, 0, sizeof(li));
+    li.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    SetInformationJobObject(job, JobObjectExtendedLimitInformation, &li, sizeof(li));
+  }
+  BOOL ok = CreateProcessW(NULL, cmd, NULL, NULL, TRUE, CREATE_NO_WINDOW | CREATE_SUSPENDED, NULL, cwd,
+                           &si, &pi);
   CloseHandle(owr);
   CloseHandle(ewr);
   if (!ok) {
     CloseHandle(ord);
     CloseHandle(erd);
+    if (job) CloseHandle(job);
     return FALSE;
   }
-  DWORD cap = 1 << 16, n = 0;
-  char *buf = (char *)malloc(cap);
-  if (buf) {
-    for (;;) {
-      if (n + 4096 > cap) {
-        DWORD grow = cap * 2;
-        char *nb = (char *)realloc(buf, grow);
-        if (!nb) break;
-        buf = nb;
-        cap = grow;
-      }
-      DWORD got = 0;
-      if (!ReadFile(ord, buf + n, cap - n - 1, &got, NULL) || !got) break;
-      n += got;
+  if (job && !AssignProcessToJobObject(job, pi.hProcess)) {
+    CloseHandle(job); /* сами в чужом задании без вложенных (Windows 7) — снимем один процесс */
+    job = NULL;
+  }
+  ResumeThread(pi.hThread);
+  DWORD cap = 1 << 16, n = 0, ecap = err && errcap > 1 ? (DWORD)errcap : 0, en = 0;
+  char *buf = (char *)malloc(cap), *ebuf = ecap ? err : NULL;
+  /* stdout и stderr читаются по очереди, пока помощник жив: кто бы из них ни
+     заполнился, помощник не встанет. Вышел — дочитываем, что успел написать. */
+  DWORD t0 = GetTickCount();
+  BOOL exited = FALSE;
+  for (;;) {
+    BOOL got = pipe_take(ord, &buf, &cap, &n, TRUE);
+    if (pipe_take(erd, &ebuf, &ecap, &en, FALSE)) got = TRUE;
+    if (!got) {
+      if (exited) break;
+      exited = WaitForSingleObject(pi.hProcess, 20) == WAIT_OBJECT_0;
     }
-    buf[n] = 0;
+    if (!exited && GetTickCount() - t0 > RUN_CAPTURE_MS) {
+      if (job) TerminateJobObject(job, 1);
+      else TerminateProcess(pi.hProcess, 1);
+      WaitForSingleObject(pi.hProcess, 3000);
+      break;
+    }
   }
-  /* helpers write one short line here, far below the pipe buffer, so reading
-     it after stdout cannot wedge them */
-  if (err && errcap > 1) {
-    DWORD got = 0;
-    if (ReadFile(erd, err, (DWORD)errcap - 1, &got, NULL)) err[got] = 0;
-  }
-  WaitForSingleObject(pi.hProcess, 30000);
+  if (buf) buf[n] = 0;
+  if (ecap) err[en] = 0;
   GetExitCodeProcess(pi.hProcess, code);
   CloseHandle(ord);
   CloseHandle(erd);
   CloseHandle(pi.hThread);
   CloseHandle(pi.hProcess);
+  if (job) CloseHandle(job);
+  if (!buf) return FALSE;
   while (n > 0 && (buf[n - 1] == '\n' || buf[n - 1] == '\r' || buf[n - 1] == ' ')) buf[--n] = 0;
   *out = buf;
   *outn = n;
@@ -6274,7 +6321,12 @@ static void finish_ocr_rect(RECT r) {
   wchar_t tmp[MAX_PATH], *bmp = (wchar_t *)malloc(MAX_PATH * sizeof(wchar_t));
   if (!bmp) return;
   GetTempPathW(MAX_PATH, tmp);
-  _snwprintf(bmp, MAX_PATH, L"%scursorpad-ocr.bmp", tmp);
+  /* у каждого снимка свой файл: второе чтение, начатое до конца первого (или
+     вторая копия программы), раньше писало поверх снимка, который ещё читают */
+  static volatile LONG seq;
+  _snwprintf(bmp, MAX_PATH, L"%scursorpad-ocr-%lu-%ld.bmp", tmp, GetCurrentProcessId(),
+             InterlockedIncrement(&seq));
+  bmp[MAX_PATH - 1] = 0;
   if (!save_rect_bmp(x, y, w, h, bmp)) {
     free(bmp);
     show_status(L"OCR: не удалось снять экран");
