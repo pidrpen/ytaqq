@@ -1440,6 +1440,47 @@ int ai_ask_image_sync(const wchar_t *instruction, const wchar_t *imagePath, DWOR
   return ai_run_sync(body, timeoutMs ? timeoutMs : 300000, cancel, answer);
 }
 
+/* Картинка и вопрос в одной реплике (так модели с картинками читают точнее, чем
+   с вопросом в system), температура 0; schema — JSON-схема ответа или NULL. */
+int ai_ask_image_sync_ex(const wchar_t *question, const wchar_t *imagePath, const char *schema, int maxTokens,
+                         DWORD timeoutMs, volatile LONG *cancel, wchar_t **answer) {
+  if (answer) *answer = NULL;
+  if (GetCurrentThreadId() == g_aiUiThread) return AI_BUSY;
+  int pre = ai_precheck();
+  if (pre != AI_OK) return pre;
+  if (!ai_vision_ready()) return AI_NO_VISION;
+  HANDLE h = CreateFileW(imagePath, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+  if (h == INVALID_HANDLE_VALUE) return AI_ERROR;
+  DWORD sz = GetFileSize(h, NULL), got = 0;
+  BYTE *data = sz && sz < 32u * 1024 * 1024 ? (BYTE *)malloc(sz) : NULL;
+  BOOL rd = data && ReadFile(h, data, sz, &got, NULL) && got == sz;
+  CloseHandle(h);
+  if (!rd) {
+    free(data);
+    return AI_ERROR;
+  }
+  const wchar_t *ext = wcsrchr(imagePath, L'.');
+  const char *mime = ext && !_wcsicmp(ext, L".bmp") ? "image/bmp" : ext && (!_wcsicmp(ext, L".jpg") || !_wcsicmp(ext, L".jpeg")) ? "image/jpeg" : "image/png";
+  char *b64 = ai_b64(data, sz), *q = ai_json_str(question);
+  free(data);
+  size_t n = (b64 ? strlen(b64) : 0) + (q ? strlen(q) : 0) + (schema ? strlen(schema) : 0) + strlen(g_aiExtModel) + 600;
+  char *body = b64 && q ? (char *)malloc(n) : NULL;
+  if (body) {
+    int k = snprintf(body, n,
+                     "{\"model\":\"%s\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"image_url\",\"image_url\":"
+                     "{\"url\":\"data:%s;base64,%s\"}},{\"type\":\"text\",\"text\":%s}]}],\"temperature\":0,\"max_tokens\":%d,"
+                     "\"stream\":true,\"cache_prompt\":false,\"chat_template_kwargs\":{\"enable_thinking\":false}",
+                     ai_selected_model(), mime, b64, q, maxTokens);
+    if (schema)
+      k += snprintf(body + k, n - k, ",\"response_format\":{\"type\":\"json_schema\",\"json_schema\":{\"name\":\"r\",\"strict\":true,\"schema\":%s}}", schema);
+    snprintf(body + k, n - k, "}");
+  }
+  free(b64);
+  free(q);
+  if (!body) return AI_BUSY;
+  return ai_run_sync(body, timeoutMs ? timeoutMs : 300000, cancel, answer);
+}
+
 /* --- точки расширения ------------------------------------------------------- */
 BOOL ai_refine_field(const wchar_t *field, const wchar_t *raw, const wchar_t *context, wchar_t *out, int cap,
                      DWORD timeoutMs) {

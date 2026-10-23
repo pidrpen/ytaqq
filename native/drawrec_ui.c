@@ -476,14 +476,37 @@ static void dr_again(void) {
    его не читает (это ещё 1–10 с на лист). */
 static void ac_route_show(const wchar_t *text); /* ai_chat.c */
 
+/* Вход правил маршрута: прочитанное моделью с картинками — впереди (почерк и чертёжный
+   шрифт она читает точнее), Tesseract — следом: правила берут первое, что узнали. */
+static void dr_tn_route(const DrPage *pg, TnRoute *r) {
+  wchar_t low[16], name[DR_CELL], mat[DR_CELL * 2 + 4];
+  lstrcpynW(low, pg->vlName, 16);
+  CharLowerBuffW(low, (DWORD)wcslen(low));
+  BOOL vn = pg->vlName[0] && wcsncmp(low, L"наимен", 6) != 0;
+  lstrcpynW(name, vn ? pg->vlName : pg->f[DF_NAME], DR_CELL);
+  _snwprintf(mat, DR_CELL * 2 + 4, L"%s\n%s", pg->vlMat, pg->f[DF_MAT]);
+  mat[DR_CELL * 2 + 3] = 0;
+  size_t n = (pg->vlText ? wcslen(pg->vlText) : 0) + (pg->text ? wcslen(pg->text) : 0) + 4;
+  wchar_t *text = (wchar_t *)malloc(n * sizeof(wchar_t));
+  if (text) _snwprintf(text, n, L"%s\n%s", pg->vlText ? pg->vlText : L"", pg->text ? pg->text : L""), text[n - 1] = 0;
+  tn_route(name, mat, text ? text : L"", r);
+  free(text);
+}
+
+/* чем читали лист — первой строкой маршрута */
+static const wchar_t *dr_tn_how(const DrPage *pg) {
+  if (pg->vlText || pg->vlName[0]) return L"Лист прочитан: Tesseract и локальная модель с картинками.\n";
+  return L"Лист прочитан только Tesseract: с локальной моделью с картинками (Настройки → ИИ, «Средний») точнее.\n";
+}
+
 static void dr_route_push(int i) {
   DrPage *pg = &g_dri[i].pg;
   TnRoute *r = (TnRoute *)malloc(sizeof(TnRoute));
   wchar_t *txt = (wchar_t *)malloc(sizeof(wchar_t) * 9000);
   if (r && txt) {
-    tn_route(pg->f[DF_NAME], pg->f[DF_MAT], pg->text, r);
-    int n = _snwprintf(txt, 9000, L"Лист: %s%s%s\n\n", tm_base(pg->path), pg->f[DF_DES][0] ? L" · " : L"",
-                       pg->f[DF_DES]);
+    dr_tn_route(pg, r);
+    int n = _snwprintf(txt, 9000, L"Лист: %s%s%s\n%s\n", tm_base(pg->path), pg->f[DF_DES][0] ? L" · " : L"",
+                       pg->f[DF_DES], dr_tn_how(pg));
     if (n < 0) n = 0;
     txt[n] = 0;
     tn_text(r, txt + n, 9000 - n);
@@ -1394,6 +1417,10 @@ static void dr_techno_test(int argc, wchar_t **argv) {
   DrPages l;
   memset(&l, 0, sizeof(l));
   for (int i = 3; i < argc && f; i++) tm_probe(f, argv[i], FALSE, dr_pages_cb, &l);
+  if (getenv("CP_DRVL")) { /* окно настроек ещё не создано — настройки ИИ прочитать самим */
+    ai_load();
+    g_aiUiThread = 0; /* здесь и окно, и чтение — в одном потоке; в программе модель зовёт рабочий поток */
+  }
   ShareBuf b;
   memset(&b, 0, sizeof(b));
   TnRoute *r = (TnRoute *)malloc(sizeof(TnRoute));
@@ -1402,10 +1429,10 @@ static void dr_techno_test(int argc, wchar_t **argv) {
     DrPage *pg = &l.p[i];
     pg->wantText = TRUE;
     dr_recognize(f, pg);
-    tn_route(pg->f[DF_NAME], pg->f[DF_MAT], pg->text, r);
+    dr_tn_route(pg, r);
     tn_text(r, txt, 9000);
-    sb_add(&b, L"==== %s · %.1f с · штамп: %s / %s\n%s\n\n", tm_base(pg->path), pg->secs, pg->f[DF_NAME],
-           pg->f[DF_MAT], txt);
+    sb_add(&b, L"==== %s · %.1f с · штамп: %s / %s · модель: %s / %s\n%s%s\n\n", tm_base(pg->path), pg->secs,
+           pg->f[DF_NAME], pg->f[DF_MAT], pg->vlName, pg->vlMat, dr_tn_how(pg), txt);
     dr_page_free(pg);
   }
   if (b.w) share_write_ex(argv[2], b.w, TRUE);

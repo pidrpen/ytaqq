@@ -1999,13 +1999,14 @@ static wchar_t *ac_tp_build(const BYTE *png, DWORD len) {
     lstrcpynW(pg->path, path, MAX_PATH);
     pg->wantText = TRUE;
     dr_recognize(f, pg);
-    tn_route(pg->f[DF_NAME], pg->f[DF_MAT], pg->text, r);
+    dr_tn_route(pg, r);
     int n = 0;
     if (!pg->text)
       n = _snwprintf(out, 9000, L"Текст листа не прочитан (%s) — маршрут только по штампу.\n\n",
                      pg->note[0] ? pg->note : L"нет Tesseract — «Проверить обновления» докачает его");
     if (n < 0) n = 0;
     out[n] = 0;
+    if (pg->text) lstrcpynW(out + n, dr_tn_how(pg), 9000 - n), n += (int)wcslen(out + n);
     tn_text(r, out + n, 9000 - n);
   } else if (out) {
     lstrcpynW(out, L"Не вышло прочитать картинку для маршрута.", 9000);

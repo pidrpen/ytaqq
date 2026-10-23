@@ -65,6 +65,9 @@ typedef struct {
   DrSpecRow *rows;
   int nrows;
   wchar_t *text;      /* весь лист (ТТ, Ra, допуски, резьбы) — для маршрута, techno.c; NULL — не читали */
+  /* то же, прочитанное локальной моделью с картинками (drawrec_vl): графы штампа и ТТ */
+  wchar_t vlName[DR_CELL], vlMat[DR_CELL];
+  wchar_t *vlText;    /* ТТ, «Развертка», «n отв.»; NULL — модель не читала */
   BOOL wantText;      /* прочитать и весь лист (кнопка «Маршрут обработки») */
   double secs;
 } DrPage;
@@ -431,48 +434,11 @@ static BOOL dr_hband(const DrLines *L, int y, int x, int r) {
 
 static int dr_cmp_int(const void *a, const void *b) { return *(const int *)a - *(const int *)b; }
 
-static BOOL dr_find_stamp(const DrLines *L, double dpi, DrStamp *s, wchar_t *why, int cap) {
+/* штамп при заданных нижней и правой линиях рамки (уже стоим на линии) */
+static BOOL dr_stamp_at(const DrLines *L, double dpi, int by, int rx, DrStamp *s, wchar_t *why, int cap) {
   const DrImg *m = L->m;
   memset(s, 0, sizeof(*s));
-  /* нижняя линия рамки: самая нижняя строка, где линий больше трети ширины */
   int r0 = (m->w < m->h ? m->w : m->h) / 700 + 1;
-  int by = -1;
-  for (double frac = 0.3; frac > 0.12 && by < 0; frac -= 0.15)
-    for (int y = m->h - 1 - r0; y >= m->h * 6 / 10; y--) {
-      int sum = 0;
-      for (int q = y - r0; q <= y + r0; q++) sum += L->rowc[q];
-      if (sum >= frac * m->w) {
-        by = y;
-        break;
-      }
-    }
-  /* тонкая линия с остатком перекоса расползается по соседним столбцам —
-     считаем полосой в несколько точек */
-  int r = (m->w < m->h ? m->w : m->h) / 700 + 1;
-  int rx = -1;
-  for (double frac = 0.3; frac > 0.12 && rx < 0; frac -= 0.15)
-    for (int x = m->w - 1 - r; x >= m->w * 6 / 10; x--) {
-      int sum = 0;
-      for (int q = x - r; q <= x + r; q++) sum += L->colc[q];
-      if (sum >= frac * m->h) {
-        rx = x;
-        break;
-      }
-    }
-  if (by < 0 || rx < 0) {
-    _snwprintf(why, cap, L"рамка листа не найдена");
-    return FALSE;
-  }
-  /* окно нашло линию где-то рядом — встаём на саму линию */
-  {
-    int bb = by, bx = rx;
-    for (int q = by - r0; q <= by + r0; q++)
-      if (q >= 0 && q < m->h && L->rowc[q] > L->rowc[bb]) bb = q;
-    for (int q = rx - r; q <= rx + r; q++)
-      if (q >= 0 && q < m->w && L->colc[q] > L->colc[bx]) bx = q;
-    by = bb;
-    rx = bx;
-  }
   /* внутренний край толстой линии */
   while (by > 0 && L->rowc[by - 1] >= 0.12 * m->w) by--;
   while (rx > 0 && L->colc[rx - 1] >= 0.12 * m->h) rx--;
@@ -513,7 +479,7 @@ static BOOL dr_find_stamp(const DrLines *L, double dpi, DrStamp *s, wchar_t *why
     _snwprintf(why, cap, L"нет линий штампа у правой рамки");
     return FALSE;
   }
-  int W = 0;
+  int Wm = 0;
   if (nl) {
     qsort(len, (size_t)nl, sizeof(int), dr_cmp_int);
     double bestV = -1;
@@ -532,18 +498,25 @@ static BOOL dr_find_stamp(const DrLines *L, double dpi, DrStamp *s, wchar_t *why
         if (g0 < 0) g0 = i;
         g1 = i;
       }
-    W = len[(g0 + g1) / 2];
+    Wm = len[(g0 + g1) / 2];
   }
   free(len);
-  /* dpi скана, если он настоящий, точнее: линия у правой рамки бывает и
-     шире штампа (у ведомостей таблица во всю ширину кончается на нём) */
-  if (dpiOk) W = (int)(185 * dpi / 25.4 + 0.5);
-  s->k = W / 185.0;
-  s->sl = rx - W;
-  /* высота: вертикаль в 65 мм от левого края штампа */
-  /* ±5 мм: старые бланки и покоробленный скан расходятся с ГОСТ на 2–3 мм */
-  int x65 = s->sl + (int)(65 * s->k + 0.5), hw = (int)(5 * s->k) + 1, tol = (int)(2 * s->k) + 2;
-  int top = dr_vup(L, x65, hw, by, tol, (int)(1.2 * s->k) + 2);
+  /* ширина: по dpi скана — если он настоящий; по линиям — если лист
+     копировали с масштабом (заводские копии бывают в 94 % от натуральной).
+     Линия у правой рамки бывает и шире штампа (ведомости), поэтому по
+     линиям — только уже, чем по dpi, и не сильно: от 80 % */
+  int Wd = dpiOk ? (int)(185 * dpi / 25.4 + 0.5) : 0, Wc[2], nw = 0;
+  if (Wd) Wc[nw++] = Wd;
+  if (Wm && (!Wd || (Wm < Wd * 0.98 && Wm > Wd * 0.8))) Wc[nw++] = Wm;
+  int top = -1;
+  for (int i = 0; i < nw && top < 0; i++) {
+    s->k = Wc[i] / 185.0;
+    s->sl = rx - Wc[i];
+    /* высота: вертикаль в 65 мм от левого края штампа */
+    /* ±5 мм: старые бланки и покоробленный скан расходятся с ГОСТ на 2–3 мм */
+    int x65 = s->sl + (int)(65 * s->k + 0.5), hw = (int)(5 * s->k) + 1, tol = (int)(2 * s->k) + 2;
+    top = dr_vup(L, x65, hw, by, tol, (int)(1.2 * s->k) + 2);
+  }
   if (top < 0) {
     _snwprintf(why, cap, L"не найдена граница граф штампа");
     return FALSE;
@@ -559,6 +532,42 @@ static BOOL dr_find_stamp(const DrLines *L, double dpi, DrStamp *s, wchar_t *why
   static const double kH[4] = {0, 55, 40, 15};
   s->st = by - (int)(kH[s->form] * s->k + 0.5);
   return TRUE;
+}
+
+/* Рамка листа: самые нижняя и правая длинные линии. На копиях под рамкой и
+   справа бывает ещё край копии — поэтому до трёх кандидатов с каждой стороны
+   (от края внутрь), и штамп ищется у каждой пары. */
+static int dr_frame_lines(const DrLines *L, BOOL rows, int out[3]) {
+  const DrImg *m = L->m;
+  int n = 0, len = rows ? m->h : m->w, across = rows ? m->w : m->h;
+  const int *cnt = rows ? L->rowc : L->colc;
+  int r = (m->w < m->h ? m->w : m->h) / 700 + 1, skip = len / 200 + 2;
+  for (double frac = 0.3; frac > 0.12 && !n; frac -= 0.15)
+    for (int i = len - 1 - r; i >= len * 6 / 10 && n < 3; i--) {
+      int sum = 0;
+      for (int q = i - r; q <= i + r; q++) sum += cnt[q];
+      if (sum < frac * across) continue;
+      int b = i; /* окно нашло линию где-то рядом — встаём на саму линию */
+      for (int q = i - r; q <= i + r; q++)
+        if (q >= 0 && q < len && cnt[q] > cnt[b]) b = q;
+      out[n++] = b;
+      i = b - skip;
+    }
+  return n;
+}
+
+static BOOL dr_find_stamp(const DrLines *L, double dpi, DrStamp *s, wchar_t *why, int cap) {
+  memset(s, 0, sizeof(*s));
+  int byc[3], rxc[3];
+  int nb = dr_frame_lines(L, TRUE, byc), nr = dr_frame_lines(L, FALSE, rxc);
+  if (!nb || !nr) {
+    _snwprintf(why, cap, L"рамка листа не найдена");
+    return FALSE;
+  }
+  for (int i = 0; i < nb; i++)
+    for (int j = 0; j < nr; j++)
+      if (dr_stamp_at(L, dpi, byc[i], rxc[j], s, why, cap)) return TRUE;
+  return FALSE;
 }
 
 /* ---- вырезки и Tesseract ------------------------------------------------------- */
@@ -1582,6 +1591,143 @@ static void dr_page_free(DrPage *pg) {
   pg->nrows = 0;
   free(pg->text);
   pg->text = NULL;
+  free(pg->vlText);
+  pg->vlText = NULL;
+  pg->vlName[0] = pg->vlMat[0] = 0;
+}
+
+/* ---- чтение моделью с картинками (только локальной: чертежи завода не уходят в сеть) ----
+   Tesseract на чертёжном шрифте и почерке ошибается; модель с картинками читает
+   наименование и материал из отдельных увеличенных граф штампа и пункты ТТ с поля
+   (замер на 37 заводских листах: маршрут целиком 12 → 27). Ответы — только как
+   дополнительный текст для правил techno.c: числа и операции модель не решает. */
+static const char kDrVlSheetSchema[] =
+    "{\"type\":\"object\",\"properties\":{\"tt\":{\"type\":\"array\",\"maxItems\":10,\"items\":{\"type\":\"string\","
+    "\"maxLength\":220}},\"razvertka\":{\"type\":\"boolean\"},\"holes\":{\"type\":\"array\",\"maxItems\":6,\"items\":"
+    "{\"type\":\"string\",\"maxLength\":40}}},\"required\":[\"tt\",\"razvertka\",\"holes\"],\"additionalProperties\":false}";
+
+static BOOL dr_vl_ok(void) {
+#ifdef SET_TEST
+  if (!getenv("CP_DRVL")) return FALSE; /* проверочная сборка зовёт модель только по просьбе */
+#endif
+  return g_aiOn && !g_aiProvider && ai_vision_ready();
+}
+
+/* часть картинки [x0,x1)×[y0,y1), увеличенная в zoom раз (1 или 2) или уменьшенная до maxSide */
+static BOOL dr_img_part(const DrImg *m, int x0, int y0, int x1, int y1, int zoom, int maxSide, DrImg *out) {
+  if (x0 < 0) x0 = 0;
+  if (y0 < 0) y0 = 0;
+  if (x1 > m->w) x1 = m->w;
+  if (y1 > m->h) y1 = m->h;
+  int w = x1 - x0, h = y1 - y0;
+  if (w < 8 || h < 8) return FALSE;
+  int s = 1;
+  if (maxSide && (w > maxSide || h > maxSide)) s = ((w > h ? w : h) + maxSide - 1) / maxSide;
+  if (!dr_img_new(out, w / s * zoom, h / s * zoom)) return FALSE;
+  for (int y = 0; y < out->h; y++)
+    for (int x = 0; x < out->w; x++) {
+      int sum = 0, sx = x0 + x / zoom * s, sy = y0 + y / zoom * s;
+      for (int dy = 0; dy < s; dy++)
+        for (int dx = 0; dx < s; dx++) sum += m->px[(size_t)(sy + dy) * m->w + sx + dx];
+      out->px[(size_t)y * out->w + x] = (BYTE)(sum / (s * s));
+    }
+  return TRUE;
+}
+
+/* картинку — во временный BMP и спросить модель; ответ — free() */
+static wchar_t *dr_vl_ask(const DrImg *im, const wchar_t *question, const char *schema, int maxTokens) {
+  wchar_t tmp[MAX_PATH], p[MAX_PATH];
+  GetTempPathW(MAX_PATH, tmp);
+  static LONG seq;
+  _snwprintf(p, MAX_PATH, L"%scursorpad-vl-%lu-%ld.bmp", tmp, GetCurrentThreadId(), InterlockedIncrement(&seq));
+  p[MAX_PATH - 1] = 0;
+  wchar_t *ans = NULL;
+  if (dr_save_bmp(im, p) && ai_ask_image_sync_ex(question, p, schema, maxTokens, 240000, NULL, &ans) != AI_OK) {
+    free(ans);
+    ans = NULL;
+  }
+  DeleteFileW(p);
+  return ans;
+}
+
+/* первая строка ответа, без кавычек и пробелов по краям */
+static void dr_vl_line(const wchar_t *ans, wchar_t *out, int cap) {
+  out[0] = 0;
+  if (!ans) return;
+  while (*ans == L' ' || *ans == L'\n' || *ans == L'\r' || *ans == L'"' || *ans == L'«') ans++;
+  int n = 0;
+  while (ans[n] && ans[n] != L'\n' && ans[n] != L'\r' && n < cap - 1) out[n] = ans[n], n++;
+  out[n] = 0;
+  while (n && (out[n - 1] == L' ' || out[n - 1] == L'"' || out[n - 1] == L'»')) out[--n] = 0;
+}
+
+/* строки массива key из JSON-ответа — в out через перевод строки */
+static void dr_json_strings(const wchar_t *j, const wchar_t *key, wchar_t *out, int cap) {
+  wchar_t k[40];
+  _snwprintf(k, 40, L"\"%s\"", key);
+  k[39] = 0;
+  const wchar_t *p = j ? wcsstr(j, k) : NULL;
+  if (!p || !(p = wcschr(p + wcslen(k), L'['))) return;
+  int n = (int)wcslen(out);
+  for (p++; *p && *p != L']';) {
+    if (*p != L'"') {
+      p++;
+      continue;
+    }
+    if (n && n < cap - 1) out[n++] = L'\n';
+    for (p++; *p && *p != L'"' && n < cap - 1; p++) {
+      if (*p == L'\\' && p[1]) {
+        p++;
+        out[n++] = *p == L'n' ? L' ' : *p == L't' ? L' ' : *p;
+      } else {
+        out[n++] = *p;
+      }
+    }
+    if (*p == L'"') p++;
+  }
+  out[n] = 0;
+}
+
+static void dr_vl_read(const DrImg *m, const DrStamp *s, DrPage *pg) {
+  DrImg im;
+  wchar_t *a;
+  if (s) { /* графы штампа формы 1: наименование 65…135 × 15…40 мм, материал 65…135 × 40…55 мм от верха */
+    int x0 = s->sl + (int)(64 * s->k), x1 = s->sl + (int)(136 * s->k);
+    if (dr_img_part(m, x0, s->by - (int)(41 * s->k), x1, s->by - (int)(14 * s->k), 2, 0, &im)) {
+      a = dr_vl_ask(&im, L"На картинке — графа «Наименование» основной надписи чертежа. Перепиши текст точно, как "
+                         L"написано, одной строкой. Только текст.", NULL, 80);
+      dr_vl_line(a, pg->vlName, DR_CELL);
+      free(a);
+      dr_img_free(&im);
+    }
+    if (dr_img_part(m, x0, s->by - (int)(16 * s->k), x1, s->by + (int)(1 * s->k), 2, 0, &im)) {
+      a = dr_vl_ask(&im, L"На картинке — графа «Материал» основной надписи чертежа. Перепиши точно, как написано. Если "
+                         L"материал записан дробью — слово слева, потом верх дроби, « / », низ дроби, например «Лист 8 "
+                         L"ГОСТ 19903-15 / 20 ГОСТ 1577-93». Только текст одной строкой.", NULL, 80);
+      dr_vl_line(a, pg->vlMat, DR_CELL);
+      free(a);
+      dr_img_free(&im);
+    }
+  }
+  if (dr_img_part(m, 0, 0, m->w, m->h, 1, 1600, &im)) {
+    a = dr_vl_ask(&im, L"Машиностроительный чертёж детали. Ответь JSON:\ntt — пункты технических требований "
+                       L"(пронумерованный текст над основной надписью), каждый дословно; если их нет — пустой список;\n"
+                       L"razvertka — true, если на поле чертежа есть надпись «Развертка» или «Линии гиба»;\nholes — "
+                       L"надписи про отверстия вида «4 отв. Ø13», «2 отв. M8-7H», «3 отв. Ø9», как написано; если таких "
+                       L"надписей нет — пустой список.\nНичего не придумывай. Основную надпись (штамп) не переписывай.",
+                   kDrVlSheetSchema, 900);
+    if (a) {
+      pg->vlText = (wchar_t *)calloc(4096, sizeof(wchar_t));
+      if (pg->vlText) {
+        dr_json_strings(a, L"tt", pg->vlText, 4096);
+        if (wcsstr(a, L"\"razvertka\":true") || wcsstr(a, L"\"razvertka\": true"))
+          lstrcpynW(pg->vlText + wcslen(pg->vlText), L"\nРазвертка", 4096 - (int)wcslen(pg->vlText));
+        dr_json_strings(a, L"holes", pg->vlText, 4096);
+      }
+      free(a);
+    }
+    dr_img_free(&im);
+  }
 }
 
 static void dr_recognize(IWICImagingFactory *f, DrPage *pg) {
@@ -1614,6 +1760,22 @@ static void dr_recognize(IWICImagingFactory *f, DrPage *pg) {
   BOOL stamp = dr_lines(&m, thr, &L) && dr_find_stamp(&L, dpi, &s, why, 200);
 #ifdef SET_TEST
   if (getenv("CP_DRDEBUG")) dr_debug_img(&L, stamp ? &s : NULL, pg);
+  if (stamp && getenv("CP_DRSTAMP")) { /* проверка чтения: штамп целиком — в папку CP_DRSTAMP */
+    DrImg st;
+    int pad = (int)(2 * s.k);
+    if (dr_img_new(&st, s.rx - s.sl + 2 * pad, s.by - s.st + 2 * pad)) {
+      for (int y = 0; y < st.h; y++)
+        for (int x = 0; x < st.w; x++) {
+          int sx = s.sl - pad + x, sy = s.st - pad + y;
+          st.px[(size_t)y * st.w + x] = sx >= 0 && sx < m.w && sy >= 0 && sy < m.h ? m.px[(size_t)sy * m.w + sx] : 255;
+        }
+      wchar_t sp[MAX_PATH], dir[MAX_PATH];
+      MultiByteToWideChar(CP_UTF8, 0, getenv("CP_DRSTAMP"), -1, dir, MAX_PATH);
+      _snwprintf(sp, MAX_PATH, L"%s\\%s.stamp.bmp", dir, tm_base(pg->path));
+      dr_save_bmp(&st, sp);
+      dr_img_free(&st);
+    }
+  }
 #endif
   double k = stamp ? s.k : (ts_dpi_known(dpi) ? dpi / 25.4 : 0);
   if (stamp) {
@@ -1689,6 +1851,7 @@ static void dr_recognize(IWICImagingFactory *f, DrPage *pg) {
       free(pg->text);
       pg->text = NULL;
     }
+    if (dr_vl_ok()) dr_vl_read(&m, stamp && s.form == 1 ? &s : NULL, pg);
   }
   if (!pg->f[DF_DES][0] && pg->type != DRT_OTHER) pg->doubt[DF_DES] = 1;
   /* формат листа: по масштабу штампа, без него — по dpi файла */

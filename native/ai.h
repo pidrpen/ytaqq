@@ -80,6 +80,9 @@ int ai_ask_sync(const wchar_t *instruction, const wchar_t *text, DWORD timeoutMs
 /* то же с картинкой (PNG/JPG/BMP-файл); нужна модель с проектором */
 int ai_ask_image_sync(const wchar_t *instruction, const wchar_t *imagePath, DWORD timeoutMs,
                       volatile LONG *cancel, wchar_t **answer);
+/* картинка и вопрос одной репликой, температура 0; schema — JSON-схема ответа или NULL */
+int ai_ask_image_sync_ex(const wchar_t *question, const wchar_t *imagePath, const char *schema, int maxTokens,
+                         DWORD timeoutMs, volatile LONG *cancel, wchar_t **answer);
 
 /* Точки расширения для правил (распознавание чертежа, сопоставление с Союзом).
    Обе — из рабочего потока; ИИ выключен или не ответил — FALSE / 0, правила

@@ -65,6 +65,7 @@ typedef struct {
   wchar_t thr[TN_TXT];    /* резьбы, как прочитаны: «M12-6H, M30x2» */
   int nThr, thrIn, thrOut;
   int holes;              /* «n отв.» — сумма */
+  double holeMin;         /* наименьший Ø у «n отв. Øx»; 0 — не прочитан */
   int edges, mark, weld, bend, key, gear, knurl, flat, hex;
   int edm;                /* «электроэрозионным способом» */
   int cutApart;           /* «разрезать на две части» */
@@ -228,6 +229,16 @@ static double tn_ra_fix(const wchar_t *p, int len, double v, int sep, int *doubt
   return v;
 }
 
+/* ряд Ra по ГОСТ 2789-73, мкм */
+static int tn_ra_std(double v) {
+  static const double r[] = {0.012, 0.016, 0.02, 0.025, 0.032, 0.04, 0.05, 0.063, 0.08, 0.1, 0.125, 0.16, 0.2, 0.25,
+                             0.32,  0.4,   0.5,  0.63,  0.8,   1,    1.25, 1.6,   2,    2.5, 3.2,   4,    5,   6.3,
+                             8,     10,    12.5, 16,    20,    25,   32,   40,    50,   63,  80,    100};
+  for (size_t i = 0; i < sizeof(r) / sizeof(r[0]); i++)
+    if (v > r[i] * 0.97 && v < r[i] * 1.03) return 1;
+  return 0;
+}
+
 static void tn_ra(const wchar_t *t, TnSigns *s) {
   for (const wchar_t *p = t; *p; p++) {
     /* R/Р/P/К + a/а — «Ra», «Pa», «Ка» (курсив) */
@@ -246,7 +257,7 @@ static void tn_ra(const wchar_t *t, TnSigns *s) {
     int len, sep, doubt;
     if (!tn_num(q, &v, &len, &sep)) continue;
     v = tn_ra_fix(q, len, v, sep, &doubt);
-    if (v < 0.01 || v > 100) continue;
+    if (v < 0.01 || v > 100 || !tn_ra_std(v)) continue;
     s->nRa++;
     if (!s->raMin || v < s->raMin) s->raMin = v, s->raDoubt = doubt;
   }
@@ -326,7 +337,7 @@ static void tn_tol(const wchar_t *t, TnSigns *s) {
     if (v <= 0 || v > 0.15 || tn_line_general(t, p)) continue;
     double band = v;
     if (prevAt && p - prevAt < 40 && prev != v) band = prev > v ? prev - v : v - prev;
-    if (!s->band || band < s->band) s->band = band;
+    if (band >= 0.004 && (!s->band || band < s->band)) s->band = band; /* тоньше 4 мкм — шум распознавания */
     prev = v;
     prevAt = p;
     p = e - 1;
@@ -448,6 +459,12 @@ static void tn_threads(const wchar_t *t, const wchar_t *f, TnSigns *s) {
       cls = (tc == L'H' || tc == L'G') ? tc : L'g';
     }
     if (k == 1 && d < 3) continue; /* «М1:1» — масштаб */
+    if (k == 1 && !cls && !wcschr(txt, L'x')) { /* «M6» без поля и шага — шум, если рядом нет «отв.» */
+      const wchar_t *fp = f + (p - t), *b0 = fp - 16 < f ? f : fp - 16;
+      int otv = 0;
+      for (const wchar_t *q2 = b0; q2 < fp && !otv; q2++) otv = q2[0] == L'о' && q2[1] == L'т' && (q2[2] == L'в' || q2[2] == L'б');
+      if (!otv) continue;
+    }
     tn_thread_add(s, txt, cls);
   }
   /* трапецеидальная словом: «Трап 27х5 лев.» (на старых чертежах), Tesseract — «Tran 27х5» */
@@ -746,7 +763,16 @@ static void tn_signs(const wchar_t *name, const wchar_t *mat, const wchar_t *tex
       const wchar_t *q = p;
       while (tn_isdig(*q)) v = v * 10 + (*q++ - L'0');
       while (*q == L' ') q++;
-      if (v > 0 && v <= 64 && q[0] == L'о' && q[1] == L'т' && (q[2] == L'в' || q[2] == L'б')) s->holes += v;
+      if (v > 0 && v <= 64 && q[0] == L'о' && q[1] == L'т' && (q[2] == L'в' || q[2] == L'б')) {
+        s->holes += v;
+        /* «4 отв. Ø13» — диаметр после «отв.» (знак Ø Tesseract читает как ф, $, #, 0) */
+        const wchar_t *r2 = q + 3;
+        while (*r2 == L'.' || *r2 == L' ') r2++;
+        if (*r2 == L'ø' || *r2 == L'ф' || *r2 == L'$' || *r2 == L'#' || *r2 == L'Ø' || *r2 == L'⌀') r2++;
+        double hd;
+        int hl, hs;
+        if (tn_num(r2, &hd, &hl, &hs) && hd >= 1 && hd <= 200 && (!s->holeMin || hd < s->holeMin)) s->holeMin = hd;
+      }
     }
   s->edges = tn_has(f, L"притуп") || tn_has(f, L"заусен");
   /* «Маркировать»: Tesseract на курсиве — «Mapxupobamb», «Mapkypobamb» */
@@ -758,7 +784,7 @@ static void tn_signs(const wchar_t *name, const wchar_t *mat, const wchar_t *tex
   s->key = tn_has(f, L"шпон");
   s->gear = tn_has(f, L"модуль") && tn_has(f, L"зуб");
   s->knurl = tn_has(f, L"накат") || tn_has(f, L"рифлен") || tn_has(f, L"сетчат"); /* «Рифление сетчатое 1,0 ГОСТ 21474» */
-  s->edm = tn_has(f, L"эрозион") || tn_has(f, L"розион");    /* «злектрозрозионным» */
+  s->edm = tn_has(f, L"эрозион") || tn_has(f, L"розион") || tn_has(f, L"электрораз");    /* «злектрозрозионным» */
   s->cutApart = tn_has(f, L"разрезать на");
   s->slot = tn_word(f, L"паз") || tn_has(f, L"пазов") || tn_has(f, L"паза");
   /* калибр, шаблон: исполнительные размеры ПР и НЕ, «изношенного», поверка раз в год */
@@ -804,6 +830,35 @@ static void tn_signs(const wchar_t *name, const wchar_t *mat, const wchar_t *tex
 
 /* ---- вид детали ---------------------------------------------------------------------- */
 
+/* расстояние Дамерау–Левенштейна не больше 1: замена, вставка, удаление или перестановка соседних */
+static int tn_dl1(const wchar_t *a, const wchar_t *b) {
+  size_t la = wcslen(a), lb = wcslen(b), i = 0;
+  if (la + 1 < lb || lb + 1 < la) return 0;
+  while (i < la && i < lb && a[i] == b[i]) i++;
+  if (i == la && i == lb) return 1;
+  if (la == lb) {
+    if (!wcscmp(a + i + 1, b + i + 1)) return 1;                                  /* замена */
+    return i + 1 < la && a[i] == b[i + 1] && a[i + 1] == b[i] && !wcscmp(a + i + 2, b + i + 2); /* перестановка */
+  }
+  return la > lb ? !wcscmp(a + i + 1, b + i) : !wcscmp(a + i, b + i + 1); /* вставка / удаление */
+}
+
+/* первое слово наименования, без кода обозначения впереди («АДЕ 3427 Оправка») */
+static void tn_first_word(const wchar_t *f, wchar_t *first, int cap) {
+  const wchar_t *p = f;
+  for (;;) {
+    while (p && *p && !tn_isletter(*p)) p++;
+    int n = 0;
+    while (p && *p && tn_isletter(*p) && n < cap - 1) first[n++] = *p++;
+    first[n] = 0;
+    const wchar_t *q = p;
+    while (q && *q == L' ') q++;
+    if (!n || !q || !tn_isdig(*q) || n > 4) return; /* за словом не номер — это и есть наименование */
+    p = q;
+    while (*p && !tn_isletter(*p)) p++;
+  }
+}
+
 static int tn_name_cls(const wchar_t *name, wchar_t *word, int cap) {
   static const struct { const wchar_t *w; int cls; } kn[] = {
       {L"вал", TN_ROT},     {L"валик", TN_ROT},   {L"ось", TN_ROT},      {L"втулка", TN_ROT},
@@ -825,13 +880,13 @@ static int tn_name_cls(const wchar_t *name, wchar_t *word, int cap) {
   int cls = TN_UNK;
   /* первое слово — главное: «Крышка корпуса» — не корпус, «Удлинитель вала» — по «вала» нет */
   wchar_t first[40];
-  int n = 0;
-  const wchar_t *p = f;
-  while (p && *p && !tn_isletter(*p)) p++;
-  while (p && *p && tn_isletter(*p) && n < 39) first[n++] = *p++;
-  first[n] = 0;
+  first[0] = 0;
+  if (f) tn_first_word(f, first, 40);
   for (size_t i = 0; f && i < sizeof(kn) / sizeof(kn[0]); i++)
     if (!wcscmp(first, kn[i].w)) cls = kn[i].cls, tn_cpy(word, cap, kn[i].w);
+  /* не нашлось — одна ошибка чтения в слове из 5 букв и длиннее («Шайдба», «Тайка», «Орпавка») */
+  for (size_t i = 0; f && cls == TN_UNK && wcslen(first) >= 4 && i < sizeof(kn) / sizeof(kn[0]); i++)
+    if (wcslen(kn[i].w) >= 5 && tn_dl1(first, kn[i].w)) cls = kn[i].cls, tn_cpy(word, cap, kn[i].w);
   free(f);
   return cls;
 }
@@ -887,7 +942,10 @@ static void tn_route(const wchar_t *name, const wchar_t *mat, const wchar_t *tex
   int byName = tn_name_cls(s->name, word, 40);
   wchar_t *nf = tn_fold(s->name, 0), *mf = tn_fold(mat ? mat : L"", 0);
   /* «Доработка кронштейна», материал «См. ТТ п.1» — деталь уже есть, заготовки нет */
-  s->rework = (nf && !wcsncmp(nf, L"доработк", 8)) || (mf && (tn_has(mf, L"см. тт") || tn_has(mf, L"см.тт")));
+  wchar_t nw[40] = {0};
+  if (nf) tn_first_word(nf, nw, 40);
+  s->rework = (nf && !wcsncmp(nf, L"доработк", 8)) || tn_dl1(nw, L"доработка") ||
+              (mf && (tn_has(mf, L"см. тт") || tn_has(mf, L"см.тт")));
   free(nf), free(mf);
   /* пруток Ø с листа = Ø детали, ни резьб, ни допусков, ни чистых поверхностей: только отрезать */
   int asBar = s->sort == TNS_ROUND && s->sortSize && (!s->dmax || s->dmax == s->sortSize) && !s->nThr && !s->holes &&
@@ -1034,6 +1092,7 @@ static void tn_route(const wchar_t *name, const wchar_t *mat, const wchar_t *tex
                ((s->heat & TNH_TEMPER) || (s->hrcHi && s->hrcHi <= 35) || (!s->hrcHi && s->hbHi && s->hbHi <= 350));
   int hard = cement || harden;
   int grind = (s->raMin && s->raMin <= 0.8) || (s->itMin && s->itMin <= 6) || (s->band && s->band <= 0.02) ||
+              (hard && s->hrcHi >= 45) ||
               (hard && ((s->raMin && s->raMin <= 1.6) || (s->itMin && s->itMin <= 7) || (s->band && s->band <= 0.03)));
   /* цветные металлы не шлифуют — круг засаливается: тонкое (алмазное) точение */
   int fineTurn = grind && (s->mat == TNM_ALU || s->mat == TNM_ALU_CAST || s->mat == TNM_COPPER ||
@@ -1129,6 +1188,7 @@ static void tn_route(const wchar_t *name, const wchar_t *mat, const wchar_t *tex
     tn_op(r, s->gear && !s->key && !s->flat && !s->hex ? L"Зубофрезерная" : L"Фрезерная", w, why);
   }
   int precHoles = (s->band && s->band <= 0.05) || (s->itMin && s->itMin <= 9);
+  double sheetS = s->thick ? s->thick : s->sort == TNS_SHEET ? s->sortSize : 0;
   if (r->cls == TN_REWORK || r->cls == TN_BAR || r->cls == TN_BENT) {
     /* отверстия доработки — выше; у проката в размер своих отверстий нет */
   } else if (s->holes && r->cls != TN_FLAT) {
@@ -1148,7 +1208,12 @@ static void tn_route(const wchar_t *name, const wchar_t *mat, const wchar_t *tex
     tn_cpy(why, TN_TXT, L"на чертеже резьба ");
     tn_cat(why, TN_TXT, s->thr);
     tn_op(r, L"Сверлильная", w, why);
-  } else if (r->cls == TN_FLAT && precHoles) {
+  } else if (r->cls == TN_FLAT && s->holes && s->holeMin && sheetS && s->holeMin < sheetS) {
+    tn_cpy(w, 300, L"Сверлить отверстия Ø");
+    tn_catnum(w, 300, s->holeMin);
+    tn_cat(w, 300, L" и меньше толщины листа (лазером и плазмой такие не вырезают)");
+    tn_op(r, L"Сверлильная", w, L"отверстие меньше толщины листа");
+  } else if (r->cls == TN_FLAT && precHoles && s->holes) {
     tn_op(r, L"Сверлильная", L"Сверлить и развернуть точные отверстия", L"отверстия с допуском");
   }
   if (cement) {
