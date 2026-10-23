@@ -236,7 +236,9 @@ const wchar_t *ai_status_text(int st) {
   }
 }
 
-/* характер помощника в чате (ai_chat_policy.h): 0 обычный, 1 южный, 2 интеллигент, 3 неуверенный, 4 без цензуры */
+/* характер помощника в чате (ai_chat_policy.h): 0 обычный, 1 южный, 2 интеллигент, 3 неуверенный, 4 матерный,
+   5 прапорщик, 6 старый мастер, 7 зумер */
+#define AI_PERSONAS 8
 static int g_aiPersona;
 /* Z.ai может получать данные PLM «Союз» и архива из инструментов ИИ — только
    если человек сам разрешил на вкладке «ИИ»; локальной модели можно всегда */
@@ -285,7 +287,7 @@ static void ai_load(void) {
     int v;
     if (sscanf(line, "on %d", &v) == 1) g_aiOn = v == 1;
     else if (sscanf(line, "provider %d", &v) == 1 && (v == 0 || v == 1)) g_aiProvider = v;
-    else if (sscanf(line, "persona %d", &v) == 1 && v >= 0 && v <= 4) g_aiPersona = v;
+    else if (sscanf(line, "persona %d", &v) == 1 && v >= 0 && v < AI_PERSONAS) g_aiPersona = v;
     else if (sscanf(line, "zai_plm %d", &v) == 1) g_aiZaiPlm = v == 1;
     else if (!strncmp(line, "zai_model ", 10)) {
       migratedZai = !ai_zai_model_valid(line + 10);

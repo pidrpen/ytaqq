@@ -150,9 +150,12 @@ static void ai_ui_create(HWND p) {
   SendMessageW(g_aiSource, CB_ADDSTRING, 0, (LPARAM)L"Локальная модель · без интернета");
   SendMessageW(g_aiSource, CB_ADDSTRING, 0, (LPARAM)L"Z.ai API · через интернет");
   g_aiPersonaBox = CreateWindowExW(0, L"COMBOBOX", L"", WS_CHILD | CBS_DROPDOWNLIST | WS_TABSTOP, 0, 0, 300, 200, p, (HMENU)(INT_PTR)ID_AI_PERSONA, NULL, NULL);
-  const wchar_t *personas[] = {L"Обычный · просто и по делу", L"Южный · «ээ, брат, щас сделаем»", L"Интеллигент · вежливо и витиевато", L"Неуверенный · «эм… кажется… наверное»",
-                               L"Без цензуры · с матом, как в курилке"};
-  for (int i = 0; i < 5; i++) SendMessageW(g_aiPersonaBox, CB_ADDSTRING, 0, (LPARAM)personas[i]);
+  /* порядок = номер в ai.txt и в kAcPersona, новые — только в конец */
+  const wchar_t *personas[] = {L"Обычный · просто и по делу", L"Южный · «эээ, биля, слюшай сюда, брат»", L"Интеллигент · вежливо и витиевато", L"Неуверенный · «эм… кажется… наверное»",
+                               L"Матерный · без цензуры, как в курилке", L"Прапорщик · «так, боец, упал — отжался»", L"Старый мастер · «вот в наше время…»",
+                               L"Зумер · «база, кринж, имба»"};
+  for (int i = 0; i < AI_PERSONAS; i++) SendMessageW(g_aiPersonaBox, CB_ADDSTRING, 0, (LPARAM)personas[i]);
+  SendMessageW(g_aiPersonaBox, CB_SETMINVISIBLE, AI_PERSONAS, 0);
   SendMessageW(g_aiPersonaBox, CB_SETCURSEL, (WPARAM)g_aiPersona, 0);
   g_aiZModel = CreateWindowExW(0, L"COMBOBOX", L"", WS_CHILD | CBS_DROPDOWNLIST | WS_TABSTOP, 0, 0, 300, 200, p, (HMENU)(INT_PTR)ID_AI_ZMODEL, NULL, NULL);
   const wchar_t *models[] = {L"glm-4.5-flash", L"glm-4.7-flash", L"glm-4.6v-flash"};
@@ -430,7 +433,7 @@ static void ai_ui_pick_llama(HWND hwnd) {
 static BOOL ai_ui_command(HWND hwnd, int id, int code) {
   if (id == ID_AI_PERSONA && code == CBN_SELCHANGE) { /* со следующего ответа */
     int selected = (int)SendMessageW(g_aiPersonaBox, CB_GETCURSEL, 0, 0);
-    if (selected >= 0 && selected <= 4) { g_aiPersona = selected; ai_save(); }
+    if (selected >= 0 && selected < AI_PERSONAS) { g_aiPersona = selected; ai_save(); }
     return TRUE;
   }
   if (id == ID_AI_SOURCE && code == CBN_SELCHANGE) {
