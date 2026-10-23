@@ -2685,6 +2685,7 @@ static void draw_pad_button(const DRAWITEMSTRUCT *dis) {
                  id == ID_MSG_SEND || id == ID_MSG_REPLY || id == ID_RT_BUILD || id == ID_RT_SAVE ||
                  id == 4714 || /* «Применить» в окне «Спросить ИИ» */
                  id == 4703 || /* и «Отправить» там же */
+                 id == 4722 || id == 4725 || /* «Сохранить…» в «Что помнит ИИ» (ai_memory.c) */
                  id == ID_XP_SAVE || id == ID_PK_SAVE; /* главное действие в подвале окон PLM */
   BOOL quiet = id == ID_CLOSE || id == ID_MIN || id == ID_PANEL_CLOSE || id == ID_PANEL_MIN;
   COLORREF fill, fg, bd;
@@ -4523,6 +4524,7 @@ static void create_settings(HWND owner) {
 #include "drawrec_sort.c" /* «Разложить по папкам»: имена по штампу, копия, журнал, отмена */
 #include "ai_chat.c" /* «Спросить ИИ»: чат с локальной моделью, после окон чертежа */
 #include "search_history.c" /* история поиска и избранное: Ctrl+H, Ctrl+D (после чата: та же запись файлов) */
+#include "ai_memory.c" /* «Что помнит ИИ»: тетрадь «запомни» и записная книжка — рядом с чатом */
 #include "game_net.c" /* связь игр с коллегами: приглашения, файлы партии, копии ходов */
 #include "nardy.c"
 #include "shashki.c" /* после нард: общий список «кто в сети» и мелочи работы с папкой */

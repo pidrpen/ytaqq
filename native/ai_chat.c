@@ -639,6 +639,12 @@ static void ac_learn_path(wchar_t *out) {
   else out[0] = 0;
 }
 
+/* общая записная книжка: ai_notebook.txt рядом с тетрадью, её пишет человек в «Что помнит ИИ» */
+static void ac_notebook_path(wchar_t *out) {
+  if (g_dataDir[0]) _snwprintf(out, MAX_PATH, L"%s\\ai_notebook.txt", g_dataDir);
+  else out[0] = 0;
+}
+
 static wchar_t *ac_read_utf8(const wchar_t *path, DWORD maxb) {
   HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
   if (h == INVALID_HANDLE_VALUE) return NULL;
@@ -787,6 +793,13 @@ static void ac_hist_load(void) {
   /* облако: прежнюю беседу в его запросы не отправляем — граница, как при смене провайдера */
   if (g_aiProvider) g_acContextStart += n;
   g_acRendered = 0;
+}
+
+/* книжка целиком (до 8 КБ); NULL — её нет или она пуста */
+static wchar_t *ac_notebook_read(void) {
+  wchar_t path[MAX_PATH];
+  ac_notebook_path(path);
+  return path[0] ? ac_read_utf8(path, 8 * 1024) : NULL;
 }
 
 /* «запомни», «запомни: текст». rest — что записать (может быть пустым). */
@@ -960,12 +973,21 @@ static void ac_sys_build(const wchar_t *q, const wchar_t *web, wchar_t *out, int
              web && web[0] ? AC_SYS_WEB : L"",
              web && web[0] ? L"\r\nИнтернет (фрагменты источников):\r\n" : L"", web && web[0] ? web : L"");
   out[cap - 1] = 0;
+  wchar_t *book = ac_notebook_read(); /* записная книжка — её пишет человек, ИИ читает в каждом ответе */
+  if (book && book[0] && wcslen(out) + wcslen(book) + 120 < (size_t)cap) {
+    wcscat(out, L"\r\nЗаписная книжка (написал пользователь, учитывай её):\r\n");
+    wcscat(out, book);
+    wcscat(out, L"\r\n");
+  }
+  free(book);
   if (g_aiProvider && wcslen(out) + 240 < (size_t)cap) {
     wchar_t model[64], identity[240]; MultiByteToWideChar(CP_UTF8, 0, g_aiZaiModel, -1, model, 64);
     _snwprintf(identity, 240, L"\r\nТы работаешь через облачный Z.ai API. Выбранная модель: %s. Сообщай это название, если пользователь спрашивает, какая ты модель.\r\n", model);
     wcscat(out, identity);
   }
 }
+
+static void mm_refresh(void); /* окно «Что помнит ИИ», если открыто (ai_memory.c) */
 
 /* showUser — вписать реплику в беседу (это был вопрос в поле, а не кнопка) */
 static void ac_remember(const wchar_t *raw, BOOL showUser) {
@@ -993,6 +1015,7 @@ static void ac_remember(const wchar_t *raw, BOOL showUser) {
   ac_push(1, msg);
   ac_redraw();
   ac_status(st == 1 ? L"Записано в ai_learn.txt" : L"");
+  if (st == 1) mm_refresh();
 }
 
 /* файловая фраза: первое слово — действие над файлами. Вопрос со знаком «?» — чат */

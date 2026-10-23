@@ -38,7 +38,7 @@ typedef struct {
   int kind;     /* 0 — пункт, 1 — заголовок раздела, 2 — опасный (красный), 3 — пока не работает (серый) */
 } MoreItem;
 
-enum { MORE_OCR = 20, MORE_NARDY, MORE_CHANGES, MORE_CLEAR, MORE_LAYOUT, MORE_MSG, MORE_ROUTE, MORE_SHASHKI, MORE_EXPORT, MORE_PACKAGE, MORE_MATCH, MORE_DRAWREC, MORE_AICHAT, MORE_CONVERT, MORE_MORSKOY };
+enum { MORE_OCR = 20, MORE_NARDY, MORE_CHANGES, MORE_CLEAR, MORE_LAYOUT, MORE_MSG, MORE_ROUTE, MORE_SHASHKI, MORE_EXPORT, MORE_PACKAGE, MORE_MATCH, MORE_DRAWREC, MORE_AICHAT, MORE_CONVERT, MORE_MORSKOY, MORE_MEMORY };
 static const MoreItem kMore[] = {
     {0, L"Расчёты и чертежи", NULL, 0, 1},
     {1, L"Расчёт резки и газов", NULL, 0xE8C6, 0},
@@ -55,6 +55,7 @@ static const MoreItem kMore[] = {
     {MORE_MATCH, L"Сопоставить с Союзом", NULL, 0xE8AB, 0},     /* с 2026.10.16.1: Excel ↔ Союз */
     {0, L"ИИ", NULL, 0, 1},
     {MORE_AICHAT, L"Спросить ИИ", NULL, 0xE8BD, 0},             /* чат с локальной моделью, с историей */
+    {MORE_MEMORY, L"Что помнит ИИ", NULL, 0xE8F1, 0},           /* с 2026.10.23.1: тетрадь «запомни» и записная книжка */
     {MORE_AVATAR, g_acAvatarMenuText, NULL, 0xE99A, 0},         /* текст — по тому, на столе ли он */
     {0, L"Текст", NULL, 0, 1},
     {MORE_OCR, L"Выделить и прочитать", g_hkName[HK_OCR], 0xE7A8, 0},  /* клавиши — какие назначены (hotkeys.c) */
@@ -164,6 +165,7 @@ static void tools_menu(HWND owner, HWND btn) {
   else if (cmd == MORE_DRAWREC) drawrec_show();
   else if (cmd == MORE_CONVERT) cvx_show();
   else if (cmd == MORE_AICHAT) aichat_show();
+  else if (cmd == MORE_MEMORY) mm_show();
   else if (cmd == MORE_AVATAR) ac_avatar_toggle();
   else if (cmd == MORE_LAYOUT) layout_fix_hint();
   else if (cmd == MORE_MSG) msg_compose_show();
