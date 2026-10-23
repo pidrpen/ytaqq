@@ -971,7 +971,7 @@ static void ac_sys_build(const wchar_t *q, const wchar_t *web, wchar_t *out, int
   SYSTEMTIME now; GetLocalTime(&now); wchar_t date[500];
   SYSTEMTIME tomorrow = ac_date_shift(now, 1);
   _snwprintf(date, 500, L"\r\nСегодня по календарю компьютера: %04u-%02u-%02u. Завтра означает %04u-%02u-%02u. Используй эту дату для относительных вопросов; даты в источниках её не заменяют.\r\n", now.wYear, now.wMonth, now.wDay, tomorrow.wYear, tomorrow.wMonth, tomorrow.wDay);
-  _snwprintf(out, cap, L"%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s", AC_SYS, kAcPersona[g_aiPersona & 3], date,
+  _snwprintf(out, cap, L"%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s", AC_SYS, kAcPersona[g_aiPersona >= 0 && g_aiPersona < AC_PERSONAS ? g_aiPersona : 0], date,
              ac_picture_context(q) ? AC_SYS_IMAGE : L"",
              ac_policy_technical(q) ? AC_SYS_TECH : L"",
              ac_policy_app(q) ? AC_SYS_APP : L"",
