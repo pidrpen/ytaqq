@@ -1,7 +1,10 @@
-2026102304
-2026.10.23.4
-sha256 5ab76fefacd8e01be55f39b5de39fc709200c736448066b394c9963a6c06b2ee
-== 0 signature-rsa-sha256 QuNXaXBYGutlg4U+By15JCFhvGjlf/eNEDm6Bhq/+lyYJptUPttIoRhvNBpI6Rutw8nmLvBD9U9Qml6fZZZk73XzfcV/75d5KKYguonBII1GPQ+3x9DrRfYGXOaddOpXmFkn0L7urgK3QhcO5MwPhBpoc5cNsPmqQiCv1ALUFjPDUIZsSQfmJkR56Ylu1U9plIuuxnW4yV4sWNOZ1ux+nKlDdu2FupLE2Q5AUBAVi4sztXtcm/GX72fqv/+HUuMLARTqfAEc0u5/E10HddsTQiZRG3M/eTk08bUU59rB6enOVZ03V+X4LWaPyMjHcMmujzzK/Da8j2cB3sRb/b5eBpxctmfmGmdqEetxoQucDcpi2nmk2NgmQBc1IUzEgFXmtBLu3qjGhQXuyu3Ir9LMsoDmiXdBNEYzlou6XDeMgwMk/wkMvjEbOhpN6MdTvZvnzYnRNZFEgnNHHJiWxC7DT1G1X3tjKD8KTUZhbgAMlpV2xrZxbbR8Y+oHdOaTuC4q
+2026102305
+2026.10.23.5
+sha256 1706db0b1c8619376552cb67df75ad62759ef83cf130773ec8bbe8710570e206
+== 0 signature-rsa-sha256 bksrZmJKi5YCnI5HWiWfWVkuRLxvVwY/karA/yPeFJ6c4ADPcHcbptVe3lASCE0+Dj8jH/zYYHk9b/9cSZHVaxzRTbAe8zxz1oW0bGYmjJ5O2eRaPQTdKj/teAaFdI6AAdTAT8kwQYkDPdbJ853yxK9fsCLIZfekjsogiLVQXt7Ptcv6D7dKbn0Y1egfW/mLXhKsl/sJfbchj6cTZTm1w4xi+4sOcgkmu4nAnvwQh2aJUcWno0mUKea2A2aXKcwoUNinYVQs3PyksokTv7ktsPVV6UW4LvpossbDyNIIkC+ZUUqZM60UY4fHwr0/I7eqpqwVCUENrXpsU131MzjEfkpB7XDQ47oP8uCezmJ1j3T1BlHIideyj+79bsbfXxCsepjwb1jWi28vitJ1bCcudEntbkmTl6dRdeO192O5l8he/74WnVcQ20NlVqh1CjDt8OiE25lOT0hvdBGSYBH7iCWW5p/3kvFqWW0GYTvf4SShQ7G/L/vCUqGlHL5Z9d4c
+== 2026.10.23.5
+Адаптер чертежей приходит сам. К «Среднему» CursorPad один раз скачивает в фоне адаптер, дообученный на заводских чертежах (40 МБ): наименование, материал, технические требования и надписи отверстий читаются почти без ошибок. Он включается со следующего запуска модели и только для чертежей — чат не меняется.
+
 == 2026.10.23.4
 Чертежи читаются точнее. Если включена локальная модель с картинками («Средний» или «С картинками»), «Маршрут обработки» и чертёж в чате читаются ещё и ею: наименование и материал из штампа (в том числе от руки и дробью), технические требования, надписи отверстий и «Развертка». Tesseract остаётся в помощь, операции по-прежнему выбирают правила. Штамп находится и на заводских сканах с двойной рамкой. Модель можно дообучить на своих чертежах: файл draw-lora….gguf рядом с моделью CursorPad подключает сам и только для чертежей — чат не меняется. Характеры помощника (Настройки → ИИ): «Южный» стал карикатурным горцем с акцентом, «Без цензуры» теперь «Матерный», новые — прапорщик, старый мастер из цеха и зумер.
 
