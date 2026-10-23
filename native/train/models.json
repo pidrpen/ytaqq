@@ -1,0 +1,29 @@
+{
+  "_": "Модели с картинками, которые CursorPad запускает локально. hf — исходные веса для обучения (Hugging Face); dir, gguf, mmproj — файлы CursorPad в %LOCALAPPDATA%\\CursorPad\\ai\\models; server — ключи llama-server, как в ai_local.c; min_image_tokens / max_image_tokens — сколько токенов llama.cpp даёт картинке (--image-min-tokens и предел проектора), обучение режет картинки так же; lora_targets — какие слои учить (регулярка по именам модулей transformers; слои линейного внимания Qwen3.5 при переводе в GGUF переставляются — их не трогаем); vision — модуль, который не учим. Новая модель — новая запись; скрипты берут её по имени (--preset).",
+  "qwen3.5-4b": {
+    "title": "Средний (Qwen3.5-4B)",
+    "hf": "Qwen/Qwen3.5-4B",
+    "dir": "qwen3.5-4b",
+    "gguf": "Qwen3.5-4B-Q4_K_M.gguf",
+    "mmproj": "mmproj-F16.gguf",
+    "server": ["--jinja", "--chat-template-kwargs", "{\"enable_thinking\":false}", "--image-min-tokens", "1024"],
+    "min_image_tokens": 1024,
+    "max_image_tokens": 4096,
+    "template_kwargs": {"enable_thinking": false},
+    "lora_targets": ".*language_model.*\\.(gate_proj|up_proj|down_proj|q_proj|k_proj|v_proj|o_proj)$",
+    "vision": "visual"
+  },
+  "qwen3-vl-4b": {
+    "title": "Qwen3-VL-4B Instruct",
+    "hf": "Qwen/Qwen3-VL-4B-Instruct",
+    "dir": "qwen3-vl-4b",
+    "gguf": "Qwen3-VL-4B-Instruct-Q4_K_M.gguf",
+    "mmproj": "mmproj-F16.gguf",
+    "server": ["--jinja", "--chat-template-kwargs", "{\"enable_thinking\":false}"],
+    "min_image_tokens": 8,
+    "max_image_tokens": 4096,
+    "template_kwargs": {},
+    "lora_targets": ".*language_model.*\\.(gate_proj|up_proj|down_proj|q_proj|k_proj|v_proj|o_proj)$",
+    "vision": "visual"
+  }
+}

@@ -71,6 +71,7 @@ static BOOL g_aiGpu;                 /* llama.cpp со сборкой Vulkan и 
 static wchar_t g_aiModel[MAX_PATH];  /* своя модель .gguf; пусто — модель уровня */
 static wchar_t g_aiSrvExe[MAX_PATH]; /* llama-server.exe, указанный руками; пусто — скачанный */
 static wchar_t g_aiExtHost[64];      /* свой сервер (Ollama…): адрес; пусто — свой llama-server */
+static BOOL g_aiDrawLora;            /* свой llama-server запущен с адаптером для чертежей (draw-lora*.gguf) */
 static int g_aiExtPort;
 static char g_aiExtModel[64];        /* имя модели для чужого сервера */
 static DWORD g_aiUiThread;           /* поток интерфейса — синхронные вызовы из него запрещены */
@@ -810,12 +811,18 @@ static int ai_server_ensure(DWORD deadline, volatile LONG *cancel, int minimumCo
        This affects attached images only; text requests keep their budget. */
     if (ai_qwen35(model) && mm[0] && n > 0)
       n += _snwprintf(cmd + n, MAX_PATH * 4 + 300 - n, L" --image-min-tokens 1024");
-    /* своя модель с дообучением: адаптер LoRA (lora*.gguf) рядом с ней подключается сам —
-       так можно взять готовую модель и свой адаптер, обученный на своих документах */
+    /* дообучение: адаптер LoRA рядом с моделью подключается сам. lora*.gguf — к своей модели,
+       на все ответы (обучена на своих документах); draw-lora*.gguf — к любой, только для
+       чтения чертежей (native/train): в остальных запросах вес адаптера 0, чат прежний */
     wchar_t lora[MAX_PATH];
+    g_aiDrawLora = FALSE;
     if (g_aiModel[0] && n > 0 && ai_find_near(g_aiModel, L"lora*.gguf", lora)) {
       ai_short_path(lora);
       _snwprintf(cmd + n, MAX_PATH * 4 + 300 - n, L" --lora \"%s\"", lora);
+    } else if (n > 0 && ai_find_near(model, L"draw-lora*.gguf", lora)) {
+      ai_short_path(lora);
+      _snwprintf(cmd + n, MAX_PATH * 4 + 300 - n, L" --lora \"%s\" --lora-init-without-apply", lora);
+      g_aiDrawLora = TRUE;
     }
     cmd[MAX_PATH * 4 + 299] = 0;
     SECURITY_ATTRIBUTES sa = {sizeof(sa), NULL, TRUE};
@@ -903,6 +910,11 @@ static int ai_server_ensure(DWORD deadline, volatile LONG *cancel, int minimumCo
       }
       if (ai_http(L"GET", port, L"/health", NULL, NULL, 1500, NULL, NULL, NULL) == 200) {
         ai_log(L"llama-server готов, порт %d", port);
+        /* адаптер чертежей: по умолчанию вес 0 (запрос без поля lora берёт общий вес),
+           1 — только в запросах с чертежом (ai_ask_image_sync_ex) */
+        if (g_aiDrawLora &&
+            ai_http(L"POST", port, L"/lora-adapters", "[{\"id\":0,\"scale\":0.0}]", g_aiKey, 5000, NULL, NULL, NULL) != 200)
+          ai_log(L"Адаптер чертежей не отключился для остальных запросов");
         g_aiSlotCtx = ctx / np;
         rc = AI_OK;
         break;
@@ -1475,6 +1487,7 @@ int ai_ask_image_sync_ex(const wchar_t *question, const wchar_t *imagePath, cons
                      ai_selected_model(), mime, b64, q, maxTokens);
     if (schema)
       k += snprintf(body + k, n - k, ",\"response_format\":{\"type\":\"json_schema\",\"json_schema\":{\"name\":\"r\",\"strict\":true,\"schema\":%s}}", schema);
+    if (g_aiDrawLora && !ai_ext()) k += snprintf(body + k, n - k, ",\"lora\":[{\"id\":0,\"scale\":1.0}]"); /* картинки — только чертежи */
     snprintf(body + k, n - k, "}");
   }
   free(b64);

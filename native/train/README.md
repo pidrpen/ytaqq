@@ -1,0 +1,111 @@
+# Дообучение модели, читающей чертежи
+
+CursorPad читает чертёж двумя способами: Tesseract и локальная модель с картинками
+(`drawrec.c`, `dr_vl_read`). Модели он отдаёт три картинки с вопросами — графу
+«Наименование», графу «Материал» (обе ×2) и лист целиком (до 1600 точек) — и склеивает
+ответы с Tesseract перед правилами маршрута (`techno.c`). Здесь — шаблон, как дообучить
+такую модель на своих чертежах и честно проверить, стало ли лучше. Шаблон не привязан к
+одной модели: всё, что зависит от модели, описано в `models.json`.
+
+Скрипты лежат в репозитории, данные — нет. Чертежи завода, разметка, веса и итоги
+обучения хранятся в отдельной папке на ПК (дальше — папка обучения, например
+`C:\Users\<имя>\CursorPad-train`); все команды ниже запускаются из неё.
+
+## Что нужно
+
+- видеокарта NVIDIA с 8 ГБ (Qwen3.5-4B в 4 битах занимает при обучении около 4,5 ГБ);
+- Python 3.12 и окружение в папке обучения:
+  ```
+  python -m venv .venv
+  .venv\Scripts\python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cu130
+  .venv\Scripts\python -m pip install transformers peft accelerate bitsandbytes pillow numpy triton-windows flash-linear-attention
+  ```
+  `flash-linear-attention` для Qwen3.5 не обязателен, но ускоряет обучение примерно вдвое;
+- исходные веса модели: `hf download Qwen/Qwen3.5-4B --local-dir base/Qwen3.5-4B`;
+- исходники llama.cpp той же сборки, что `llama-server.exe` у CursorPad (`llama-server --version`,
+  например b11699) — только для перевода адаптера в GGUF:
+  ```
+  git clone --depth 1 --branch b11699 https://github.com/ggml-org/llama.cpp llama.cpp
+  .venv\Scripts\python -m pip install -e llama.cpp/gguf-py
+  ```
+- `tn_cli.exe` — маршрут правилами `techno.c`, как в CursorPad:
+  `gcc -O2 -finput-charset=UTF-8 -Wno-unused-function -o tn_cli.exe <репозиторий>/native/train/tn_cli.c -luser32 -s`.
+
+## Шаги
+
+1. **Выгрузка.** Проверочная сборка CursorPad с переменной `CP_DRVLDUMP` кладёт в папку
+   ровно то, что получает модель, и прочитанное Tesseract; модель при этом не зовётся.
+   Собрать в `native/` (MinGW, как обычную, плюс `-DSET_TEST`):
+   ```
+   windres cursorpad.rc -O coff -o res.o
+   gcc -O2 -finput-charset=UTF-8 -DSET_TEST -o harness.exe cursorpad.c res.o -luser32 -lgdi32 -lshell32 -lole32 -loleaut32 -luuid -lcomctl32 -lwinhttp -ladvapi32 -lodbc32 -lcrypt32 -lcomdlg32 -lmsimg32 -Wl,--subsystem,windows -municode -s -static
+   ```
+   Запускать при закрытом CursorPad (второй экземпляр не стартует), листы — списком файлов:
+   ```
+   set CP_DRVLDUMP=C:\Users\<имя>\CursorPad-train\data\dump
+   harness.exe --drawrec out.txt "D:\чертежи\лист1.TIF" "D:\чертежи\лист2.TIF" …
+   ```
+   На лист — `<файл>.name.bmp`, `.mat.bmp`, `.sheet.bmp`, `.tess.txt`; на всю папку —
+   вопросы `name|mat|sheet.prompt.txt`, схема ответа `sheet.schema.json`, `*.max_tokens.txt`.
+   Если вопросы в `drawrec.c` поменялись — выгрузить заново и переобучить.
+
+2. **Разметка** `data/labels.json` — что на листе написано на самом деле и какой должен быть
+   маршрут (без Слесарной и Контрольной). Ключ — имя файла. Пример с придуманным листом:
+   ```json
+   {"ИВК 1234-001.TIF": {"name": "Втулка", "material": "Сталь 45 ГОСТ 1050-2013",
+     "tt": ["1. 40...45 HRC.", "2. h14, ±IT14/2."], "razvertka": false, "holes": ["2 отв. Ø9"],
+     "route": ["ROT", "ЗАГ ТОК СВЕРЛ ТО ШЛИФ"], "eval": true}}
+   ```
+   Материал дробью пишется как просит вопрос: «Лист 8 ГОСТ 19903-15 / 20 ГОСТ 1577-93».
+   `eval: true` — лист отложен: на нём не учат, по нему судят. Отложить стоит треть листов
+   разных видов (тела вращения, листовые, прокат, гнутые).
+
+3. **Проверка до обучения:**
+   ```
+   python eval_model.py --dump data/dump --labels data/labels.json --out runs/base.json
+   python eval_model.py ... --tess-only --out runs/tess.json      # без модели
+   python eval_model.py ... --preset qwen3-vl-4b --out runs/vl.json # другая модель
+   ```
+   Сервер запускается с теми же ключами, что в CursorPad. Итог — сколько маршрутов совпало
+   целиком, вид детали, верные/лишние/пропущенные операции, наименование, материал,
+   сходство пунктов ТТ, «Развертка», надписи отверстий.
+
+4. **Учебные картинки** — графы и листы, нарисованные шрифтами ГОСТ и «от руки», с шумом
+   скана; тексты придуманы из типовых формулировок:
+   `python synth.py --out data/synth --n-name 500 --n-mat 500 --n-sheet 250`.
+
+5. **Обучение** (QLoRA: веса модели в 4 битах, учатся только добавочные матрицы языковой части):
+   ```
+   python train_lora.py --preset qwen3.5-4b --base base/Qwen3.5-4B --dump data/dump ^
+       --labels data/labels.json --synth data/synth/synth.jsonl --out runs/r1
+   ```
+   Заводские листы идут по 6 раз с небольшими искажениями, учебные — по разу. Каждые 300
+   примеров — контрольная потеря на отложенных листах; лучший адаптер — `runs/r1/adapter`.
+   На RTX 5060 Ti 8 ГБ — около 1,7 с на пример, 1700 примеров — меньше часа, если видеокарту
+   не делить с другими программами: когда видеопамяти не хватает, Windows уводит её часть в
+   общую память, и шаг замедляется в разы (`--vram-gb` — предел обучения, лишний пример
+   пропускается). Прерванное обучение продолжается с последнего сохранения:
+   `--resume runs/r1/adapter --start <пример из train.log>`.
+
+6. **В GGUF:**
+   ```
+   python to_gguf.py --adapter runs/r1/adapter --base base/Qwen3.5-4B --llama llama.cpp ^
+       --out runs/r1/draw-lora-qwen3.5-4b.gguf
+   ```
+
+7. **Проверка после:** `python eval_model.py ... --lora runs/r1/draw-lora-qwen3.5-4b.gguf --out runs/r1.json`
+   и сравнить с шагом 3. Ставить адаптер, только если на отложенных листах стало лучше.
+
+8. **Подключение.** Положить `draw-lora-….gguf` рядом с моделью:
+   `%LOCALAPPDATA%\CursorPad\ai\models\qwen3.5-4b\`. CursorPad сам загрузит его при запуске
+   модели и включит только для чертежей: общий вес адаптера 0, запросы с чертежом просят 1 —
+   чат и остальные ответы модели не меняются. Убрать адаптер — удалить файл.
+
+## Другая модель
+
+Новая запись в `models.json`: веса Hugging Face (`hf`), файлы CursorPad (`dir`, `gguf`,
+`mmproj`), ключи сервера, как их ставит `ai_local.c`, пределы токенов картинки (как в
+llama.cpp), `lora_targets` — какие слои учить, `vision` — модуль картинок (его не учат).
+Слои, которые llama.cpp при переводе переставляет (у Qwen3.5 — линейное внимание), в
+`lora_targets` не включать: адаптер для них не переведётся. Адаптер подходит только к той
+модели, на которой учили.

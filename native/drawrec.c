@@ -1613,6 +1613,19 @@ static BOOL dr_vl_ok(void) {
   return g_aiOn && !g_aiProvider && ai_vision_ready();
 }
 
+#ifdef SET_TEST
+/* дообучение (native/train): --drawrec с CP_DRVLDUMP=папка кладёт туда картинки и вопросы
+   ровно такими, какими их получает модель, и прочитанное Tesseract — модель не зовут */
+static wchar_t g_drVlDump[MAX_PATH], g_drVlBase[MAX_PATH];
+#endif
+
+static BOOL dr_vl_want(void) {
+#ifdef SET_TEST
+  if (g_drVlDump[0]) return TRUE;
+#endif
+  return dr_vl_ok();
+}
+
 /* часть картинки [x0,x1)×[y0,y1), увеличенная в zoom раз (1 или 2) или уменьшенная до maxSide */
 static BOOL dr_img_part(const DrImg *m, int x0, int y0, int x1, int y1, int zoom, int maxSide, DrImg *out) {
   if (x0 < 0) x0 = 0;
@@ -1634,9 +1647,29 @@ static BOOL dr_img_part(const DrImg *m, int x0, int y0, int x1, int y1, int zoom
   return TRUE;
 }
 
-/* картинку — во временный BMP и спросить модель; ответ — free() */
-static wchar_t *dr_vl_ask(const DrImg *im, const wchar_t *question, const char *schema, int maxTokens) {
+/* картинку — во временный BMP и спросить модель; ответ — free(). tag — имя вопроса для выгрузки */
+static wchar_t *dr_vl_ask(const DrImg *im, const wchar_t *tag, const wchar_t *question, const char *schema,
+                          int maxTokens) {
   wchar_t tmp[MAX_PATH], p[MAX_PATH];
+#ifdef SET_TEST
+  if (g_drVlDump[0]) {
+    _snwprintf(p, MAX_PATH, L"%s\\%s.%s.bmp", g_drVlDump, g_drVlBase, tag);
+    p[MAX_PATH - 1] = 0;
+    dr_save_bmp(im, p);
+    _snwprintf(p, MAX_PATH, L"%s\\%s.prompt.txt", g_drVlDump, tag);
+    share_write_ex(p, question, TRUE);
+    if (schema) {
+      wchar_t ws[2048];
+      MultiByteToWideChar(CP_UTF8, 0, schema, -1, ws, 2048);
+      _snwprintf(p, MAX_PATH, L"%s\\%s.schema.json", g_drVlDump, tag);
+      share_write_ex(p, ws, TRUE);
+    }
+    _snwprintf(p, MAX_PATH, L"%s\\%s.max_tokens.txt", g_drVlDump, tag);
+    _snwprintf(tmp, MAX_PATH, L"%d", maxTokens);
+    share_write_ex(p, tmp, TRUE);
+    if (!dr_vl_ok()) return NULL;
+  }
+#endif
   GetTempPathW(MAX_PATH, tmp);
   static LONG seq;
   _snwprintf(p, MAX_PATH, L"%scursorpad-vl-%lu-%ld.bmp", tmp, GetCurrentThreadId(), InterlockedIncrement(&seq));
@@ -1694,14 +1727,14 @@ static void dr_vl_read(const DrImg *m, const DrStamp *s, DrPage *pg) {
   if (s) { /* графы штампа формы 1: наименование 65…135 × 15…40 мм, материал 65…135 × 40…55 мм от верха */
     int x0 = s->sl + (int)(64 * s->k), x1 = s->sl + (int)(136 * s->k);
     if (dr_img_part(m, x0, s->by - (int)(41 * s->k), x1, s->by - (int)(14 * s->k), 2, 0, &im)) {
-      a = dr_vl_ask(&im, L"На картинке — графа «Наименование» основной надписи чертежа. Перепиши текст точно, как "
+      a = dr_vl_ask(&im, L"name", L"На картинке — графа «Наименование» основной надписи чертежа. Перепиши текст точно, как "
                          L"написано, одной строкой. Только текст.", NULL, 80);
       dr_vl_line(a, pg->vlName, DR_CELL);
       free(a);
       dr_img_free(&im);
     }
     if (dr_img_part(m, x0, s->by - (int)(16 * s->k), x1, s->by + (int)(1 * s->k), 2, 0, &im)) {
-      a = dr_vl_ask(&im, L"На картинке — графа «Материал» основной надписи чертежа. Перепиши точно, как написано. Если "
+      a = dr_vl_ask(&im, L"mat", L"На картинке — графа «Материал» основной надписи чертежа. Перепиши точно, как написано. Если "
                          L"материал записан дробью — слово слева, потом верх дроби, « / », низ дроби, например «Лист 8 "
                          L"ГОСТ 19903-15 / 20 ГОСТ 1577-93». Только текст одной строкой.", NULL, 80);
       dr_vl_line(a, pg->vlMat, DR_CELL);
@@ -1710,7 +1743,7 @@ static void dr_vl_read(const DrImg *m, const DrStamp *s, DrPage *pg) {
     }
   }
   if (dr_img_part(m, 0, 0, m->w, m->h, 1, 1600, &im)) {
-    a = dr_vl_ask(&im, L"Машиностроительный чертёж детали. Ответь JSON:\ntt — пункты технических требований "
+    a = dr_vl_ask(&im, L"sheet", L"Машиностроительный чертёж детали. Ответь JSON:\ntt — пункты технических требований "
                        L"(пронумерованный текст над основной надписью), каждый дословно; если их нет — пустой список;\n"
                        L"razvertka — true, если на поле чертежа есть надпись «Развертка» или «Линии гиба»;\nholes — "
                        L"надписи про отверстия вида «4 отв. Ø13», «2 отв. M8-7H», «3 отв. Ø9», как написано; если таких "
@@ -1851,7 +1884,7 @@ static void dr_recognize(IWICImagingFactory *f, DrPage *pg) {
       free(pg->text);
       pg->text = NULL;
     }
-    if (dr_vl_ok()) dr_vl_read(&m, stamp && s.form == 1 ? &s : NULL, pg);
+    if (dr_vl_want()) dr_vl_read(&m, stamp && s.form == 1 ? &s : NULL, pg);
   }
   if (!pg->f[DF_DES][0] && pg->type != DRT_OTHER) pg->doubt[DF_DES] = 1;
   /* формат листа: по масштабу штампа, без него — по dpi файла */
@@ -1904,11 +1937,30 @@ static void dr_test(int argc, wchar_t **argv) {
   memset(&l, 0, sizeof(l));
   for (int i = 3; i < argc && f; i++) tm_probe(f, argv[i], FALSE, dr_pages_cb, &l);
   g_drText = getenv("CP_DRTEXT") != NULL; /* и текст всего листа */
+  if (getenv("CP_DRVLDUMP")) {
+    MultiByteToWideChar(CP_UTF8, 0, getenv("CP_DRVLDUMP"), -1, g_drVlDump, MAX_PATH);
+    CreateDirectoryW(g_drVlDump, NULL);
+    g_drText = TRUE;
+  }
   ShareBuf b;
   memset(&b, 0, sizeof(b));
   for (int i = 0; i < l.n; i++) {
     DrPage *pg = &l.p[i];
+    _snwprintf(g_drVlBase, MAX_PATH, pg->frame ? L"%s.p%u" : L"%s", tm_base(pg->path), pg->frame + 1);
+    g_drVlBase[MAX_PATH - 1] = 0;
     dr_recognize(f, pg);
+    if (g_drVlDump[0]) { /* прочитанное Tesseract: наименование, материал, дальше текст листа */
+      size_t n = 2 * DR_CELL + (pg->text ? wcslen(pg->text) : 0) + 4;
+      wchar_t *t = (wchar_t *)malloc(n * sizeof(wchar_t)), p[MAX_PATH];
+      if (t) {
+        _snwprintf(t, n, L"%s\n%s\n%s", pg->f[DF_NAME], pg->f[DF_MAT], pg->text ? pg->text : L"");
+        t[n - 1] = 0;
+        _snwprintf(p, MAX_PATH, L"%s\\%s.tess.txt", g_drVlDump, g_drVlBase);
+        p[MAX_PATH - 1] = 0;
+        share_write_ex(p, t, TRUE);
+        free(t);
+      }
+    }
     sb_add(&b, L"== %s стр.%u · %s · форма %d · %s · %.1f с · %.2f° %.2f°%s%s\n", tm_base(pg->path), pg->frame + 1,
            kDrType[pg->type], pg->form, pg->fmt, pg->secs, g_drAng, g_drAngV, pg->note[0] ? L" · " : L"", pg->note);
     for (int k = 0; k < DF_N; k++)
