@@ -2233,6 +2233,17 @@ static void ac_send(void) {
       return;
     }
   }
+  /* «в союз» — последний маршрут беседы в окно «В Союз» (soyuz_ui.c); модель не нужна */
+  if (sz_chat_cmd(a)) {
+    BOOL ok = FALSE;
+    for (int i = g_acN - 1; i >= 0 && !ok; i--)
+      if (g_acTurns[i].assistant && g_acTurns[i].text) ok = sz_start(g_acTurns[i].text);
+    if (ok) SetWindowTextW(g_acIn, L"");
+    ac_status(ok ? L"Маршрут — в окне «В Союз» рядом с клиентом «Союза»"
+                 : L"В беседе нет маршрута со строками «005 Операция. …» — сначала «Маршрут обработки» по чертежу");
+    free(in);
+    return;
+  }
   if (g_acId || g_agActive || g_acWebOn || ac_pc_busy()) {
     free(in);
     return;
@@ -3239,6 +3250,7 @@ static void ac_route_show(const wchar_t *text) {
   if (!g_acWnd) return;
   ac_push(1, text);
   ac_redraw();
+  ac_status(L"«в союз» — перенести операции маршрута в ТП «Союза»");
 }
 
 /* поиск с вопросом (мини-ИИ): открыть чат и сразу спросить */

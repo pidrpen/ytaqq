@@ -2718,6 +2718,7 @@ static void draw_pad_button(const DRAWITEMSTRUCT *dis) {
                  id == 4714 || /* «Применить» в окне «Спросить ИИ» */
                  id == 4703 || /* и «Отправить» там же */
                  id == 4722 || id == 4725 || /* «Сохранить…» в «Что помнит ИИ» (ai_memory.c) */
+                 id == 4842 ||               /* «Дальше» в окне «В Союз» (soyuz_ui.c) */
                  id == ID_XP_SAVE || id == ID_PK_SAVE; /* главное действие в подвале окон PLM */
   BOOL quiet = id == ID_CLOSE || id == ID_MIN || id == ID_PANEL_CLOSE || id == ID_PANEL_MIN;
   COLORREF fill, fg, bd;
@@ -4559,6 +4560,8 @@ static void create_settings(HWND owner) {
 #include "tiffsort.c"
 #include "drawrec.c"    /* распознать чертёж: штамп, спецификация, тип листа */
 #include "techno.c"     /* маршрут обработки по чертежу: правила технолога */
+#include "soyuz_ops.c"  /* маршрут → операции ТП «Союза»: разбор, коды справочника, сверка */
+#include "soyuz_ui.c"   /* окно «В Союз»: буфер по операции, аналоги и слежение в базе */
 #include "drawrec_ui.c" /* окно «Распознать чертёж» */
 #include "drawrec_sort.c" /* «Разложить по папкам»: имена по штампу, копия, журнал, отмена */
 #include "ai_chat.c" /* «Спросить ИИ»: чат с локальной моделью, после окон чертежа */
@@ -5093,7 +5096,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
   case WM_CLIPBOARDUPDATE:
     if (lf_quiet()) return 0; /* это исправление раскладки гоняет буфер — не копирование человека */
     /* своё мы помечаем флажком; без него — скопировал человек */
-    if (!g_ownClip) onec_foreign_copy();
+    if (!g_ownClip) onec_foreign_copy(), sz_foreign_copy();
     grab_last_copy();
     return 0;
   case WM_NCHITTEST: {
