@@ -20,6 +20,7 @@
    Файл таблицы — текст, столбцы через табуляцию (UTF-8 или «Текст Юникод» из Excel):
      назначение  токарная.установка     что за таблица; несколько — через «;»
      источник    ОМН … 1974             книга
+     ссылка      https://…#Par1593      где текст открыт в сети (якорь карты)
      карта / лист / страница            где в книге
      столбцы     масса, кг              по какому параметру выбирают столбец
      выбор       ближайшее большее | интерполяция
@@ -35,10 +36,13 @@
    ключ — код, дальше поля по именам.
 
    Параметры (имена ключей и «столбцы»): масса, способ, станок, размер станка,
-   материал, марка, вид (черновая/чистовая), D, Dзаг, L, h (припуск на сторону),
-   t, i, S, V, n, d, l (глубина отверстия), отверстий, B, Dф, z, Sм, толщина,
-   периметр, пробивок, переходов, инструментов, измерений, партия, квалитет, Ra,
-   То, Тв, Топ. Таблицы: <оп>.установка, .переход, .измерение, .ктв, .обслуживание,
+   размерная группа, материал, марка, вид (черновая/чистовая), D, Dзаг, L, h (припуск
+   на сторону), t, i, S, V, n, d, l (глубина отверстия), отверстий, отверстие
+   (сквозное/глухое), B, Dф, z, Sм, толщина, периметр, пробивок, переход (вид
+   перехода), И (измеряемый размер), квалитет, Ra, угол (резца в плане), перемещение,
+   наладка, инструментов, переходов, измерений, деталей, поверхность (прокат/отливка),
+   вид подачи, партия, смен (обработки партии), То, Тв, Топ. Чего нет — подходят
+   строки со «*» в этом ключе. Таблицы: <оп>.установка, .переход, .измерение, .ктв, .обслуживание,
    .отдых, .пз, .пз.доп, .подача, .скорость, .скорость.к (поправки), .глубина,
    .припуск, .врезание; резка.пробивка; станки (поля: группа, размер, ряд n,
    ряд S, ряд Sм). <оп> — токарная, сверлильная, фрезерная, резка; ктв и отдых —
@@ -273,7 +277,7 @@ typedef struct {
 typedef struct {
   wchar_t *buf;     /* текст файла, порезанный на клетки: всё ниже указывает в него */
   wchar_t file[80];
-  const wchar_t *purpose, *src, *card, *sheet, *page, *note, *unit, *checked, *colName;
+  const wchar_t *purpose, *src, *url, *card, *sheet, *page, *note, *unit, *checked, *colName;
   int interp, records, isChecked;
   int nkeys, keyNum[NM_KEYS];
   const wchar_t *keyName[NM_KEYS];
@@ -404,6 +408,7 @@ static int nm_base_add(NmBase *b, wchar_t *text, const wchar_t *file) {
       const wchar_t *k = cell[0], *v = cell[1];
       if (nm_eq(k, L"назначение")) t->purpose = v;
       else if (nm_eq(k, L"источник")) t->src = v;
+      else if (nm_eq(k, L"ссылка")) t->url = v;
       else if (nm_eq(k, L"карта")) t->card = v;
       else if (nm_eq(k, L"лист")) t->sheet = v;
       else if (nm_eq(k, L"страница") || nm_eq(k, L"стр.") || nm_eq(k, L"стр")) t->page = v;
@@ -477,6 +482,12 @@ static int nm_base_add(NmBase *b, wchar_t *text, const wchar_t *file) {
 /* таблица с этим назначением? */
 static int nm_tab_is(const NmTab *t, const wchar_t *purpose) { return nm_list_has(t->purpose, purpose); }
 
+static int nm_has(const NmBase *b, const wchar_t *purpose) {
+  for (int i = 0; i < b->n; i++)
+    if (!b->t[i].records && nm_tab_is(&b->t[i], purpose)) return 1;
+  return 0;
+}
+
 /* ---- выбор значения ---------------------------------------------------------------- */
 
 typedef struct {
@@ -520,20 +531,21 @@ static int nm_try(const NmTab *t, const NmCtx *c, NmHit *h) {
   for (int k = 0; k < t->nkeys; k++) {
     kp[k] = nm_parc(c, t->keyName[k]);
     asNum[k] = kp[k] && t->keyNum[k] && !nm_na(kp[k]->v);
-    if (!kp[k] || (t->keyNum[k] && nm_na(kp[k]->v) && !kp[k]->s[0])) {
-      tn_cpy(h->need, 40, t->keyName[k]);
-      tn_cpy(h->why, 360, L"нужен параметр «");
-      tn_cat(h->why, 360, t->keyName[k]);
-      tn_cat(h->why, 360, L"»");
-      return 0;
-    }
+    if (kp[k] && t->keyNum[k] && nm_na(kp[k]->v) && !kp[k]->s[0]) kp[k] = NULL;
   }
-  int best = -1;
+  /* параметра нет — подходят только строки со «*» в этом ключе; не нашлось — просим параметр */
+  int best = -1, miss = -1;
   for (int i = 0; i < t->nrows; i++) {
     const NmRow *r = &t->row[i];
     int ok = 1;
-    for (int k = 0; k < t->nkeys && ok; k++)
+    for (int k = 0; k < t->nkeys && ok; k++) {
+      if (!kp[k]) {
+        ok = r->kr[k].any && (t->keyNum[k] || nm_eq(r->key[k], L"*") || !r->key[k][0]);
+        if (!ok && miss < 0) miss = k;
+        continue;
+      }
       ok = asNum[k] ? nm_in(&r->kr[k], kp[k]->v) : nm_text_match(r->key[k], kp[k]);
+    }
     if (!ok) continue;
     if (best < 0) {
       best = i;
@@ -550,8 +562,16 @@ static int nm_try(const NmTab *t, const NmCtx *c, NmHit *h) {
       if (a > b + 1e-9) break;
     }
   }
+  if (best < 0 && miss >= 0) {
+    tn_cpy(h->need, 40, t->keyName[miss]);
+    tn_cpy(h->why, 360, L"нужен параметр «");
+    tn_cat(h->why, 360, t->keyName[miss]);
+    tn_cat(h->why, 360, L"»");
+    return 0;
+  }
   wchar_t by[200] = {0};
   for (int k = 0; k < t->nkeys; k++) {
+    if (!kp[k]) continue;
     if (by[0]) tn_cat(by, 200, L", ");
     nm_said(kp[k], by, 200);
   }
@@ -1168,11 +1188,19 @@ static void nm_op_calc(NmJob *j) {
   wchar_t s[300];
   o->to = o->tv = o->top = o->tsht = o->tpz = o->tshk = NM_NONE;
   j->pref = kNmKind[o->kind];
-  o->to = o->kind == NMK_TURN    ? nm_to_turn(j)
-          : o->kind == NMK_DRILL ? nm_to_drill(j)
-          : o->kind == NMK_MILL  ? nm_to_mill(j)
-                                 : nm_to_cut(j);
-  nm_putv(&j->c, L"То", o->to, NMO_CALC, NULL);
+  const NmPar *given = nm_parc(&j->c, L"То");
+  if (given && given->org == NMO_ASK && !nm_na(given->v)) { /* То посчитано технологом (САМ, режимы) */
+    o->to = given->v;
+    s[0] = 0;
+    nm_from(&j->c, L"То", L" мин", s, 300);
+    nm_line(j, s);
+  } else {
+    o->to = o->kind == NMK_TURN    ? nm_to_turn(j)
+            : o->kind == NMK_DRILL ? nm_to_drill(j)
+            : o->kind == NMK_MILL  ? nm_to_mill(j)
+                                   : nm_to_cut(j);
+    nm_putv(&j->c, L"То", o->to, NMO_CALC, NULL);
+  }
   if (!j->b->n) return; /* таблиц нет: у резки — только То по нормам резки завода */
   /* вспомогательное */
   double tus = 0, tper = 0, tizm = 0, k;
@@ -1199,9 +1227,28 @@ static void nm_op_calc(NmJob *j) {
   }
   o->tv = tus + tper + tizm;
   nm_putv(&j->c, L"Тв", o->tv, NMO_CALC, NULL);
-  double ktv = 1;
-  if (!nm_look_pref(j, L"ктв", L"Kтв", 0, &ktv) && !nm_look(j, L"ктв", L"Kтв", 0, &ktv)) ktv = 1;
-  double to0 = nm_na(o->to) ? 0 : o->to, top = to0 + o->tv * ktv;
+  /* Kтв — по серийности: продолжительность обработки партии в сменах (ОМН, карта 1). Тшт ещё
+     нет, поэтому смены — оценкой (То + Тв)·партия/480; без партии Kтв не берётся */
+  double ktv = 1, to0 = nm_na(o->to) ? 0 : o->to, q = nm_v(&j->c, L"партия");
+  if (nm_na(nm_v(&j->c, L"смен")) && !nm_na(q) && q > 0) {
+    double sm = (to0 + o->tv) * q / 480;
+    nm_putv(&j->c, L"смен", sm, NMO_CALC, L"(То + Тв)·партия/480 — оценка");
+    tn_cpy(s, 300, L"смен на партию = (То + Тв)·партия/480 = (");
+    tn_catnum(s, 300, to0), tn_cat(s, 300, L" + "), tn_catnum(s, 300, o->tv), tn_cat(s, 300, L")·");
+    tn_catnum(s, 300, q), tn_cat(s, 300, L"/480 = "), tn_catnum(s, 300, sm);
+    nm_line(j, s);
+  }
+  wchar_t kp[64];
+  nm_purp(j, L"ктв", kp, 64);
+  if (o->kind == NMK_CUT || !(o->tv > 0)) {
+    /* Kтв — из нормативов станочных работ; у резки его нет, без Тв поправлять нечего */
+  } else if (nm_na(nm_v(&j->c, L"смен")) && (nm_has(j->b, kp) || nm_has(j->b, L"ктв"))) {
+    nm_line(j, L"Kтв не взят — нужна партия: коэффициент зависит от продолжительности обработки партии");
+    nm_need(j, L"партия");
+  } else if (!nm_look(j, kp, L"Kтв", 0, &ktv) && !nm_look(j, L"ктв", L"Kтв", 0, &ktv)) {
+    ktv = 1;
+  }
+  double top = to0 + o->tv * ktv;
   nm_putv(&j->c, L"Топ", top, NMO_CALC, NULL);
   tn_cpy(s, 300, L"Топ = То + Тв");
   if (ktv != 1) tn_cat(s, 300, L"·Kтв");
@@ -1232,7 +1279,6 @@ static void nm_op_calc(NmJob *j) {
     if (nm_look_pref(j, L"пз.доп", L"Тпз доп.", 0, &pzx)) pz += pzx;
     o->tpz = pz;
   }
-  double q = nm_v(&j->c, L"партия");
   if (!nm_na(o->tpz) && !nm_na(q) && q > 0 && o->full) {
     o->tshk = o->tsht + o->tpz / q;
     tn_cpy(s, 300, L"Тшк = Тшт + Тпз/партия = ");
@@ -1259,14 +1305,20 @@ static void nm_way_code(const wchar_t *s, wchar_t *out, int cap) {
     const wchar_t *stem, *code;
   } k[] = {{L"центр", L"центры"},   {L"патрон", L"патрон"}, {L"тиск", L"тиски"},         {L"стол", L"стол"},
            {L"оправк", L"оправка"}, {L"кондуктор", L"кондуктор"}, {L"приспособ", L"приспособление"}};
+  wchar_t buf[64];
   const wchar_t *p = nm_skipsp(s), *q;
   if ((q = nm_pre(p, L"в ")) || (q = nm_pre(p, L"на "))) p = q;
+  tn_cpy(buf, 64, p);
+  /* первое слово — к коду, остальное как есть: «патроне пневматический» → «патрон пневматический» */
   for (size_t i = 0; i < sizeof(k) / sizeof(k[0]); i++)
-    if (nm_pre(p, k[i].stem)) {
+    if (nm_pre(buf, k[i].stem)) {
+      const wchar_t *rest = buf;
+      while (*rest && *rest != L' ') rest++;
       tn_cpy(out, cap, k[i].code);
+      tn_cat(out, cap, rest);
       return;
     }
-  tn_cpy(out, cap, p);
+  tn_cpy(out, cap, buf);
 }
 
 /* числа и слова из вопроса: «норма: L 120, партия 50, станок 16К20, в центрах» */
@@ -1279,7 +1331,11 @@ static void nm_ask(const wchar_t *text, NmCtx *c) {
            {L"длина", L"L", 0, 0},             {L"ширина", L"B", 0, 0},       {L"припуск", L"h", 0, 0},
            {L"глубина резания", L"t", 0, 0},   {L"глубина", L"l", 0, 0},      {L"подача", L"S", 0, 0},
            {L"скорость", L"V", 0, 0},          {L"партия", L"партия", 0, 0},  {L"масса", L"масса", 0, 0},
-           {L"пробив", L"пробивок", 0, 0},     {L"переход", L"переходов", 0, 0},
+           {L"пробив", L"пробивок", 0, 0},     {L"вид перехода", L"переход", 2, 0},
+           {L"вид подачи", L"вид подачи", 1, 0}, {L"наладка", L"наладка", 2, 0},
+           {L"квалитет", L"квалитет", 0, 0},   {L"угол", L"угол", 0, 0},      {L"То", L"То", 0, 1},
+           {L"смен", L"смен", 0, 0},
+           {L"переход", L"переходов", 0, 0},
            {L"инструмент", L"инструментов", 0, 0}, {L"измерен", L"измерений", 0, 0},
            {L"отверсти", L"отверстий", 0, 0},  {L"врезание", L"врезание", 0, 0},
            {L"толщина", L"толщина", 0, 0},     {L"станок", L"станок", 1, 0},  {L"способ", L"способ", 2, 0},
@@ -1387,6 +1443,33 @@ static void nm_ctx_defaults(const NmBase *b, const TnRoute *r, NmOp *o, NmCtx *c
   double v;
   const wchar_t *e;
   if (sz && nm_num(sz, &v, &e)) nm_putv(c, L"размер станка", v, NMO_TAB, L"перечень станков");
+  const wchar_t *gr = m ? nm_rec(b, L"станки", m->s, L"размерная группа", NULL) : NULL;
+  if (gr && nm_num(gr, &v, &e)) nm_putv(c, L"размерная группа", v, NMO_TAB, L"перечень станков");
+  /* ключи карт ОМН, которых на листе нет: вид перехода и наладки, подача, размер измерения */
+  static const struct {
+    int kind;
+    const wchar_t *per, *nal;
+  } kDef[] = {{NMK_TURN, L"точение по лимбу", L"цилиндрические"},
+              {NMK_DRILL, L"сверление по разметке", L"отверстия"},
+              {NMK_MILL, L"фрезерование по лимбу", L"плоскости"}};
+  for (size_t i = 0; i < sizeof(kDef) / sizeof(kDef[0]); i++)
+    if (kDef[i].kind == o->kind) {
+      nm_put(c, L"переход", kDef[i].per, NM_NONE, NMO_DEF, L"вид перехода");
+      nm_put(c, L"наладка", kDef[i].nal, NM_NONE, NMO_DEF, L"вид наладки");
+    }
+  nm_put(c, L"вид подачи", L"механическая", NM_NONE, NMO_DEF, NULL);
+  nm_putv(c, L"деталей", 1, NMO_DEF, L"одновременно устанавливаемых");
+  nm_put(c, L"поверхность", wcsstr(r->blank, L"Отливка") ? L"отливка" : L"прокат", NM_NONE, NMO_CALC,
+         L"по заготовке");
+  if (o->kind == NMK_TURN) {
+    nm_putv(c, L"угол", 90, NMO_DEF, L"резец в плане, проходной упорный");
+    if (!nm_na(nm_v(c, L"D"))) nm_putv(c, L"И", nm_v(c, L"D"), NMO_CALC, L"измеряемый размер — Ø обработки");
+  }
+  if (o->kind == NMK_DRILL) {
+    if (!nm_na(nm_v(c, L"d"))) nm_putv(c, L"И", nm_v(c, L"d"), NMO_CALC, L"измеряемый размер — Ø отверстия");
+    nm_putv(c, L"перемещение", 0, NMO_DEF, L"вертикально-сверлильный: инструмент не перемещается");
+    nm_put(c, L"отверстие", L"сквозное", NM_NONE, NMO_DEF, NULL);
+  }
   /* вид — для таблиц режимов с черновой и чистовой; у одной операции «начисто» его нет */
   if (wcsstr(o->op, L"чистов") || wcsstr(o->op, L"тонкая")) nm_put(c, L"вид", L"чистовая", NM_NONE, NMO_CALC, NULL);
   else if (wcsstr(o->op, L"чернов")) nm_put(c, L"вид", L"черновая", NM_NONE, NMO_CALC, NULL);
@@ -1502,6 +1585,7 @@ static void nm_text(const NmBase *b, const NmResult *res, const wchar_t *dir, wc
       if (wcscmp(w, t->file)) tn_cat(out, cap, w), tn_cat(out, cap, L" — "); /* без карты — имя файла ниже */
       tn_cat(out, cap, t->purpose);
       if (t->src && t->src[0]) tn_cat(out, cap, L" — "), tn_cat(out, cap, t->src);
+      if (t->url && t->url[0]) tn_cat(out, cap, L" — "), tn_cat(out, cap, t->url);
       tn_cat(out, cap, L" (");
       tn_cat(out, cap, t->file);
       tn_cat(out, cap, t->isChecked ? L", сверено" : L", не сверено");

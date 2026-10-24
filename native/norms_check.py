@@ -87,19 +87,35 @@ def layout(head, cols):
     return records, keys, vals, book
 
 
-def monotonic(xs):
-    xs = [x for x in xs if x is not None]
-    up = all(b >= a for a, b in zip(xs, xs[1:]))
-    down = all(b <= a for a, b in zip(xs, xs[1:]))
-    return up or down
+def spikes(xs):
+    """Номера значений, которые резко выбиваются из обоих соседей (опечатка переноса: «10,28» среди 0,24…0,32).
+    Плавные ряды — и растущие, и U-образные (у лёгких деталей время в книге растёт) — не трогаем."""
+    idx = [k for k, x in enumerate(xs) if x is not None]
+    out = []
+    for n, k in enumerate(idx):
+        v = xs[k]
+        nb = [xs[idx[m]] for m in (n - 1, n + 1) if 0 <= m < len(idx)]
+        if not nb:
+            continue
+        if v <= 0:  # «0,00» среди времён — опечатка распознавания
+            if max(nb) > 0:
+                out.append(k)
+            continue
+        hi, lo = max(nb), min(nb)
+        far = 1.6 if len(nb) == 2 else 3.0
+        if (lo > 0 and v > far * hi) or v * far < lo:
+            out.append(k)
+    return out
 
 
 def check(head, cols, rows):
     """Замечания: (номер строки или None, номер столбца или None, текст)."""
     out = []
-    for k in ("назначение", "источник", "страница"):
+    for k in ("назначение", "источник"):
         if not head.get(k):
             out.append((None, None, f"нет строки «{k}»"))
+    if not head.get("страница") and not head.get("ссылка") and not head.get("вид"):
+        out.append((None, None, "нет ни «страница», ни «ссылка» — откуда сверять"))
     if not cols:
         out.append((None, None, "нет шапки таблицы (строка «поз.»)"))
         return out
@@ -125,8 +141,8 @@ def check(head, cols, rows):
             if cell.strip() not in DASH and num(cell) is None:
                 out.append((i, j, f"поз. {pos}, «{cols[j]}»: «{cell}» — не число"))
         xs = [num(r[j]) if j < len(r) else None for j in vals]
-        if len([x for x in xs if x is not None]) >= 3 and not monotonic(xs):
-            out.append((i, None, f"поз. {pos}: значения по строке то растут, то падают — проверьте"))
+        for k in spikes(xs):
+            out.append((i, vals[k], f"поз. {pos}, «{cols[vals[k]]}»: {r[vals[k]]} выбивается из соседних по строке — проверьте"))
     # по столбцу — внутри групп с одинаковым словом-ключом (числовые ключи меняются)
     for j in vals:
         group, prev_key = [], None
@@ -137,9 +153,9 @@ def check(head, cols, rows):
                 key = tuple(v if v else (prev_key[n] if prev_key else "") for n, v in enumerate(key))
             if r is None or (prev_key is not None and key != prev_key):
                 xs = [num(rows[g][j]) if j < len(rows[g]) else None for g in group]
-                if len([x for x in xs if x is not None]) >= 3 and not monotonic(xs):
-                    out.append((group[0], j, f"столбец «{cols[j]}», поз. {rows[group[0]][0]}…{rows[group[-1]][0]}: "
-                                             "значения то растут, то падают — проверьте"))
+                for k in spikes(xs):
+                    g = group[k]
+                    out.append((g, j, f"поз. {rows[g][0]}, «{cols[j]}»: {rows[g][j]} выбивается из соседних по столбцу — проверьте"))
                 group = []
             if r is not None:
                 group.append(i)
@@ -185,6 +201,10 @@ def sheet(name, head, cols, rows, warns, img, out_dir):
          f"<h1>{html.escape(title)}</h1><div class='mut'>{html.escape(name)} · "
          f"{html.escape(head.get('источник', 'источник не указан'))} · ед.: {html.escape(head.get('ед', '—'))}"
          f" · столбцы по: {html.escape(head.get('столбцы', '—'))}</div>"]
+    url = head.get("ссылка", "")
+    if url.startswith(("http://", "https://")):
+        h.append(f"<div>источник в сети: <a href='{html.escape(url)}' target='_blank' rel='noopener'>"
+                 f"{html.escape(url)}</a></div>")
     checked = head.get("сверено", "")
     h.append(f"<div class='{'ok' if checked.lower().startswith('да') else 'mut'}'>сверено: "
              f"{html.escape(checked or 'нет')}</div>")
@@ -198,7 +218,7 @@ def sheet(name, head, cols, rows, warns, img, out_dir):
         h.append(f"<div class='page'><img src='{html.escape(rel)}' alt='страница книги'></div>")
     else:
         h.append("<div class='page'><p class='mut' style='padding:12px'>Картинки страницы нет: "
-                 "укажите --pages (и --offset) или сверяйте с PDF рядом.</p></div>")
+                 "укажите --pages (и --offset) или сверяйте с источником по ссылке выше.</p></div>")
     h.append("<div class='tab'><table><tr>")
     for j, c in enumerate(cols):
         h.append(f"<th class='{'k' if j == 0 or j in keys or j == book else ''}'>{html.escape(c)}</th>")

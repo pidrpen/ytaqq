@@ -52,8 +52,8 @@ def main():
         ok("буква вместо цифры", any("«О,3» — не число" in t for t in warns))
         ok("лишняя клетка", any("клеток 7, а в шапке 6" in t for t in warns))
         ok("повтор позиции", any("поз. 2 повторяется" in t for t in warns))
-        ok("скачок в строке", any("поз. 1: значения по строке" in t for t in warns))
-        ok("скачок в столбце", any("столбец «до 100»" in t for t in warns))
+        ok("скачок в строке", any("поз. 1, «до 100»: 0,8 выбивается из соседних по строке" in t for t in warns))
+        ok("скачок в столбце", any("«до 100»: 0,8 выбивается из соседних по столбцу" in t for t in warns))
 
         ok("запуск", norms_check.main([norms, "--pages", pages, "--offset", "2"]) == 0)
         out = os.path.join(norms, "сверка")
