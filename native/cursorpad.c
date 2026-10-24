@@ -4559,6 +4559,8 @@ static void create_settings(HWND owner) {
 #include "tiffsort.c"
 #include "drawrec.c"    /* распознать чертёж: штамп, спецификация, тип листа */
 #include "techno.c"     /* маршрут обработки по чертежу: правила технолога */
+#include "std.c"        /* справочник ГОСТ/DIN/ISO: разбор таблиц и поиск */
+#include "std_files.c"  /* его таблицы с диска пользователя (CursorPad-std) */
 #include "drawrec_ui.c" /* окно «Распознать чертёж» */
 #include "drawrec_sort.c" /* «Разложить по папкам»: имена по штампу, копия, журнал, отмена */
 #include "ai_chat.c" /* «Спросить ИИ»: чат с локальной моделью, после окон чертежа */

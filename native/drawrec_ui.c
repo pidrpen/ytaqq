@@ -510,6 +510,7 @@ static void dr_route_push(int i) {
     if (n < 0) n = 0;
     txt[n] = 0;
     tn_text(r, txt + n, 9000 - n);
+    gs_route_note(r, txt, 9000); /* заготовка и марка — по справочнику стандартов, если он есть */
     ac_route_show(txt);
     dr_status(L"Маршрут — в чате ИИ: там его можно обсудить и поправить");
   }
