@@ -5457,6 +5457,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
     if (argv && argc >= 3 && !wcscmp(argv[1], L"--idlefight")) if_test_shots(argv[2]);
     if (argv && argc >= 3 && !wcscmp(argv[1], L"--xptest")) export_test(argv[2]);
     if (argv && argc >= 4 && !wcscmp(argv[1], L"--drawrec")) dr_test(argc, argv);
+    if (argv && argc >= 3 && !wcscmp(argv[1], L"--avatarshot")) ac_avatar_shot(argv[2]);
     if (argv && argc >= 4 && !wcscmp(argv[1], L"--drawui")) dr_ui_test(argc, argv);
     if (argv && argc >= 4 && !wcscmp(argv[1], L"--techno")) dr_techno_test(argc, argv);
     if (argv && argc >= 4 && !wcscmp(argv[1], L"--tpchat")) ac_tp_test(argv[2], argv[3]);

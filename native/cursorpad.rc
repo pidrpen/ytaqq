@@ -129,3 +129,4 @@ END
 330 RCDATA "whatsnew.txt"
 346 RCDATA "match_rules.txt"
 380 RCDATA "ai_avatar_atlas.png"
+381 RCDATA "ai_avatar_cat.png"

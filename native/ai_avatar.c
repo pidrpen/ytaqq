@@ -4,9 +4,25 @@
    экране-лице программа рисует сама поверх кадра по точкам из ai_avatar_face.h:
    робот моргает, следит за курсором и меняет выражение. Пузырь рядом с ним
    показывает, чем ИИ занят фоном: строку состояния чата, шаг файловой задачи,
-   начало ответа. Всё рисуется в окнах с попиксельной прозрачностью. */
+   начало ответа. Всё рисуется в окнах с попиксельной прозрачностью.
+   Второй вид — «Кошка» (аниме-девушка с ушками и хвостом): 2D-кадры по арту
+   пользователя (ComfyUI), ресурс 381 — 9 кадров лица в ряд. Лицо у неё уже
+   нарисовано в кадре, поэтому эмоции — сменой кадра, а дыхание, прыжки и
+   раскачивание — та же поза, что у робота. */
 #include "ai_avatar_face.h"
 #define IDR_AI_AVATAR_ATLAS 380
+#define IDR_AI_AVATAR_CAT 381
+#define AC_CAT_W 135                /* кадр кошки 135×384 — в квадрате 460×460 окна: внизу посередине, */
+#define AC_CAT_H 384                /* сверху запас под прыжок и потягивание, чтобы уши не обрезались */
+#define AC_CAT_BOX 460
+#define AC_CAT_TOP 72
+#define AC_CAT_FEET 0.983f          /* подошвы: (72 + 380) / 460 */
+#define AC_CAT_EYE_X 0.49f          /* середина между глаз, доля ширины окна */
+#define AC_CAT_HEAD 0.16f           /* макушка, доля высоты окна */
+enum { AC_SKIN_ROBOT, AC_SKIN_CAT };
+/* порядок = кадры ai_avatar_cat.png */
+enum { AC_CAT_IDLE, AC_CAT_BLINK, AC_CAT_TALK, AC_CAT_HAPPY, AC_CAT_SURPRISED, AC_CAT_SAD, AC_CAT_ANGRY, AC_CAT_SHY,
+       AC_CAT_WAVE, AC_CAT_N };
 #define AC_AVATAR_TIMER 0xA171
 #define AC_AVATAR_TICK 33           /* ~30 к/с: кадр выбирается по часам, тик только перерисовывает */
 #define AC_AVATAR_FAST_TICK 16       /* пока появляется или уходит */
@@ -24,6 +40,9 @@ enum { AC_AV_IDLE, AC_AV_LISTENING, AC_AV_THINKING, AC_AV_FILES, AC_AV_WAVE, AC_
 static HWND g_acAvatar, g_acBubble;
 static HBITMAP g_acAvatarAtlas;
 static BYTE *g_acAvatarPixels;
+static int g_acAvatarSkin;          /* AC_SKIN_…; в ai_avatar.ini — Skin */
+static HBITMAP g_acCatAtlas;
+static BYTE *g_acCatPixels;
 static HBITMAP g_acAvatarFrameBitmap;
 static BYTE *g_acAvatarFramePixels;
 static int g_acAvatarSize = AC_AVATAR_DEFAULT_SIZE;
@@ -106,9 +125,9 @@ static void ac_menu_close(void);
 /* GetTickCount переполняется раз в 49,7 суток: сравниваем разность, а не значения */
 static BOOL ac_due(DWORD now, DWORD at) { return (LONG)(now - at) >= 0; }
 
-static BOOL ac_avatar_load(void) {
-  if (g_acAvatarAtlas) return TRUE;
-  HRSRC resource = FindResourceW(g_inst, MAKEINTRESOURCEW(IDR_AI_AVATAR_ATLAS), RT_RCDATA);
+/* PNG из ресурса id — в 32-битный DIB с premultiplied alpha, ровно w×h */
+static BOOL ac_png_resource(int id, UINT w, UINT h, HBITMAP *outBitmap, BYTE **outPixels) {
+  HRSRC resource = FindResourceW(g_inst, MAKEINTRESOURCEW(id), RT_RCDATA);
   DWORD size = resource ? SizeofResource(g_inst, resource) : 0;
   HGLOBAL loaded = resource ? LoadResource(g_inst, resource) : NULL;
   const void *source = loaded ? LockResource(loaded) : NULL;
@@ -137,8 +156,7 @@ static BOOL ac_avatar_load(void) {
         SUCCEEDED(converter->lpVtbl->Initialize(converter, (IWICBitmapSource *)frame, &kAcAvatarPbgra,
                                                 WICBitmapDitherTypeNone, NULL, 0.0, WICBitmapPaletteTypeCustom))) {
       UINT width = 0, height = 0;
-      if (SUCCEEDED(converter->lpVtbl->GetSize(converter, &width, &height)) &&
-          width == AC_AVATAR_FRAME * AC_AVATAR_COLS && height == AC_AVATAR_FRAME * AC_AVATAR_ROWS) {
+      if (SUCCEEDED(converter->lpVtbl->GetSize(converter, &width, &height)) && width == w && height == h) {
         BITMAPINFO info;
         memset(&info, 0, sizeof(info));
         info.bmiHeader.biSize = sizeof(info.bmiHeader);
@@ -152,8 +170,8 @@ static BOOL ac_avatar_load(void) {
         if (bitmap && pixels && SUCCEEDED(converter->lpVtbl->CopyPixels(converter, NULL,
                                                                        width * 4, width * height * 4,
                                                                        (BYTE *)pixels))) {
-          g_acAvatarAtlas = bitmap;
-          g_acAvatarPixels = (BYTE *)pixels;
+          *outBitmap = bitmap;
+          *outPixels = (BYTE *)pixels;
           ok = TRUE;
         } else if (bitmap) DeleteObject(bitmap);
       }
@@ -166,6 +184,14 @@ static BOOL ac_avatar_load(void) {
   if (stream) stream->lpVtbl->Release(stream);
   if (memory) GlobalFree(memory);
   return ok;
+}
+
+/* атлас выбранного вида; другой не держим — у робота он ~32 МБ */
+static BOOL ac_avatar_load(void) {
+  if (g_acAvatarSkin == AC_SKIN_CAT)
+    return g_acCatAtlas || ac_png_resource(IDR_AI_AVATAR_CAT, AC_CAT_W * AC_CAT_N, AC_CAT_H, &g_acCatAtlas, &g_acCatPixels);
+  return g_acAvatarAtlas || ac_png_resource(IDR_AI_AVATAR_ATLAS, AC_AVATAR_FRAME * AC_AVATAR_COLS,
+                                            AC_AVATAR_FRAME * AC_AVATAR_ROWS, &g_acAvatarAtlas, &g_acAvatarPixels);
 }
 
 static void ac_avatar_schedule_idle(DWORD now) {
@@ -301,9 +327,8 @@ static void ac_avatar_frame(DWORD now) {
   g_acAvatarNext = (g_acAvatarFrame + 1) % AC_AVATAR_COLS;
 }
 
-/* билинейная выборка одного канала атласа: строки r0/r1, столбцы x0/x1, доли 0..65535 */
-static unsigned ac_bilerp(size_t r0, size_t r1, int x0, int x1, int wx, int wy, int c) {
-  const BYTE *p = g_acAvatarPixels;
+/* билинейная выборка одного канала атласа p: строки r0/r1, столбцы x0/x1, доли 0..65535 */
+static unsigned ac_bilerp(const BYTE *p, size_t r0, size_t r1, int x0, int x1, int wx, int wy, int c) {
   unsigned top = ((unsigned)p[(r0 + x0) * 4 + c] * (65536 - wx) + (unsigned)p[(r0 + x1) * 4 + c] * wx) >> 16;
   unsigned bottom = ((unsigned)p[(r1 + x0) * 4 + c] * (65536 - wx) + (unsigned)p[(r1 + x1) * 4 + c] * wx) >> 16;
   return (top * (65536 - wy) + bottom * wy) >> 16;
@@ -320,7 +345,7 @@ static void ac_xf(const AcXf *x, float qx, float qy, float *px, float *py) {
 static void ac_avatar_pose(DWORD now, float zoom, AcXf *x) {
   int S = g_acAvatarSize;
   float sx = zoom, sy = zoom, ox = 0.0f, oy = 0.0f, ang = g_acSwing;
-  float pvx = S * 0.5f, pvy = S * 0.84f; /* «ноги» — над кольцом */
+  float pvx = S * 0.5f, pvy = S * (g_acAvatarSkin == AC_SKIN_CAT ? AC_CAT_FEET : 0.84f); /* «ноги» — над кольцом */
   float br = sinf(now / (g_acAvatarState == AC_AV_SLEEP ? 1150.0f : 640.0f)) * 0.016f; /* дыхание */
   sy *= 1.0f + br;
   sx *= 1.0f - br * 0.6f;
@@ -555,6 +580,81 @@ static void ac_avatar_face(DWORD now, const AcXf *xf) {
   }
 }
 
+/* Кадр в окно S×S: поза в обратную сторону и билинейная выборка из атласа. Кадр fw×fh стоит
+   в квадрате со стороной box посередине по ширине и на top ниже верха — вокруг прозрачно. */
+static void ac_avatar_sample(const BYTE *atlas, int atlasW, int fw, int fh, int box, int top, int frameX, int frameY,
+                             int nextX, unsigned mix, const AcXf *xf) {
+  int S = g_acAvatarSize;
+  float scale = (float)box / S, left = (box - fw) * 0.5f, isx = 1.0f / xf->sx, isy = 1.0f / xf->sy;
+  for (int y = 0; y < S; y++) {
+    for (int x = 0; x < S; x++) {
+      /* точка кадра под пикселем окна: поза в обратную сторону */
+      float dx = x + 0.5f - xf->pvx - xf->ox, dy = y + 0.5f - xf->pvy - xf->oy;
+      float qx = xf->pvx + (dx * xf->c + dy * xf->s) * isx, qy = xf->pvy + (-dx * xf->s + dy * xf->c) * isy;
+      float sx = qx * scale - left - 0.5f, sy = qy * scale - top - 0.5f;
+      if (sx <= -1.0f || sx >= fw || sy <= -1.0f || sy >= fh) {
+        memset(g_acAvatarFramePixels + ((size_t)y * S + x) * 4, 0, 4);
+        continue;
+      }
+      if (sy < 0.0f) sy = 0.0f;
+      int y0 = (int)sy;
+      int wy = (int)((sy - y0) * 65535.0f);
+      if (y0 >= fh - 1) { y0 = fh - 1; wy = 0; }
+      int y1 = y0 + (wy ? 1 : 0);
+      if (sx < 0.0f) sx = 0.0f;
+      int x0 = (int)sx;
+      int wx = (int)((sx - x0) * 65535.0f);
+      if (x0 >= fw - 1) { x0 = fw - 1; wx = 0; }
+      int x1 = x0 + (wx ? 1 : 0);
+      size_t r0 = (size_t)(frameY + y0) * atlasW, r1 = (size_t)(frameY + y1) * atlasW;
+      BYTE *dst = g_acAvatarFramePixels + (((size_t)y * S + x) * 4);
+      for (int c = 0; c < 4; c++) {
+        unsigned v = ac_bilerp(atlas, r0, r1, frameX + x0, frameX + x1, wx, wy, c);
+        if (mix) v = (v * (256 - mix) + ac_bilerp(atlas, r0, r1, nextX + x0, nextX + x1, wx, wy, c) * mix) >> 8;
+        dst[c] = (BYTE)v;
+      }
+    }
+  }
+}
+
+/* Лицо кошки — готовый кадр по состоянию и эмоции (те же, что у робота рисуются глазами) */
+static int ac_cat_face(DWORD now) {
+  int state = g_acAvatarState, emo = ac_emo_now(now);
+  if (state == AC_AV_SLEEP) return AC_CAT_BLINK;
+  switch (emo) {
+  case AC_EMO_SURPRISED: return AC_CAT_SURPRISED;
+  case AC_EMO_LOVE: return AC_CAT_HAPPY;
+  case AC_EMO_SHY: return AC_CAT_SHY;
+  case AC_EMO_SAD: return AC_CAT_SAD;
+  case AC_EMO_ANGRY: return AC_CAT_ANGRY;
+  case AC_EMO_WINK: return AC_CAT_BLINK;
+  case AC_EMO_DIZZY: return (now / 260) & 1 ? AC_CAT_BLINK : AC_CAT_IDLE; /* своего кадра нет — жмурится */
+  }
+  if (state == AC_AV_WAVE) return AC_CAT_WAVE;
+  if (state == AC_AV_ERROR) return AC_CAT_SAD;
+  if (state == AC_AV_SUCCESS || g_acAvatarJoyUntil) return AC_CAT_HAPPY;
+  if (state == AC_AV_TALKING) return (now / 130) & 1 ? AC_CAT_TALK : AC_CAT_IDLE;
+  if (g_acAvatarBlinkAt && now - g_acAvatarBlinkAt < 150) return AC_CAT_BLINK;
+  return AC_CAT_IDLE;
+}
+
+/* кадр в g_acAvatarFramePixels; alpha — прозрачность призыва и отзыва */
+static void ac_avatar_render(DWORD now, BYTE *alpha) {
+  float zoom = ac_avatar_zoom(now, alpha);
+  ac_avatar_frame(now);
+  AcXf xf;
+  ac_avatar_pose(now, zoom, &xf);
+  if (g_acAvatarSkin == AC_SKIN_CAT) {
+    int f = ac_cat_face(now) * AC_CAT_W;
+    ac_avatar_sample(g_acCatPixels, AC_CAT_W * AC_CAT_N, AC_CAT_W, AC_CAT_H, AC_CAT_BOX, AC_CAT_TOP, f, 0, f, 0, &xf);
+    return;
+  }
+  ac_avatar_sample(g_acAvatarPixels, AC_AVATAR_FRAME * AC_AVATAR_COLS, AC_AVATAR_FRAME, AC_AVATAR_FRAME,
+                   AC_AVATAR_FRAME, 0, g_acAvatarFrame * AC_AVATAR_FRAME, g_acAvatarState * AC_AVATAR_FRAME,
+                   g_acAvatarNext * AC_AVATAR_FRAME, (unsigned)g_acAvatarMix, &xf);
+  ac_avatar_face(now, &xf);
+}
+
 static void ac_avatar_present(void) {
   if (!g_acAvatar || !IsWindowVisible(g_acAvatar) || !ac_avatar_load()) return;
   if (!g_acAvatarFrameBitmap) {
@@ -571,48 +671,8 @@ static void ac_avatar_present(void) {
     if (!g_acAvatarFrameBitmap || !g_acAvatarFramePixels) return;
   }
 
-  DWORD now = GetTickCount();
   BYTE alpha;
-  float zoom = ac_avatar_zoom(now, &alpha);
-  ac_avatar_frame(now);
-  int S = g_acAvatarSize;
-  AcXf xf;
-  ac_avatar_pose(now, zoom, &xf);
-  float scale = (float)AC_AVATAR_FRAME / S, isx = 1.0f / xf.sx, isy = 1.0f / xf.sy;
-  int frameX = g_acAvatarFrame * AC_AVATAR_FRAME, nextX = g_acAvatarNext * AC_AVATAR_FRAME;
-  unsigned mix = (unsigned)g_acAvatarMix;
-  int frameY = g_acAvatarState * AC_AVATAR_FRAME;
-  int atlasW = AC_AVATAR_FRAME * AC_AVATAR_COLS;
-  for (int y = 0; y < S; y++) {
-    for (int x = 0; x < S; x++) {
-      /* точка кадра под пикселем окна: поза в обратную сторону */
-      float dx = x + 0.5f - xf.pvx - xf.ox, dy = y + 0.5f - xf.pvy - xf.oy;
-      float qx = xf.pvx + (dx * xf.c + dy * xf.s) * isx, qy = xf.pvy + (-dx * xf.s + dy * xf.c) * isy;
-      float sx = qx * scale - 0.5f, sy = qy * scale - 0.5f;
-      if (sx <= -1.0f || sx >= AC_AVATAR_FRAME || sy <= -1.0f || sy >= AC_AVATAR_FRAME) {
-        memset(g_acAvatarFramePixels + ((size_t)y * S + x) * 4, 0, 4);
-        continue;
-      }
-      if (sy < 0.0f) sy = 0.0f;
-      int y0 = (int)sy;
-      int wy = (int)((sy - y0) * 65535.0f);
-      if (y0 >= AC_AVATAR_FRAME - 1) { y0 = AC_AVATAR_FRAME - 1; wy = 0; }
-      int y1 = y0 + (wy ? 1 : 0);
-      if (sx < 0.0f) sx = 0.0f;
-      int x0 = (int)sx;
-      int wx = (int)((sx - x0) * 65535.0f);
-      if (x0 >= AC_AVATAR_FRAME - 1) { x0 = AC_AVATAR_FRAME - 1; wx = 0; }
-      int x1 = x0 + (wx ? 1 : 0);
-      size_t r0 = (size_t)(frameY + y0) * atlasW, r1 = (size_t)(frameY + y1) * atlasW;
-      BYTE *dst = g_acAvatarFramePixels + (((size_t)y * S + x) * 4);
-      for (int c = 0; c < 4; c++) {
-        unsigned v = ac_bilerp(r0, r1, frameX + x0, frameX + x1, wx, wy, c);
-        if (mix) v = (v * (256 - mix) + ac_bilerp(r0, r1, nextX + x0, nextX + x1, wx, wy, c) * mix) >> 8;
-        dst[c] = (BYTE)v;
-      }
-    }
-  }
-  ac_avatar_face(now, &xf);
+  ac_avatar_render(GetTickCount(), &alpha);
 
   HDC screen = GetDC(NULL);
   HDC memory = screen ? CreateCompatibleDC(screen) : NULL;
@@ -750,11 +810,14 @@ static void ac_bubble_update(void) {
   /* над головой; у верхнего края экрана — под аватаром */
   RECT ar;
   GetWindowRect(g_acAvatar, &ar);
-  const short *f = kAcAvatarFace[g_acAvatarState][g_acAvatarFrame];
-  float k = (float)S / AC_AVATAR_FRAME / 8.0f;
-  float eyeD = sqrtf((float)(f[2] - f[0]) * (f[2] - f[0]) + (float)(f[3] - f[1]) * (f[3] - f[1])) * k;
-  int headX = ar.left + (int)((f[0] + f[2]) * 0.5f * k);
-  int headTop = ar.top + (int)((f[1] + f[3]) * 0.5f * k - eyeD * 1.5f);
+  int headX = ar.left + (int)(S * AC_CAT_EYE_X), headTop = ar.top + (int)(S * AC_CAT_HEAD); /* кошка */
+  if (g_acAvatarSkin != AC_SKIN_CAT) {
+    const short *f = kAcAvatarFace[g_acAvatarState][g_acAvatarFrame];
+    float k = (float)S / AC_AVATAR_FRAME / 8.0f;
+    float eyeD = sqrtf((float)(f[2] - f[0]) * (f[2] - f[0]) + (float)(f[3] - f[1]) * (f[3] - f[1])) * k;
+    headX = ar.left + (int)((f[0] + f[2]) * 0.5f * k);
+    headTop = ar.top + (int)((f[1] + f[3]) * 0.5f * k - eyeD * 1.5f);
+  }
   MONITORINFO mi = {sizeof(mi)};
   GetMonitorInfoW(MonitorFromWindow(g_acAvatar, MONITOR_DEFAULTTONEAREST), &mi);
   int x = headX - W / 2, y = headTop - H + margin;
@@ -997,6 +1060,25 @@ static void ac_avatar_save_settings(void) {
   WritePrivateProfileStringW(L"Avatar", L"Wander", g_acAvatarWander ? L"1" : L"0", path);
   WritePrivateProfileStringW(L"Avatar", L"Bubbles", g_acAvatarBubbles ? L"1" : L"0", path);
   WritePrivateProfileStringW(L"Avatar", L"Windows", g_acAvatarWindows ? L"1" : L"0", path);
+  WritePrivateProfileStringW(L"Avatar", L"Skin", g_acAvatarSkin == AC_SKIN_CAT ? L"cat" : L"robot", path);
+}
+
+/* «Вид: Робот / Кошка» — атлас прежнего вида освобождается, новый грузится при отрисовке */
+static void ac_avatar_set_skin(int skin) {
+  g_acAvatarSkin = skin == AC_SKIN_CAT ? AC_SKIN_CAT : AC_SKIN_ROBOT;
+  if (g_acAvatarSkin == AC_SKIN_CAT && g_acAvatarAtlas) {
+    DeleteObject(g_acAvatarAtlas);
+    g_acAvatarAtlas = NULL;
+    g_acAvatarPixels = NULL;
+  }
+  if (g_acAvatarSkin == AC_SKIN_ROBOT && g_acCatAtlas) {
+    DeleteObject(g_acCatAtlas);
+    g_acCatAtlas = NULL;
+    g_acCatPixels = NULL;
+  }
+  g_acHopAt = GetTickCount() | 1; /* переоделся — подпрыгнул */
+  ac_avatar_present();
+  ac_avatar_save_settings();
 }
 
 /* Новый размер окна. Робот растёт и уменьшается «от ног»: середина низа
@@ -1068,7 +1150,7 @@ static void ac_avatar_hide(void) {
    как пузырь, — шапка с состоянием, чат, ползунок размера, переключатели,
    «Отозвать». Закрывается щелчком мимо и Esc, ходит стрелками. */
 
-enum { ACM_HEAD, ACM_CHAT, ACM_SIZE, ACM_BUBBLES, ACM_WANDER, ACM_WINDOWS, ACM_SEP, ACM_DISMISS, ACM_N };
+enum { ACM_HEAD, ACM_CHAT, ACM_SIZE, ACM_SKIN, ACM_BUBBLES, ACM_WANDER, ACM_WINDOWS, ACM_SEP, ACM_DISMISS, ACM_N };
 #define AC_MENU_TIMER 0xA172
 static HWND g_acMenu;
 static RECT g_acMenuRow[ACM_N];
@@ -1082,7 +1164,8 @@ static HFONT g_acMenuFont, g_acMenuBold, g_acMenuSmall, g_acMenuIcons;
 
 static int ac_mpx(int v) { return v * g_acMenuK / 100; }
 static BOOL ac_menu_pick(int i) {
-  return i == ACM_CHAT || i == ACM_SIZE || i == ACM_BUBBLES || i == ACM_WANDER || i == ACM_WINDOWS || i == ACM_DISMISS;
+  return i == ACM_CHAT || i == ACM_SIZE || i == ACM_SKIN || i == ACM_BUBBLES || i == ACM_WANDER || i == ACM_WINDOWS ||
+         i == ACM_DISMISS;
 }
 
 static HFONT ac_menu_font(int px, int weight, const wchar_t *face) {
@@ -1107,7 +1190,7 @@ static void ac_menu_close(void) {
 }
 
 static void ac_menu_layout(void) {
-  static const int kRowH[ACM_N] = {56, 38, 62, 38, 38, 38, 9, 38};
+  static const int kRowH[ACM_N] = {56, 38, 62, 38, 38, 38, 38, 9, 38};
   int m = ac_mpx(14), w = ac_mpx(292), pad = ac_mpx(6), y = m + pad;
   for (int i = 0; i < ACM_N; i++) {
     SetRect(&g_acMenuRow[i], m + pad, y, m + w - pad, y + ac_mpx(kRowH[i]));
@@ -1235,6 +1318,8 @@ static void ac_menu_render(void) {
   ac_paint_stroke(pix, W, H, fill, 2, (float)ac_mpx(2), cyan, cyan, (float)ac_mpx(2), 1.0f);
   ac_paint_stroke(pix, W, H, knob, 1, (float)ac_mpx(7), RGB(255, 255, 255), cyan,
                   (float)ac_mpx(g_acMenuDrag ? 5 : 3), 1.0f);
+  ac_menu_line(pix, W, H, dc, g_acMenuRow[ACM_SKIN], 0xE77B, L"Вид", g_acAvatarSkin == AC_SKIN_CAT ? L"Кошка ›" : L"Робот ›",
+               ink, cyan, lineH);
   ac_menu_line(pix, W, H, dc, g_acMenuRow[ACM_BUBBLES], 0xE8F2, L"Мысли ИИ рядом", NULL, ink, cyan, lineH);
   ac_menu_switch(pix, W, H, g_acMenuRow[ACM_BUBBLES], g_acAvatarBubbles);
   ac_menu_line(pix, W, H, dc, g_acMenuRow[ACM_WANDER], 0xE805, L"Гулять рядом с местом", NULL, ink, cyan, lineH);
@@ -1280,6 +1365,10 @@ static void ac_menu_size_at(int x) {
 static void ac_menu_activate(int i) {
   switch (i) {
   case ACM_CHAT: ac_menu_close(); aichat_show(); break;
+  case ACM_SKIN:
+    ac_avatar_set_skin(g_acAvatarSkin == AC_SKIN_CAT ? AC_SKIN_ROBOT : AC_SKIN_CAT);
+    ac_menu_render();
+    break;
   case ACM_BUBBLES:
     g_acAvatarBubbles = !g_acAvatarBubbles;
     if (!g_acAvatarBubbles) ac_bubble_hide(TRUE);
@@ -1614,6 +1703,8 @@ static void ac_avatar_show(void) {
     g_acAvatarWander = GetPrivateProfileIntW(L"Avatar", L"Wander", 1, path) != 0;
     g_acAvatarBubbles = GetPrivateProfileIntW(L"Avatar", L"Bubbles", 1, path) != 0;
     g_acAvatarWindows = GetPrivateProfileIntW(L"Avatar", L"Windows", 0, path) != 0;
+    GetPrivateProfileStringW(L"Avatar", L"Skin", L"robot", value, 32, path);
+    g_acAvatarSkin = !_wcsicmp(value, L"cat") ? AC_SKIN_CAT : AC_SKIN_ROBOT;
   }
   /* сохранённое место — если оно на каком-нибудь мониторе */
   RECT saved = {g_acAvatarX, g_acAvatarY, g_acAvatarX + g_acAvatarSize, g_acAvatarY + g_acAvatarSize};
@@ -1649,6 +1740,76 @@ static void ac_avatar_startup(void) {
   ac_avatar_show();
 }
 
+#ifdef SET_TEST
+/* проверочная сборка: --avatarshot выход.bmp — кадры помощника полосой на светлом фоне, без окон:
+   робот, затем кошка в покое, говорит, рада, удивлена, ошибка, смущена, злится, машет, в прыжке и на курсоре */
+static void ac_avatar_shot(const wchar_t *out) {
+  CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+  /* вид, состояние, эмоция; 1 — в прыжке, 2 — держат мышью */
+  static const int kShot[][4] = {{AC_SKIN_ROBOT, AC_AV_IDLE, AC_EMO_NONE, 0},    {AC_SKIN_CAT, AC_AV_IDLE, AC_EMO_NONE, 0},
+                                 {AC_SKIN_CAT, AC_AV_TALKING, AC_EMO_NONE, 0},   {AC_SKIN_CAT, AC_AV_SUCCESS, AC_EMO_NONE, 0},
+                                 {AC_SKIN_CAT, AC_AV_IDLE, AC_EMO_SURPRISED, 0}, {AC_SKIN_CAT, AC_AV_ERROR, AC_EMO_NONE, 0},
+                                 {AC_SKIN_CAT, AC_AV_IDLE, AC_EMO_SHY, 0},       {AC_SKIN_CAT, AC_AV_IDLE, AC_EMO_ANGRY, 0},
+                                 {AC_SKIN_CAT, AC_AV_WAVE, AC_EMO_NONE, 0},      {AC_SKIN_CAT, AC_AV_IDLE, AC_EMO_NONE, 1},
+                                 {AC_SKIN_CAT, AC_AV_IDLE, AC_EMO_NONE, 2}};
+  int n = (int)(sizeof(kShot) / sizeof(kShot[0])), S = g_acAvatarSize = 240, W = S * n, stride = (W * 3 + 3) & ~3;
+  BITMAPINFO info;
+  memset(&info, 0, sizeof(info));
+  info.bmiHeader.biSize = sizeof(info.bmiHeader);
+  info.bmiHeader.biWidth = S;
+  info.bmiHeader.biHeight = -S;
+  info.bmiHeader.biPlanes = 1;
+  info.bmiHeader.biBitCount = 32;
+  info.bmiHeader.biCompression = BI_RGB;
+  g_acAvatarFrameBitmap = CreateDIBSection(NULL, &info, DIB_RGB_COLORS, (void **)&g_acAvatarFramePixels, NULL, 0);
+  BYTE *strip = (BYTE *)calloc((size_t)stride * S, 1);
+  if (!g_acAvatarFrameBitmap || !strip) ExitProcess(1);
+  DWORD now = (GetTickCount() / 260) * 260 + 135; /* «говорит» — кадр с открытым ртом */
+  for (int i = 0; i < n; i++) {
+    g_acAvatarSkin = kShot[i][0];
+    if (!ac_avatar_load()) ExitProcess(2);
+    g_acAvatarState = kShot[i][1];
+    g_acAvatarStateAt = now - 400;
+    g_acEmo = kShot[i][2];
+    g_acEmoUntil = g_acEmo ? now + 10000 : 0;
+    g_acHopAt = kShot[i][3] == 1 ? (now - 210) | 1 : 0; /* верх прыжка */
+    g_acLandAt = 0;
+    g_acHeld = kShot[i][3] == 2;
+    g_acGrip.x = S * 6 / 10;
+    g_acGrip.y = S / 5;
+    g_acSwing = g_acHeld ? 0.35f : 0.0f;
+    BYTE alpha;
+    ac_avatar_render(now, &alpha);
+    for (int y = 0; y < S; y++)
+      for (int x = 0; x < S; x++) {
+        const BYTE *s = g_acAvatarFramePixels + ((size_t)y * S + x) * 4;
+        BYTE *d = strip + (size_t)(S - 1 - y) * stride + (size_t)(i * S + x) * 3;
+        static const BYTE kBg[3] = {244, 238, 232};
+        for (int c = 0; c < 3; c++) d[c] = (BYTE)(s[c] + kBg[c] * (255 - s[3]) / 255);
+      }
+  }
+  BITMAPFILEHEADER fh;
+  BITMAPINFOHEADER ih;
+  memset(&fh, 0, sizeof(fh));
+  memset(&ih, 0, sizeof(ih));
+  fh.bfType = 0x4D42;
+  fh.bfOffBits = sizeof(fh) + sizeof(ih);
+  fh.bfSize = fh.bfOffBits + (DWORD)stride * S;
+  ih.biSize = sizeof(ih);
+  ih.biWidth = W;
+  ih.biHeight = S;
+  ih.biPlanes = 1;
+  ih.biBitCount = 24;
+  ih.biSizeImage = (DWORD)stride * S;
+  HANDLE f = CreateFileW(out, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+  DWORD w;
+  BOOL ok = f != INVALID_HANDLE_VALUE && WriteFile(f, &fh, sizeof(fh), &w, NULL) && WriteFile(f, &ih, sizeof(ih), &w, NULL) &&
+            WriteFile(f, strip, (DWORD)stride * S, &w, NULL);
+  if (f != INVALID_HANDLE_VALUE) CloseHandle(f);
+  ExitProcess(ok ? 0 : 3);
+}
+#endif
+
 static void ac_avatar_destroy(void) {
   if (g_acBubble) { DestroyWindow(g_acBubble); g_acBubble = NULL; }
   if (g_acBubbleBitmap) { DeleteObject(g_acBubbleBitmap); g_acBubbleBitmap = NULL; g_acBubblePixels = NULL; }
@@ -1656,6 +1817,7 @@ static void ac_avatar_destroy(void) {
   if (g_acAvatar) { KillTimer(g_acAvatar, AC_AVATAR_TIMER); DestroyWindow(g_acAvatar); g_acAvatar = NULL; }
   if (g_acAvatarFrameBitmap) { DeleteObject(g_acAvatarFrameBitmap); g_acAvatarFrameBitmap = NULL; }
   if (g_acAvatarAtlas) { DeleteObject(g_acAvatarAtlas); g_acAvatarAtlas = NULL; g_acAvatarPixels = NULL; }
+  if (g_acCatAtlas) { DeleteObject(g_acCatAtlas); g_acCatAtlas = NULL; g_acCatPixels = NULL; }
 }
 
 static DWORD ac_avatar_random(void) {
@@ -1730,7 +1892,7 @@ static HWND ac_window_below(int x, int y) {
 /* Окна: едет на своём окне, падает, если опоры нет, иногда перебирается
    на активное окно. Только при включённом «Садиться на окна». */
 static void ac_avatar_windows(DWORD now, RECT wr, BOOL idle) {
-  int S = g_acAvatarSize, feet = (int)(S * AC_FEET);
+  int S = g_acAvatarSize, feet = (int)(S * (g_acAvatarSkin == AC_SKIN_CAT ? AC_CAT_FEET : AC_FEET));
   if (g_acHeld) return;
   if (g_acPerch) {
     if (!ac_perch_ok(g_acPerch)) { g_acPerch = NULL; g_acFalling = TRUE; g_acFallV = 0.0f; ac_emo(AC_EMO_SURPRISED, 800); }
