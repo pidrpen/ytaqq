@@ -200,4 +200,33 @@ static int tables_seed_list(const BuiltinTable *t, int n, const wchar_t *group, 
 static int tables_seed(const wchar_t *group, const wchar_t *dir, wchar_t *note, int cap) {
   return tables_seed_list(kTables, TABLES_COUNT, group, dir, note, cap);
 }
+
+/* Раз за запуск: группа раскладывается при первом обращении к её таблицам (норма к маршруту,
+   вопрос справочнику) — из любого потока, остальные потоки сразу читают папку (файлы меняются
+   подменой целиком). slot: 0 — нормативы, 1 — справочник. Сообщение о новых версиях правленых
+   таблиц забирает первый ответ (tables_note_append). Модули с таблицами проверяют
+   TABLES_SEED_ONCE: стенды без встроенных таблиц (norms_win_test) его не видят. */
+#define TABLES_SEED_ONCE 1
+static volatile LONG g_tbOnce[2], g_tbNoteReady[2];
+static wchar_t g_tbNote[2][700];
+
+static void tables_seed_once(int slot, const wchar_t *group, const wchar_t *dir) {
+  if (InterlockedCompareExchange(&g_tbOnce[slot], 1, 0)) return;
+  wchar_t names[500];
+  if (tables_seed(group, dir, names, 500) > 0) {
+    _snwprintf(g_tbNote[slot], 700,
+               L"С обновлением CursorPad пришли новые версии таблиц, которые вы правили: %s. Ваши оставлены как "
+               L"есть, новая лежит рядом — «….tsv.новая» в %s; сравните и перенесите нужное.",
+               names, dir);
+    g_tbNote[slot][699] = 0;
+    InterlockedExchange(&g_tbNoteReady[slot], 1);
+  }
+}
+
+/* дописать сообщение о новых версиях (если есть, один раз) в конец out */
+static void tables_note_append(int slot, wchar_t *out, int cap) {
+  if (!InterlockedExchange(&g_tbNoteReady[slot], 0)) return;
+  size_t k = wcslen(out);
+  if ((size_t)cap > k + 2) _snwprintf(out + k, (size_t)cap - k, L"\n%s\n", g_tbNote[slot]), out[cap - 1] = 0;
+}
 #endif

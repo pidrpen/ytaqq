@@ -89,6 +89,9 @@ static void gs_open(GsDb *db) {
   memset(db, 0, sizeof(*db));
   wchar_t dir[MAX_PATH];
   gs_dir(dir);
+#ifdef TABLES_SEED_ONCE /* встроенные таблицы — в папку, раз за запуск (после ai_load: std_dir уже прочитан) */
+  if (dir[0]) tables_seed_once(1, L"std", dir);
+#endif
   if (dir[0]) gs_load_tree(db, dir, 0);
 }
 
@@ -121,6 +124,11 @@ static wchar_t *gs_answer(const wchar_t *q, wchar_t **cite, wchar_t *why, int ca
       if (c.n) gs_cat(&c, L"; ");
       gs_cite(hit[i].t, &c);
     }
+#ifdef TABLES_SEED_ONCE
+    wchar_t note[760] = {0};
+    tables_note_append(1, note, 760);
+    if (note[0]) gs_cat(&b, note);
+#endif
     out = b.s;
     *cite = c.s;
   } else {

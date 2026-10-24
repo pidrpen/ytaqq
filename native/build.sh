@@ -64,9 +64,11 @@ cd "$HERE"
 if [ "$DEV" = 1 ]; then
   "$PY" "$HERE/build_agent_pack.py" || echo "ВНИМАНИЕ: комплект QwenPaw не сходится с native/agent — перед выпуском пересоберите его"
   "$PY" "$HERE/build_addons_pack.py" || echo "ВНИМАНИЕ: комплект tools не сходится — перед выпуском пересоберите его"
+  "$PY" "$HERE/make_tables.py" --check || echo "ВНИМАНИЕ: tables_data.h не сходится с native/tables — python native/make_tables.py"
 else
   "$PY" "$HERE/build_agent_pack.py"
   "$PY" "$HERE/build_addons_pack.py"
+  "$PY" "$HERE/make_tables.py" --check
 fi
 # помощник распознавания зашит в exe ресурсом, поэтому собирается первым
 $CC $CFLAGS -o CursorPadOcr.exe ocr_module.c -lole32 -lruntimeobject -luser32 -municode -s -Wl,--no-insert-timestamp $LDX

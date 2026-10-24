@@ -54,6 +54,7 @@ jobs:
           set -eu
           python -I -B native/test_convert_files.py
           python -I -B native/test_norms_check.py
+          python -I -B native/make_tables.py --check
           python -I -B native/test_native_arguments.py
           python -I -B native/test_windows_https.py native/agent/windows_https.py
           python -I -B native/test_network_diagnostics.py native/agent/bridge.py --transport-only

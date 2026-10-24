@@ -4,9 +4,9 @@
    каждой цифры — откуда она: файл, карта, страница, позиция, столбец, или «с
    чертежа», «задано», «по умолчанию». Чего не хватило — в «Уточнить».
 
-   Таблицы нормативов могут быть под авторским правом: они только у пользователя,
-   в Документы\CursorPad\Нормативы (переносит человек или ИИ, сверяет человек).
-   В репозитории — код и выдуманные таблицы тестов. Windows здесь не нужен:
+   Таблицы нормативов — в репозитории (native/tables/norms), встроены в exe и
+   раскладываются в Документы\CursorPad\Нормативы (tables_seed.c): там их правит
+   и сверяет человек, правленые обновление не затирает. Windows здесь не нужен:
      gcc -O2 -Wall -Werror -o norms_test norms_test.c && ./norms_test
 
    Формула (ОМН, серийное производство):
@@ -1797,12 +1797,20 @@ static wchar_t *nm_read_file(const wchar_t *path) {
   return w;
 }
 
-/* все *.tsv и *.txt папки; FALSE — папки нет (нормирование не включено). Служебные «.имя»
+/* все *.tsv и *.txt папки; FALSE — папки нет (и создать не вышло). Служебные «.имя»
    (.встроено.txt раскладки встроенных таблиц) не таблицы; «имя.tsv.новая» маска с коротким
    именем 8.3 могла бы зацепить — расширение сверяем по длинному имени */
 static BOOL nm_base_load(NmBase *b, wchar_t *dir) {
   memset(b, 0, sizeof(*b));
   nm_dir(dir);
+#ifdef TABLES_SEED_ONCE /* встроенные таблицы ОМН — в папку, раз за запуск; проверочную CP_NORMS не трогаем */
+  BOOL own = TRUE;
+#ifdef SET_TEST
+  const wchar_t *test = _wgetenv(L"CP_NORMS");
+  own = !(test && test[0]);
+#endif
+  if (dir[0] && own) tables_seed_once(0, L"norms", dir);
+#endif
   DWORD a = dir[0] ? GetFileAttributesW(dir) : INVALID_FILE_ATTRIBUTES;
   if (a == INVALID_FILE_ATTRIBUTES || !(a & FILE_ATTRIBUTE_DIRECTORY)) return FALSE;
   static const wchar_t *const masks[] = {L"*.tsv", L"*.txt"};
@@ -1840,6 +1848,9 @@ static wchar_t *nm_route_text(const TnRoute *r, const wchar_t *mass, const wchar
     out[0] = 0;
     nm_route(&b, r, mass, ask, res);
     nm_text(&b, res, dir, out, 24000);
+#ifdef TABLES_SEED_ONCE
+    tables_note_append(0, out, 24000);
+#endif
   } else {
     free(out);
     out = NULL;
@@ -1915,8 +1926,8 @@ static wchar_t *nm_follow_text(const wchar_t *q) {
     t = (wchar_t *)malloc(sizeof(wchar_t) * (MAX_PATH + 300));
     if (t) {
       _snwprintf(t, MAX_PATH + 300,
-                 L"Нормирование не включено: нет папки с таблицами нормативов %s. Создайте её и положите "
-                 L"таблицы — тогда к маршруту добавятся Тпз и Тшт с разбором, откуда каждая цифра.",
+                 L"Нормирование не включено: папки с таблицами нормативов %s нет и создать её не вышло "
+                 L"(нет доступа к «Документам»?). Таблицы встроены в CursorPad и кладутся туда сами.",
                  dir);
       t[MAX_PATH + 299] = 0;
     }

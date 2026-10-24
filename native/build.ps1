@@ -25,6 +25,8 @@ try {
   if ($LASTEXITCODE -ne 0) { if ($Dev) { Write-Warning 'Agent pack does not match native/agent: rebuild it before a release' } else { throw 'Agent pack verification failed' } }
   & $python build_addons_pack.py
   if ($LASTEXITCODE -ne 0) { if ($Dev) { Write-Warning 'Tools pack does not match: rebuild it before a release' } else { throw 'Tools pack verification failed' } }
+  & $python make_tables.py --check
+  if ($LASTEXITCODE -ne 0) { if ($Dev) { Write-Warning 'tables_data.h does not match native/tables: python native/make_tables.py' } else { throw 'Built-in tables verification failed' } }
   & $compiler @flags -o CursorPadOcr.exe ocr_module.c -lole32 -lruntimeobject -luser32 -municode -s -static '-Wl,--no-insert-timestamp'
   if ($LASTEXITCODE -ne 0) { throw 'OCR helper compilation failed' }
   & $resourceCompiler cursorpad.rc -O coff -o $resourceObject
