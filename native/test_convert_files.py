@@ -71,6 +71,15 @@ with tempfile.TemporaryDirectory(prefix='cursorpad-batch-test-') as directory:
     with Image.open(paths(run('convert',[deep],format='jpg'))[0]) as image:assert abs(image.getpixel((5,5))-116)<=2
     with Image.open(paths(run('resize',[scan],format='png',resize_mode='percent',percent=50))[0]) as image:assert round(image.info['dpi'][0])==150
     with Image.open(paths(run('convert',[huge],format='png'))[0]) as image:assert image.size==(14000,13000)
+    # Multi-page TIFF split: one TIFF per page, 1-bit pages stay Group 4 with their dpi.
+    pack=src/'Комплект.tif';page.save(pack,save_all=True,append_images=[Image.new('L',(300,200),128)],compression='tiff_lzw',dpi=(300,300))
+    source_hash[pack]=hashlib.sha256(pack.read_bytes()).hexdigest()
+    pieces=sorted(paths(run('tiff_split',[pack])));assert [p.name for p in pieces]==['Комплект-стр-001.tif','Комплект-стр-002.tif']
+    with Image.open(pieces[0]) as image:assert image.mode=='1' and image.info['compression']=='group4' and round(image.info['dpi'][0])==300
+    with Image.open(pieces[1]) as image:assert image.mode=='L' and getattr(image,'n_frames',1)==1
+    try:run('tiff_split',[scan])
+    except ValueError as error:assert 'одна страница' in str(error)
+    else:raise AssertionError('Single-page TIFF split')
     scan_pdf=PdfReader(paths(run('to_pdf',[scan]))[0]);box=scan_pdf.pages[0].mediabox
     assert abs(float(box.width)-595.2)<1 and abs(float(box.height)-842)<1
     picture=list(scan_pdf.pages[0]['/Resources']['/XObject'].values())[0].get_object()
@@ -229,4 +238,4 @@ with tempfile.TemporaryDirectory(prefix='cursorpad-batch-test-') as directory:
     for path,digest in source_hash.items():assert hashlib.sha256(path.read_bytes()).hexdigest()==digest
     assert not list(out.glob('.CursorPad-*'))
     listing=run('history');assert listing['history_ids'] and listing['history_labels']
-print('PASS: batches, real image formats/size/byte budget, scan dpi/1-bit/G4/CCITT PDF, CMYK, 16-bit, A0 size, PDF pages to 1-bit/colour images, multipage TIFF, PDF ordering/extract/split/rotate/packet, ZIP duplicates, persisted history, identity/hash undo, cancellation, metadata failure rollback, publication replacement guard, atomic failure rollback, unchanged sources')
+print('PASS: batches, real image formats/size/byte budget, scan dpi/1-bit/G4/CCITT PDF, CMYK, 16-bit, A0 size, TIFF split, PDF pages to 1-bit/colour images, multipage TIFF, PDF ordering/extract/split/rotate/packet, ZIP duplicates, persisted history, identity/hash undo, cancellation, metadata failure rollback, publication replacement guard, atomic failure rollback, unchanged sources')

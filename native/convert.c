@@ -7,6 +7,7 @@
 #define TIMER_CONVERT 1739
 #define WM_CONVERT_DONE (WM_APP + 139)
 #define WM_CV_CREATE_MENU (WM_APP + 141)
+#define WM_CV_TIFF_MERGE (WM_APP + 142) /* lParam — CvSelection*: в окно «Объединение TIFF / PDF» */
 static HWND g_cvWnd;
 static BOOL g_cvOle, g_cvRegistered, g_cvWord, g_cvExcel;
 static BOOL g_cvDown, g_cvSource, g_cvDismissed;
@@ -15,7 +16,7 @@ static POINT g_cvCreatePoint;
 static POINT g_cvOrigin;
 static DWORD g_cvReleased;
 static volatile LONG g_cvBusy;
-static int g_cvSize = 360, g_cvCount, g_cvFormats[16], g_cvHover = -1;
+static int g_cvSize = 360, g_cvCount, g_cvFormats[20], g_cvHover = -1;
 static wchar_t g_cvPath[MAX_PATH], g_cvLast[MAX_PATH];
 #define CV_FILES 128
 typedef struct { int count; wchar_t paths[CV_FILES][MAX_PATH]; } CvSelection;
@@ -30,6 +31,7 @@ static void cvx_show(void);
 static void cvx_shutdown(void);
 static void cv_pending_clear(void) { if(g_cvPendingData){g_cvPendingData->lpVtbl->Release(g_cvPendingData);g_cvPendingData=NULL;} }
 #include "convert_ring.c" /* вид кольца: прозрачное окно, плитки, центр */
+#include "convert_select.c" /* выделение Проводника на миг нажатия Shift */
 static void cv_redraw(void) { if(g_cvWnd&&IsWindowVisible(g_cvWnd))cv_paint(); }
 static void cv_hide(void) { cv_pending_clear();if (g_cvWnd) ShowWindow(g_cvWnd, SW_HIDE); g_cvHover = -1;g_cvInHub=FALSE; }
 static void cv_reveal(void) {
@@ -139,6 +141,7 @@ static void cv_tick(void) {
   if(shift&&((down&&!g_cvDown)||(!down&&g_cvDesktopDragged)))empty=dc_empty_desktop(point);
 #endif
   BOOL source=down&&!g_cvDown?cv_explorer_at(point):FALSE;
+  cv_snap_track(down,shift,point);
   cv_gesture(point,down,shift,(GetAsyncKeyState(VK_ESCAPE)&0x8000)!=0,source,empty);
 }
 /* Файлы из перетаскивания. Папки пропускаются: Shift+щелчок в проводнике
@@ -167,6 +170,8 @@ static BOOL cvx_can(int action, const wchar_t *path) {
   BOOL pdf=!_wcsicmp(e,L"pdf"), word=cv_word_file(path) && g_cvWord, excel=cv_excel_file(path) && g_cvExcel;
   if (action==7 || action==15) return TRUE;
   if (action<4) return image>=0 || pdf; /* PDF → картинки: по странице, 300 dpi */
+  if (action==18) return image==3;      /* разделить многостраничный TIFF */
+  if (action==19) return image>=0;      /* один TIFF — в окне объединения */
   if (action==8 || action==9) return image>=0;
   if (action==4) return image>=0 || word || excel;
   if (action==5) return word;
@@ -180,10 +185,17 @@ static void cv_menu_formats(void) {
   if (!g_cvSelection.count) return;
   BOOL pdfs=cvx_all(&g_cvSelection,10);
   if (cvx_all(&g_cvSelection,0)) { /* картинки и PDF — в картинки; у PDF без BMP, он для чертежей не нужен */
-    for (int i=0;i<4;i++) if((g_cvSelection.count>1 || cv_image_type(g_cvPath)!=i) && !(pdfs && i==2)) g_cvFormats[g_cvCount++]=i;
+    /* BMP в кольце не нужен (чертежам и сканам — PNG/TIFF); остался в окне «Ещё» */
+    /* формат, в котором уже все файлы, не предлагается */
+    for (int i=0;i<4;i++) {
+      BOOL same=TRUE;for(int k=0;same && k<g_cvSelection.count;k++) same=cv_image_type(g_cvSelection.paths[k])==i;
+      if(i!=2 && !same) g_cvFormats[g_cvCount++]=i;
+    }
     /* сканы чаще всего нужны в PDF: каждый отдельно, а несколько — ещё и одним файлом */
     if(cvx_all(&g_cvSelection,4)) g_cvFormats[g_cvCount++]=4;
     if(g_cvSelection.count>1 && !pdfs && cvx_all(&g_cvSelection,14)) g_cvFormats[g_cvCount++]=14;
+    if(g_cvSelection.count>1 && cvx_all(&g_cvSelection,19)) g_cvFormats[g_cvCount++]=19;
+    if(cvx_all(&g_cvSelection,18)) g_cvFormats[g_cvCount++]=18;
     if(cvx_all(&g_cvSelection,8)) { g_cvFormats[g_cvCount++]=8; g_cvFormats[g_cvCount++]=9; }
     if(pdfs) for(int i=10;i<=13;i++) g_cvFormats[g_cvCount++]=i;
   } else if (pdfs) { for(int i=10;i<=13;i++) g_cvFormats[g_cvCount++]=i; }
@@ -194,7 +206,7 @@ static void cv_read_pending(void) {
   if(!g_cvPendingData)return;
   g_cvDataAttempt=GetTickCount();
   g_cvRead=cv_data(g_cvPendingData,&g_cvSelection,&g_cvSkipped);
-  if(g_cvRead==CV_READ_OK){lstrcpynW(g_cvPath,g_cvSelection.paths[0],MAX_PATH);cv_menu_formats();}
+  if(g_cvRead==CV_READ_OK){cv_snap_apply();lstrcpynW(g_cvPath,g_cvSelection.paths[0],MAX_PATH);cv_menu_formats();}
   /* не прочиталось — повторим в DragOver: проводник может отдать список позже */
   if(g_cvRead!=CV_READ_FAILED)cv_pending_clear();
   cv_redraw();
@@ -219,7 +231,7 @@ static HRESULT STDMETHODCALLTYPE cv_over(IDropTarget *self, DWORD keys, POINTL p
   *effect = hover >= 0 ? DROPEFFECT_COPY : DROPEFFECT_NONE; return S_OK;
 }
 static HRESULT STDMETHODCALLTYPE cv_enter(IDropTarget *self, IDataObject *data, DWORD keys, POINTL position, DWORD *effect) {
-  cv_pending_clear();g_cvCount = 0; g_cvPath[0] = 0;g_cvSelection.count=0;g_cvRead=CV_READ_WAIT;g_cvSkipped=0;g_cvEnteredAt=GetTickCount();
+  cv_pending_clear();g_cvCount = 0; g_cvPath[0] = 0;g_cvSelection.count=0;g_cvRead=CV_READ_WAIT;g_cvSkipped=0;g_cvEnteredAt=GetTickCount();g_cvWide=FALSE;
   if(data){g_cvPendingData=data;data->lpVtbl->AddRef(data);cv_read_pending();}
   cv_redraw();return cv_over(self, keys, position, effect);
 }
@@ -229,8 +241,11 @@ static HRESULT STDMETHODCALLTYPE cv_leave(IDropTarget *self) {
 static HRESULT STDMETHODCALLTYPE cv_drop(IDropTarget *self, IDataObject *data, DWORD keys, POINTL position, DWORD *effect) {
   cv_over(self, keys, position, effect);
   CvSelection *dropped=(CvSelection*)calloc(1,sizeof(*dropped));
-  BOOL accepted=g_cvHover>=0 && dropped && cv_data(data,dropped,NULL)==CV_READ_OK && dropped->count==g_cvSelection.count;
-  for(int i=0;accepted && i<dropped->count;i++) if(wcscmp(dropped->paths[i],g_cvSelection.paths[i])) accepted=FALSE;
+  /* бросили то же, что принесли; если кольцо взяло запомненное выделение — сверка с принесённым */
+  const CvSelection *brought=g_cvWide?&g_cvDragged:&g_cvSelection;
+  BOOL accepted=g_cvHover>=0 && dropped && cv_data(data,dropped,NULL)==CV_READ_OK && dropped->count==brought->count;
+  for(int i=0;accepted && i<dropped->count;i++) if(wcscmp(dropped->paths[i],brought->paths[i])) accepted=FALSE;
+  if(accepted) *dropped=g_cvSelection;
   int target = accepted ? g_cvFormats[g_cvHover] : -1;
   *effect = DROPEFFECT_NONE;
   if (accepted && !g_cvBusy && cvx_dispatch(dropped,target)) *effect=DROPEFFECT_COPY;
@@ -242,6 +257,11 @@ static CvDrop g_cvDrop = {{&g_cvVtbl}, 1};
 static LRESULT CALLBACK cv_proc(HWND hwnd, UINT message, WPARAM wp, LPARAM lp) {
 #ifndef CV_RING_TEST
   if(message==WM_CV_CREATE_MENU){dc_menu(g_cvCreatePoint);return 0;}
+  if(message==WM_CV_TIFF_MERGE){ /* уже после сброса: окно с вопросом не держит Проводник */
+    CvSelection *s=(CvSelection*)lp;wchar_t name[MAX_PATH];const wchar_t *slash=wcsrchr(s->paths[0],L'\\');
+    lstrcpynW(name,slash?slash+1:s->paths[0],MAX_PATH);wchar_t *dot=wcsrchr(name,L'.');if(dot)*dot=0;
+    tm_open_pack(s->paths,s->count,name);free(s);return 0;
+  }
 #endif
   if (message == WM_MOUSEACTIVATE) return MA_NOACTIVATE;
   return DefWindowProcW(hwnd,message,wp,lp);

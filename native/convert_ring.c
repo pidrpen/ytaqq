@@ -16,7 +16,7 @@ static UiTokens g_uiTok = {RGB(255, 255, 255), RGB(243, 244, 246), RGB(255, 255,
 enum { CV_T_IMAGE, CV_T_PDF, CV_T_TEXT, CV_T_ZIP, CV_T_MORE };
 typedef struct { wchar_t icon; const wchar_t *label, *title, *note; int tint; } CvRingItem;
 /* по номерам действий: 0–3 картинки, 4 PDF, 5 TXT, 6 CSV, 7 ZIP, 8–14 окно параметров, 15 «Ещё» */
-static const CvRingItem kCvRing[16] = {
+static const CvRingItem kCvRing[20] = {
     {0xEB9F, L"PNG", L"В PNG", L"копия рядом с исходником", CV_T_IMAGE},
     {0xEB9F, L"JPG", L"В JPG", L"копия рядом с исходником", CV_T_IMAGE},
     {0xEB9F, L"BMP", L"В BMP", L"копия рядом с исходником", CV_T_IMAGE},
@@ -32,7 +32,10 @@ static const CvRingItem kCvRing[16] = {
     {0xE8C6, L"Разделить", L"Разделить PDF", L"откроет окно параметров", CV_T_PDF},
     {0xE7AD, L"Повернуть", L"Повернуть страницы", L"откроет окно параметров", CV_T_PDF},
     {0xE8F1, L"Один PDF", L"Всё в один PDF", L"порядок — в окне параметров", CV_T_PDF},
-    {0xE712, L"Ещё", L"Все действия", L"окно обработки файлов", CV_T_MORE}};
+    {0xE712, L"Ещё", L"Все действия", L"окно обработки файлов", CV_T_MORE},
+    {0, NULL, NULL, NULL, 0}, {0, NULL, NULL, NULL, 0}, /* 16, 17 — отмена и «показать» истории */
+    {0xE8C6, L"Разделить", L"Разделить TIFF", L"каждая страница — свой TIFF", CV_T_IMAGE},
+    {0xE7C4, L"Один TIFF", L"Один TIFF", L"порядок — в окне объединения", CV_T_IMAGE}};
 static const COLORREF kCvTint[] = {RGB(8, 145, 178), RGB(220, 38, 38), RGB(22, 163, 74), RGB(217, 119, 6),
                                    RGB(100, 116, 139)};
 
@@ -275,8 +278,12 @@ static void cv_render(BYTE *pix, int size, HDC dc, DWORD now) {
     if (g_cvFont[CV_F_ICON])
       cv_text(pix, size, dc, CV_F_ICON, &it->icon, 1, cv_box(cx, cy - 10 * g.s, 30 * g.s, 26 * g.s),
               DT_CENTER | DT_VCENTER | DT_SINGLELINE, cv_mix(kCvTint[it->tint], on, l), 1.0f);
-    cv_text(pix, size, dc, CV_F_LABEL, it->label, -1, cv_box(cx, cy + (g_cvFont[CV_F_ICON] ? 12 : 0) * g.s, w, 18 * g.s),
-            DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS, cv_mix(ink, on, l), 1.0f);
+    RECT lr = cv_box(cx, cy + (g_cvFont[CV_F_ICON] ? 12 : 0) * g.s, w, 18 * g.s);
+    int font = CV_F_LABEL;
+    SIZE ext;
+    SelectObject(dc, g_cvFont[font]);
+    if (GetTextExtentPoint32W(dc, it->label, lstrlenW(it->label), &ext) && ext.cx > lr.right - lr.left) font = CV_F_SMALL; /* тесно — помельче */
+    cv_text(pix, size, dc, font, it->label, -1, lr, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS, cv_mix(ink, on, l), 1.0f);
   }
   /* центр */
   if (wait) {

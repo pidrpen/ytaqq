@@ -94,6 +94,9 @@ static int preview(const wchar_t *dir, int dpi) {
     g_cvHover = 0; g_cvLevel[0] = 1; preview_shot(dir, L"3-image-hover", t);
     preview_select(images, 5); g_cvHover = 4; g_cvLevel[4] = 1; preview_shot(dir, L"4-images-resize", t);
     preview_select(pdfs, 3); g_cvHover = 2; g_cvLevel[2] = 1; preview_shot(dir, L"5-pdf-hover", t);
+    { static const wchar_t *tiffs[] = {L"C:\\a\\Лист 1.tif", L"C:\\a\\Лист 2.tif", L"C:\\a\\Лист 3.tif"};
+      preview_select(tiffs, 3); for (int i = 0; i < g_cvCount; i++) if (g_cvFormats[i] == 19) g_cvHover = i, g_cvLevel[i] = 1;
+      preview_shot(dir, L"5b-tiffs", t); }
     preview_select(word, 1); g_cvInHub = TRUE; preview_shot(dir, L"6-word-center", t);
     preview_select(other, 1); preview_shot(dir, L"7-other", t);
     /* ожидание файлов: огонёк, затем объяснение; одни папки */
@@ -130,6 +133,16 @@ int wmain(int argc, wchar_t **argv) {
   FakeData dir={{&data_vtable},folder,FALSE,0}; effect=DROPEFFECT_COPY|DROPEFFECT_MOVE;
   cv_enter(&g_cvDrop.iface,&dir.iface,MK_SHIFT,sector,&effect);
   if (g_cvRead != CV_READ_FOLDERS || g_cvCount || g_cvPendingData || effect != DROPEFFECT_NONE) return 14;
+  /* Shift+щелчок урезал выделение Проводника: при том же нажатии Shift кольцо берёт запомненное целиком */
+  g_cvSnap.count=2; lstrcpynW(g_cvSnap.paths[0],path,MAX_PATH); lstrcpynW(g_cvSnap.paths[1],path,MAX_PATH);
+  g_cvSnapPress=g_cvDownPress=5; g_cvSnapWnd=g_cvDownRoot=(HWND)1; g_cvSnapDesktop=FALSE; effect=DROPEFFECT_COPY|DROPEFFECT_MOVE;
+  data.multiple=FALSE; /* принесён один файл из двух выделенных */
+  cv_enter(&g_cvDrop.iface,&data.iface,MK_SHIFT,sector,&effect);
+  if (!g_cvWide || g_cvSelection.count != 2 || g_cvDragged.count != 1) return 15;
+  g_cvDownPress=6; effect=DROPEFFECT_COPY|DROPEFFECT_MOVE; /* другое нажатие Shift — как пришло */
+  cv_enter(&g_cvDrop.iface,&data.iface,MK_SHIFT,sector,&effect);
+  if (g_cvWide || g_cvSelection.count != 1) return 16;
+  g_cvDownPress=0;
   data.multiple=FALSE; effect=DROPEFFECT_COPY|DROPEFFECT_MOVE;
   cv_enter(&g_cvDrop.iface,&data.iface,MK_SHIFT,sector,&effect); if (effect != DROPEFFECT_COPY) return 7;
   if(GetUpdateRect(g_cvWnd,NULL,FALSE))return 13;
@@ -142,6 +155,6 @@ int wmain(int argc, wchar_t **argv) {
   }
   BOOL ok=!g_cvBusy && g_cvLast[0] && GetFileAttributesW(g_cvLast)!=INVALID_FILE_ATTRIBUTES;
   cv_shutdown(); DestroyWindow(g_hwnd);
-  puts(ok ? "PASS: OLE registration, delayed CF_HDROP retry without re-click, immediate paint, center cancellation, Shift, multiple-file selection, folder-only selection, COPY effect, threaded conversion" : "FAIL: conversion");
+  puts(ok ? "PASS: OLE registration, delayed CF_HDROP retry without re-click, immediate paint, center cancellation, Shift, multiple-file selection, folder-only selection, Shift-click range kept, COPY effect, threaded conversion" : "FAIL: conversion");
   return ok ? 0 : 9;
 }

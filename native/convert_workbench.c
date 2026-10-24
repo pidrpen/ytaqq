@@ -3,7 +3,7 @@
 #define WM_CVX_DONE (WM_APP+140)
 enum { CX_FILES=7600,CX_ADD,CX_REMOVE,CX_CLEAR,CX_UP,CX_DOWN,CX_ACTION,CX_FORMAT,CX_MODE,CX_SIZE,CX_KB,CX_PAGES,CX_ROTATE,CX_DIR,CX_BROWSE,CX_RUN,CX_CANCEL,CX_HISTORY,CX_REFRESH,CX_UNDO,CX_REVEAL,CX_TOGGLE,CX_LAST };
 static const wchar_t *kCvxActions[]={L"Картинки, PDF → PNG",L"Картинки, PDF → JPG",L"Картинки, PDF → BMP",L"Картинки, PDF → TIFF",L"Каждый файл → PDF",L"Word → TXT",L"Excel → CSV (лист 1)",L"Собрать ZIP для отправки",L"Изменить размер картинок",L"Сжать картинки до лимита",L"Объединить PDF",L"Извлечь страницы PDF",L"Разделить PDF по страницам",L"Повернуть страницы PDF",L"Пакет чертежей в один PDF"};
-static const char *kCvxOps[]={"convert","convert","convert","convert","to_pdf","convert","convert","zip","resize","compress","merge","extract","split","rotate","packet","history","undo","reveal"};
+static const char *kCvxOps[]={"convert","convert","convert","convert","to_pdf","convert","convert","zip","resize","compress","merge","extract","split","rotate","packet","history","undo","reveal","tiff_split"};
 typedef struct {
   CvJob result; CvSelection files; int action,format,mode,size,kb,rotation;
   wchar_t pages[256],directory[MAX_PATH],entry[80],run[MAX_PATH]; char *report;
@@ -179,7 +179,7 @@ static BOOL cvx_start(CvxJob *job) {
   for(int i=0;i<100;i++){swprintf(job->run,MAX_PATH,L"%ls\\run-%lu-%lu-%d",dir,GetCurrentProcessId(),GetTickCount(),i);if(CreateDirectoryW(job->run,NULL)){made=TRUE;break;}}
   if(!made){free(job);g_cvBusy=0;return FALSE;}
   swprintf(g_cvxCancelPath,MAX_PATH,L"%ls\\cancel",job->run);
-  lstrcpynW(job->result.label,job->action<15?kCvxActions[job->action]:L"История",80);
+  lstrcpynW(job->result.label,job->action<15?kCvxActions[job->action]:job->action==18?L"Разделение TIFF":L"История",80);
   HANDLE thread=CreateThread(NULL,0,cvx_worker,job,0,NULL);
   if(!thread){RemoveDirectoryW(job->run);free(job);g_cvBusy=0;return FALSE;}CloseHandle(thread);
   if(job->action!=15){if(g_cvxStatus)SetWindowTextW(g_cvxStatus,L"Обработка… Исходники сохраняются. Отмена — после текущего файла.");show_status(L"Обрабатываю файлы…");}
@@ -362,7 +362,12 @@ static void cvx_show(void) {
   ShowWindow(g_cvxWnd,SW_SHOWNORMAL);SetForegroundWindow(g_cvxWnd);cvx_controls();cvx_hint();if(g_cvxHistoryOpen&&!g_cvBusy)cvx_history(15);
 }
 static BOOL cvx_dispatch(const CvSelection *selection,int action) {
-  if(action>=8){cvx_show();g_cvxSelection=*selection;cvx_list();int chosen=action==15?(cvx_all(selection,10)?10:cvx_all(selection,8)?8:cvx_all(selection,14)?14:7):action;SendMessageW(g_cvxAction,CB_SETCURSEL,chosen,0);cvx_controls();cvx_hint();return TRUE;}
+  if(action==19){ /* один TIFF — в окне объединения: там порядок страниц и «Сохранить как TIFF» */
+    CvSelection *copy=(CvSelection*)malloc(sizeof(*copy));if(!copy)return FALSE;*copy=*selection;
+    if(!PostMessageW(g_cvWnd,WM_CV_TIFF_MERGE,0,(LPARAM)copy)){free(copy);return FALSE;}
+    return TRUE;
+  }
+  if(action>=8&&action!=18){cvx_show();g_cvxSelection=*selection;cvx_list();int chosen=action==15?(cvx_all(selection,10)?10:cvx_all(selection,8)?8:cvx_all(selection,14)?14:7):action;SendMessageW(g_cvxAction,CB_SETCURSEL,chosen,0);cvx_controls();cvx_hint();return TRUE;}
   CvxJob *job=(CvxJob*)calloc(1,sizeof(*job));if(!job)return FALSE;job->files=*selection;job->action=action;job->format=action<4?action:0;job->kb=1024;job->size=1920;job->rotation=90;return cvx_start(job);
 }
 static void cvx_shutdown(void) {if(g_cvxWnd){DestroyWindow(g_cvxWnd);g_cvxWnd=NULL;}if(g_cvxFont){DeleteObject(g_cvxFont);g_cvxFont=NULL;}}

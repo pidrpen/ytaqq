@@ -408,6 +408,25 @@ def pdf_images(task, source, ext):
         save_image(fit(page, ext), task.stage(task.destination(source), target), ext, (float(used), float(used)), None)
 
 
+def tiff_split(task, files):
+    """Multi-page TIFF to one TIFF per page: 1-bit stays Group 4, dpi of every page kept."""
+    split = 0
+    for source in files:
+        if source.suffix.lower() not in ('.tif', '.tiff'):
+            raise ValueError(f'Ожидается TIFF: {source.name}')
+        for index, count, image in image_frames(source):
+            if count == 1:
+                break
+            task.check()
+            dpi, icc = resolution(image), image.info.get('icc_profile')
+            ready = fit(image, 'tif')
+            save_image(ready, task.stage(task.destination(source), f'{source.stem}-стр-{index + 1:03}.tif'), 'tif', dpi,
+                       icc if ready.mode == image.mode else None)
+            split += 1
+    if not split:
+        raise ValueError('В TIFF одна страница — делить нечего')
+
+
 def pdf_reader(path, stack):
     from pypdf import PdfReader
     reader = PdfReader(stack.enter_context(open(path, 'rb')), strict=False)
@@ -552,7 +571,8 @@ def execute(request):
     task = Task(request)
     labels = {'convert': 'Конвертация', 'resize': 'Размер картинок', 'compress': 'Сжатие картинок', 'zip': 'ZIP',
               'merge': 'Объединение PDF', 'packet': 'Пакет чертежей', 'extract': 'Страницы PDF',
-              'split': 'Разделение PDF', 'rotate': 'Поворот PDF', 'to_pdf': 'Преобразование в PDF'}
+              'split': 'Разделение PDF', 'rotate': 'Поворот PDF', 'to_pdf': 'Преобразование в PDF',
+              'tiff_split': 'Разделение TIFF'}
     try:
         zip_sizes = None
         if files:
@@ -560,6 +580,8 @@ def execute(request):
                 images(task, files, op)
             elif op == 'zip':
                 zip_sizes = archive(task, files)
+            elif op == 'tiff_split':
+                tiff_split(task, files)
             elif op in ('merge', 'packet', 'extract', 'split', 'rotate', 'to_pdf'):
                 pdfs(task, files, op)
             else:
