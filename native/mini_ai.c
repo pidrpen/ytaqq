@@ -235,6 +235,24 @@ static const wchar_t *mini_after_verb(const wchar_t *q) {
   return NULL;
 }
 
+/* «Материалы» — только когда спрашивают о самом материале: марка или её свойство, режимы.
+   Слова обработки («токарн», «фрезеров», «резец») в ключах карточки — чтобы на «режимы
+   точения» модель не выдумывала числа; сами по себе («это на токарном делается») они про
+   маршрут, а не про сталь. q — после mini_fold. */
+static int mini_materials_intent(const wchar_t *q) {
+  static const wchar_t *const grades[] = {L"20", L"40", L"45"};
+  for (int i = 0; i < 3; i++)
+    for (const wchar_t *p = q; (p = wcsstr(p, grades[i])) != NULL; p += 2)
+      if ((p == q || p[-1] < L'0' || p[-1] > L'9') && (p[2] < L'0' || p[2] > L'9')) return 1;
+  static const wchar_t *const k[] = {L"сталь", L"стали", L"марк", L"твердост", L"hrc", L"hb", L"закал", L"калить",
+                                     L"отпуск", L"термообработ", L"состав", L"свойств", L"прочност", L"текучест",
+                                     L"цементац", L"азотир", L"нормализац", L"улучшен", L"чугун", L"бронз",
+                                     L"дюрал", L"режим", L"скорост", L"подач", NULL};
+  for (int i = 0; k[i]; i++)
+    if (wcsstr(q, k[i])) return 1;
+  return 0;
+}
+
 /* Карточка, если запрос на неё похож. NULL — общего текста модели не подсовывать. */
 static const wchar_t *mini_ai_card(const wchar_t *query, const wchar_t **title) {
   if (title) *title = NULL;
@@ -252,6 +270,7 @@ static const wchar_t *mini_ai_card(const wchar_t *query, const wchar_t **title) 
     }
   }
   if (best < 0 || bestScore < 2) return NULL;
+  if (!wcscmp(kMiniCards[best].title, L"Материалы") && !mini_materials_intent(q)) return NULL;
   if (title) *title = kMiniCards[best].title;
   return kMiniCards[best].body;
 }

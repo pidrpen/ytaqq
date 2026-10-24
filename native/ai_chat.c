@@ -19,6 +19,7 @@ static const GUID kAcBgra = {0x6fddc324, 0x4e03, 0x4bfe, {0xb1, 0x85, 0x3d, 0x77
 #define WM_AC_WEB (WM_APP + 75)  /* lParam — AcWebDone*, страницы для Qwen */
 #define WM_AC_TP (WM_APP + 77)   /* lParam — AcTpDone*: маршрут по чертежу; wParam 1 — черновик */
 #define WM_AC_PC (WM_APP + 78)   /* сверка с Союзом (ai_plm_check.c): wParam 1 — строка состояния, 0 — итог */
+#define WM_AC_LINK (WM_APP + 81) /* ссылка над лентой (kAcLogLinks): wParam — какая */
 #define ID_AC_LOG 4701
 #define ID_AC_IN 4702
 #define ID_AC_SEND 4703
@@ -114,6 +115,7 @@ static int g_acContextStart;
    а лента и ai_chat.txt их хранят. «Вернуть» — пока не задан новый вопрос. */
 static int g_acNewAt;
 static int g_acUndoAt = -1, g_acUndoNewAt, g_acUndoCtx;
+static BOOL ac_new_topic_undo_ready(void);
 static int g_acId; /* запрос в пути, 0 — нет */
 static LONG g_acWebGen;
 static BOOL g_acWebOn;
@@ -340,7 +342,7 @@ static void ac_draw_title(const DRAWITEMSTRUCT *dis) {
 static wchar_t ac_tool_icon(int id) {
   switch (id) {
   case ID_AC_SHOT: return 0xE722;
-  case ID_AC_CLEAR: return 0xE74D;
+  case ID_AC_CLEAR: return 0xE72C; /* «Новая беседа» — как ⟳ в мини-чате */
   case ID_AC_COPY: return 0xE8C8;
   case ID_AC_LEARN: return 0xE734;
   case ID_AC_AVATAR: return 0xE99A;
@@ -541,24 +543,64 @@ static int ac_log_twips(void) {
   return MulDiv(px, 1440, dpi);
 }
 
-/* «Новая беседа»: черта в ленте — что выше, ИИ уже не учитывает */
+/* «Новая беседа»: обе ленты — полного чата и мини-чата — показывают одну текущую
+   беседу. Прежние скрыты строкой сверху: «вернуть» (пока нет нового вопроса),
+   «показать» — тогда видна вся история с чертами между беседами, «скрыть» и
+   «удалить всю историю» (с вопросом). Слова-ссылки ловит EN_LINK (ac_log_link). */
 #define AC_NEW_LINE L"———  новая беседа: что выше, ИИ не помнит  ———"
+static const wchar_t *const kAcLogLinks[] = {L"вернуть", L"показать", L"скрыть", L"удалить всю историю"};
+static BOOL g_acShowOld, g_acLogTop; /* показать прежние беседы; ленту — с начала */
+
 static void ac_rtf_new_line(AcRtf *b) {
   ac_rtf_add(b, "\\pard\\qc\\sb120\\sa160\\cf3\\fs18 ");
   for (const wchar_t *p = AC_NEW_LINE; *p; p++) ac_rtf_char(b, *p);
   ac_rtf_add(b, "\\par\\pard\\cf1\\fs22 ");
 }
 
+/* строка над лентой, если есть прежние беседы; NULL — их нет */
+static const wchar_t *ac_log_top(void) {
+  if (g_acNewAt <= 0) return NULL;
+  if (g_acShowOld) return L"Показаны и прежние беседы — скрыть · удалить всю историю";
+  if (ac_new_topic_undo_ready()) return L"Новая беседа. Прежняя сохранена — вернуть · показать";
+  return L"Прежние беседы скрыты — показать";
+}
+
+/* слова-ссылки строки сверху: она в начале ленты, ищем только в ней */
+static void ac_log_links(int topLen) {
+  for (size_t i = 0; i < sizeof(kAcLogLinks) / sizeof(kAcLogLinks[0]); i++) {
+    FINDTEXTEXW ft;
+    memset(&ft, 0, sizeof(ft));
+    ft.chrg.cpMin = 0;
+    ft.chrg.cpMax = topLen + 1;
+    ft.lpstrText = kAcLogLinks[i];
+    if (SendMessageW(g_acLog, EM_FINDTEXTEXW, FR_DOWN, (LPARAM)&ft) < 0) continue;
+    SendMessageW(g_acLog, EM_EXSETSEL, 0, (LPARAM)&ft.chrgText);
+    CHARFORMAT2W cf;
+    memset(&cf, 0, sizeof(cf));
+    cf.cbSize = sizeof(cf);
+    cf.dwMask = CFM_LINK;
+    cf.dwEffects = CFE_LINK;
+    SendMessageW(g_acLog, EM_SETCHARFORMAT, SCF_SELECTION, (LPARAM)&cf);
+  }
+}
+
 static void ac_redraw(void) {
   ac_mini_refresh(); /* мини-чат у помощника показывает ту же беседу */
+  int from = g_acShowOld ? 0 : g_acNewAt < g_acN ? g_acNewAt : g_acN;
+  const wchar_t *top = ac_log_top();
   if (g_acRich) {
     AcRtf rtf = {0}; ac_rtf_begin_ui(&rtf);
     int tw = ac_log_twips();
-    for (int i = 0; i < g_acN; i++) {
-      if (i && i == g_acNewAt) ac_rtf_new_line(&rtf);
+    if (top) {
+      ac_rtf_add(&rtf, "\\pard\\qc\\sb60\\sa160\\cf3\\fs18 ");
+      for (const wchar_t *p = top; *p; p++) ac_rtf_char(&rtf, *p);
+      ac_rtf_add(&rtf, "\\par\\pard\\cf1\\fs22 ");
+    }
+    for (int i = from; i < g_acN; i++) {
+      if (g_acShowOld && i && i == g_acNewAt) ac_rtf_new_line(&rtf);
       ac_rtf_bubble(&rtf, &g_acTurns[i], tw);
     }
-    if (g_acN && g_acNewAt == g_acN) ac_rtf_new_line(&rtf);
+    if (g_acShowOld && g_acN && g_acNewAt == g_acN) ac_rtf_new_line(&rtf);
     ac_rtf_add(&rtf, "}");
     if (!rtf.failed) {
       SCROLLINFO si = {0}; si.cbSize = sizeof(si); si.fMask = SIF_RANGE | SIF_POS | SIF_PAGE;
@@ -572,8 +614,13 @@ static void ac_redraw(void) {
       AcStream source = {rtf.text, rtf.size, 0};
       EDITSTREAM stream = {(DWORD_PTR)&source, 0, ac_stream};
       SendMessageW(g_acLog, EM_STREAMIN, SF_RTF, (LPARAM)&stream);
+      if (top) ac_log_links((int)wcslen(top));
       SendMessageW(g_acLog, WM_SETREDRAW, TRUE, 0);
-      if (bottom) {
+      if (g_acLogTop) { /* показали прежние беседы — с их начала */
+        g_acLogTop = FALSE;
+        SendMessageW(g_acLog, EM_SETSEL, 0, 0);
+        SendMessageW(g_acLog, WM_VSCROLL, SB_TOP, 0);
+      } else if (bottom) {
         int end = GetWindowTextLengthW(g_acLog);
         SendMessageW(g_acLog, EM_SETSEL, end, end); SendMessageW(g_acLog, EM_SCROLLCARET, 0, 0);
         SendMessageW(g_acLog, WM_VSCROLL, SB_BOTTOM, 0);
@@ -586,13 +633,17 @@ static void ac_redraw(void) {
     }
     free(rtf.text); return;
   }
-  size_t cap = 64 + wcslen(AC_NEW_LINE);
+  size_t cap = 64 + wcslen(AC_NEW_LINE) + (top ? wcslen(top) : 0);
   for (int i = 0; i < g_acN; i++) cap += wcslen(g_acTurns[i].text) + 32;
   wchar_t *s = (wchar_t *)malloc(cap * sizeof(wchar_t));
   if (!s) return;
   s[0] = 0;
-  for (int i = 0; i <= g_acN; i++) {
-    if (i && i == g_acNewAt) wcscat(s, AC_NEW_LINE L"\r\n\r\n");
+  if (top) { /* простое поле без ссылок: только сказать, что прежние скрыты */
+    wcscat(s, g_acShowOld ? L"Показаны и прежние беседы" : L"Прежние беседы скрыты");
+    wcscat(s, L"\r\n\r\n");
+  }
+  for (int i = from; i <= g_acN; i++) {
+    if (i && i == g_acNewAt && g_acShowOld) wcscat(s, AC_NEW_LINE L"\r\n\r\n");
     if (i == g_acN) break;
     wcscat(s, g_acTurns[i].assistant ? L"ИИ:\r\n" : L"Вы:\r\n");
     if (g_acTurns[i].png) wcscat(s, L"[картинка] ");
@@ -1523,7 +1574,7 @@ static void ac_learn_grades(const wchar_t *qFold, wchar_t *out, int cap) {
 }
 
 static BOOL ac_para_keep(const wchar_t *para, int n, BOOL any, BOOL g20, BOOL g40, BOOL g45, BOOL g40x) {
-  if (!any) return TRUE;
+  if (!any) return n < 6 || wcsncmp(para, L"Марка:", 6) != 0; /* марка не названа — общее, без всех марок */
   if (n >= 15 && !wcsncmp(para, L"Марка: сталь 20", 15)) return g20;
   if (n >= 15 && !wcsncmp(para, L"Марка: сталь 40", 15) && para[15] != L'Х') return g40;
   if (n >= 15 && !wcsncmp(para, L"Марка: сталь 45", 15)) return g45;
@@ -1544,6 +1595,14 @@ static BOOL ac_materials_direct(const wchar_t *q, wchar_t *out, int cap) {
   BOOL g45 = ac_grade_tok(folded, L"45");
   BOOL g40x = wcsstr(folded, L"40х") || wcsstr(folded, L"40x");
   BOOL any = g20 || g40 || g45 || g40x;
+  if (!any && g_nmLast && g_nmLast->r.s.grade[0]) { /* марку не назвали — та, что в последнем маршруте */
+    wchar_t g[64];
+    lstrcpynW(g, g_nmLast->r.s.grade, 64);
+    mini_fold(g);
+    g20 = ac_grade_tok(g, L"20"), g40 = ac_grade_tok(g, L"40"), g45 = ac_grade_tok(g, L"45");
+    g40x = wcsstr(g, L"40х") || wcsstr(g, L"40x");
+    any = g20 || g40 || g45 || g40x;
+  }
   out[0] = 0;
   const wchar_t *p = card;
   while (*p && (int)wcslen(out) < cap - 1) {
@@ -1563,6 +1622,10 @@ static BOOL ac_materials_direct(const wchar_t *q, wchar_t *out, int cap) {
     }
     if (!e) break;
     p = e + 4;
+  }
+  if (!any) {
+    static const wchar_t kAsk[] = L"\r\n\r\nВ карточке — стали 20, 40, 45 и 40Х: назовите марку, и будут её числа.";
+    if ((int)(wcslen(out) + wcslen(kAsk)) < cap - 1) wcscat(out, kAsk);
   }
   wchar_t lessons[1500];
   ac_learn_recall(q, lessons, 1500);
@@ -2024,6 +2087,8 @@ static BOOL ac_new_topic(void) {
   g_acMkWait = g_acTakeWait = 0; g_acCmdWait = FALSE; g_acCmdText[0] = 0;
   g_acWebFoot[0] = 0;
   g_acNewAt = g_acContextStart = g_acN;
+  g_acShowOld = FALSE; /* обе ленты — с чистого листа */
+  g_acRendered = 0;
   ac_hist_save();
   ac_redraw();
   ac_status(L"Новая беседа: прежние реплики ИИ больше не учитывает");
@@ -2037,6 +2102,7 @@ static void ac_new_topic_undo(void) {
   g_acNewAt = g_acUndoNewAt;
   g_acContextStart = g_acUndoCtx;
   g_acUndoAt = -1;
+  g_acRendered = 0;
   ac_hist_save();
   ac_redraw();
   ac_status(L"Прежняя беседа возвращена — ИИ снова её помнит");
@@ -2997,6 +3063,41 @@ static void ac_clear(void) {
   ac_status(L"");
 }
 
+/* «удалить всю историю» над лентой — только с вопросом: стирает и файл ai_chat.txt */
+static void ac_clear_ask(void) {
+  if (MessageBoxW(g_acWnd, L"Удалить всю историю чата без возврата — и прежние беседы, и текущую?",
+                  L"Спросить ИИ — CursorPad", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES)
+    return;
+  ac_clear();
+  g_acShowOld = FALSE;
+  ac_redraw();
+  ac_status(L"История чата удалена");
+}
+
+/* щёлкнули слово-ссылку над лентой; само действие — после EN_LINK (WM_AC_LINK) */
+static void ac_log_link(const ENLINK *el) {
+  wchar_t t[40] = L"";
+  if (el->chrg.cpMax - el->chrg.cpMin <= 0 || el->chrg.cpMax - el->chrg.cpMin >= 40) return;
+  TEXTRANGEW tr = {el->chrg, t};
+  SendMessageW(g_acLog, EM_GETTEXTRANGE, 0, (LPARAM)&tr);
+  for (size_t i = 0; i < sizeof(kAcLogLinks) / sizeof(kAcLogLinks[0]); i++)
+    if (!wcscmp(t, kAcLogLinks[i])) PostMessageW(g_acWnd, WM_AC_LINK, i, 0);
+}
+
+static void ac_log_link_do(WPARAM which) {
+  switch (which) {
+  case 0: ac_new_topic_undo(); break; /* вернуть */
+  case 1: /* показать */
+  case 2: /* скрыть */
+    g_acShowOld = which == 1;
+    g_acLogTop = g_acShowOld;
+    g_acRendered = 0;
+    ac_redraw();
+    break;
+  case 3: ac_clear_ask(); break;
+  }
+}
+
 static void ac_copy_answer(void) {
   for (int i = g_acN - 1; i >= 0; i--)
     if (g_acTurns[i].assistant) {
@@ -3220,8 +3321,8 @@ static LRESULT CALLBACK AcProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
       } else if (g_agActive && !g_acId) ag_cancel_work();
       else if (g_acId) ai_cancel(g_acId);
       break;
-    case ID_AC_CLEAR:
-      ac_clear();
+    case ID_AC_CLEAR: /* то же, что ⟳ мини-чата: ничего не стирает, прежнее — «показать» над лентой */
+      ac_new_topic();
       break;
     case ID_AC_COPY:
       ac_copy_answer();
@@ -3271,6 +3372,18 @@ static LRESULT CALLBACK AcProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
     return 0;
   case WM_AC_PC:
     ac_pc_ready(wParam, lParam);
+    return 0;
+  case WM_NOTIFY: {
+    const NMHDR *nm = (const NMHDR *)lParam;
+    if (nm && nm->hwndFrom == g_acLog && nm->code == EN_LINK) {
+      const ENLINK *el = (const ENLINK *)lParam;
+      if (el->msg == WM_LBUTTONUP) ac_log_link(el);
+      return 0;
+    }
+    break;
+  }
+  case WM_AC_LINK:
+    ac_log_link_do(wParam);
     return 0;
   case WM_CLOSE:
     ShowWindow(hwnd, SW_HIDE);
@@ -3327,6 +3440,7 @@ static void ac_create(void) {
     SendMessageW(g_acLog, EM_EXLIMITTEXT, 0, 16000000);
     SendMessageW(g_acLog, EM_SETBKGNDCOLOR, 0, ac_log_bg());
     SendMessageW(g_acLog, EM_SETEDITSTYLE, SES_HIDEGRIDLINES, SES_HIDEGRIDLINES); /* у пузырей — только свои рамки */
+    SendMessageW(g_acLog, EM_SETEVENTMASK, 0, SendMessageW(g_acLog, EM_GETEVENTMASK, 0, 0) | ENM_LINK); /* «показать»… */
   }
   g_acIn = CreateWindowExW(0, L"EDIT", L"",
                            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN,
@@ -3335,7 +3449,7 @@ static void ac_create(void) {
                              (HMENU)(INT_PTR)ID_AC_STAT, g_inst, NULL);
   g_acSend = mk_btn(g_acWnd, L"Отправить", ID_AC_SEND);
   g_acStop = mk_btn(g_acWnd, L"Стоп", ID_AC_STOP);
-  g_acClear = mk_btn(g_acWnd, L"Очистить", ID_AC_CLEAR);
+  g_acClear = mk_btn(g_acWnd, L"Новая беседа", ID_AC_CLEAR);
   g_acCopy = mk_btn(g_acWnd, L"Копировать", ID_AC_COPY);
   g_acLearn = mk_btn(g_acWnd, L"Запомнить", ID_AC_LEARN);
   g_acSet = mk_btn(g_acWnd, L"Настройки", ID_AC_SET);
@@ -3391,12 +3505,15 @@ static void ac_retheme(void) {
 
 #include "ai_minichat.c" /* мини-чат у помощника: та же беседа в маленьком окне у робота */
 
-/* полный чат — окном */
+/* полный чат — окном. Беседа одна, и окно у неё одно: мини-чат закрывается,
+   недописанный вопрос переезжает сюда; картинка к вопросу и строка состояния общие. */
 static void aichat_show_full(void) {
   ac_avatar_startup(); /* отозванного помощника чат обратно не зовёт */
   if (!g_acWnd) ac_create();
   if (!g_acWnd) return;
-  g_amOwnsInput = FALSE; /* поле ввода снова у полного чата — мини-чат его не забирает */
+  ac_mini_close();
+  g_amFace = FALSE;
+  am_move_draft(g_amIn, g_acIn);
   BOOL wasVisible = IsWindowVisible(g_acWnd);
   ShowWindow(g_acWnd, IsIconic(g_acWnd) ? SW_RESTORE : SW_SHOW);
   if (!wasVisible) ac_avatar_set(AC_AV_WAVE);
@@ -3404,7 +3521,7 @@ static void aichat_show_full(void) {
   SetFocus(g_acIn);
   if (!g_acId) {
     if (!ai_ready()) ac_status(ai_status_text(g_aiOn ? AI_NO_MODEL : AI_OFF));
-    else ac_status(L"Enter — отправить · Shift+Enter — новая строка");
+    else if (!GetWindowTextLengthW(g_acStat)) ac_status(L"Enter — отправить · Shift+Enter — новая строка");
   }
 }
 
