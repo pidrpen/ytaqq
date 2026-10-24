@@ -5,8 +5,8 @@
 Читает все *.tsv папки (кроме pdf), пишет рядом «сверка.html»: каждая таблица
 с источником-ссылкой, пометками «## ПРОВЕРИТЬ» из файла и автоматическими
 проверками (масса круга по формуле, e шестигранника против S, диапазоны
-«a-b»). Сами таблицы остаются только у пользователя: страница — локальный
-файл, ни в репозиторий, ни в сеть она не идёт. Сверили — в файле таблицы
+«a-b»), а также строкой «#сверка» — чем сверено по второму источнику.
+Страница — локальный файл в папке справочника. Сверили — в файле таблицы
 строку «#проверено нет» меняют на «#проверено да, дата, кто».
 """
 import html
@@ -113,10 +113,11 @@ def checks(t):
 
 
 def page(folder):
-    files = []
+    files, fresh = [], []  # fresh — «имя.tsv.новая» от tables_seed.c рядом с правленым файлом
     for root, dirs, names in os.walk(folder):
         dirs[:] = [d for d in dirs if d.lower() != 'pdf' and not d.startswith('.')]
         files += [os.path.join(root, n) for n in names if n.lower().endswith('.tsv')]
+        fresh += [os.path.join(root, n) for n in names if n.lower().endswith('.tsv.новая')]
     files.sort()
     e = html.escape
     parts, total, unchecked, flagged, crossed = [], 0, 0, 0, 0
@@ -164,6 +165,7 @@ tr.bad td{{background:var(--bad)}} code{{font-size:13px}}
 </style></head><body>
 <h1>Сверка справочника стандартов</h1>
 <p>Таблиц: <b>{total}</b>, не сверено человеком: <b>{unchecked}</b>, сверено кодом по второму источнику: <b>{crossed}</b>, с замечаниями: <b>{flagged}</b>. Папка: <code>{e(folder)}</code></p>
+{'<ul class="warn"><li>Новая версия из обновления CursorPad лежит рядом с вашим исправленным файлом — сравните и перенесите нужное (CursorPad читает только *.tsv):</li>' + ''.join(f'<li><code>{e(os.path.relpath(f, folder))}</code></li>' for f in sorted(fresh)) + '</ul>' if fresh else ''}
 <p>Как сверять: откройте источник таблицы, сравните строки (подсвеченные — в первую очередь). Сошлось — в файле таблицы
 замените строку <code>#проверено	нет</code> на <code>#проверено	да, дата, кто сверил</code> (Блокнот или Excel; сохранять как текст
 с разделителями табуляции). Ответы CursorPad по несверенным таблицам идут с пометкой «НЕ СВЕРЕНО».</p>

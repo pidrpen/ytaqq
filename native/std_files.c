@@ -1,8 +1,10 @@
 /* std_files.c — справочник стандартов (std.c) с диска этого компьютера: папка
    из ai.txt «std_dir» (g_gsDir, ai_local.c) или %USERPROFILE%\CursorPad-std,
    все *.tsv в ней и в подпапках. Вне OneDrive и AppData — как CursorPad-train:
-   таблицы не уезжают в облако и не прячутся виртуализацией MSIX. Подключается
-   после std.c и techno.c; Windows нужен только здесь. */
+   правки человека не прячутся виртуализацией MSIX. Встроенные таблицы туда
+   раскладывает tables_seed.c; его «имя.tsv.новая» и «.встроено.txt» этот
+   загрузчик не читает (не *.tsv). Подключается после std.c и techno.c;
+   Windows нужен только здесь. */
 
 static void gs_dir(wchar_t *out) {
   if (g_gsDir[0]) {
