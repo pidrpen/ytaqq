@@ -273,19 +273,40 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
   st_check(g_szR.it[1].state == SO_WAIT, L"операция в другом ТП не считается");
   st_shot(L"3-next.png");
 
+  /* автоввод: сам sz_auto_start здесь не зовётся — клавиши ушли бы на рабочий стол человека,
+     где открыт настоящий клиент; проверяется разбор пункта меню и ответ потока окну */
+  {
+    wchar_t t[80];
+    sz_menu_text(L"&Вставить операцию\tCtrl+Shift+V", t, 80);
+    st_check(!wcscmp(t, kSzPasteItem), L"пункт меню «&Вставить операцию\\tCtrl+Shift+V» узнаётся");
+    wchar_t *m = (wchar_t *)malloc(600 * sizeof(wchar_t));
+    lstrcpynW(m, L"Шаг 3: в меню узла «Версия 1» нет пункта «Вставить операцию». Видны: «Создать», «Открыть». "
+                 L"Выделен не тот узел, нет прав технолога или клиент изменился после обновления. Меню закрыто, ничего не нажато.",
+              600);
+    SendMessageW(g_szWnd, WM_SZ_AUTO, 0, (LPARAM)m);
+    st_check(!g_szAutoWait && wcsstr(g_szNote, L"Шаг 3") != NULL, L"автоввод не нашёл пункт — окно говорит, на каком шаге");
+    st_shot(L"3a-auto-broken.png");
+    m = (wchar_t *)malloc(600 * sizeof(wchar_t));
+    lstrcpynW(m, L"«Вставить операцию» нажата на «Версия 1» — жду операцию в ТП…", 600);
+    SendMessageW(g_szWnd, WM_SZ_AUTO, 1, (LPARAM)m);
+    st_check(g_szAutoWait, L"пункт нажат — жду операцию в базе");
+    st_newop(g_szR.it[1].dir, ver, L"010");
+    st_check(!g_szAutoWait && g_szR.it[1].state == SO_DONE && g_szR.cur == 2, L"токарная встала — ожидание снято, дальше термическая");
+  }
+
   /* «Текст» — та же строка текстом, как для 1С */
   sz_command(ID_SZ_MODE);
   st_pump(50);
-  st_check(!wcscmp(g_stClip, L"4110 Токарная"), L"«Текст»: в буфере «4110 Токарная»");
+  st_check(!wcscmp(g_stClip, L"5000 Термическая обработка"), L"«Текст»: в буфере «5000 Термическая обработка», как для 1С");
   st_note(L"     в буфере: «%ls», режим текст %d, строка %d", g_stClip, g_szTextOnly, g_szR.cur);
   st_shot(L"4-text.png");
   sz_command(ID_SZ_MODE);
   /* «Копировать» у поля — в буфере поле, Ctrl+V очередь не двигает; «В буфер» — вернуть */
   sz_command(ID_SZ_COPY + SZF_CODE);
-  st_check(!wcscmp(g_stClip, L"4110") && g_szClip == 1, L"«Копировать» у кода — в буфере «4110»");
+  st_check(!wcscmp(g_stClip, L"5000") && g_szClip == 1, L"«Копировать» у кода — в буфере «5000»");
   st_shot(L"5-field.png");
   sz_command(ID_SZ_PUT);
-  st_check(!wcscmp(g_stClip, g_szR.it[1].guid) && g_szClip == 0, L"«В буфер» вернул операцию");
+  st_check(!wcscmp(g_stClip, g_szR.it[2].guid) && g_szClip == 0, L"«В буфер» вернул операцию");
 
   /* без аналога — текстом; Ctrl+V (как его ловит хук) — следом следующая */
   sz_select(iOkr);

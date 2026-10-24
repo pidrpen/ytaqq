@@ -30,9 +30,12 @@
 #define ID_SZ_STOP 4844
 #define ID_SZ_LIST 4845
 #define ID_SZ_PUT 4846  /* «В буфер» — вернуть операцию в буфер */
+#define ID_SZ_AUTO 4847 /* «Вставить сам» — автоввод (soyuz_auto.c) */
 #define ID_SZ_COPY 4850 /* + поле SZF_… */
 #define TIMER_SZ_PASTE 4860
 #define TIMER_SZ_CLIP 4861
+#define TIMER_SZ_WAIT 4862       /* после автоввода — сколько ждать операцию в базе */
+#define WM_SZ_AUTO (WM_APP + 94) /* wParam: 1 — пункт нажат; lParam — wchar_t* что вышло, освобождает окно */
 
 enum { SZF_CODE, SZF_NAME, SZF_CEH, SZF_EQUIP, SZF_TPZ, SZF_TSHT, SZF_N };
 static const wchar_t *const kSzField[SZF_N] = {L"Код", L"Операция", L"Цех, участок", L"Оборудование", L"Тпз",
@@ -52,6 +55,9 @@ static HHOOK g_szHook;
 static BOOL g_szVDown, g_szInsDown, g_szPend;
 static int g_szRetry;
 static float g_szS = 1.0f;
+static volatile LONG g_szAutoBusy, g_szAutoAbort; /* автоввод идёт; Esc — прервать */
+static BOOL g_szAutoWait;                         /* пункт нажат — ждём операцию в базе */
+static void sz_auto_start(void);                  /* soyuz_auto.c */
 
 static int SZS(int v) { return (int)(v * g_szS + 0.5f); }
 
@@ -547,6 +553,7 @@ static LRESULT CALLBACK sz_kbd(int code, WPARAM wp, LPARAM lp) {
       if (down) g_szInsDown = TRUE;
       if (up) g_szInsDown = FALSE;
     }
+    if (k->vkCode == VK_ESCAPE && down && g_szAutoBusy) g_szAutoAbort = 1; /* Esc — стоп автоввода */
     SoItem *it = sz_cur();
     if (paste && !g_szPend && it && !sz_guid_mode(it) && !g_szClip && !sz_ours(GetForegroundWindow())) {
       g_szPend = TRUE;
@@ -593,8 +600,8 @@ static void sz_hint(wchar_t *out, int cap) {
     lstrcpynW(out, L"В буфере — поле из окна. «В буфер» — вернуть туда операцию.", cap);
   } else if (sz_guid_mode(it)) {
     _snwprintf(out, cap,
-               L"В буфере — операция-аналог. В дереве ТП: правая кнопка на версии ТП → «Вставить операцию». "
-               L"Номер «Союз» поставит сам. После вставки поправьте нормы и оборудование.");
+               L"В буфере — операция-аналог. В дереве ТП: правая кнопка на версии ТП → «Вставить операцию» "
+               L"(или выделите узел и «Вставить» здесь). Номер «Союз» поставит сам; нормы и оборудование потом поправьте.");
   } else {
     wchar_t t[160];
     so_clip_text(it, t, 160);
@@ -634,6 +641,7 @@ static void sz_refresh(void) {
   }
   SetWindowTextW(GetDlgItem(g_szWnd, ID_SZ_MODE), g_szTextOnly ? L"● Текст" : L"Текст");
   EnableWindow(GetDlgItem(g_szWnd, ID_SZ_PUT), it != NULL);
+  EnableWindow(GetDlgItem(g_szWnd, ID_SZ_AUTO), sz_guid_mode(it) && !g_szAutoBusy);
   EnableWindow(GetDlgItem(g_szWnd, ID_SZ_NEXT), it != NULL);
   EnableWindow(GetDlgItem(g_szWnd, ID_SZ_SKIP), it != NULL);
   sz_list_fill();
@@ -653,10 +661,10 @@ static void sz_layout(void) {
     MoveWindow(GetDlgItem(g_szWnd, ID_SZ_COPY + f), rc.right - pad - bw, y, bw, SZS(SZ_ROW) - SZS(3), TRUE);
   y += SZS(34); /* строка аналога — рисуется */
   int foot = rc.bottom - SZS(TOOL_FOOT_H), by = foot + (SZS(TOOL_FOOT_H) - SZS(30)) / 2;
-  MoveWindow(g_szList, pad, y, rc.right - pad * 2, foot - SZS(40) - y, TRUE);
-  int x = SZS(12), w = (rc.right - SZS(24) - SZS(6) * 4) / 5;
-  int ids[5] = {ID_SZ_PREV, ID_SZ_SKIP, ID_SZ_MODE, ID_SZ_PUT, ID_SZ_NEXT};
-  for (int i = 0; i < 5; i++, x += w + SZS(6)) MoveWindow(GetDlgItem(g_szWnd, ids[i]), x, by, w, SZS(30), TRUE);
+  MoveWindow(g_szList, pad, y, rc.right - pad * 2, foot - SZS(54) - y, TRUE);
+  int x = SZS(12), w = (rc.right - SZS(24) - SZS(5) * 5) / 6;
+  int ids[6] = {ID_SZ_PREV, ID_SZ_SKIP, ID_SZ_MODE, ID_SZ_PUT, ID_SZ_AUTO, ID_SZ_NEXT};
+  for (int i = 0; i < 6; i++, x += w + SZS(5)) MoveWindow(GetDlgItem(g_szWnd, ids[i]), x, by, w, SZS(30), TRUE);
   InvalidateRect(g_szWnd, NULL, FALSE);
 }
 
@@ -738,8 +746,9 @@ static void sz_paint(HWND hwnd, HDC hdc) {
                       : g_szDb == 3 ? L"Нет связи с базой — переносите по Ctrl+V и «Дальше», без отметок"
                       : g_szDb == 1 ? L"Связываюсь с базой…"
                                     : L"Нет входа в базу (Настройки → PLM): только текст по Ctrl+V";
-  RECT sr = {pad, foot - SZS(34), right, foot - SZS(12)};
-  DrawTextW(hdc, st, -1, &sr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+  RECT sr = {pad, foot - SZS(48), right, foot - SZS(12)}; /* две строки: сообщение автоввода бывает длинным */
+  if (g_szNote[0] && wcsncmp(g_szNote, L"Шаг ", 4) == 0) SetTextColor(hdc, RGB(185, 74, 34));
+  DrawTextW(hdc, st, -1, &sr, DT_LEFT | DT_WORDBREAK | DT_END_ELLIPSIS | DT_NOPREFIX | DT_EDITCONTROL);
 }
 
 static void sz_stop(void);
@@ -770,6 +779,9 @@ static void sz_command(int id) {
   case ID_SZ_PUT:
     g_szNote[0] = 0;
     sz_put(0);
+    break;
+  case ID_SZ_AUTO:
+    sz_auto_start();
     break;
   case ID_SZ_NEXT: /* эта строка сделана — следующая */
     if (!it) break;
@@ -837,7 +849,7 @@ static LRESULT CALLBACK SzProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
     return panel_hittest(hwnd, lParam);
   case WM_GETMINMAXINFO: {
     MINMAXINFO *mm = (MINMAXINFO *)lParam;
-    mm->ptMinTrackSize.x = SZS(400);
+    mm->ptMinTrackSize.x = SZS(460);
     mm->ptMinTrackSize.y = SZS(520);
     return 0;
   }
@@ -885,6 +897,8 @@ static LRESULT CALLBACK SzProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
       int was = g_szR.cur;
       int hit = so_match(&g_szR, nw->dir, nw->parent, nw->num);
       if (hit >= 0) {
+        KillTimer(hwnd, TIMER_SZ_WAIT);
+        g_szAutoWait = FALSE;
         _snwprintf(g_szNote, 300, L"%s %s — в ТП под № %s", g_szR.it[hit].num, g_szR.it[hit].op,
                    nw->num[0] ? nw->num : L"?");
         g_szNote[299] = 0;
@@ -899,6 +913,28 @@ static LRESULT CALLBACK SzProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
     free(nw);
     return 0;
   }
+  case WM_SZ_AUTO: { /* автоввод нажал пункт (или сказал, почему нет) */
+    wchar_t *m = (wchar_t *)lParam;
+    if (m) lstrcpynW(g_szNote, m, 300);
+    free(m);
+    g_szAutoWait = wParam && g_szOn;
+    if (g_szAutoWait) SetTimer(hwnd, TIMER_SZ_WAIT, g_szDb == 2 ? 15000 : 3000, NULL);
+    sz_refresh();
+    return 0;
+  }
+  case WM_TIMER:
+    if (wParam == TIMER_SZ_WAIT) {
+      KillTimer(hwnd, TIMER_SZ_WAIT);
+      if (g_szAutoWait)
+        lstrcpynW(g_szNote,
+                  g_szDb == 2 ? L"За 15 с операция не появилась в базе. Посмотрите ТП в «Союзе»: если он что-то спросил — "
+                                L"ответьте в его окне."
+                              : L"Пункт нажат. Без связи с базой отметить нельзя — проверьте ТП и нажмите «Дальше».",
+                  300);
+      g_szAutoWait = FALSE;
+      sz_refresh();
+    }
+    return 0;
   case WM_SZ_DB: {
     wchar_t *e = (wchar_t *)lParam;
     g_szDb = wParam ? 2 : 3;
@@ -986,7 +1022,7 @@ static void sz_window(void) {
   wc.hbrBackground = g_paper;
   wc.lpszClassName = L"CursorPadSoyuz";
   RegisterClassExW(&wc);
-  int w = SZS(440), h = SZS(700), x, y;
+  int w = SZS(500), h = SZS(700), x, y;
   sz_place(w, h, &x, &y);
   /* WS_EX_NOACTIVATE: «Копировать» и «Дальше» жмутся, а ввод остаётся в «Союзе» */
   g_szWnd = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, L"CursorPadSoyuz",
@@ -998,9 +1034,10 @@ static void sz_window(void) {
   tool_frame_init(g_szWnd);
   for (int f = 0; f < SZF_N; f++) mk_btn(g_szWnd, L"Копировать", ID_SZ_COPY + f);
   mk_btn(g_szWnd, L"Назад", ID_SZ_PREV);
-  mk_btn(g_szWnd, L"Пропустить", ID_SZ_SKIP);
+  mk_btn(g_szWnd, L"Пропуск", ID_SZ_SKIP);
   mk_btn(g_szWnd, L"Текст", ID_SZ_MODE);
   mk_btn(g_szWnd, L"В буфер", ID_SZ_PUT);
+  mk_btn(g_szWnd, L"Вставить", ID_SZ_AUTO);
   mk_btn(g_szWnd, L"Дальше", ID_SZ_NEXT);
   g_szList = CreateWindowExW(0, L"LISTBOX", L"", WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT,
                              0, 0, 10, 10, g_szWnd, (HMENU)(INT_PTR)ID_SZ_LIST, g_inst, NULL);
@@ -1019,6 +1056,8 @@ static void sz_stop(void) {
   }
   BOOL was = g_szOn;
   g_szOn = FALSE;
+  g_szAutoAbort = 1; /* автоввод, если идёт, бросает на следующем шаге */
+  g_szAutoWait = FALSE;
   sz_thread_stop();
   if (g_szWnd) ShowWindow(g_szWnd, SW_HIDE);
   if (was) show_status(L"«В Союз» остановлен");
