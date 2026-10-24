@@ -108,6 +108,10 @@ static AcTurn *g_acTurns;
 static int g_acN, g_acCap, g_acRendered;
 /* The visible log remains intact. Cancelled tasks are outside model context. */
 static int g_acContextStart;
+/* «Новая беседа» (мини-чат ⟳, «/новая»): с этой реплики ИИ не помнит прежних,
+   а лента и ai_chat.txt их хранят. «Вернуть» — пока не задан новый вопрос. */
+static int g_acNewAt;
+static int g_acUndoAt = -1, g_acUndoNewAt, g_acUndoCtx;
 static int g_acId; /* запрос в пути, 0 — нет */
 static LONG g_acWebGen;
 static BOOL g_acWebOn;
@@ -158,6 +162,7 @@ static void ac_unsend(void) {
   }
   free(t->text);
   g_acN--;
+  if (g_acNewAt > g_acN) g_acNewAt = g_acN;
   ac_hist_save();
 }
 
@@ -166,7 +171,8 @@ static void ac_clear_turns(void) {
     free(g_acTurns[i].text);
     free(g_acTurns[i].png);
   }
-  g_acN = g_acRendered = g_acContextStart = 0;
+  g_acN = g_acRendered = g_acContextStart = g_acNewAt = 0;
+  g_acUndoAt = -1;
 }
 
 typedef struct { const char *text; size_t size, offset; } AcStream;
@@ -533,12 +539,24 @@ static int ac_log_twips(void) {
   return MulDiv(px, 1440, dpi);
 }
 
+/* «Новая беседа»: черта в ленте — что выше, ИИ уже не учитывает */
+#define AC_NEW_LINE L"———  новая беседа: что выше, ИИ не помнит  ———"
+static void ac_rtf_new_line(AcRtf *b) {
+  ac_rtf_add(b, "\\pard\\qc\\sb120\\sa160\\cf3\\fs18 ");
+  for (const wchar_t *p = AC_NEW_LINE; *p; p++) ac_rtf_char(b, *p);
+  ac_rtf_add(b, "\\par\\pard\\cf1\\fs22 ");
+}
+
 static void ac_redraw(void) {
   ac_mini_refresh(); /* мини-чат у помощника показывает ту же беседу */
   if (g_acRich) {
     AcRtf rtf = {0}; ac_rtf_begin_ui(&rtf);
     int tw = ac_log_twips();
-    for (int i = 0; i < g_acN; i++) ac_rtf_bubble(&rtf, &g_acTurns[i], tw);
+    for (int i = 0; i < g_acN; i++) {
+      if (i && i == g_acNewAt) ac_rtf_new_line(&rtf);
+      ac_rtf_bubble(&rtf, &g_acTurns[i], tw);
+    }
+    if (g_acN && g_acNewAt == g_acN) ac_rtf_new_line(&rtf);
     ac_rtf_add(&rtf, "}");
     if (!rtf.failed) {
       SCROLLINFO si = {0}; si.cbSize = sizeof(si); si.fMask = SIF_RANGE | SIF_POS | SIF_PAGE;
@@ -566,12 +584,14 @@ static void ac_redraw(void) {
     }
     free(rtf.text); return;
   }
-  size_t cap = 64;
+  size_t cap = 64 + wcslen(AC_NEW_LINE);
   for (int i = 0; i < g_acN; i++) cap += wcslen(g_acTurns[i].text) + 32;
   wchar_t *s = (wchar_t *)malloc(cap * sizeof(wchar_t));
   if (!s) return;
   s[0] = 0;
-  for (int i = 0; i < g_acN; i++) {
+  for (int i = 0; i <= g_acN; i++) {
+    if (i && i == g_acNewAt) wcscat(s, AC_NEW_LINE L"\r\n\r\n");
+    if (i == g_acN) break;
     wcscat(s, g_acTurns[i].assistant ? L"ИИ:\r\n" : L"Вы:\r\n");
     if (g_acTurns[i].png) wcscat(s, L"[картинка] ");
     wcscat(s, g_acTurns[i].text);
@@ -704,7 +724,8 @@ static BOOL ac_write_utf8(const wchar_t *path, const wchar_t *text) {
 
 /* беседа на диске: %LOCALAPPDATA%\CursorPad\ai_chat.txt, по строке на реплику (store_text.h).
    Картинки не пишем — только текст. Лимиты: последние AC_HIST_TURNS реплик и не больше
-   AC_HIST_CHARS знаков. Мини-чат у помощника показывает ту же беседу — отдельно не нужен. */
+   AC_HIST_CHARS знаков. Мини-чат у помощника показывает ту же беседу — отдельно не нужен.
+   Строка с меткой 2 — черта «Новая беседа» (g_acNewAt) между репликами. */
 #define AC_HIST_TURNS 200
 #define AC_HIST_CHARS 120000
 #define AC_HIST_BYTES (4u << 20)
@@ -729,7 +750,14 @@ static void ac_hist_save(void) {
     from--;
   }
   StBuf b = {0};
-  for (int i = from; i < g_acN; i++) {
+  for (int i = from; i <= g_acN; i++) {
+    if (i > from && i == g_acNewAt) { /* черта раньше сохранённого — её и не нужно */
+      st_char(&b, L'2');
+      st_char(&b, L'\t');
+      st_quoted(&b, L"новая беседа");
+      st_char(&b, L'\n');
+    }
+    if (i == g_acN) break;
     const wchar_t *s = g_acTurns[i].text;
     if (!s || !s[0]) continue;
     st_char(&b, g_acTurns[i].assistant ? L'1' : L'0');
@@ -752,8 +780,12 @@ static void ac_hist_load(void) {
   wchar_t *text = path[0] ? ac_read_utf8(path, AC_HIST_BYTES) : NULL;
   if (!text) return;
   AcTurn *t = NULL;
-  int n = 0, cap = 0;
+  int n = 0, cap = 0, mark = 0;
   for (const wchar_t *p = text; *p; p = st_next(p)) {
+    if (p[0] == L'2' && p[1] == L'\t') { /* черта «Новая беседа»; прежние версии такую строку пропускают */
+      mark = n;
+      continue;
+    }
     wchar_t tag = 0;
     wchar_t *s = st_record(p, &tag);
     if (!s) continue;
@@ -799,6 +831,10 @@ static void ac_hist_load(void) {
   free(t);
   /* облако: прежнюю беседу в его запросы не отправляем — граница, как при смене провайдера */
   if (g_aiProvider) g_acContextStart += n;
+  if (g_acNewAt) g_acNewAt += n; /* «Новую беседу» начали ещё до чтения файла */
+  else g_acNewAt = mark;
+  if (g_acUndoAt >= 0) g_acUndoAt += n, g_acUndoNewAt += n, g_acUndoCtx += n;
+  if (g_acContextStart < g_acNewAt) g_acContextStart = g_acNewAt;
   g_acRendered = 0;
 }
 
@@ -1961,6 +1997,63 @@ static BOOL ac_provider_change(int provider) {
   SetWindowTextW(g_acTitle, provider ? L"Мини-ИИ · Z.ai API" : L"Мини-ИИ · на этом компьютере");
   return TRUE;
 }
+
+/* «Новая беседа» — кнопка ⟳ мини-чата или «/новая»: ИИ начинает с чистого листа.
+   Ничего не стирается: прежние реплики остаются в ленте полного чата (над чертой)
+   и в ai_chat.txt, а пока новый вопрос не задан, их можно «Вернуть». Пока ИИ
+   работает или план ждёт решения — нельзя, причина в строке состояния. */
+static BOOL ac_new_topic(void) {
+  if (g_acId || g_agActive || g_acWebOn || g_acRouting || ac_pc_busy()) {
+    ac_status(L"Сначала дождитесь ответа или нажмите «Стоп»");
+    return FALSE;
+  }
+  if (g_acPlanOn) {
+    ac_status(L"Сначала «Применить» или «Отмена» для плана");
+    return FALSE;
+  }
+  if (g_acNewAt == g_acN) {
+    ac_status(L"Беседа и так новая");
+    return FALSE;
+  }
+  g_acUndoAt = g_acN;
+  g_acUndoNewAt = g_acNewAt;
+  g_acUndoCtx = g_acContextStart;
+  ag_stop(); af_clear(); ac_review_reset();
+  g_acMkWait = g_acTakeWait = 0; g_acCmdWait = FALSE; g_acCmdText[0] = 0;
+  g_acWebFoot[0] = 0;
+  g_acNewAt = g_acContextStart = g_acN;
+  ac_hist_save();
+  ac_redraw();
+  ac_status(L"Новая беседа: прежние реплики ИИ больше не учитывает");
+  return TRUE;
+}
+
+static BOOL ac_new_topic_undo_ready(void) { return g_acUndoAt >= 0 && g_acUndoAt == g_acN && g_acNewAt == g_acN; }
+
+static void ac_new_topic_undo(void) {
+  if (!ac_new_topic_undo_ready() || g_acId || g_agActive || g_acWebOn || g_acRouting || ac_pc_busy()) return;
+  g_acNewAt = g_acUndoNewAt;
+  g_acContextStart = g_acUndoCtx;
+  g_acUndoAt = -1;
+  ac_hist_save();
+  ac_redraw();
+  ac_status(L"Прежняя беседа возвращена — ИИ снова её помнит");
+}
+
+/* «/новая», «/сброс», «новая беседа», «начать заново» — целым сообщением */
+static BOOL ac_new_topic_cmd(const wchar_t *a) {
+  static const wchar_t *const kCmds[] = {L"/new", L"/reset", L"/clear", L"/новая", L"/сброс", L"/заново",
+                                         L"новая беседа", L"начать заново", L"начнём заново", L"начнем заново",
+                                         L"сброс контекста", L"сбрось контекст"};
+  wchar_t q[32];
+  if (wcslen(a) >= 32) return FALSE;
+  lstrcpynW(q, a, 32);
+  CharLowerBuffW(q, (DWORD)wcslen(q));
+  for (size_t n = wcslen(q); n && wcschr(L" .!", q[n - 1]); n--) q[n - 1] = 0;
+  for (size_t i = 0; i < sizeof(kCmds) / sizeof(kCmds[0]); i++)
+    if (!wcscmp(q, kCmds[i])) return TRUE;
+  return FALSE;
+}
 /* ---- маршрут обработки по чертежу (techno.c) --------------------------------------
    «маршрут», «техпроцесс», «как обрабатывать» — операции и заготовку решают правила
    технолога, а не модель: она их не выдумывает. С картинкой — лист читается целиком
@@ -2116,6 +2209,12 @@ static void ac_send(void) {
   size_t n = wcslen(a);
   while (n && (a[n - 1] == L' ' || a[n - 1] == L'\r' || a[n - 1] == L'\n' || a[n - 1] == L'\t')) a[--n] = 0;
   if (!n) {
+    free(in);
+    return;
+  }
+  if (ac_new_topic_cmd(a)) {
+    ac_new_topic();
+    if (g_acNewAt == g_acN) SetWindowTextW(g_acIn, L""); /* команда выполнена или беседа и так новая */
     free(in);
     return;
   }
@@ -2392,6 +2491,7 @@ static void ac_cmd_run(const wchar_t *j) {
 
 static void ac_relayout(void) {
   if (!g_acWnd) return;
+  ac_mini_refresh(); /* картинка к вопросу пришла или ушла — и в мини-чате */
   RECT rc;
   GetClientRect(g_acWnd, &rc);
   ac_layout(rc.right, rc.bottom);
@@ -2572,9 +2672,8 @@ static void ac_paste_img(void) {
   CloseClipboard();
 }
 
-/* «С экрана»: область мышью, как в «Распознать чертёж» */
-static void ac_shot_done(RECT r) {
-  ShowWindow(g_acWnd, SW_SHOWNORMAL);
+/* «С экрана»: область мышью, как в «Распознать чертёж»; снимок — и из мини-чата */
+static void ac_shot_grab(RECT r) {
   int w = r.right - r.left, h = r.bottom - r.top;
   if (w < 20 || h < 20) {
     ac_status(L"Выделено слишком мало — обведите картинку целиком");
@@ -2597,12 +2696,21 @@ static void ac_shot_done(RECT r) {
   DeleteObject(hb);
 }
 
+static void ac_shot_done(RECT r) {
+  ShowWindow(g_acWnd, SW_SHOWNORMAL);
+  ac_shot_grab(r);
+}
+
+/* модель без картинок — сказать, какую выбрать, и открыть вкладку «ИИ» */
+static BOOL ac_vision_check(void) {
+  if (ai_vision_ready()) return TRUE;
+  ac_status(g_aiProvider ? L"Для картинок выберите glm-4.6v-flash или другую модель Z.ai с изображениями." : L"Для картинок выберите «Средний» (Qwen3.5) или «С картинками» и нажмите «Скачать» на вкладке «ИИ».");
+  ac_open_settings();
+  return FALSE;
+}
+
 static void ac_shot(void) {
-  if (!ai_vision_ready()) {
-    ac_status(g_aiProvider ? L"Для картинок выберите glm-4.6v-flash или другую модель Z.ai с изображениями." : L"Для картинок выберите «Средний» (Qwen3.5) или «С картинками» и нажмите «Скачать» на вкладке «ИИ».");
-    ac_open_settings();
-    return;
-  }
+  if (!ac_vision_check()) return;
   ShowWindow(g_acWnd, SW_HIDE);
   Sleep(150);
   g_pickDone = ac_shot_done;
@@ -3101,6 +3209,7 @@ static void aichat_show_full(void) {
   ac_avatar_startup(); /* отозванного помощника чат обратно не зовёт */
   if (!g_acWnd) ac_create();
   if (!g_acWnd) return;
+  g_amOwnsInput = FALSE; /* поле ввода снова у полного чата — мини-чат его не забирает */
   BOOL wasVisible = IsWindowVisible(g_acWnd);
   ShowWindow(g_acWnd, IsIconic(g_acWnd) ? SW_RESTORE : SW_SHOW);
   if (!wasVisible) ac_avatar_set(AC_AV_WAVE);
