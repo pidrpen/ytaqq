@@ -1753,6 +1753,67 @@ static void nm_text(const NmBase *b, const NmResult *res, const wchar_t *dir, wc
   }
 }
 
+/* «норма подробно», «откуда», «разбор» в последней строке задания — нужен разбор с источниками */
+static int nm_want_full(const wchar_t *ask) {
+  if (!ask) return 0;
+  const wchar_t *last = wcsrchr(ask, L'\n');
+  wchar_t *f = tn_fold(last ? last + 1 : ask, 0);
+  if (!f) return 0;
+  int yes = wcsstr(f, L"подробн") || wcsstr(f, L"откуда") || wcsstr(f, L"разбор") ||
+            wcsstr(f, L"источник");
+  free(f);
+  return yes;
+}
+
+/* коротко к маршруту: строка на операцию; разбор каждой цифры и источники — nm_text */
+static void nm_text_brief(const NmBase *b, const NmResult *res, const wchar_t *dir, wchar_t *out, int cap) {
+  if (!b->n || !res->n) { /* таблиц нет или нормировать нечего — как в полном тексте, он короткий */
+    nm_text(b, res, dir, out, cap);
+    return;
+  }
+  tn_cat(out, cap, L"\n\nНормы времени (ОМН; проверяет технолог):");
+  int noTo = 0;
+  for (int i = 0; i < res->n; i++) {
+    const NmOp *o = &res->op[i];
+    wchar_t num[8];
+    int v = (o->idx + 1) * 5;
+    num[0] = L'0' + v / 100, num[1] = L'0' + v / 10 % 10, num[2] = L'0' + v % 10, num[3] = 0;
+    tn_cat(out, cap, L"\n");
+    tn_cat(out, cap, num);
+    tn_cat(out, cap, L" ");
+    tn_cat(out, cap, o->op);
+    tn_cat(out, cap, L": ");
+    if (nm_na(o->tsht)) {
+      tn_cat(out, cap, L"То ");
+      if (nm_na(o->to)) tn_cat(out, cap, L"—");
+      else nm_catmin(out, cap, o->to);
+      continue;
+    }
+    tn_cat(out, cap, L"Тпз ");
+    if (nm_na(o->tpz)) tn_cat(out, cap, L"—");
+    else nm_catmin(out, cap, o->tpz);
+    tn_cat(out, cap, L" · Тшт ");
+    if (o->full) {
+      nm_catmin(out, cap, o->tsht);
+      if (!nm_na(o->tshk)) tn_cat(out, cap, L" · Тшк "), nm_catmin(out, cap, o->tshk);
+    } else if (nm_na(o->to)) {
+      noTo = 1;
+      if (o->tsht > 0) tn_cat(out, cap, L"≥ "), nm_catmin(out, cap, o->tsht), tn_cat(out, cap, L" без машинного То");
+      else tn_cat(out, cap, L"— нет машинного То");
+    } else {
+      tn_cat(out, cap, L"≈ ");
+      nm_catmin(out, cap, o->tsht);
+      tn_cat(out, cap, L" (неполная)");
+    }
+  }
+  if (res->skip[0]) tn_cat(out, cap, L"\nПока не нормируются: "), tn_cat(out, cap, res->skip);
+  if (b->err[0]) tn_cat(out, cap, L"\nНе прочитаны таблицы: "), tn_cat(out, cap, b->err);
+  if (noTo)
+    tn_cat(out, cap, L"\nПолная Тшт — с машинным временем: «норма: То 2,5» или «норма: L 120, подача 0,2, "
+                     L"скорость 120, партия 50».");
+  tn_cat(out, cap, L"\nРазбор каждой цифры и источники — «норма подробно».");
+}
+
 /* ---- Windows: папка нормативов (только в сборке CursorPad, где подключён windows.h) ---- */
 #ifdef _WINDOWS_
 
@@ -1837,7 +1898,8 @@ static BOOL nm_base_load(NmBase *b, wchar_t *dir) {
   return TRUE;
 }
 
-/* текст норм к маршруту (дописать после tn_text) или NULL, если папки нормативов нет */
+/* текст норм к маршруту (дописать после tn_text) или NULL, если папки нормативов нет; коротко,
+   а с «подробно» в последней строке ask — разбор с источниками */
 static wchar_t *nm_route_text(const TnRoute *r, const wchar_t *mass, const wchar_t *ask) {
   NmBase b;
   wchar_t dir[MAX_PATH];
@@ -1847,7 +1909,8 @@ static wchar_t *nm_route_text(const TnRoute *r, const wchar_t *mass, const wchar
   if (res && out) {
     out[0] = 0;
     nm_route(&b, r, mass, ask, res);
-    nm_text(&b, res, dir, out, 24000);
+    if (nm_want_full(ask)) nm_text(&b, res, dir, out, 24000);
+    else nm_text_brief(&b, res, dir, out, 24000);
 #ifdef TABLES_SEED_ONCE
     tables_note_append(0, out, 24000);
 #endif

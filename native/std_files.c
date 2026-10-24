@@ -141,9 +141,62 @@ static wchar_t *gs_answer(const wchar_t *q, wchar_t **cite, wchar_t *why, int ca
   return out;
 }
 
-/* К маршруту по чертежу (techno.c): заготовка и марка — по справочнику, с
-   источником. «Круг 51» — нет в сортаменте, ближайшие 50 и 52. Пустой
-   справочник или ничего не нашлось — ничего не дописывается. */
+/* значение к маршруту: «σв 600 Н/мм²», «P ≤ 0,030» — из шапки «имя, единица» */
+static void gs_brief_cell(GsBuf *b, const wchar_t *head, const wchar_t *v) {
+  const wchar_t *comma = wcsstr(head, L", ");
+  wchar_t name[80];
+  lstrcpynW(name, head, comma && comma - head < 79 ? (int)(comma - head) + 1 : 80);
+  const wchar_t *unit = comma ? comma + 2 : L"";
+  gs_cat(b, name);
+  if (!wcscmp(unit, L"не более")) gs_cat(b, L" ≤ "), gs_cat(b, v);
+  else if (!wcscmp(unit, L"не менее")) gs_cat(b, L" ≥ "), gs_cat(b, v);
+  else {
+    gs_cat(b, L" ");
+    gs_cat(b, v);
+    if (unit[0]) gs_cat(b, L" "), gs_cat(b, unit);
+  }
+}
+
+/* строка таблицы к маршруту — одной строкой: ключ, масса 1 м, затем остальное, не больше 5 значений;
+   полный ответ с источником, сверкой и примечанием — в чате (gs_text) */
+static void gs_brief_row(const GsHit *h, GsBuf *b) {
+  const GsTable *t = h->t;
+  gs_cat(b, L"\n• ");
+  gs_cat(b, t->std);
+  wchar_t what[120] = {0};
+  if (t->massCol >= 0) lstrcpynW(what, L"сортамент", 120);
+  else { /* «4 — Механические свойства (М1) на…» → «механические свойства» */
+    const wchar_t *p = wcsstr(t->table, L"— ");
+    p = p ? p + 2 : t->table;
+    int k = 0;
+    while (p[k] && p[k] != L'(' && p[k] != L',' && p[k] != L';' && k < 119) k++;
+    while (k && p[k - 1] == L' ') k--;
+    lstrcpynW(what, p, k + 1);
+    CharLowerBuffW(what, 1);
+  }
+  if (what[0]) gs_cat(b, L", "), gs_cat(b, what);
+  gs_cat(b, h->close ? L" (ближайший): " : L": ");
+  int order[64], n = 0;
+  for (int i = 0; i < t->nKey && n < 64; i++) order[n++] = t->keyAll ? 0 : t->keyCol[i];
+  if (t->massCol >= 0 && n < 64) order[n++] = t->massCol;
+  for (int c = 0; c < t->ncol && n < 64; c++) {
+    int seen = 0;
+    for (int i = 0; i < n; i++) seen |= order[i] == c;
+    if (!seen) order[n++] = c;
+  }
+  for (int i = 0, k = 0; i < n && k < 5; i++) {
+    const wchar_t *v = gs_cell(t, h->row, order[i]);
+    if (!v[0] || !wcscmp(v, L"-") || wcslen(v) > 40) continue;
+    if (k++) gs_cat(b, L"; ");
+    gs_brief_cell(b, gs_cell(t, 0, order[i]), v);
+  }
+  if (!gs_is_checked(t)) gs_cat(b, L" (не сверено)");
+}
+
+/* К маршруту по чертежу (techno.c): заготовка и марка — по справочнику, коротко:
+   не больше двух таблиц (сортамент, механика; химсостав — в чате), строкой на
+   таблицу. «Круг 51» — нет в сортаменте, ближайший. Пустой справочник или ничего
+   не нашлось — ничего не дописывается. */
 static void gs_route_note(const TnRoute *r, wchar_t *out, int cap) {
   const TnSigns *s = &r->s;
   wchar_t q[600] = {0};
@@ -160,22 +213,20 @@ static void gs_route_note(const TnRoute *r, wchar_t *out, int cap) {
   gs_open(&db);
   GsHit *hit = (GsHit *)calloc(16, sizeof(GsHit));
   GsQuery *Q = (GsQuery *)calloc(1, sizeof(GsQuery));
-  int n = hit && Q && db.n ? gs_find(&db, q, hit, 16, Q) : 0, m = 0, tables = 0;
-  /* «Круг ГОСТ 2590 или поковка» — размера нет, сводка таблицы маршруту не нужна;
-     и не больше трёх таблиц (сортамент, состав, механика) — остальное спросят в чате */
-  for (int i = 0; i < n; i++) {
-    if (!hit[i].row && hit[i].tok < 0) continue;
-    if (!m || hit[m - 1].t != hit[i].t) {
-      if (tables == 3) break;
-      tables++;
-    }
-    hit[m++] = hit[i];
+  int n = hit && Q && db.n ? gs_find(&db, q, hit, 16, Q) : 0, m = 0;
+  /* по строке таблицы, не больше двух таблиц: сводка без размера («Круг ГОСТ 2590 или
+     поковка») и химсостав маршруту не нужны — их спросят в чате */
+  for (int i = 0; i < n && m < 2; i++) {
+    if (!hit[i].row || (m && hit[m - 1].t == hit[i].t)) continue;
+    wchar_t *f = tn_fold(hit[i].t->table, 0);
+    BOOL chem = f && wcsstr(f, L"химическ");
+    free(f);
+    if (!chem) hit[m++] = hit[i];
   }
   if (m) {
     GsBuf b = {0};
-    n = m;
-    gs_cat(&b, L"\n\nПо справочнику стандартов (числа — из таблиц на этом компьютере):\n");
-    gs_text(Q, hit, n, &b);
+    gs_cat(&b, L"\n\nСправочник стандартов (подробно — спросите в чате, например «сталь 45 ГОСТ 1050»):");
+    for (int i = 0; i < m; i++) gs_brief_row(&hit[i], &b);
     if (b.s) lstrcpynW(out + used, b.s, cap - used);
     free(b.s);
   }

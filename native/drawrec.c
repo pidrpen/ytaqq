@@ -69,6 +69,8 @@ typedef struct {
   wchar_t vlName[DR_CELL], vlMat[DR_CELL];
   wchar_t *vlText;    /* ТТ, «Развертка», «n отв.»; NULL — модель не читала */
   BOOL wantText;      /* прочитать и весь лист (кнопка «Маршрут обработки») */
+  BOOL vlLater;       /* модель — вторым проходом (dr_vl_later): черновик по Tesseract сразу */
+  void *vlKeep;       /* лист и штамп для второго прохода (DrVlKeep); NULL — нет */
   double secs;
 } DrPage;
 
@@ -1585,7 +1587,19 @@ static BOOL dr_has(const wchar_t *low, const wchar_t *w) { return wcsstr(low, w)
 
 /* ---- одна страница ----------------------------------------------------------------- */
 
+/* лист и штамп, отложенные для второго прохода модели (DrPage.vlLater) */
+typedef struct {
+  DrImg m;
+  DrStamp s;
+  BOOL hasStamp;
+} DrVlKeep;
+
 static void dr_page_free(DrPage *pg) {
+  if (pg->vlKeep) {
+    dr_img_free(&((DrVlKeep *)pg->vlKeep)->m);
+    free(pg->vlKeep);
+    pg->vlKeep = NULL;
+  }
   free(pg->rows);
   pg->rows = NULL;
   pg->nrows = 0;
@@ -1966,7 +1980,18 @@ static void dr_recognize(IWICImagingFactory *f, DrPage *pg) {
       free(pg->text);
       pg->text = NULL;
     }
-    if (dr_vl_want()) dr_vl_read(&m, stamp && s.form == 1 ? &s : NULL, pg);
+    if (dr_vl_want() && pg->vlLater) { /* черновик — сейчас, модель — dr_vl_later: лист забираем себе */
+      DrVlKeep *k = (DrVlKeep *)calloc(1, sizeof(DrVlKeep));
+      if (k) {
+        k->m = m;
+        m.px = NULL;
+        k->hasStamp = stamp && s.form == 1;
+        if (k->hasStamp) k->s = s;
+        pg->vlKeep = k;
+      } else
+        dr_vl_read(&m, stamp && s.form == 1 ? &s : NULL, pg);
+    } else if (dr_vl_want())
+      dr_vl_read(&m, stamp && s.form == 1 ? &s : NULL, pg);
   }
   if (!pg->f[DF_DES][0] && pg->type != DRT_OTHER) pg->doubt[DF_DES] = 1;
   /* формат листа: по масштабу штампа, без него — по dpi файла */
@@ -1979,6 +2004,19 @@ static void dr_recognize(IWICImagingFactory *f, DrPage *pg) {
   dr_img_free(&m);
   pg->secs = (GetTickCount64() - t0) / 1000.0;
   pg->done = TRUE;
+}
+
+/* второй проход: отложенный лист читает модель (ТТ, штамп, элементы); FALSE — откладывать было нечего */
+static BOOL dr_vl_later(DrPage *pg) {
+  DrVlKeep *k = (DrVlKeep *)pg->vlKeep;
+  if (!k) return FALSE;
+  ULONGLONG t0 = GetTickCount64();
+  dr_vl_read(&k->m, k->hasStamp ? &k->s : NULL, pg);
+  dr_img_free(&k->m);
+  free(k);
+  pg->vlKeep = NULL;
+  pg->secs += (GetTickCount64() - t0) / 1000.0;
+  return TRUE;
 }
 
 /* ---- страницы файлов --------------------------------------------------------------- */

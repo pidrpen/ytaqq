@@ -17,7 +17,7 @@ static const GUID kAcBgra = {0x6fddc324, 0x4e03, 0x4bfe, {0xb1, 0x85, 0x3d, 0x77
 #define WM_AC_SEND (WM_APP + 73) /* из поля ввода: отправить */
 #define WM_AG_TOOL (WM_APP + 74) /* результат файлового инструмента из рабочего потока */
 #define WM_AC_WEB (WM_APP + 75)  /* lParam — AcWebDone*, страницы для Qwen */
-#define WM_AC_TP (WM_APP + 77)   /* lParam — wchar_t*: маршрут по чертежу (techno.c), free */
+#define WM_AC_TP (WM_APP + 77)   /* lParam — AcTpDone*: маршрут по чертежу; wParam 1 — черновик */
 #define WM_AC_PC (WM_APP + 78)   /* сверка с Союзом (ai_plm_check.c): wParam 1 — строка состояния, 0 — итог */
 #define ID_AC_LOG 4701
 #define ID_AC_IN 4702
@@ -2073,13 +2073,26 @@ typedef struct {
   BYTE *png;
   DWORD len;
   wchar_t *ask; /* вопрос: в нём могут быть L, партия, станок — для норм (norms.c) */
+  LONG seq;     /* какой это вопрос: черновик и ответ на него — одна реплика чата */
 } AcTpJob;
 
-/* картинка (PNG/JPG в памяти) → весь лист → маршрут и нормы; текст — free();
-   *last — маршрут для «норма: …» в чате (окну отдаётся с WM_AC_TP) */
-static wchar_t *ac_tp_build(const BYTE *png, DWORD len, const wchar_t *ask, NmLast **last) {
-  IWICImagingFactory *f = NULL;
-  CoCreateInstance(&kTmClsidFactory, NULL, CLSCTX_INPROC_SERVER, &kTmIidFactory, (void **)&f);
+/* окну с WM_AC_TP: wParam 1 — черновик по Tesseract, 0 — ответ (с моделью, если она есть) */
+typedef struct {
+  wchar_t *text;
+  NmLast *last; /* маршрут для «норма: …» следом; у черновика — NULL */
+  LONG seq;
+} AcTpDone;
+
+/* поток окон: номер последнего вопроса о маршруте, на какой уже пришёл ответ, где черновик */
+static LONG g_acTpSeq, g_acTpDoneSeq, g_acTpDraftSeq;
+static int g_acTpDraftTurn = -1;
+/* лист, прочитанный без модели (ИИ выключен): после «включи ИИ» перечитать его моделью */
+static BYTE *g_acTpRetry;
+static DWORD g_acTpRetryLen;
+static wchar_t *g_acTpRetryAsk;
+
+/* картинка (PNG/JPG в памяти) → прочитанный лист; модель — сразу или, при pg->vlLater, потом */
+static BOOL ac_tp_read(const BYTE *png, DWORD len, IWICImagingFactory *f, DrPage *pg) {
   wchar_t tmp[MAX_PATH], path[MAX_PATH];
   GetTempPathW(MAX_PATH, tmp);
   _snwprintf(path, MAX_PATH, L"%scursorpad-route-%lu-%lu.png", tmp, GetCurrentThreadId(), GetTickCount());
@@ -2088,65 +2101,218 @@ static wchar_t *ac_tp_build(const BYTE *png, DWORD len, const wchar_t *ask, NmLa
   DWORD wr = 0;
   BOOL ok = h != INVALID_HANDLE_VALUE && WriteFile(h, png, len, &wr, NULL) && wr == len;
   if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
-  DrPage *pg = (DrPage *)calloc(1, sizeof(DrPage));
-  TnRoute *r = (TnRoute *)malloc(sizeof(TnRoute));
-  wchar_t *out = (wchar_t *)malloc(sizeof(wchar_t) * 9000);
-  if (out) out[0] = 0;
-  if (ok && f && pg && r && out) {
+  if (ok) {
     lstrcpynW(pg->path, path, MAX_PATH);
     pg->wantText = TRUE;
     dr_recognize(f, pg);
-    dr_tn_route(pg, r);
-    int n = 0;
-    if (!pg->text)
-      n = _snwprintf(out, 9000, L"Текст листа не прочитан (%s) — маршрут только по штампу.\n\n",
-                     pg->note[0] ? pg->note : L"нет Tesseract — «Проверить обновления» докачает его");
-    if (n < 0) n = 0;
-    out[n] = 0;
-    if (pg->text) lstrcpynW(out + n, dr_tn_how(pg), 9000 - n), n += (int)wcslen(out + n);
-    tn_text(r, out + n, 9000 - n);
-    gs_route_note(r, out, 9000);
-    out = nm_append(out, r, pg->f[DF_MASS], ask);
-    if (last) *last = nm_last_new(r, pg->f[DF_MASS], ask);
-  } else if (out) {
-    lstrcpynW(out, L"Не вышло прочитать картинку для маршрута.", 9000);
   }
   DeleteFileW(path);
+  return ok;
+}
+
+/* текст ответа по прочитанному листу: чем читали, маршрут, справочник, нормы; free().
+   *last — маршрут для «норма: …» в чате */
+static wchar_t *ac_tp_text(DrPage *pg, TnRoute *r, const wchar_t *ask, NmLast **last) {
+  wchar_t *out = (wchar_t *)malloc(sizeof(wchar_t) * 9000);
+  if (!out) return NULL;
+  dr_tn_route(pg, r);
+  int n = 0;
+  if (!pg->text)
+    n = _snwprintf(out, 9000, L"Текст листа не прочитан (%s) — маршрут только по штампу.\n\n",
+                   pg->note[0] ? pg->note : L"нет Tesseract — «Проверить обновления» докачает его");
+  if (n < 0) n = 0;
+  out[n] = 0;
+  if (pg->text) lstrcpynW(out + n, dr_tn_how(pg), 9000 - n), n += (int)wcslen(out + n);
+  tn_text(r, out + n, 9000 - n);
+  gs_route_note(r, out, 9000); /* дописывает на месте — до норм: те перевыделяют буфер */
+  out = nm_append(out, r, pg->f[DF_MASS], ask);
+  if (last) *last = nm_last_new(r, pg->f[DF_MASS], ask);
+  return out;
+}
+
+static void ac_tp_post(wchar_t *text, NmLast *last, LONG seq, BOOL draft) {
+  AcTpDone *d = text ? (AcTpDone *)calloc(1, sizeof(AcTpDone)) : NULL;
+  if (d) {
+    d->text = text;
+    d->last = last;
+    d->seq = seq;
+    if (g_acWnd && PostMessageW(g_acWnd, WM_AC_TP, draft, (LPARAM)d)) return;
+  }
+  free(d);
+  free(text);
+  free(last);
+}
+
+/* Черновик — сразу: лист читает Tesseract, маршрут по правилам — секунды. Если есть локальная
+   модель с картинками, она дочитывает тот же лист вторым проходом (dr_vl_later), и ответ
+   приходит на место черновика — ждать модель, чтобы увидеть маршрут, не нужно. */
+static DWORD WINAPI ac_tp_thread(LPVOID arg) {
+  AcTpJob *j = (AcTpJob *)arg;
+  CoInitializeEx(NULL, COINIT_MULTITHREADED);
+  IWICImagingFactory *f = NULL;
+  CoCreateInstance(&kTmClsidFactory, NULL, CLSCTX_INPROC_SERVER, &kTmIidFactory, (void **)&f);
+  DrPage *pg = (DrPage *)calloc(1, sizeof(DrPage));
+  TnRoute *r = (TnRoute *)malloc(sizeof(TnRoute));
+  if (f && pg && r && (pg->vlLater = dr_vl_ok(), ac_tp_read(j->png, j->len, f, pg))) {
+    if (pg->vlKeep) {
+      ac_tp_post(ac_tp_text(pg, r, j->ask, NULL), NULL, j->seq, TRUE);
+      dr_vl_later(pg);
+    }
+    NmLast *last = NULL;
+    wchar_t *out = ac_tp_text(pg, r, j->ask, &last);
+    ac_tp_post(out, last, j->seq, FALSE);
+  } else
+    ac_tp_post(_wcsdup(L"Не вышло прочитать картинку для маршрута."), NULL, j->seq, FALSE);
   if (pg) dr_page_free(pg);
   free(pg);
   free(r);
   if (f) IWICImagingFactory_Release(f);
-  return out;
-}
-
-static DWORD WINAPI ac_tp_thread(LPVOID arg) {
-  AcTpJob *j = (AcTpJob *)arg;
-  CoInitializeEx(NULL, COINIT_MULTITHREADED);
-  NmLast *last = NULL;
-  wchar_t *out = ac_tp_build(j->png, j->len, j->ask, &last);
   free(j->png);
   free(j->ask);
   free(j);
   CoUninitialize();
-  if (out && g_acWnd && PostMessageW(g_acWnd, WM_AC_TP, (WPARAM)last, (LPARAM)out)) return 0;
-  free(out);
-  free(last);
   return 0;
 }
 
+/* ответ на маршрут пришёл окну: черновик — новой репликой, ответ — на место своего черновика */
+static void ac_tp_done(BOOL draft, AcTpDone *d) {
+  if (draft) {
+    if (d->seq == g_acTpSeq && d->seq != g_acTpDoneSeq) {
+      ac_push(1, d->text);
+      g_acTpDraftTurn = g_acN - 1;
+      g_acTpDraftSeq = d->seq;
+      ac_redraw();
+      ac_status(L"Черновик по Tesseract — локальная модель дочитывает лист, ответ обновится сам…");
+    }
+  } else {
+    if (d->last) nm_last_keep(d->last); /* маршрут — для «норма: L 120» следом */
+    d->last = NULL;
+    g_acTpDoneSeq = d->seq;
+    int i = g_acTpDraftTurn;
+    if (i >= 0 && i == g_acN - 1 && g_acTpDraftSeq == d->seq && g_acTurns[i].assistant) {
+      free(g_acTurns[i].text);
+      g_acTurns[i].text = d->text;
+      d->text = NULL;
+      ac_hist_save();
+    } else
+      ac_push(1, d->text);
+    g_acTpDraftTurn = -1;
+    ac_redraw();
+    ac_status(L"Маршрут — по правилам технолога; что не прочиталось — в «Уточнить»");
+  }
+  free(d->text);
+  free(d->last);
+  free(d);
+}
+
 #ifdef SET_TEST
-/* проверочная сборка: --tpchat картинка итог.txt — как маршрут в чате */
+/* проверочная сборка: --tpchat картинка итог.txt — как маршрут в чате: черновик по Tesseract,
+   второй проход модели (CP_DRVL) и ответ, со временем каждого */
 static void ac_tp_test(const wchar_t *img, const wchar_t *outPath) {
   CoInitializeEx(NULL, COINIT_MULTITHREADED);
+  g_aiUiThread = 0; /* здесь и окно, и чтение — в одном потоке; в программе модель зовёт рабочий поток */
   char *data = NULL;
   DWORD n = 0;
-  wchar_t *out = read_file_bytes(img, &data, &n, 64 * 1024 * 1024) ? ac_tp_build((const BYTE *)data, n, NULL, NULL) : NULL;
+  IWICImagingFactory *f = NULL;
+  CoCreateInstance(&kTmClsidFactory, NULL, CLSCTX_INPROC_SERVER, &kTmIidFactory, (void **)&f);
+  DrPage *pg = (DrPage *)calloc(1, sizeof(DrPage));
+  TnRoute *r = (TnRoute *)malloc(sizeof(TnRoute));
+  wchar_t *out = (wchar_t *)calloc(40000, sizeof(wchar_t));
+  ULONGLONG t0 = GetTickCount64();
+  if (out && f && pg && r && read_file_bytes(img, &data, &n, 64 * 1024 * 1024)) {
+    pg->vlLater = dr_vl_ok();
+    if (ac_tp_read((const BYTE *)data, n, f, pg)) {
+      if (pg->vlKeep) {
+        wchar_t *d = ac_tp_text(pg, r, NULL, NULL);
+        _snwprintf(out, 40000, L"==== черновик за %.1f с\n%s\n\n", (GetTickCount64() - t0) / 1000.0, d ? d : L"");
+        free(d);
+        dr_vl_later(pg);
+      }
+      wchar_t *a = ac_tp_text(pg, r, NULL, NULL);
+      size_t k = wcslen(out);
+      _snwprintf(out + k, 40000 - k, L"==== ответ за %.1f с\n%s\n", (GetTickCount64() - t0) / 1000.0, a ? a : L"");
+      out[39999] = 0;
+      free(a);
+    }
+  }
   free(data);
-  if (out) share_write_ex(outPath, out, TRUE);
+  if (out && out[0]) share_write_ex(outPath, out, TRUE);
   free(out);
+  if (pg) dr_page_free(pg);
+  free(pg);
+  free(r);
+  if (f) IWICImagingFactory_Release(f);
   ExitProcess(0);
 }
 #endif
+
+/* прочитать лист в фоне; черновик и ответ придут окну с WM_AC_TP */
+static BOOL ac_tp_run(const BYTE *png, DWORD len, const wchar_t *ask) {
+  AcTpJob *j = (AcTpJob *)calloc(1, sizeof(AcTpJob));
+  BYTE *copy = (BYTE *)malloc(len);
+  wchar_t *q = _wcsdup(ask ? ask : L"");
+  if (!j || !copy || !q) {
+    free(j);
+    free(copy);
+    free(q);
+    return FALSE;
+  }
+  memcpy(copy, png, len);
+  j->png = copy;
+  j->len = len;
+  j->ask = q;
+  j->seq = ++g_acTpSeq;
+  /* без модели — запомнить лист (копией: png может быть самим g_acTpRetry) */
+  BYTE *keep = NULL;
+  wchar_t *keepAsk = NULL;
+  if (!dr_vl_ok() && (keep = (BYTE *)malloc(len)) != NULL) memcpy(keep, png, len), keepAsk = _wcsdup(q);
+  free(g_acTpRetry);
+  free(g_acTpRetryAsk);
+  g_acTpRetry = keep;
+  g_acTpRetryLen = keep ? len : 0;
+  g_acTpRetryAsk = keepAsk;
+  HANDLE th = CreateThread(NULL, 0, ac_tp_thread, j, 0, NULL);
+  if (!th) {
+    free(j->png);
+    free(j->ask);
+    free(j);
+    return FALSE;
+  }
+  CloseHandle(th);
+  return TRUE;
+}
+
+/* «включи ИИ» — коротко и в начале: «включи ии», «вкл ИИ» */
+static BOOL ac_ai_on_wanted(const wchar_t *a) {
+  wchar_t *f = tn_fold(a, 0);
+  if (!f) return FALSE;
+  const wchar_t *p = f;
+  while (*p == L' ') p++;
+  BOOL yes = (!wcsncmp(p, L"включи", 6) || !wcsncmp(p, L"вкл", 3)) && (wcsstr(p, L" ии") || wcsstr(p, L" ai")) &&
+             wcslen(p) < 30;
+  free(f);
+  return yes;
+}
+
+/* включить локальный ИИ и перечитать моделью лист, прочитанный без неё */
+static void ac_ai_on(const wchar_t *a) {
+  ac_push(0, a);
+  const wchar_t *msg = L"ИИ включён.";
+  if (g_aiProvider)
+    msg = L"Сейчас выбран Z.ai — чертежи ему не отправляются. Локальная модель: Настройки → ИИ → «Локальная модель».";
+  else {
+    if (!g_aiOn) {
+      InterlockedExchange(&g_aiOn, TRUE);
+      ai_save();
+      ai_ui_refresh();
+    }
+    if (!ai_ready()) msg = L"ИИ включён, но модель не скачана: Настройки → ИИ → «Скачать».";
+    else if (g_acTpRetry && dr_vl_ok() && ac_tp_run(g_acTpRetry, g_acTpRetryLen, g_acTpRetryAsk))
+      msg = L"ИИ включён. Перечитываю последний лист моделью — черновик и ответ придут сюда.";
+  }
+  ac_push(1, msg);
+  ac_redraw();
+}
 
 static BOOL ac_tp_start(const wchar_t *a) {
   const BYTE *src = g_acImgFull ? g_acImgFull : g_acImg;
@@ -2173,18 +2339,8 @@ static BOOL ac_tp_start(const wchar_t *a) {
     free(txt);
     return any;
   }
-  AcTpJob *j = (AcTpJob *)calloc(1, sizeof(AcTpJob));
-  BYTE *copy = (BYTE *)malloc(len);
-  if (!j || !copy) {
-    free(j);
-    free(copy);
-    return FALSE;
-  }
-  memcpy(copy, src, len);
-  j->png = copy;
-  j->len = len;
-  j->ask = _wcsdup(a);
   ac_push(0, a);
+  BOOL started = ac_tp_run(src, len, a); /* копирует картинку — до того, как её отдадим реплике */
   if (g_acImg && g_acN) { /* миниатюра вопроса — как обычно: модель увидит её в следующих вопросах */
     g_acTurns[g_acN - 1].png = g_acImg;
     g_acTurns[g_acN - 1].pngLen = g_acImgLen;
@@ -2195,18 +2351,11 @@ static BOOL ac_tp_start(const wchar_t *a) {
   g_acImgFull = NULL;
   g_acImgFullLen = 0;
   ac_relayout();
-  HANDLE th = CreateThread(NULL, 0, ac_tp_thread, j, 0, NULL);
-  if (!th) {
-    free(j->png);
-    free(j->ask);
-    free(j);
-    ac_push(1, L"Не вышло запустить чтение чертежа.");
-    ac_redraw();
-    return TRUE;
-  }
-  CloseHandle(th);
+  if (!started) ac_push(1, L"Не вышло запустить чтение чертежа.");
   ac_redraw();
-  ac_status(L"Читаю чертёж целиком и строю маршрут по правилам технолога…");
+  if (started)
+    ac_status(dr_vl_ok() ? L"Черновик — за секунды; локальная модель дочитает лист и обновит ответ…"
+                         : L"Читаю чертёж целиком и строю маршрут по правилам технолога…");
   return TRUE;
 }
 
@@ -2276,6 +2425,12 @@ static void ac_send(void) {
       free(in);
       return;
     }
+  }
+  if (ac_ai_on_wanted(a)) { /* «включи ИИ» — и перечитать моделью лист, прочитанный без неё */
+    ac_ai_on(a);
+    SetWindowTextW(g_acIn, L"");
+    free(in);
+    return;
   }
   if ((ac_tp_wanted(a) || nm_ask_wanted(a)) && ac_tp_start(a)) {
     SetWindowTextW(g_acIn, L"");
@@ -3108,17 +3263,9 @@ static LRESULT CALLBACK AcProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
   case WM_AC_WEB:
     ac_web_ready((AcWebDone *)lParam);
     return 0;
-  case WM_AC_TP: {
-    wchar_t *txt = (wchar_t *)lParam;
-    nm_last_keep((NmLast *)wParam); /* маршрут — для «норма: L 120» следом */
-    if (txt) {
-      ac_push(1, txt);
-      free(txt);
-      ac_redraw();
-      ac_status(L"Маршрут — по правилам технолога; что не прочиталось — в «Уточнить»");
-    }
+  case WM_AC_TP:
+    if (lParam) ac_tp_done(wParam != 0, (AcTpDone *)lParam);
     return 0;
-  }
   case WM_AG_TOOL:
     ag_tool_ready((void *)lParam);
     return 0;

@@ -107,8 +107,11 @@ int wmain(int argc, wchar_t **argv) {
   t = nm_follow_text(L"норма: партия 30");
   ok("досчёт с партией — Тшк", t && wcsstr(t, L"Тшк "));
   free(t);
-  t = nm_follow_text(L"норма: L 200");
+  t = nm_follow_text(L"норма подробно: L 200");
   ok("новое L важнее прежнего", t && wcsstr(t, L"L 200 мм (задано)"));
+  free(t);
+  t = nm_follow_text(L"норма: L 200");
+  ok("досчёт коротко — без разбора", t && wcsstr(t, L"Тшт ") && !wcsstr(t, L"(задано)"));
   free(t);
 
   SetEnvironmentVariableW(L"CP_NORMS", L"Z:\\нет такой папки");
