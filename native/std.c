@@ -18,6 +18,7 @@
      #ключ	d                    — по какому столбцу ищут («все» — по любому); без строки — первый
      #масса	Масса 1 м, кг        — столбец погонной массы: масса заготовки по длине
      #проверено	да, 2026-10-25     — сверено человеком с источником; иначе — с оговоркой
+     #сверка	адрес второго источника — совпало 15 из 15 строк   (сверка кодом по второму источнику)
      #примечание	…
      d	P	S	e	k
      M12	1,75	18	19,9	7,5
@@ -69,6 +70,7 @@ typedef struct {
   wchar_t src[400];    /* где набрано */
   wchar_t kind[240];   /* виды через «;»: ищутся по первому слову */
   wchar_t checked[160];
+  wchar_t cross[400];  /* «#сверка»: чем и как сверено со вторым источником */
   wchar_t note[800];
   wchar_t keyName[160], massName[80];
   int keyCol[GS_KEYS], nKey, keyAll;
@@ -511,7 +513,8 @@ static void gs_parse(GsDb *db, wchar_t *text, const wchar_t *file) {
       struct { const wchar_t *k; wchar_t *v; int cap; } kf[] = {
           {L"стандарт", cur.std, 80},       {L"название", cur.title, 240},  {L"таблица", cur.table, 240},
           {L"источник", cur.src, 400},      {L"вид", cur.kind, 240},        {L"ключ", cur.keyName, 160},
-          {L"масса", cur.massName, 80},     {L"проверено", cur.checked, 160}, {L"примечание", cur.note, 800}};
+          {L"масса", cur.massName, 80},     {L"проверено", cur.checked, 160}, {L"примечание", cur.note, 800},
+          {L"сверка", cur.cross, 400}};
       int known = 0;
       for (size_t i = 0; i < sizeof(kf) / sizeof(kf[0]); i++) {
         wchar_t fk[32];
@@ -879,6 +882,7 @@ static void gs_text(const GsQuery *Q, const GsHit *hit, int n, GsBuf *b) {
       gs_cat(b, t->src[0] ? t->src : L"не указан");
       if (gs_is_checked(t)) gs_cat(b, L". Сверено человеком: "), gs_cat(b, t->checked);
       else gs_cat(b, L". НЕ СВЕРЕНО человеком с источником — числа давать с оговоркой");
+      if (t->cross[0]) gs_cat(b, L"\nСверка по второму источнику: "), gs_cat(b, t->cross);
       gs_ch(b, L'\n');
       int nearTok = -1;
       for (int j = i; j < n && hit[j].t == t; j++)

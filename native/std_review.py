@@ -119,7 +119,7 @@ def page(folder):
         files += [os.path.join(root, n) for n in names if n.lower().endswith('.tsv')]
     files.sort()
     e = html.escape
-    parts, total, unchecked, flagged = [], 0, 0, 0
+    parts, total, unchecked, flagged, crossed = [], 0, 0, 0, 0
     for f in files:
         rel = os.path.relpath(f, folder)
         for t in tables(f):
@@ -127,10 +127,12 @@ def page(folder):
             m = t['meta']
             ok = m.get('проверено', '').lower().startswith('да')
             unchecked += not ok
+            crossed += bool(m.get('сверка'))
             bad = checks(t)
             warn = [n for n in t['notes'] if 'ПРОВЕРИТЬ' in n or 'исправлен' in n.lower()]
             flagged += bool(bad or warn)
             src = m.get('источник', 'не указан')
+            link = lambda s: re.sub(r'(https?://[^\s,;)]+)', lambda x: f'<a href="{e(x.group(1))}">{e(x.group(1))}</a>', e(s))
             src_html = re.sub(r'(https?://[^\s,;)]+)', lambda x: f'<a href="{e(x.group(1))}">{e(x.group(1))}</a>', e(src))
             badrows = {i for i, _ in bad}
             rows = ''.join(
@@ -141,7 +143,7 @@ def page(folder):
             parts.append(f'''<section class="{'ok' if ok else 'todo'}">
 <h2>{e(m.get('стандарт', '?'))} — табл. {e(m.get('таблица', ''))}</h2>
 <p class="meta">{e(m.get('название', ''))}<br>Файл: <code>{e(rel)}</code> · строк: {len(t['rows'])} ·
-{'<b class="yes">сверено: ' + e(m.get('проверено', '')) + '</b>' if ok else '<b class="no">не сверено</b>'}<br>Источник: {src_html}</p>
+{'<b class="yes">сверено: ' + e(m.get('проверено', '')) + '</b>' if ok else '<b class="no">не сверено</b>'}<br>Источник: {src_html}<br>Второй источник: {link(m['сверка']) if m.get('сверка') else '<b class="no">нет — сверить вручную</b>'}</p>
 {'<ul class="warn">' + items + '</ul>' if items else '<p class="clean">Автоматические проверки замечаний не нашли.</p>'}
 {'<p class="note">' + e(m['примечание']) + '</p>' if m.get('примечание') else ''}
 <div class="scroll"><table><tr>{''.join(f'<th>{e(h)}</th>' for h in t['head'])}</tr>{rows}</table></div>
@@ -161,7 +163,7 @@ td,th{{border:1px solid var(--line);padding:3px 6px;white-space:nowrap;text-alig
 tr.bad td{{background:var(--bad)}} code{{font-size:13px}}
 </style></head><body>
 <h1>Сверка справочника стандартов</h1>
-<p>Таблиц: <b>{total}</b>, не сверено: <b>{unchecked}</b>, с замечаниями: <b>{flagged}</b>. Папка: <code>{e(folder)}</code></p>
+<p>Таблиц: <b>{total}</b>, не сверено человеком: <b>{unchecked}</b>, сверено кодом по второму источнику: <b>{crossed}</b>, с замечаниями: <b>{flagged}</b>. Папка: <code>{e(folder)}</code></p>
 <p>Как сверять: откройте источник таблицы, сравните строки (подсвеченные — в первую очередь). Сошлось — в файле таблицы
 замените строку <code>#проверено	нет</code> на <code>#проверено	да, дата, кто сверил</code> (Блокнот или Excel; сохранять как текст
 с разделителями табуляции). Ответы CursorPad по несверенным таблицам идут с пометкой «НЕ СВЕРЕНО».</p>
