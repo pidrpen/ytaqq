@@ -24,6 +24,14 @@ CAT = [('Заготовительная', 'ЗАГ'), ('Токарная', 'ТО�
        ('Гибочная', 'ГИБ'), ('Сварочная', 'СВАР'), ('Электроэрозионная', 'ЭЭ'), ('Окрасочная', 'ОКР'),
        ('Гальваническая', 'ГАЛЬВ'), ('Анодирование', 'ГАЛЬВ'), ('Маркировочная', 'МАРК'), ('Долбёжная', 'ДОЛБ'),
        ('Доводочная', 'ДОВ'), ('Отрезная', 'ОТР'), ('Штамповочная', 'ШТАМП'), ('Механическая', 'МЕХ')]
+# конструктивные элементы — как в drawrec.c (kDrVlSheetSchemaEl, dr_json_elements): тип → код строки «§EL»
+# для правил techno.c; отверстия идут строкой «n отв. размер», резьбы — самим размером
+ELEMENT_TYPES = ['шпоночный паз', 'шпоночный паз в отверстии', 'паз', 'лыска', 'грани под ключ', 'шлицы',
+                 'шлицы в отверстии', 'зубья', 'резьба наружная', 'резьба внутренняя', 'резьбовое отверстие',
+                 'отверстие', 'канавка', 'рифление', 'выдавка', 'сварной шов']
+EL_CODES = {'шпоночный паз в отверстии': 'keyin', 'шпоночный паз': 'key', 'паз': 'slot', 'лыска': 'flat',
+            'грани под ключ': 'hex', 'шлицы в отверстии': 'splinein', 'шлицы': 'spline', 'зубья': 'gear',
+            'рифление': 'knurl', 'выдавка': 'emboss', 'сварной шов': 'weld'}
 
 
 def load_presets():
@@ -63,14 +71,22 @@ def load_labels(path):
     return {k: v for k, v in json.loads(pathlib.Path(path).read_text('utf-8')).items() if k != '_'}
 
 
-def target(label, tag):
+def has_elements(prompts):
+    """вопрос по листу спрашивает и конструктивные элементы (адаптер второго поколения)"""
+    s = (prompts.get('sheet') or {}).get('schema') or {}
+    return 'elements' in s.get('properties', {})
+
+
+def target(label, tag, elements=False):
     """что модель должна ответить на вопрос tag по разметке листа"""
     if tag == 'name':
         return label['name']
     if tag == 'mat':
         return label['material']
-    return json.dumps({'tt': label['tt'], 'razvertka': label['razvertka'], 'holes': label['holes']},
-                      ensure_ascii=False)
+    ans = {'tt': label['tt'], 'razvertka': label['razvertka'], 'holes': label['holes']}
+    if elements:
+        ans['elements'] = label.get('elements', [])
+    return json.dumps(ans, ensure_ascii=False)
 
 
 # ---- как CursorPad разбирает ответы --------------------------------------------------
@@ -121,7 +137,27 @@ def sheet_text(ans):
     t = _json_strings(ans, 'tt', '')
     if '"razvertka":true' in ans or '"razvertka": true' in ans:
         t += '\nРазвертка'
-    return _json_strings(ans, 'holes', t)
+    t = _json_strings(ans, 'holes', t)
+    for e in elements_of(ans):  # dr_json_elements
+        line = ''
+        if e['type'] in EL_CODES:
+            line = '§EL ' + EL_CODES[e['type']]
+        elif e['type'] in ('отверстие', 'резьбовое отверстие'):
+            line = f"{max(1, int(e.get('count') or 1))} отв. {e.get('size', '')}"
+        elif e['type'].startswith('резьба') and e.get('size'):
+            line = e['size']
+        if line:
+            t += '\n' + line
+    return t
+
+
+def elements_of(ans):
+    """список элементов из JSON-ответа по листу; ответ без элементов или битый — пусто"""
+    try:
+        j = json.loads(ans) if isinstance(ans, str) else ans
+        return [e for e in (j.get('elements') or []) if isinstance(e, dict) and e.get('type')]
+    except (ValueError, AttributeError):
+        return []
 
 
 def route_input(tess, vl_name, vl_mat, vl_text):

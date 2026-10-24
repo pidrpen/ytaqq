@@ -68,6 +68,7 @@ typedef struct {
   wchar_t thrHole[TN_TXT]; /* резьбы из «n отв. M10» — в отверстиях: метчиком на сверлильной */
   double holeMin;         /* наименьший Ø у «n отв. Øx»; 0 — не прочитан */
   int edges, mark, weld, bend, key, gear, knurl, flat, hex;
+  int keyIn, slotEl, splineOut, splineIn, emboss; /* элементы, увиденные моделью: строки «§EL код» */
   int edm;                /* «электроэрозионным способом» */
   int cutApart;           /* «разрезать на две части» */
   int gauge;              /* калибр/шаблон: ПР и НЕ */
@@ -838,6 +839,22 @@ static void tn_signs(const wchar_t *name, const wchar_t *mat, const wchar_t *tex
              tn_has(f, L"шаблон");
   s->flat = tn_has(f, L"лыск");
   s->hex = tn_has(f, L"под ключ") || tn_has(f, L"шестигр");
+  /* конструктивные элементы с видов и сечений, которые назвала модель с картинками (drawrec.c,
+     dr_vl_read): строки «§EL код». Отверстия и резьбы приходят обычным текстом — «2 отв. M10» */
+  for (const wchar_t *p = t; (p = wcsstr(p, L"§EL ")) != NULL; p += 4) {
+    const wchar_t *c = p + 4;
+    if (!wcsncmp(c, L"keyin", 5)) s->keyIn = 1;
+    else if (!wcsncmp(c, L"key", 3)) s->key = 1;
+    else if (!wcsncmp(c, L"slot", 4)) s->slotEl = 1;
+    else if (!wcsncmp(c, L"flat", 4)) s->flat = 1;
+    else if (!wcsncmp(c, L"hex", 3)) s->hex = 1;
+    else if (!wcsncmp(c, L"splinein", 8)) s->splineIn = 1;
+    else if (!wcsncmp(c, L"spline", 6)) s->splineOut = 1, s->rot++;
+    else if (!wcsncmp(c, L"gear", 4)) s->gear = 1, s->rot++;
+    else if (!wcsncmp(c, L"knurl", 5)) s->knurl = 1;
+    else if (!wcsncmp(c, L"emboss", 6)) s->emboss = 1;
+    else if (!wcsncmp(c, L"weld", 4)) s->weld = 1;
+  }
   /* признаки вращения: Ø со знаком (уверенно — наибольший Ø), фаски ×45° */
   for (const wchar_t *p = t; *p; p++) {
     wchar_t c = *p;
@@ -1214,6 +1231,7 @@ static void tn_route(const wchar_t *name, const wchar_t *mat, const wchar_t *tex
     if (s->holes) tn_cat(w, 300, L" вместе с отверстиями");
     tn_cat(w, 300, L"; прямоугольную без отверстий — на гильотине");
     tn_op(r, L"Заготовительная (раскрой)", w, L"листовая деталь");
+    if (s->emboss) tn_op(r, L"Штамповочная", L"Выдавить рифты (выдавки) на прессе по штампу", L"на чертеже выдавки");
     if (s->bend) tn_op(r, L"Гибочная", L"Гнуть по чертежу (развёртка — по месту гибов)", L"на чертеже гибка");
   } else if (r->cls == TN_BODY) {
     tn_op(r, L"Фрезерная", L"Фрезеровать базовые плоскости, затем остальные плоскости, пазы, уступы",
@@ -1225,15 +1243,28 @@ static void tn_route(const wchar_t *name, const wchar_t *mat, const wchar_t *tex
   }
 
   if (s->weld && r->cls != TN_BODY) tn_op(r, L"Сварочная", L"Сварить по чертежу", L"на чертеже сварка");
-  if (s->edm) s->gear = 0; /* шлицы по ТТ — электроэрозией, не зубофрезерованием */
-  if (s->key || s->flat || s->hex || s->gear) {
+  if (s->edm) s->gear = s->splineOut = s->splineIn = 0; /* шлицы по ТТ — электроэрозией, не фрезой */
+  /* паз у тела вращения и корпуса — фрезой; у листовой — вырезается с контуром, у доработки — по ТТ */
+  int slotMill = s->slotEl && (r->cls == TN_ROT || r->cls == TN_BODY || r->cls == TN_UNK);
+  if (s->key || s->flat || s->hex || s->gear || slotMill || s->splineOut) {
     w[0] = why[0] = 0;
     if (s->key) tn_item(w, 300, L"фрезеровать шпоночный паз"), tn_item(why, TN_TXT, L"шпоночный паз");
+    if (slotMill) tn_item(w, 300, L"фрезеровать паз"), tn_item(why, TN_TXT, L"паз");
     if (s->flat) tn_item(w, 300, L"фрезеровать лыски"), tn_item(why, TN_TXT, L"лыски");
     if (s->hex) tn_item(w, 300, L"фрезеровать шестигранник под ключ"), tn_item(why, TN_TXT, L"размер под ключ");
+    if (s->splineOut) tn_item(w, 300, L"фрезеровать шлицы"), tn_item(why, TN_TXT, L"шлицы");
     if (s->gear) tn_item(w, 300, L"нарезать зубья"), tn_item(why, TN_TXT, L"зубчатый венец");
     if (w[0] >= L'а' && w[0] <= L'я') w[0] = (wchar_t)(w[0] - 32);
-    tn_op(r, s->gear && !s->key && !s->flat && !s->hex ? L"Зубофрезерная" : L"Фрезерная", w, why);
+    tn_op(r, s->gear && !s->key && !s->flat && !s->hex && !slotMill && !s->splineOut ? L"Зубофрезерная" : L"Фрезерная",
+          w, why);
+  }
+  /* шпоночный паз и шлицы в отверстии — долбёжным (или протяжкой), фрезой туда не достать */
+  if ((s->keyIn || s->splineIn) && r->cls != TN_FLAT && r->cls != TN_BAR && r->cls != TN_BENT) {
+    w[0] = why[0] = 0;
+    if (s->keyIn) tn_item(w, 300, L"долбить шпоночный паз в отверстии"), tn_item(why, TN_TXT, L"шпоночный паз в отверстии");
+    if (s->splineIn) tn_item(w, 300, L"долбить или протянуть шлицы в отверстии"), tn_item(why, TN_TXT, L"шлицы в отверстии");
+    if (w[0] >= L'а' && w[0] <= L'я') w[0] = (wchar_t)(w[0] - 32);
+    tn_op(r, L"Долбёжная", w, why);
   }
   int precHoles = (s->band && s->band <= 0.05) || (s->itMin && s->itMin <= 9);
   double sheetS = s->thick ? s->thick : s->sort == TNS_SHEET ? s->sortSize : 0;

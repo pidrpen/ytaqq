@@ -829,7 +829,8 @@ static int ai_server_ensure(DWORD deadline, volatile LONG *cancel, int minimumCo
     if (g_aiModel[0] && n > 0 && ai_find_near(g_aiModel, L"lora*.gguf", lora)) {
       ai_short_path(lora);
       _snwprintf(cmd + n, MAX_PATH * 4 + 300 - n, L" --lora \"%s\"", lora);
-    } else if (n > 0 && ai_find_near(model, L"draw-lora*.gguf", lora)) {
+    } else if (n > 0 && (ai_find_near(model, L"draw-lora2*.gguf", lora) || ai_find_near(model, L"draw-lora*.gguf", lora))) {
+      /* второе поколение (знает конструктивные элементы) — первым: drawrec.c спрашивает по нему */
       ai_short_path(lora);
       _snwprintf(cmd + n, MAX_PATH * 4 + 300 - n, L" --lora \"%s\" --lora-init-without-apply", lora);
       g_aiDrawLora = TRUE;
@@ -1284,6 +1285,14 @@ static char *ai_content_img(const wchar_t *text, const BYTE *png, DWORD len) {
   free(tx);
   free(b64);
   return c;
+}
+
+/* стоит ли рядом с моделью адаптер чертежей второго поколения (draw-lora2…): он обучен называть
+   конструктивные элементы, и drawrec.c спрашивает про них только тогда */
+BOOL ai_draw_elements(void) {
+  if (g_aiProvider || ai_ext()) return FALSE;
+  wchar_t m[MAX_PATH], mm[MAX_PATH], f[MAX_PATH];
+  return ai_pick_model(m, mm) && ai_find_near(m, L"draw-lora2*.gguf", f);
 }
 
 BOOL ai_vision_ready(void) {
@@ -1832,13 +1841,15 @@ static DWORD WINAPI ai_lora_thread(LPVOID p) {
 
 /* модель уровня есть, а адаптера чертежей рядом нет — скачать в фоне, раз за запуск программы */
 static void ai_lora_kick(const wchar_t *model) {
-  wchar_t have[MAX_PATH];
-  if (ai_find_near(model, L"draw-lora*.gguf", have) || InterlockedExchange(&g_aiLoraTried, 1)) return;
   const wchar_t *name = wcsrchr(kAiDrawLora.file, L'/');
-  lstrcpynW(g_aiLoraDest, model, MAX_PATH);
-  wchar_t *sl = wcsrchr(g_aiLoraDest, L'\\');
-  if (!name || !sl || (size_t)(sl - g_aiLoraDest) + wcslen(name) + 1 >= MAX_PATH) return;
+  wchar_t dest[MAX_PATH];
+  lstrcpynW(dest, model, MAX_PATH);
+  wchar_t *sl = wcsrchr(dest, L'\\');
+  if (!name || !sl || (size_t)(sl - dest) + wcslen(name) + 1 >= MAX_PATH) return;
   wcscpy(sl + 1, name + 1);
+  /* закреплённого адаптера ещё нет (прежнее поколение рядом не в счёт) — скачать */
+  if (ai_file_size(dest) == kAiDrawLora.size || InterlockedExchange(&g_aiLoraTried, 1)) return;
+  lstrcpynW(g_aiLoraDest, dest, MAX_PATH);
   HANDLE t = CreateThread(NULL, 0, ai_lora_thread, NULL, 0, NULL);
   if (t) CloseHandle(t);
 }

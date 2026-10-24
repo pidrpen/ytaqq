@@ -12,6 +12,7 @@ import json
 import math
 import pathlib
 import random
+import re
 import time
 
 import torch
@@ -32,8 +33,32 @@ def augment(im, r):
     return im
 
 
+def holes_to_elements(holes):
+    """старые учебные листы без элементов: подписи «4 отв. Ø13», «2 отв. M8-7H» — это и есть элементы"""
+    out = []
+    for h in holes:
+        m = re.search(r'(\d+)\s*отв\.?\s*([ØMМ⌀]\S*)', h) or re.search(r'([ØMМ⌀]\S*)\s+(\d+)\s*отв', h)
+        if not m:
+            continue
+        cnt, size = (m.group(1), m.group(2)) if m.group(1).isdigit() else (m.group(2), m.group(1))
+        out.append({'type': 'резьбовое отверстие' if size[:1] in 'MМ' else 'отверстие', 'size': size,
+                    'count': int(cnt)})
+    return out
+
+
+def fit_answer(ans, elements):
+    """ответ по листу — под вопрос: с элементами или без них"""
+    j = json.loads(ans)
+    if elements and 'elements' not in j:
+        j['elements'] = holes_to_elements(j.get('holes') or [])
+    if not elements:
+        j.pop('elements', None)
+    return json.dumps(j, ensure_ascii=False)
+
+
 def samples(a, prompts, labels, sheets, rnd):
     train, held = [], []
+    el = cpvl.has_elements(prompts)
     for k, s in sheets.items():
         lab = labels.get(k)
         if not lab:
@@ -41,15 +66,17 @@ def samples(a, prompts, labels, sheets, rnd):
         for tag in cpvl.TAGS:
             if s[tag] is None or tag not in prompts:
                 continue
-            ex = {'image': str(s[tag]), 'tag': tag, 'answer': cpvl.target(lab, tag), 'real': True}
+            ex = {'image': str(s[tag]), 'tag': tag, 'answer': cpvl.target(lab, tag, el), 'real': True}
             if lab.get('eval'):
                 held.append(ex)
             else:
                 train += [ex] * a.real_repeat
-    if a.synth:
-        for line in open(a.synth, encoding='utf-8'):
+    for path in a.synth or []:
+        for line in open(path, encoding='utf-8'):
             ex = json.loads(line)
             if ex['tag'] in prompts:
+                if ex['tag'] == 'sheet':
+                    ex['answer'] = fit_answer(ex['answer'], el)
                 train.append({**ex, 'real': False})
     rnd.shuffle(train)
     return train, held
@@ -91,7 +118,7 @@ def main():
     ap.add_argument('--preset', default='qwen3.5-4b')
     ap.add_argument('--base', required=True, help='папка весов Hugging Face (hf download …)')
     ap.add_argument('--dump', required=True), ap.add_argument('--labels', required=True)
-    ap.add_argument('--synth', help='synth.jsonl из synth.py')
+    ap.add_argument('--synth', nargs='*', help='наборы учебных картинок: synth.jsonl (synth.py), parts.jsonl (synth_parts.py)')
     ap.add_argument('--out', required=True)
     ap.add_argument('--real-repeat', type=int, default=6, help='сколько раз каждый заводской пример (с искажениями)')
     ap.add_argument('--epochs', type=float, default=1.0)

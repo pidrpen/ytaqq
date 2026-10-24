@@ -10,6 +10,7 @@
 По умолчанию — только отложенные листы (eval: true в разметке): на них не учат."""
 import argparse
 import json
+from collections import Counter
 import pathlib
 import sys
 import time
@@ -36,6 +37,14 @@ def score_sheet(lab, got, tess, tn):
         r['tt_n_ok'] = len(tt) == len(lab['tt'])
         r['razv_ok'] = j.get('razvertka') == lab['razvertka']
         r['holes_ok'] = sorted(map(cpvl.norm, j.get('holes') or [])) == sorted(map(cpvl.norm, lab['holes']))
+        if 'elements' in lab and 'elements' in j:  # типы элементов: сколько верно, лишних, пропущено
+            got_t = Counter(e['type'] for e in cpvl.elements_of(j))
+            want_t = Counter(e['type'] for e in lab['elements'])
+            r['el_tp'] = sum((got_t & want_t).values())
+            r['el_fp'] = sum((got_t - want_t).values())
+            r['el_fn'] = sum((want_t - got_t).values())
+            r['el_ok'] = got_t == want_t
+            r['el_got'] = sorted(got_t.elements())
     name, mat, text = cpvl.route_input(tess, cpvl.first_line(got.get('name')), cpvl.first_line(got.get('mat')),
                                        cpvl.sheet_text(got.get('sheet')))
     cls, ops, blank = cpvl.route(tn, name, mat, text)
@@ -111,6 +120,10 @@ def main():
         'ТТ сходство': round(sum(tts) / len(tts), 3) if tts else '—', 'ТТ число пунктов': cnt('tt_n_ok'),
         'развертка': cnt('razv_ok'), 'отверстия': cnt('holes_ok'),
     }
+    if any('el_tp' in r for r in res.values()):
+        summary.update({'элементы целиком': cnt('el_ok'), 'элементов верных': sum(r.get('el_tp', 0) for r in res.values()),
+                        'выдуманных': sum(r.get('el_fp', 0) for r in res.values()),
+                        'пропущенных': sum(r.get('el_fn', 0) for r in res.values())})
     for k, r in res.items():
         lab = labels[k]
         miss = set(lab['route'][1].split()) - set(r['ops'])
@@ -118,7 +131,8 @@ def main():
         print(f'{"OK" if r["route_ok"] else "--"} {k[:34]:34} {r["cls"]:6} ждали {lab["route"][0]:6} '
               f'лишнее {" ".join(sorted(extra)) or "-":12} нет {" ".join(sorted(miss)) or "-":12} '
               f'{"имя" if r.get("name_ok") else "---"} {"мат" if r.get("mat_ok") else "---"} '
-              f'ТТ {r.get("tt_sim", "-")}')
+              f'ТТ {r.get("tt_sim", "-")}' + (f' эл. {r["el_tp"]}/{r["el_fp"]}/{r["el_fn"]} {",".join(r["el_got"])}'
+                                              if 'el_tp' in r else ''))
     print(json.dumps(summary, ensure_ascii=False))
     pathlib.Path(a.out).parent.mkdir(parents=True, exist_ok=True)
     pathlib.Path(a.out).write_text(json.dumps({'summary': summary, 'args': vars(a), 'sheets': res},
