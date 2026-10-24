@@ -41,9 +41,13 @@
    (сквозное/глухое), B, Dф, z, Sм, толщина, периметр, пробивок, переход (вид
    перехода), И (измеряемый размер), квалитет, Ra, угол (резца в плане), перемещение,
    наладка, инструментов, переходов, измерений, деталей, поверхность (прокат/отливка),
-   вид подачи, партия, смен (обработки партии), То, Тв, Топ. Чего нет — подходят
+   вид подачи, партия, смен (обработки партии), То, Тв, Топ; приёмы при переходе —
+   прием, длина перемещения, смен резца, изменений подачи, изменений оборотов;
+   измерения — измеритель, отсчёт, допуск, длина измерения, длина в D, поверхность
+   измерения, способ размера; доп (дополнительное Тпз списком: «резьба; люнет»). Чего нет — подходят
    строки со «*» в этом ключе. Таблицы: <оп>.установка, .переход, .измерение, .ктв, .обслуживание,
-   .отдых, .пз, .пз.доп, .подача, .скорость, .скорость.к (поправки), .глубина,
+   .отдых, .пз, .пз.доп (по каждому коду «доп»), .приемы, .измерение.к (периодичность),
+   .подача, .скорость, .скорость.к (поправки), .глубина,
    .припуск, .врезание; резка.пробивка; станки (поля: группа, размер, ряд n,
    ряд S, ряд Sм). <оп> — токарная, сверлильная, фрезерная, резка; ктв и отдых —
    и без <оп>. */
@@ -856,6 +860,34 @@ static int nm_req(NmJob *j, const wchar_t *name, const wchar_t *what) {
   return 0;
 }
 
+/* произведение поправок: каждая таблица «<оп>.<what>», что подходит (Kv, периодичность измерений) */
+static double nm_coefs(NmJob *j, const wchar_t *what, const wchar_t *label) {
+  wchar_t p[64], s[400];
+  double k = 1;
+  nm_purp(j, what, p, 64);
+  for (int i = 0; i < j->b->n; i++) {
+    const NmTab *t = &j->b->t[i];
+    NmHit h;
+    if (t->records || !nm_tab_is(t, p)) continue;
+    if (nm_try(t, &j->c, &h)) {
+      nm_use(j->res, t);
+      k *= h.v;
+      tn_cpy(s, 400, label);
+      tn_cat(s, 400, L" ×");
+      tn_catnum(s, 400, h.v);
+      tn_cat(s, 400, L" — ");
+      tn_cat(s, 400, h.why);
+    } else {
+      tn_cpy(s, 400, label);
+      tn_cat(s, 400, L" не взят: ");
+      tn_cat(s, 400, h.why);
+      if (h.need[0]) nm_need(j, h.need);
+    }
+    nm_line(j, s);
+  }
+  return k;
+}
+
 /* ступень станка из ряда поля field («ряд n»); нет ряда — берётся расчётное */
 static double nm_machine_step(NmJob *j, const wchar_t *field, const wchar_t *what, double x, wchar_t *s, int cap) {
   const NmPar *m = nm_parc(&j->c, L"станок");
@@ -904,27 +936,7 @@ static int nm_mode(NmJob *j, double D, double *S, double *n) {
   } else if (!nm_look_pref(j, L"скорость", L"V", 1, &V)) {
     return 0;
   } else {
-    /* поправочные коэффициенты: каждая таблица «<оп>.скорость.к», что подходит */
-    wchar_t p[64];
-    nm_purp(j, L"скорость.к", p, 64);
-    for (int i = 0; i < j->b->n; i++) {
-      const NmTab *t = &j->b->t[i];
-      NmHit h;
-      if (t->records || !nm_tab_is(t, p)) continue;
-      if (nm_try(t, &j->c, &h)) {
-        nm_use(j->res, t);
-        V *= h.v;
-        tn_cpy(s, 300, L"Kv ×");
-        tn_catnum(s, 300, h.v);
-        tn_cat(s, 300, L" — ");
-        tn_cat(s, 300, h.why);
-      } else {
-        tn_cpy(s, 300, L"Kv не взят: ");
-        tn_cat(s, 300, h.why);
-        if (h.need[0]) nm_need(j, h.need);
-      }
-      nm_line(j, s);
-    }
+    V *= nm_coefs(j, L"скорость.к", L"Kv");
   }
   k = 1000 * V / (NM_PI * D);
   tn_cpy(s, 300, L"n = 1000·V/(π·D) = 1000·");
@@ -1182,6 +1194,49 @@ static double nm_to_cut(NmJob *j) {
   return to;
 }
 
+/* приёмы, связанные с переходом, но не вошедшие в комплекс «время на проход»: смена резца,
+   изменение подачи и оборотов; перемещение каретки на длину сверх учтённой в комплексе */
+static double nm_priems(NmJob *j) {
+  static const struct {
+    int kind;
+    const wchar_t *code, *count;
+  } k[] = {{NMK_TURN, L"изменение оборотов", L"изменений оборотов"},
+           {NMK_TURN, L"изменение подачи", L"изменений подачи"},
+           {NMK_TURN, L"смена резца поворотом", L"смен резца"}};
+  wchar_t p[64], s[300], lab[80];
+  nm_purp(j, L"приемы", p, 64);
+  if (!nm_has(j->b, p)) return 0;
+  double sum = 0, t;
+  for (size_t i = 0; i < sizeof(k) / sizeof(k[0]); i++) {
+    double n = nm_v(&j->c, k[i].count);
+    if (k[i].kind != j->o->kind || nm_na(n) || n <= 0) continue;
+    nm_put(&j->c, L"прием", k[i].code, NM_NONE, NMO_CALC, NULL);
+    tn_cpy(lab, 80, L"Тприем «");
+    tn_cat(lab, 80, k[i].code);
+    tn_cat(lab, 80, L"»");
+    if (nm_look(j, p, lab, 0, &t)) {
+      sum += t * n;
+      tn_cpy(s, 300, L"   × ");
+      nm_from(&j->c, k[i].count, NULL, s, 300);
+      nm_line(j, s);
+    }
+  }
+  /* комплекс «время на проход» учитывает ход каретки до 200 мм (у станков I–II группы — до 50) */
+  double L = nm_v(&j->c, L"L"), g = nm_v(&j->c, L"размерная группа"), pass = nm_v(&j->c, L"i");
+  if (j->o->kind == NMK_TURN && !nm_na(L) && L > (!nm_na(g) && g <= 2 ? 50 : 200)) {
+    nm_put(&j->c, L"прием", L"перемещение продольное", NM_NONE, NMO_CALC, NULL);
+    nm_putv(&j->c, L"длина перемещения", L, NMO_CALC, L"длина обработки L");
+    if (nm_look(j, p, L"Тприем «перемещение продольное»", 0, &t)) {
+      if (nm_na(pass) || pass < 1) pass = 1;
+      sum += t * pass;
+      tn_cpy(s, 300, L"   × проходов ");
+      tn_catnum(s, 300, pass);
+      nm_line(j, s);
+    }
+  }
+  return sum;
+}
+
 /* одна операция: То, Тв, Топ, Тшт, Тпз */
 static void nm_op_calc(NmJob *j) {
   NmOp *o = j->o;
@@ -1218,8 +1273,9 @@ static void nm_op_calc(NmJob *j) {
     } else {
       okTv = 0;
     }
+    tper += nm_priems(j);
     if (nm_look_pref(j, L"измерение", L"Тизм", 0, &tizm)) {
-      tizm *= nm_v(&j->c, L"измерений");
+      tizm *= nm_coefs(j, L"измерение.к", L"Kпер (периодичность)") * nm_v(&j->c, L"измерений");
       tn_cpy(s, 300, L"   × ");
       nm_from(&j->c, L"измерений", NULL, s, 300);
       nm_line(j, s);
@@ -1276,7 +1332,27 @@ static void nm_op_calc(NmJob *j) {
   /* подготовительно-заключительное */
   double pz = 0, pzx = 0;
   if (nm_look_pref(j, L"пз", L"Тпз", o->kind != NMK_CUT, &pz)) {
-    if (nm_look_pref(j, L"пз.доп", L"Тпз доп.", 0, &pzx)) pz += pzx;
+    /* дополнительное Тпз — по каждому коду из «доп»: «резьба; люнет» */
+    const NmPar *dp = nm_parc(&j->c, L"доп");
+    wchar_t list[64], one[64], lab[80];
+    tn_cpy(list, 64, dp ? dp->s : L"");
+    for (const wchar_t *p = list; *p;) {
+      const wchar_t *e = wcschr(p, L';');
+      int n = e ? (int)(e - p) : (int)wcslen(p);
+      if (n > 63) n = 63;
+      wcsncpy(one, p, (size_t)n);
+      one[n] = 0;
+      p = e ? e + 1 : p + n;
+      const wchar_t *w = nm_skipsp(one);
+      if (!*w) continue;
+      NmCtx keep = j->c;
+      nm_put(&j->c, L"доп", w, NM_NONE, NMO_ASK, NULL);
+      tn_cpy(lab, 80, L"Тпз доп. («");
+      tn_cat(lab, 80, w);
+      tn_cat(lab, 80, L"»)");
+      if (nm_look_pref(j, L"пз.доп", lab, 0, &pzx)) pz += pzx;
+      j->c = keep;
+    }
     o->tpz = pz;
   }
   if (!nm_na(o->tpz) && !nm_na(q) && q > 0 && o->full) {
@@ -1334,7 +1410,9 @@ static void nm_ask(const wchar_t *text, NmCtx *c) {
            {L"пробив", L"пробивок", 0, 0},     {L"вид перехода", L"переход", 2, 0},
            {L"вид подачи", L"вид подачи", 1, 0}, {L"наладка", L"наладка", 2, 0},
            {L"квалитет", L"квалитет", 0, 0},   {L"угол", L"угол", 0, 0},      {L"То", L"То", 0, 1},
-           {L"смен", L"смен", 0, 0},
+           {L"смен резца", L"смен резца", 0, 0}, {L"изменений подачи", L"изменений подачи", 0, 0},
+           {L"изменений оборотов", L"изменений оборотов", 0, 0}, {L"смен", L"смен", 0, 0},
+           {L"измеритель", L"измеритель", 2, 0}, {L"доп", L"доп", 2, 0},
            {L"переход", L"переходов", 0, 0},
            {L"инструмент", L"инструментов", 0, 0}, {L"измерен", L"измерений", 0, 0},
            {L"отверсти", L"отверстий", 0, 0},  {L"врезание", L"врезание", 0, 0},
@@ -1363,7 +1441,8 @@ static void nm_ask(const wchar_t *text, NmCtx *c) {
       if (k[i].word) {
         wchar_t w[64];
         int n = 0;
-        while (*e && *e != L',' && *e != L';' && *e != L'\n' && !(k[i].word == 1 && *e == L' ') && n < 63)
+        int list = !wcscmp(k[i].par, L"доп"); /* «доп резьба; люнет» — список до запятой */
+        while (*e && *e != L',' && (list || *e != L';') && *e != L'\n' && !(k[i].word == 1 && *e == L' ') && n < 63)
           w[n++] = *e++;
         while (n && w[n - 1] == L' ') n--;
         w[n] = 0;
@@ -1493,6 +1572,26 @@ static void nm_ctx_defaults(const NmBase *b, const TnRoute *r, NmOp *o, NmCtx *c
   nm_putv(c, L"переходов", per, NMO_DEF, why);
   nm_putv(c, L"инструментов", ins, NMO_DEF, L"оценка");
   nm_putv(c, L"измерений", per, NMO_DEF, L"по числу переходов");
+  if (o->kind != NMK_TURN) return;
+  /* приёмы при переходе — оценка: каждый следующий резец, смена режима на половине переходов */
+  per = nm_v(c, L"переходов"), ins = nm_v(c, L"инструментов");
+  nm_putv(c, L"смен резца", ins > 1 ? ins - 1 : 0, NMO_DEF, L"оценка: каждый следующий резец");
+  double half = (double)(long)((per + 1) / 2);
+  nm_putv(c, L"изменений подачи", half, NMO_DEF, L"оценка: на половине переходов");
+  nm_putv(c, L"изменений оборотов", half, NMO_DEF, L"оценка: на половине переходов");
+  /* контрольные измерения: инструмент по квалитету, размер — Ø, длина — L; периодичность — по способу */
+  double it = nm_v(c, L"квалитет");
+  nm_put(c, L"измеритель", !nm_na(it) && it <= 9 ? L"скоба" : L"штангенциркуль", NM_NONE, NMO_DEF,
+         L"по квалитету: до IT9 — скоба, грубее — штангенциркуль");
+  nm_put(c, L"отсчёт", L"0,1", NM_NONE, NMO_DEF, L"штангенциркуль 0,1 мм");
+  nm_put(c, L"поверхность измерения", L"цилиндрические", NM_NONE, NMO_DEF, NULL);
+  double Lm = nm_v(c, L"L"), Dm = nm_v(c, L"D");
+  if (!nm_na(Lm)) nm_putv(c, L"длина измерения", Lm, NMO_CALC, L"длина обработки L");
+  if (!nm_na(Lm) && !nm_na(Dm) && Dm > 0) nm_putv(c, L"длина в D", Lm / Dm, NMO_CALC, L"L/D — для калибров");
+  const NmPar *pp = nm_parc(c, L"переход");
+  nm_put(c, L"способ размера", pp && wcsstr(pp->s, L"на размер") ? L"на размер" : L"лимб", NM_NONE, NMO_CALC,
+         L"по виду перехода");
+  if (r->s.thrOut > 0) nm_put(c, L"доп", L"резьба", NM_NONE, NMO_DRAW, L"на чертеже наружная резьба");
 }
 
 /* нормы всех операций маршрута; ask — вопрос пользователя (может быть NULL) */

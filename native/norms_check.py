@@ -143,15 +143,26 @@ def check(head, cols, rows):
         xs = [num(r[j]) if j < len(r) else None for j in vals]
         for k in spikes(xs):
             out.append((i, vals[k], f"поз. {pos}, «{cols[vals[k]]}»: {r[vals[k]]} выбивается из соседних по строке — проверьте"))
-    # по столбцу — внутри групп с одинаковым словом-ключом (числовые ключи меняются)
+    # по столбцу — внутри групп с одинаковым словом-ключом; новая группа и там, где числовые ключи
+    # пошли на убыль (у пробок квалитет сменился — размер И начался заново)
+    def bounds(r):
+        out_b = []
+        for k in keys:
+            cell = r[k] if k < len(r) else ""
+            m = re.findall(r"\d+(?:[.,]\d+)?", cell) if is_range(cell) else []
+            hi = float(m[-1].replace(",", ".")) if m else float("inf")
+            out_b.append(float("inf") if re.match(r"\s*(св|свыше|более|больше)", cell, re.I) and len(m) == 1 else hi)
+        return tuple(out_b)
+
     for j in vals:
-        group, prev_key = [], None
+        group, prev_key, prev_b = [], None, None
         for i, r in enumerate(rows + [None]):
-            key = None
+            key = b = None
             if r is not None:
                 key = tuple(r[k] if k < len(r) and not is_range(r[k]) else "" for k in keys)
                 key = tuple(v if v else (prev_key[n] if prev_key else "") for n, v in enumerate(key))
-            if r is None or (prev_key is not None and key != prev_key):
+                b = bounds(r)
+            if r is None or (prev_key is not None and (key != prev_key or b <= prev_b)):
                 xs = [num(rows[g][j]) if j < len(rows[g]) else None for g in group]
                 for k in spikes(xs):
                     g = group[k]
@@ -159,7 +170,7 @@ def check(head, cols, rows):
                 group = []
             if r is not None:
                 group.append(i)
-                prev_key = key
+                prev_key, prev_b = key, b
     return out
 
 
