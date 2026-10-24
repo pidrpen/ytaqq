@@ -64,7 +64,8 @@ typedef struct {
   int heatFirst;          /* «калить в заготовке»: ТО до механообработки */
   wchar_t thr[TN_TXT];    /* резьбы, как прочитаны: «M12-6H, M30x2» */
   int nThr, thrIn, thrOut;
-  int holes;              /* «n отв.» — сумма */
+  int holes;              /* «n отв.» — сумма разных выносок */
+  wchar_t thrHole[TN_TXT]; /* резьбы из «n отв. M10» — в отверстиях: метчиком на сверлильной */
   double holeMin;         /* наименьший Ø у «n отв. Øx»; 0 — не прочитан */
   int edges, mark, weld, bend, key, gear, knurl, flat, hex;
   int edm;                /* «электроэрозионным способом» */
@@ -142,6 +143,17 @@ static void tn_catnum(wchar_t *d, int cap, double v) {
 static void tn_item(wchar_t *d, int cap, const wchar_t *s) {
   if (d[0]) tn_cat(d, cap, L"; ");
   tn_cat(d, cap, s);
+}
+
+/* есть ли в списке «a; b; c» ровно такой пункт */
+static int tn_list_has(const wchar_t *list, const wchar_t *item) {
+  size_t n = wcslen(item);
+  for (const wchar_t *p = list; p && *p;) {
+    if (!wcsncmp(p, item, n) && (p[n] == 0 || p[n] == L';')) return 1;
+    p = wcschr(p, L';');
+    if (p) p += p[1] == L' ' ? 2 : 1;
+  }
+  return 0;
 }
 
 /* ---- сложенный текст: регистр, ё и латиница, похожая на кириллицу ------------ */
@@ -291,7 +303,12 @@ static void tn_ra(const wchar_t *t, TnSigns *s) {
     if (*e && *e != L'\n') continue; /* только число одно на строке */
     v = tn_ra_fix(q, len, v, sep, &doubt);
     if (!(v == 0.4 || v == 0.8 || v == 1.6 || v == 3.2 || v == 0.2)) continue;
-    if (!sep && q[0] != L'0') doubt = 1; /* «16», «32» — может быть и размер */
+    /* «16», «32» без запятой — чаще размер (вал: «32» — длина под резьбу); шероховатостью
+       считаем, только если на листе есть знак «остальное» в углу, то есть Ra пишут числом */
+    if (!sep && q[0] != L'0') {
+      if (!s->raGen) continue;
+      doubt = 1;
+    }
     s->nRa++;
     if (!s->raMin || v < s->raMin) s->raMin = v, s->raDoubt = doubt;
   }
@@ -412,6 +429,21 @@ static wchar_t tn_digitish(wchar_t c) {
   if (c == L'i' || c == L'l' || c == L'I' || c == L'|') return L'1';
   if (c == L'O' || c == L'o' || c == L'О' || c == L'о') return L'0';
   return 0;
+}
+
+/* резьбы для токарной: все прочитанные, кроме тех, что в «n отв. M…» — их режут метчиком */
+static void tn_thr_turn(const TnSigns *s, wchar_t *out, int cap) {
+  out[0] = 0;
+  for (const wchar_t *p = s->thr; *p;) {
+    wchar_t item[48], base[48];
+    int n = 0, k = 0;
+    while (*p && *p != L';' && n < 47) item[n++] = *p++;
+    item[n] = 0;
+    while (*p == L';' || *p == L' ') p++;
+    while (item[k] && item[k] != L'x' && item[k] != L'-') base[k] = item[k], k++;
+    base[k] = 0;
+    if (!tn_list_has(s->thrHole, base)) tn_item(out, cap, item);
+  }
 }
 
 static void tn_thread_add(TnSigns *s, const wchar_t *txt, wchar_t cls) {
@@ -756,7 +788,9 @@ static void tn_signs(const wchar_t *name, const wchar_t *mat, const wchar_t *tex
   /* «калить в заготовке» (Tesseract: «калить 6 заготовке») — ТО до механообработки */
   for (const wchar_t *p = f; (p = wcsstr(p, L"калит")) != NULL; p++)
     if (wcsstr(p, L"заготов") && wcsstr(p, L"заготов") - p < 20) s->heatFirst = 1;
-  /* «4 отв.», «3 отб» (курсивное «в» Tesseract читает как «б») */
+  /* «4 отв.», «3 отб» (курсивное «в» Tesseract читает как «б»). Одну выноску читают не раз — модель
+     и Tesseract в трёх поворотах, — поэтому одинаковые «n отв. <размер>» считаются однажды */
+  int seen[24], nSeen = 0;
   for (const wchar_t *p = f; *p; p++)
     if (tn_isdig(*p) && (p == f || !tn_isdig(p[-1]))) {
       int v = 0;
@@ -764,14 +798,26 @@ static void tn_signs(const wchar_t *name, const wchar_t *mat, const wchar_t *tex
       while (tn_isdig(*q)) v = v * 10 + (*q++ - L'0');
       while (*q == L' ') q++;
       if (v > 0 && v <= 64 && q[0] == L'о' && q[1] == L'т' && (q[2] == L'в' || q[2] == L'б')) {
-        s->holes += v;
-        /* «4 отв. Ø13» — диаметр после «отв.» (знак Ø Tesseract читает как ф, $, #, 0) */
+        /* «4 отв. Ø13» — диаметр после «отв.» (знак Ø Tesseract читает как ф, $, #, 0); «2 отв. M10» — резьба */
         const wchar_t *r2 = q + 3;
         while (*r2 == L'.' || *r2 == L' ') r2++;
-        if (*r2 == L'ø' || *r2 == L'ф' || *r2 == L'$' || *r2 == L'#' || *r2 == L'Ø' || *r2 == L'⌀') r2++;
+        int thr = *r2 == L'м' && tn_isdig(r2[1]);
+        if (thr || *r2 == L'ø' || *r2 == L'ф' || *r2 == L'$' || *r2 == L'#' || *r2 == L'Ø' || *r2 == L'⌀') r2++;
         double hd;
         int hl, hs;
-        if (tn_num(r2, &hd, &hl, &hs) && hd >= 1 && hd <= 200 && (!s->holeMin || hd < s->holeMin)) s->holeMin = hd;
+        int sized = tn_num(r2, &hd, &hl, &hs) && hd >= 1 && hd <= 200;
+        int key = v * 10000 + (sized ? (int)(hd * 10 + 0.5) : 0), dup = 0;
+        for (int i = 0; i < nSeen && !dup; i++) dup = seen[i] == key;
+        if (dup) continue;
+        if (nSeen < 24) seen[nSeen++] = key;
+        s->holes += v;
+        if (sized && thr) {
+          wchar_t m[16] = L"M";
+          tn_catnum(m, 16, hd);
+          if (!tn_list_has(s->thrHole, m)) tn_item(s->thrHole, TN_TXT, m);
+        } else if (sized && (!s->holeMin || hd < s->holeMin)) {
+          s->holeMin = hd;
+        }
       }
     }
   s->edges = tn_has(f, L"притуп") || tn_has(f, L"заусен");
@@ -1150,12 +1196,14 @@ static void tn_route(const wchar_t *name, const wchar_t *mat, const wchar_t *tex
       tn_op(r, L"Токарная (тонкая)", L"Тонкое (алмазное) точение точных поверхностей",
             L"точная поверхность у цветного металла — шлифовать нельзя");
     if (s->knurl) tn_op(r, L"Токарная (накатка)", L"Накатать рифление", heatFirst ? L"на чертеже рифление" : L"на чертеже накатка (рифление) — до закалки");
-    if (s->nThr) {
+    wchar_t turn[TN_TXT];
+    tn_thr_turn(s, turn, TN_TXT);
+    if (turn[0]) {
       tn_cpy(w, 300, L"Нарезать резьбу ");
-      tn_cat(w, 300, s->thr);
+      tn_cat(w, 300, turn);
       tn_cat(w, 300, L" (на токарном станке; внутреннюю — метчиком или резцом)");
       tn_cpy(why, TN_TXT, L"на чертеже резьба ");
-      tn_cat(why, TN_TXT, s->thr);
+      tn_cat(why, TN_TXT, turn);
       /* резьба — переход токарной, но отдельной строкой, чтобы её не потерять */
       tn_op(r, L"Токарная (резьба)", w, why);
     }
@@ -1196,11 +1244,14 @@ static void tn_route(const wchar_t *name, const wchar_t *mat, const wchar_t *tex
     tn_catnum(w, 300, s->holes);
     tn_cat(w, 300, L" отв.");
     if (precHoles) tn_cat(w, 300, L"; точные — сверлить и развернуть");
-    /* у тела вращения резьба — на токарной; у корпуса и листа — метчиком в отверстиях */
+    /* у тела вращения резьба — на токарной, кроме резьбовых отверстий («2 отв. M10» во фланце);
+       у корпуса и листа — вся метчиком в отверстиях */
     if (s->nThr && r->cls != TN_ROT) tn_cat(w, 300, L"; нарезать резьбу "), tn_cat(w, 300, s->thr);
+    else if (s->thrHole[0]) tn_cat(w, 300, L" под резьбу, нарезать резьбу "), tn_cat(w, 300, s->thrHole), tn_cat(w, 300, L" метчиком");
     tn_cpy(why, TN_TXT, L"на чертеже «");
     tn_catnum(why, TN_TXT, s->holes);
     tn_cat(why, TN_TXT, L" отв.»");
+    if (s->thrHole[0] && r->cls == TN_ROT) tn_cat(why, TN_TXT, L" — резьба в отверстиях, не на токарной");
     tn_op(r, L"Сверлильная", w, why);
   } else if (s->nThr && r->cls != TN_ROT) {
     tn_cpy(w, 300, L"Сверлить отверстия под резьбу, нарезать резьбу ");

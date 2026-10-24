@@ -1,7 +1,7 @@
 /* tn_cli вход.txt — маршрут правилами techno.c, как в CursorPad, для проверки моделей (native/train).
    Вход (UTF-8): наименование, материал и текст листа, разделённые символом \f (материал бывает
    в две строки: прочитанное моделью и Tesseract).
-   Выход (UTF-8): вид|операция|операция…||заготовка
+   Выход (UTF-8): вид|операция|операция…||заготовка; с ключом --text — маршрут, как его видит человек.
    Сборка: gcc -O2 -finput-charset=UTF-8 -Wno-unused-function -o tn_cli.exe tn_cli.c -luser32 -s */
 #include <windows.h>
 #include <stdio.h>
@@ -27,10 +27,14 @@ int main(int argc, char **argv) {
   if (!r) return 2;
   tn_route(name, mat ? mat : L"", text ? text : L"", r);
   static wchar_t out[8000];
-  swprintf(out, 8000, L"%d", r->cls);
-  for (int i = 0; i < r->n; i++) wcscat(out, L"|"), wcscat(out, r->op[i].op);
-  wcscat(out, L"||");
-  wcscat(out, r->blank);
+  if (argc > 2 && !strcmp(argv[2], "--text")) {
+    tn_text(r, out, 8000);
+  } else {
+    swprintf(out, 8000, L"%d", r->cls);
+    for (int i = 0; i < r->n; i++) wcscat(out, L"|"), wcscat(out, r->op[i].op);
+    wcscat(out, L"||");
+    wcscat(out, r->blank);
+  }
   static char u[32000];
   WideCharToMultiByte(CP_UTF8, 0, out, -1, u, sizeof(u), NULL, NULL);
   fwrite(u, 1, strlen(u), stdout);
