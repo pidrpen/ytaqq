@@ -2,7 +2,7 @@
 #include <commdlg.h>
 #define WM_CVX_DONE (WM_APP+140)
 enum { CX_FILES=7600,CX_ADD,CX_REMOVE,CX_CLEAR,CX_UP,CX_DOWN,CX_ACTION,CX_FORMAT,CX_MODE,CX_SIZE,CX_KB,CX_PAGES,CX_ROTATE,CX_DIR,CX_BROWSE,CX_RUN,CX_CANCEL,CX_HISTORY,CX_REFRESH,CX_UNDO,CX_REVEAL,CX_TOGGLE,CX_LAST };
-static const wchar_t *kCvxActions[]={L"Картинки → PNG",L"Картинки → JPG",L"Картинки → BMP",L"Картинки → TIFF",L"Каждый файл → PDF",L"Word → TXT",L"Excel → CSV (лист 1)",L"Собрать ZIP для отправки",L"Изменить размер картинок",L"Сжать картинки до лимита",L"Объединить PDF",L"Извлечь страницы PDF",L"Разделить PDF по страницам",L"Повернуть страницы PDF",L"Пакет чертежей в один PDF"};
+static const wchar_t *kCvxActions[]={L"Картинки, PDF → PNG",L"Картинки, PDF → JPG",L"Картинки, PDF → BMP",L"Картинки, PDF → TIFF",L"Каждый файл → PDF",L"Word → TXT",L"Excel → CSV (лист 1)",L"Собрать ZIP для отправки",L"Изменить размер картинок",L"Сжать картинки до лимита",L"Объединить PDF",L"Извлечь страницы PDF",L"Разделить PDF по страницам",L"Повернуть страницы PDF",L"Пакет чертежей в один PDF"};
 static const char *kCvxOps[]={"convert","convert","convert","convert","to_pdf","convert","convert","zip","resize","compress","merge","extract","split","rotate","packet","history","undo","reveal"};
 typedef struct {
   CvJob result; CvSelection files; int action,format,mode,size,kb,rotation;
@@ -61,11 +61,13 @@ static void cvx_hint(void) {
     action==13?L"Поворот применяется к выбранным страницам; остальные страницы остаются в документе.":
     action==7?L"Имя ZIP — по первому файлу. Видео и другие уже сжатые файлы почти не уменьшаются.":
     action==6?L"CSV сохраняет первый лист книги в UTF-8. Для экспорта нужен установленный Excel.":
+    action<4?L"PDF — каждая страница отдельной картинкой, 300 dpi; чертежи и текст — чёрно-белыми.":
     L"Результаты сохраняются новыми файлами. Исходники не изменяются; операции доступны в истории.";
   if(g_cvxSelection.count&&action>=0&&!cvx_all(&g_cvxSelection,action)) {
-    hint=action<4||action==8||action==9?L"Нужны картинки PNG, JPG, BMP или TIFF. Уберите из списка файлы других типов.":
+    hint=action<4?L"Нужны картинки PNG, JPG, BMP, TIFF или PDF. Уберите из списка файлы других типов.":
+      action==8||action==9?L"Нужны картинки PNG, JPG, BMP или TIFF. Уберите из списка файлы других типов.":
       action>=10&&action<=13?L"Нужны файлы PDF. Уберите из списка файлы других типов.":
-      action==5?L"Нужны документы DOCX и установленный Word.":action==6?L"Нужны книги XLSX и установленный Excel.":
+      action==5?L"Нужны документы Word (DOCX, DOC, RTF, ODT) и установленный Word.":action==6?L"Нужны книги Excel (XLSX, XLS, ODS) и установленный Excel.":
       L"Подходят картинки, PDF (для пакета) и DOCX/XLSX с установленным Office.";
   }
   SetWindowTextW(g_cvxHint,hint);
@@ -144,6 +146,8 @@ static DWORD WINAPI cvx_worker(void *parameter) {
     } else {if(filesCount++)cx_raw(&files,",");cx_string(&files,source);}
   }
   cx_raw(&files,"]");cx_raw(&prepared,"]");cx_raw(&wire,"{\"op\":\"");cx_raw(&wire,kCvxOps[job->action]);cx_raw(&wire,"\"");
+  /* страницы PDF рисует помощник распознавания (--pdf, Windows.Data.Pdf) */
+  wchar_t renderer[MAX_PATH];swprintf(renderer,MAX_PATH,L"%ls\\CursorPadOcr.exe",g_dataDir);cx_field(&wire,"pdf_renderer",renderer);
   cx_field(&wire,"history",history);cx_field(&wire,"cancel",cancel);cx_field(&wire,"entry_id",job->entry);cx_field(&wire,"pages",job->pages);
   cx_field(&wire,"output_dir",job->directory);if(job->files.count)cx_field(&wire,"anchor",job->files.paths[0]);
   cx_raw(&wire,",\"files\":");cx_raw(&wire,files.text);cx_raw(&wire,",\"prepared\":");cx_raw(&wire,prepared.text);

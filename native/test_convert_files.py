@@ -130,6 +130,32 @@ with tempfile.TemporaryDirectory(prefix='cursorpad-batch-test-') as directory:
     except ValueError as error:assert 'отменена' in str(error)
     else:raise AssertionError('Cancellation ignored')
     assert set(out.iterdir())==before
+    # PDF pages to images: CursorPadOcr.exe --pdf draws them; CI uses a stand-in with the same protocol.
+    fake=root/'render.py';fake.write_text('\n'.join([
+        'import sys','from pathlib import Path','from PIL import Image, ImageDraw','from pypdf import PdfReader',
+        '_, flag, pdf, folder, dpi = sys.argv','assert flag == "--pdf"',
+        'for i, page in enumerate(PdfReader(pdf).pages, 1):',
+        '    w, h = round(float(page.mediabox.width) * int(dpi) / 72), round(float(page.mediabox.height) * int(dpi) / 72)',
+        '    im = Image.new("RGBA", (w, h), "white"); d = ImageDraw.Draw(im); d.rectangle((5, 5, w - 5, h - 5), outline="black", width=3)',
+        '    if i == 2: d.ellipse((20, 20, 60, 60), fill=(220, 30, 30))',
+        '    im.save(Path(folder) / f"p{i:04}.png"); print(f"p{i:04}.png {dpi}.000")']),encoding='utf-8')
+    renderer=[sys.executable,'-I','-B',str(fake)]
+    sheets=src/'Листы.pdf';writer=PdfWriter();writer.add_blank_page(width=595.28,height=841.89);writer.add_blank_page(width=200,height=100);writer.write(sheets)
+    sheet=src/'Лист.pdf';writer=PdfWriter();writer.add_blank_page(width=100,height=100);writer.write(sheet)
+    source_hash.update({p:hashlib.sha256(p.read_bytes()).hexdigest() for p in (sheets,sheet)})
+    rendered=paths(run('convert',[sheets,sheet],format='png',pdf_renderer=renderer,pdf_dpi=150))
+    assert sorted(p.name for p in rendered)==['Лист.png','Листы-стр-001.png','Листы-стр-002.png']
+    pages={p.name:p for p in rendered}
+    with Image.open(pages['Листы-стр-001.png']) as image:assert image.mode=='1' and image.size==(1240,1754) and round(image.info['dpi'][0])==150
+    with Image.open(pages['Листы-стр-002.png']) as image:assert image.mode=='RGB'
+    tiff=[p for p in paths(run('convert',[sheets],format='tif',pdf_renderer=renderer)) if p.name.endswith('001.tif')][0]
+    with Image.open(tiff) as image:assert image.info['compression']=='group4' and round(image.info['dpi'][0])==300
+    before=set(out.iterdir())
+    for files,kwargs,word in [([encrypted],{'pdf_renderer':renderer},'паролем'),([sheet],{},'недоступен')]:
+        try:run('convert',files,format='png',**kwargs)
+        except ValueError as error:assert word in str(error)
+        else:raise AssertionError('PDF to images accepted a bad case')
+        assert set(out.iterdir())==before
     # Prepared Office files participate in the same commit and history entry.
     prepared=root/'office.pdf';prepared.write_bytes(pdf2.read_bytes())
     ready=run('to_pdf',[],prepared=[{'path':str(prepared),'name':'Office.pdf','original':str(src/'Office.docx')}])
@@ -203,4 +229,4 @@ with tempfile.TemporaryDirectory(prefix='cursorpad-batch-test-') as directory:
     for path,digest in source_hash.items():assert hashlib.sha256(path.read_bytes()).hexdigest()==digest
     assert not list(out.glob('.CursorPad-*'))
     listing=run('history');assert listing['history_ids'] and listing['history_labels']
-print('PASS: batches, real image formats/size/byte budget, scan dpi/1-bit/G4/CCITT PDF, CMYK, 16-bit, A0 size, multipage TIFF, PDF ordering/extract/split/rotate/packet, ZIP duplicates, persisted history, identity/hash undo, cancellation, metadata failure rollback, publication replacement guard, atomic failure rollback, unchanged sources')
+print('PASS: batches, real image formats/size/byte budget, scan dpi/1-bit/G4/CCITT PDF, CMYK, 16-bit, A0 size, PDF pages to 1-bit/colour images, multipage TIFF, PDF ordering/extract/split/rotate/packet, ZIP duplicates, persisted history, identity/hash undo, cancellation, metadata failure rollback, publication replacement guard, atomic failure rollback, unchanged sources')

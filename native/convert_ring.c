@@ -288,7 +288,8 @@ static void cv_render(BYTE *pix, int size, HDC dc, DWORD now) {
                     g_cvPendingData ? L"держите Shift" : L"не отпускайте мышь и Shift", ink, muted);
   } else if (g_cvHover >= 0) {
     const CvRingItem *it = &kCvRing[g_cvFormats[g_cvHover]];
-    cv_hub_say(pix, size, dc, g, it->icon, kCvTint[it->tint], it->title, it->note, ink, muted);
+    BOOL pages = g_cvFormats[g_cvHover] < 4 && !_wcsicmp(cv_extension(g_cvPath), L"pdf"); /* PDF → картинки */
+    cv_hub_say(pix, size, dc, g, it->icon, kCvTint[it->tint], it->title, pages ? L"каждая страница, 300 dpi" : it->note, ink, muted);
   } else
     cv_hub_file(pix, size, dc, g, ink, muted);
 }

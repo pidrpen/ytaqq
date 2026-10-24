@@ -8,6 +8,7 @@
 
    Called as:  CursorPadOcr.exe <bmp-path> [lang]
                CursorPadOcr.exe --prep <in.bmp> <out.bmp>   (picture for Tesseract)
+               CursorPadOcr.exe --pdf <in.pdf> <folder> <dpi> (PDF pages to PNG, pdf_pages.c)
    Writes UTF-8 text to stdout, one recognised line per output line.
    Exit codes: 0 text, 2 no recognition engine, 3 nothing recognised, 1 error.
 
@@ -503,10 +504,13 @@ static int prep_only(const wchar_t *in, const wchar_t *out) {
   return ok ? 0 : 1;
 }
 
+#include "pdf_pages.c" /* --pdf: страницы PDF для конвертера файлов */
+
 int wmain(int argc, wchar_t **argv) {
   if (argc == 4 && !wcscmp(argv[1], L"--prep")) return prep_only(argv[2], argv[3]);
+  if (argc == 5 && !wcscmp(argv[1], L"--pdf")) return pdf_pages(argv[2], argv[3], _wtoi(argv[4]));
   if (argc < 2) {
-    note("usage: CursorPadOcr.exe <bmp> [lang] | --prep <in.bmp> <out.bmp>\n");
+    note("usage: CursorPadOcr.exe <bmp> [lang] | --prep <in.bmp> <out.bmp> | --pdf <in.pdf> <folder> <dpi>\n");
     return 1;
   }
   const wchar_t *lang = argc > 2 ? argv[2] : L"ru";

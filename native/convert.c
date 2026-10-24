@@ -166,7 +166,8 @@ static BOOL cvx_can(int action, const wchar_t *path) {
   int image=cv_image_type(path); const wchar_t *e=cv_extension(path);
   BOOL pdf=!_wcsicmp(e,L"pdf"), word=cv_word_file(path) && g_cvWord, excel=cv_excel_file(path) && g_cvExcel;
   if (action==7 || action==15) return TRUE;
-  if (action<4 || action==8 || action==9) return image>=0;
+  if (action<4) return image>=0 || pdf; /* PDF → картинки: по странице, 300 dpi */
+  if (action==8 || action==9) return image>=0;
   if (action==4) return image>=0 || word || excel;
   if (action==5) return word;
   if (action==6) return excel;
@@ -177,12 +178,15 @@ static BOOL cvx_all(const CvSelection *s,int action) { if (!s->count) return FAL
 static void cv_menu_formats(void) {
   g_cvCount=0;
   if (!g_cvSelection.count) return;
-  if (cvx_all(&g_cvSelection,0)) {
-    for (int i=0;i<4;i++) if(g_cvSelection.count>1 || cv_image_type(g_cvPath)!=i) g_cvFormats[g_cvCount++]=i;
+  BOOL pdfs=cvx_all(&g_cvSelection,10);
+  if (cvx_all(&g_cvSelection,0)) { /* картинки и PDF — в картинки; у PDF без BMP, он для чертежей не нужен */
+    for (int i=0;i<4;i++) if((g_cvSelection.count>1 || cv_image_type(g_cvPath)!=i) && !(pdfs && i==2)) g_cvFormats[g_cvCount++]=i;
     /* сканы чаще всего нужны в PDF: каждый отдельно, а несколько — ещё и одним файлом */
-    g_cvFormats[g_cvCount++]=4; if(g_cvSelection.count>1) g_cvFormats[g_cvCount++]=14;
-    g_cvFormats[g_cvCount++]=8; g_cvFormats[g_cvCount++]=9;
-  } else if (cvx_all(&g_cvSelection,10)) { for(int i=10;i<=13;i++) g_cvFormats[g_cvCount++]=i; }
+    if(cvx_all(&g_cvSelection,4)) g_cvFormats[g_cvCount++]=4;
+    if(g_cvSelection.count>1 && !pdfs && cvx_all(&g_cvSelection,14)) g_cvFormats[g_cvCount++]=14;
+    if(cvx_all(&g_cvSelection,8)) { g_cvFormats[g_cvCount++]=8; g_cvFormats[g_cvCount++]=9; }
+    if(pdfs) for(int i=10;i<=13;i++) g_cvFormats[g_cvCount++]=i;
+  } else if (pdfs) { for(int i=10;i<=13;i++) g_cvFormats[g_cvCount++]=i; }
   else { for(int i=4;i<=6;i++) if(cvx_all(&g_cvSelection,i)) g_cvFormats[g_cvCount++]=i; if (!g_cvCount && cvx_all(&g_cvSelection,14)) g_cvFormats[g_cvCount++]=14; }
   g_cvFormats[g_cvCount++]=7; g_cvFormats[g_cvCount++]=15;
 }

@@ -10,7 +10,9 @@ import os
 from pathlib import Path
 import shutil
 import stat
+import subprocess
 import tempfile
+import time
 import uuid
 import zipfile
 
@@ -20,6 +22,7 @@ MAX_PAGES = 2000
 # here are local and chosen by the user; an A0 drawing scanned at 400 dpi is 266 MP.
 MAX_PIXELS = 1_000_000_000
 IMAGE_EXT = {'.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff'}
+PDF_DPI = 300  # usual for drawings: A4 = 2480x3508, readable dimensions and thin lines
 
 
 def size_label(size):
@@ -305,6 +308,9 @@ def images(task, files, op):
     if ext not in ('png', 'jpg', 'bmp', 'tif'):
         raise ValueError('Неподдерживаемый формат изображения')
     for source in files:
+        if op == 'convert' and source.suffix.lower() == '.pdf':
+            pdf_images(task, source, ext)
+            continue
         if source.suffix.lower() not in IMAGE_EXT:
             raise ValueError(f'Ожидается изображение: {source.name}')
         for index, count, image in image_frames(source):
@@ -344,6 +350,62 @@ def images(task, files, op):
                 output = task.stage(task.destination(source), f'{source.stem}{suffix}.{ext}')
                 ready = fit(image, ext)
                 save_image(ready, output, ext, dpi, icc if ready.mode == image.mode else None)
+
+
+def line_art(image):
+    """A rendered page of only dark lines on white (drawing, text) becomes 1-bit; colour and photos stay."""
+    from PIL import ImageChops
+    rgb = image.convert('RGB')
+    red, green, blue = rgb.split()
+    spread = max(ImageChops.difference(a, b).getextrema()[1] for a, b in ((red, green), (green, blue), (red, blue)))
+    if spread > 24:
+        return rgb
+    gray = rgb.convert('L')
+    histogram = gray.histogram()
+    middle = sum(histogram[48:208]) / max(1, gray.width * gray.height)
+    # light threshold keeps thin anti-aliased lines; mid-tones only on edges mean no photo on the page
+    return gray.point(lambda value: 255 if value > 200 else 0, mode='1') if middle < 0.04 else gray
+
+
+def pdf_images(task, source, ext):
+    """PDF pages to images. Drawn by CursorPadOcr.exe --pdf (Windows.Data.Pdf) in its own process."""
+    from PIL import Image
+    Image.MAX_IMAGE_PIXELS = MAX_PIXELS
+    renderer = task.request.get('pdf_renderer')
+    if not renderer:
+        raise ValueError('Перевод PDF в картинки недоступен: нет модуля отрисовки')
+    count = len(pdf_reader(source, task.stack).pages)  # password and page limit in plain words first
+    dpi = int(task.request.get('pdf_dpi', PDF_DPI))
+    if not 72 <= dpi <= 600:
+        raise ValueError('DPI для PDF: от 72 до 600')
+    work = Path(task.stack.enter_context(tempfile.TemporaryDirectory(prefix='CursorPad-pdf-')))
+    command = ([renderer] if isinstance(renderer, str) else list(renderer)) + ['--pdf', str(source), str(work), str(dpi)]
+    listing = work / 'pages.txt'
+    with open(listing, 'w', encoding='utf-8') as out, open(work / 'errors.txt', 'w', encoding='utf-8') as err:
+        process = subprocess.Popen(command, stdout=out, stderr=err, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+        deadline = time.monotonic() + 60 + 30 * count
+        try:
+            while process.poll() is None:
+                task.check()
+                if time.monotonic() > deadline:
+                    raise ValueError(f'PDF рисуется слишком долго: {source.name}')
+                time.sleep(0.1)
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+    if process.returncode:
+        reason = (work / 'errors.txt').read_text(encoding='utf-8', errors='replace').strip()
+        raise ValueError(f'Не удалось отрисовать PDF {source.name}: {reason or process.returncode}')
+    pages = [line.split() for line in listing.read_text(encoding='utf-8').splitlines() if line.strip()]
+    if len(pages) != count or any(len(page) != 2 or Path(page[0]).name != page[0] for page in pages):
+        raise ValueError(f'PDF отрисован не полностью: {source.name}')
+    for number, (name, used) in enumerate(pages, 1):
+        task.check()
+        with Image.open(work / name) as image:
+            page = line_art(image)
+        target = f'{source.stem}.{ext}' if count == 1 else f'{source.stem}-стр-{number:03}.{ext}'
+        save_image(fit(page, ext), task.stage(task.destination(source), target), ext, (float(used), float(used)), None)
 
 
 def pdf_reader(path, stack):
