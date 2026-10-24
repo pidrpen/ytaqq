@@ -621,6 +621,54 @@ static int ai_cores(void) {
   return cores < 1 ? 1 : (cores > 16 ? 16 : cores);
 }
 
+/* Сколько слоёв модели влезет в свободную память видеокарты — llama-fit-params из той же
+   сборки llama.cpp считает так же, как сервер с -ngl auto, но заранее (секунды). Проектор
+   картинок в его расчёт не входит: его размер добавлен к запасу (сервер делает так же).
+   -1 — влезают все слои, -2 — не узнать (нет программы, не ответила). */
+#define AI_FIT_MIN_LAYERS 8 /* меньше — процессор быстрее: слои гоняются по шине (замер 24.10.2026) */
+static int ai_fit_layers(const wchar_t *exe, const wchar_t *model, const wchar_t *mm, int ctx, int np) {
+  wchar_t fit[MAX_PATH], cmd[MAX_PATH * 3 + 200], out[MAX_PATH];
+  lstrcpynW(fit, exe, MAX_PATH);
+  wchar_t *sl = wcsrchr(fit, L'\\');
+  if (!sl || (size_t)(sl - fit) + 24 >= MAX_PATH) return -2;
+  wcscpy(sl + 1, L"llama-fit-params.exe");
+  if (!ai_file_exists(fit)) return -2;
+  int margin = 1024 + (mm[0] ? (int)(ai_file_size(mm) >> 20) * 4 / 3 : 0);
+  _snwprintf(cmd, MAX_PATH * 3 + 200, L"\"%s\" -m \"%s\" -c %d -np %d -ngl auto -fitt %d", fit, model, ctx, np, margin);
+  cmd[MAX_PATH * 3 + 199] = 0;
+  ai_dir(out, L"fit.txt");
+  SECURITY_ATTRIBUTES sa = {sizeof(sa), NULL, TRUE};
+  HANDLE f = CreateFileW(out, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, CREATE_ALWAYS,
+                         FILE_ATTRIBUTE_TEMPORARY, NULL);
+  if (f == INVALID_HANDLE_VALUE) return -2;
+  STARTUPINFOW si;
+  PROCESS_INFORMATION pi;
+  memset(&si, 0, sizeof(si));
+  si.cb = sizeof(si);
+  si.dwFlags = STARTF_USESTDHANDLES;
+  si.hStdOutput = f; /* ответ — строка «-c 32768 -ngl 18»; журнал (stderr) не нужен */
+  int layers = -2;
+  if (CreateProcessW(fit, cmd, NULL, NULL, TRUE, CREATE_NO_WINDOW | CREATE_SUSPENDED, NULL, NULL, &si, &pi)) {
+    if (g_aiJob) AssignProcessToJobObject(g_aiJob, pi.hProcess);
+    ResumeThread(pi.hThread);
+    CloseHandle(pi.hThread);
+    if (WaitForSingleObject(pi.hProcess, 30000) != WAIT_OBJECT_0) TerminateProcess(pi.hProcess, 1);
+    CloseHandle(pi.hProcess);
+    char buf[512];
+    DWORD got = 0;
+    SetFilePointer(f, 0, NULL, FILE_BEGIN);
+    if (ReadFile(f, buf, sizeof(buf) - 1, &got, NULL)) {
+      buf[got] = 0;
+      const char *p = NULL;
+      for (const char *q = buf; (q = strstr(q, "-ngl ")) != NULL; q += 5) p = q;
+      if (p) layers = atoi(p + 5) < 0 ? -1 : atoi(p + 5);
+    }
+  }
+  CloseHandle(f);
+  DeleteFileW(out);
+  return layers;
+}
+
 /* последняя непустая строка журнала сервера — почему он не поднялся */
 static void ai_log_tail(const wchar_t *log, wchar_t *out, int cap) {
   out[0] = 0;
@@ -796,22 +844,36 @@ static int ai_server_ensure(DWORD deadline, volatile LONG *cancel, int minimumCo
   if (mm[0]) ai_short_path(mm);
   int rc = AI_NO_SERVER;
   g_aiSrvNote[0] = g_aiRunNote[0] = 0;
-  /* если модель не влезла, пробуем проще: без видеокарты, затем с малым контекстом */
-  int ngl = gpu ? 99 : 0, ctx = g_aiCtx * 2, np = 2, fail = -1;
+  /* если модель не влезла, пробуем проще: без видеокарты, затем с малым контекстом.
+     ngl -1 — «auto»: llama.cpp сам кладёт на видеокарту, сколько влезает, остальное считает
+     процессор. Раньше было 99 (всё на видеокарту): на 4 ГБ или при занятой другой программой
+     карте слои вытеснялись в общую память по шине — 3–4 токена в секунду вместо 90 */
+  int ngl = gpu ? -1 : 0, ctx = g_aiCtx * 2, np = 2, fail = -1;
+  BOOL mmCpu = FALSE; /* проектор картинок тоже на процессоре: на видеокарте нет и гигабайта */
   if (need) { ctx = g_aiCtx > need ? g_aiCtx : need; np = 1; }
   {
     int av, tot;
     ai_mem_mb(&av, &tot);
     ai_log(L"Память: свободно %d МБ из %d, модель %d МБ, контекст %d", av, tot, (int)(ai_file_size(model) >> 20), ctx);
   }
+  if (gpu) {
+    int fit = ai_fit_layers(exe, model, mm, ctx, np);
+    ai_log(L"Видеокарта: слоёв модели влезет %s%d", fit == -1 ? L"все " : fit == -2 ? L"? " : L"", fit < 0 ? 0 : fit);
+    if (fit >= 0 && fit < AI_FIT_MIN_LAYERS) {
+      ngl = 0;
+      mmCpu = fit == 0;
+      lstrcpynW(g_aiRunNote, L"видеокарта занята другими программами — модель идёт на процессоре", 200);
+    }
+  }
   for (int attempt = 0; attempt < 6 && rc != AI_OK; attempt++) {
     int port = AI_PORT0 + (attempt % 4) * 7;
     wchar_t cmd[MAX_PATH * 4 + 300], wkey[40];
     MultiByteToWideChar(CP_UTF8, 0, g_aiKey, -1, wkey, 40);
     int n = _snwprintf(cmd, MAX_PATH * 4 + 300,
-                       L"\"%s\" -m \"%s\" --host 127.0.0.1 --port %d --api-key %s -c %d -np %d -t %d -ngl %d",
-                       exe, model, port, wkey, ctx, np, ai_cores(), ngl);
-    if (mm[0] && n > 0) n += _snwprintf(cmd + n, MAX_PATH * 4 + 300 - n, L" --mmproj \"%s\"", mm);
+                       L"\"%s\" -m \"%s\" --host 127.0.0.1 --port %d --api-key %s -c %d -np %d -t %d -ngl %s",
+                       exe, model, port, wkey, ctx, np, ai_cores(), ngl ? L"auto" : L"0");
+    if (mm[0] && n > 0)
+      n += _snwprintf(cmd + n, MAX_PATH * 4 + 300 - n, L" --mmproj \"%s\"%s", mm, mmCpu ? L" --no-mmproj-offload" : L"");
     /* Qwen3 / Qwen3.5 default to thinking. Tool JSON has a small output budget, so
        reasoning must not consume that budget before the action is returned.
        Server default also covers QwenPaw's auxiliary checklist/audit calls. */
