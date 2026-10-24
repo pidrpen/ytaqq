@@ -22,6 +22,7 @@ static const AgDataTool kAgDataTools[] = {
   {L"plm_where_used", L"куда изделие входит по техсоставу (входимость); text — обозначение или IO.номер"},
   {L"archive_find", L"найти файлы и сканы чертежей в архиве (индекс files.json) по обозначению или словам; text — запрос; ответ — полные пути"},
   {L"plm_check", L"сверить с PLM «Союз» список обозначений и наименований: что есть, чего нет, где наименование другое; text — сам список (строка на позицию) или «буфер»; либо path — файл .xlsx/.docx/.csv/.txt или скан чертежа .tif/.png/.jpg (штамп и спецификация); ответ — готовый итог"},
+  {L"std_find", L"справочник стандартов на этом компьютере: размеры крепежа, сортамент и масса 1 м (с L= — масса заготовки), марки сталей, аналоги DIN/ISO↔ГОСТ; text — «болт М12 ГОСТ 7798», «круг 50 L=120», «40Х»; ответ — строки таблиц с источником"},
 };
 static BOOL ag_data_tool(const wchar_t *name) {
   for (size_t i = 0; i < sizeof(kAgDataTools) / sizeof(kAgDataTools[0]); i++)
@@ -599,6 +600,20 @@ static int ag_data_call(const AgJson *j, AgFs *fs, wchar_t *out, int cap, volati
   if (!ag_data_tool(name)) {
     lstrcpynW(out, L"Неизвестная команда CursorPad. Используй app name=capabilities; произвольные команды запрещены.", cap);
     return -1;
+  }
+  if (!wcscmp(name, L"std_find")) { /* таблицы стандартов — не данные завода: и для Z.ai */
+    if (!text[0]) {
+      lstrcpynW(out, L"std_find: нужен text — изделие, размер, марка или стандарт: «болт М12 ГОСТ 7798», «40Х».", cap);
+      return -1;
+    }
+    wchar_t *cite = NULL, why[600];
+    wchar_t *t = gs_answer(text, &cite, why, 600);
+    if (t) ag_fit(L"Справочник стандартов на этом компьютере (только чтение; числа — из таблиц, бери их дословно):\r\n", t, out, cap);
+    else swprintf(out, cap, L"%ls. Чисел из справочника нет — не называй размеры, состав и свойства по памяти, скажи об этом.", why);
+    *got = t != NULL;
+    free(t);
+    free(cite);
+    return 0;
   }
   if (g_aiProvider && !g_aiZaiPlm) {
     lstrcpynW(out, L"Данные PLM и архива не передаются в облачный Z.ai: разрешения нет (Настройки → ИИ → «Z.ai может читать PLM «Союз» и архив»). Скажи об этом пользователю; данных нет, не выдумывай их.", cap);

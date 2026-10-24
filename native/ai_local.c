@@ -253,6 +253,8 @@ static int g_aiPersona;
 /* Z.ai может получать данные PLM «Союз» и архива из инструментов ИИ — только
    если человек сам разрешил на вкладке «ИИ»; локальной модели можно всегда */
 static BOOL g_aiZaiPlm;
+/* папка справочника стандартов (std_files.c): «std_dir» в ai.txt; пусто — %USERPROFILE%\CursorPad-std */
+static wchar_t g_gsDir[MAX_PATH];
 
 /* ai.txt: строки «ключ значение», UTF-8 */
 static void ai_save(void) {
@@ -268,6 +270,11 @@ static void ai_save(void) {
     char se[MAX_PATH * 3];
     WideCharToMultiByte(CP_UTF8, 0, g_aiSrvExe, -1, se, sizeof(se), NULL, NULL);
     n += snprintf(buf + n, sizeof(buf) - n, "serverexe %s\r\n", se);
+  }
+  if (g_gsDir[0]) {
+    char sd[MAX_PATH * 3];
+    WideCharToMultiByte(CP_UTF8, 0, g_gsDir, -1, sd, sizeof(sd), NULL, NULL);
+    n += snprintf(buf + n, sizeof(buf) - n, "std_dir %s\r\n", sd);
   }
   if (ai_ext()) {
     char host[64];
@@ -308,6 +315,7 @@ static void ai_load(void) {
     else if (sscanf(line, "gpu %d", &v) == 1) g_aiGpu = v == 1;
     else if (!strncmp(line, "model ", 6)) MultiByteToWideChar(CP_UTF8, 0, line + 6, -1, g_aiModel, MAX_PATH);
     else if (!strncmp(line, "serverexe ", 10)) MultiByteToWideChar(CP_UTF8, 0, line + 10, -1, g_aiSrvExe, MAX_PATH);
+    else if (!strncmp(line, "std_dir ", 8)) MultiByteToWideChar(CP_UTF8, 0, line + 8, -1, g_gsDir, MAX_PATH);
     else if (!strncmp(line, "server ", 7)) {
       /* свой сервер с OpenAI-совместимым API: «server 127.0.0.1 11434 qwen3:4b» —
          Ollama или llama-server, запущенный руками. Только адреса этого компьютера:

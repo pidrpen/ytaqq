@@ -85,6 +85,8 @@ static BOOL ac_pc_start(const wchar_t *a);
 static void ac_pc_ready(WPARAM wp, LPARAM lp);
 static BOOL ac_pc_busy(void);
 static BOOL ac_pc_cancel(void);
+/* справочник стандартов без модели — ai_std.c */
+static BOOL ac_std_start(const wchar_t *a);
 static BOOL g_acRouting;
 static int g_acRouteDispatch; /* 0 classify, 1 file tools, 2 web, 3 ordinary reply */
 static BOOL ac_route_start(const wchar_t *q);
@@ -2103,6 +2105,7 @@ static wchar_t *ac_tp_build(const BYTE *png, DWORD len, const wchar_t *ask, NmLa
     out[n] = 0;
     if (pg->text) lstrcpynW(out + n, dr_tn_how(pg), 9000 - n), n += (int)wcslen(out + n);
     tn_text(r, out + n, 9000 - n);
+    gs_route_note(r, out, 9000);
     out = nm_append(out, r, pg->f[DF_MASS], ask);
     if (last) *last = nm_last_new(r, pg->f[DF_MASS], ask);
   } else if (out) {
@@ -2157,6 +2160,7 @@ static BOOL ac_tp_start(const wchar_t *a) {
       any = r->cls != TN_UNK || r->s.mat; /* в вопросе нет ни вида детали, ни материала — пусть ответит модель */
       if (any) {
         tn_text(r, txt, 9000);
+        gs_route_note(r, txt, 9000);
         txt = nm_append(txt, r, NULL, a); /* нормы — числа из вопроса: «L 120, масса 2,4» */
         nm_last_keep(nm_last_new(r, NULL, a));
         ac_push(0, a);
@@ -2274,6 +2278,12 @@ static void ac_send(void) {
     }
   }
   if ((ac_tp_wanted(a) || nm_ask_wanted(a)) && ac_tp_start(a)) {
+    SetWindowTextW(g_acIn, L"");
+    free(in);
+    return;
+  }
+  /* «болт М12 ГОСТ 7798», «свойства 40Х» — строки справочника стандартов, если они там есть */
+  if (!g_agPending && ac_std_start(a)) {
     SetWindowTextW(g_acIn, L"");
     free(in);
     return;
@@ -3282,3 +3292,4 @@ static void aichat_ask(const wchar_t *q) {
 #include "ai_files.c" /* команды для файлов: копировать, переместить, переименовать, создать папку */
 #include "ai_agent.c" /* составные файловые задачи с реальными наблюдениями и общим планом */
 #include "ai_plm_check.c" /* сверка списка, файла или чертежа с PLM «Союз» — без модели */
+#include "ai_std.c" /* вопросы о стандартных изделиях и материалах — строками справочника */

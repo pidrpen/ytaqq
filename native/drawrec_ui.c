@@ -510,6 +510,7 @@ static void dr_route_push(int i) {
     if (n < 0) n = 0;
     txt[n] = 0;
     tn_text(r, txt + n, 9000 - n);
+    gs_route_note(r, txt, 9000); /* заготовка и марка — по справочнику стандартов, если он есть */
     txt = nm_append(txt, r, pg->f[DF_MASS], NULL); /* нормы времени — если есть папка нормативов */
     nm_last_keep(nm_last_new(r, pg->f[DF_MASS], NULL));
     ac_route_show(txt);
