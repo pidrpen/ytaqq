@@ -95,18 +95,23 @@ static int cvx_lab(HINSTANCE instance) {
   if(dc_empty_accessible(icon,TRUE))return 45;
   DestroyWindow(probe);
   POINT start={500,400},end={550,430};MSG gesture;
+  /* пустое место стола: протянули с Shift — кольцо «Создать» у курсора, отпустили на плитке Word — создать Word */
   cv_gesture(start,TRUE,TRUE,FALSE,TRUE,TRUE);cv_gesture(end,TRUE,TRUE,FALSE,FALSE,FALSE);
-  if(IsWindowVisible(g_cvWnd)||!g_cvDesktopDragged)return 46;
-  cv_gesture(end,FALSE,TRUE,FALSE,FALSE,TRUE);
-  if(!PeekMessageW(&gesture,g_cvWnd,WM_CV_CREATE_MENU,WM_CV_CREATE_MENU,PM_REMOVE))return 47;
-  cv_gesture(end,FALSE,TRUE,FALSE,FALSE,TRUE);
-  if(PeekMessageW(&gesture,g_cvWnd,WM_CV_CREATE_MENU,WM_CV_CREATE_MENU,PM_REMOVE))return 48;
-  cv_gesture(start,TRUE,TRUE,FALSE,TRUE,TRUE);cv_gesture(end,TRUE,TRUE,FALSE,FALSE,FALSE);cv_gesture(end,FALSE,FALSE,FALSE,FALSE,TRUE);
-  if(PeekMessageW(&gesture,g_cvWnd,WM_CV_CREATE_MENU,WM_CV_CREATE_MENU,PM_REMOVE))return 49;
-  cv_gesture(start,TRUE,TRUE,FALSE,TRUE,TRUE);cv_gesture(end,TRUE,TRUE,FALSE,FALSE,FALSE);cv_gesture(end,FALSE,TRUE,TRUE,FALSE,TRUE);
-  if(PeekMessageW(&gesture,g_cvWnd,WM_CV_CREATE_MENU,WM_CV_CREATE_MENU,PM_REMOVE))return 50;
+  if(!IsWindowVisible(g_cvWnd)||!g_cvCreate||!g_cvDesktopDragged)return 46;
+  CvGeo ring=cv_geo(g_cvSize,1.0f);POINT word={g_cvAt.x+(LONG)ring.c,g_cvAt.y+(LONG)(ring.c+(ring.rin+ring.R)/2)};
+  cv_gesture(word,TRUE,TRUE,FALSE,FALSE,FALSE);cv_gesture(word,FALSE,TRUE,FALSE,FALSE,FALSE);
+  if(!PeekMessageW(&gesture,g_cvWnd,WM_CV_CREATE,WM_CV_CREATE,PM_REMOVE)||gesture.wParam!=3||IsWindowVisible(g_cvWnd))return 47;
+  cv_gesture(word,FALSE,TRUE,FALSE,FALSE,TRUE);
+  if(PeekMessageW(&gesture,g_cvWnd,WM_CV_CREATE,WM_CV_CREATE,PM_REMOVE))return 48;
+  /* без Shift, с Esc или в центре — ничего не создаётся */
+  cv_gesture(start,TRUE,TRUE,FALSE,TRUE,TRUE);cv_gesture(end,TRUE,TRUE,FALSE,FALSE,FALSE);cv_gesture(word,TRUE,TRUE,FALSE,FALSE,FALSE);cv_gesture(word,FALSE,FALSE,FALSE,FALSE,TRUE);
+  if(PeekMessageW(&gesture,g_cvWnd,WM_CV_CREATE,WM_CV_CREATE,PM_REMOVE))return 49;
+  cv_gesture(start,TRUE,TRUE,FALSE,TRUE,TRUE);cv_gesture(end,TRUE,TRUE,FALSE,FALSE,FALSE);cv_gesture(word,TRUE,TRUE,FALSE,FALSE,FALSE);cv_gesture(word,FALSE,TRUE,TRUE,FALSE,TRUE);
+  if(PeekMessageW(&gesture,g_cvWnd,WM_CV_CREATE,WM_CV_CREATE,PM_REMOVE))return 50;
+  cv_gesture(start,TRUE,TRUE,FALSE,TRUE,TRUE);cv_gesture(end,TRUE,TRUE,FALSE,FALSE,FALSE);cv_gesture(end,FALSE,TRUE,FALSE,FALSE,FALSE);
+  if(PeekMessageW(&gesture,g_cvWnd,WM_CV_CREATE,WM_CV_CREATE,PM_REMOVE)||IsWindowVisible(g_cvWnd))return 52;
   cv_gesture(start,TRUE,TRUE,FALSE,TRUE,FALSE);cv_gesture(end,TRUE,TRUE,FALSE,FALSE,FALSE);
-  if(!IsWindowVisible(g_cvWnd)||g_cvDesktopGesture)return 51;
+  if(!IsWindowVisible(g_cvWnd)||g_cvDesktopGesture||g_cvCreate)return 51;
   cv_hide();cv_gesture(end,FALSE,FALSE,FALSE,FALSE,FALSE);
   cv_shutdown();DestroyWindow(g_hwnd);
   swprintf(out,MAX_PATH,L"%ls\\passed.txt",g_dataDir);aq_write(out,"PASS: native controls -> JSON request -> pinned Python helper -> batch JPEG/resize/ZIP/PDF packet -> history -> guarded undo; no API or Office");

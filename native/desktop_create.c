@@ -40,24 +40,10 @@ static BOOL dc_create_at(const wchar_t *directory,int kind,wchar_t *out) {
   }
   out[0]=0;SetLastError(ERROR_FILE_EXISTS);return FALSE;
 }
-static HBITMAP cv_icon_bitmap(const wchar_t *path, BOOL folder, int px, BYTE **pixels); /* convert_ring.c */
-static int cv_monitor_dpi(POINT point);
-static void dc_menu(POINT point) {
-  HMENU menu=CreatePopupMenu();if(!menu)return;
-  AppendMenuW(menu,MF_STRING|MF_DISABLED,0,L"Создать на рабочем столе");AppendMenuW(menu,MF_SEPARATOR,0,NULL);
-  AppendMenuW(menu,MF_STRING,1,L"Папка");AppendMenuW(menu,MF_STRING,2,L"Текстовый файл (.txt)");
-  AppendMenuW(menu,MF_STRING,3,L"Документ Word (.docx)");AppendMenuW(menu,MF_STRING,4,L"Книга Excel (.xlsx)");
-  /* у каждого пункта — значок, как у такого файла в Проводнике (Word, Excel, Блокнот, папка) */
-  static const wchar_t *const kinds[]={L"Новая папка",L"a.txt",L"a.docx",L"a.xlsx"};HBITMAP icons[4]={0};
-  int px=MulDiv(16,cv_monitor_dpi(point),96);
-  for(int i=0;i<4;i++){
-    icons[i]=cv_icon_bitmap(kinds[i],i==0,px,NULL);if(!icons[i])continue;
-    MENUITEMINFOW item={sizeof(item)};item.fMask=MIIM_BITMAP;item.hbmpItem=icons[i];SetMenuItemInfoW(menu,i+1,FALSE,&item);
-  }
-  SetForegroundWindow(g_hwnd);
-  int choice=TrackPopupMenu(menu,TPM_RETURNCMD|TPM_RIGHTBUTTON,point.x,point.y,0,g_hwnd,NULL);
-  DestroyMenu(menu);for(int i=0;i<4;i++)if(icons[i])DeleteObject(icons[i]);
-  PostMessageW(g_hwnd,WM_NULL,0,0);if(!choice)return;
+/* выбор из кольца «Создать» (convert.c): 1 папка, 2 TXT, 3 Word, 4 Excel. Меню больше нет —
+   оно висело, пока на него не наведёшь; кольцо уходит само, как только отпущена мышь. */
+static void dc_create(int choice) {
+  if(choice<1||choice>4)return;
   wchar_t desktop[MAX_PATH],path[MAX_PATH],message[600];
   if(FAILED(SHGetFolderPathW(NULL,CSIDL_DESKTOPDIRECTORY,NULL,SHGFP_TYPE_CURRENT,desktop))) {
     show_status(L"Не удалось найти папку рабочего стола.");return;

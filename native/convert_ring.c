@@ -16,9 +16,10 @@ static UiTokens g_uiTok = {RGB(255, 255, 255), RGB(243, 244, 246), RGB(255, 255,
 
 #define CV_RING_BASE 360 /* сторона окна при 96 dpi; круг — без полей под тень */
 enum { CV_T_IMAGE, CV_T_PDF, CV_T_TEXT, CV_T_ZIP, CV_T_MORE };
-typedef struct { wchar_t icon; const wchar_t *label, *title, *note; int tint; } CvRingItem;
+/* shell — образец имени для значка из Проводника (кольцо «Создать»); folder — значок папки */
+typedef struct { wchar_t icon; const wchar_t *label, *title, *note; int tint; const wchar_t *shell; BOOL folder; } CvRingItem;
 /* по номерам действий: 0–3 картинки, 4 PDF, 5 TXT, 6 CSV, 7 ZIP, 8–14 окно параметров, 15 «Ещё» */
-static const CvRingItem kCvRing[20] = {
+static const CvRingItem kCvRing[24] = {
     {0xEB9F, L"PNG", L"В PNG", L"копия рядом с исходником", CV_T_IMAGE},
     {0xEB9F, L"JPG", L"В JPG", L"копия рядом с исходником", CV_T_IMAGE},
     {0xEB9F, L"BMP", L"В BMP", L"копия рядом с исходником", CV_T_IMAGE},
@@ -37,7 +38,12 @@ static const CvRingItem kCvRing[20] = {
     {0xE712, L"Ещё", L"Все действия", L"окно обработки файлов", CV_T_MORE},
     {0, NULL, NULL, NULL, 0}, {0, NULL, NULL, NULL, 0}, /* 16, 17 — отмена и «показать» истории */
     {0xE8C6, L"Разделить", L"Разделить TIFF", L"каждая страница — свой TIFF", CV_T_IMAGE},
-    {0xE7C4, L"Один TIFF", L"Один TIFF", L"порядок — в окне объединения", CV_T_IMAGE}};
+    {0xE7C4, L"Один TIFF", L"Один TIFF", L"порядок — в окне объединения", CV_T_IMAGE},
+    /* 20–23 — кольцо «Создать на рабочем столе» */
+    {0xE8B7, L"Папка", L"Новая папка", L"отпустите — появится на столе", CV_T_ZIP, L"Новая папка", TRUE},
+    {0xE8A5, L"TXT", L"Текстовый файл", L"отпустите — появится на столе", CV_T_MORE, L"a.txt", FALSE},
+    {0xE8A5, L"Word", L"Документ Word", L"отпустите — появится на столе", CV_T_TEXT, L"a.docx", FALSE},
+    {0xE80A, L"Excel", L"Книга Excel", L"отпустите — появится на столе", CV_T_TEXT, L"a.xlsx", FALSE}};
 static const COLORREF kCvTint[] = {RGB(8, 145, 178), RGB(220, 38, 38), RGB(22, 163, 74), RGB(217, 119, 6),
                                    RGB(100, 116, 139)};
 
@@ -346,6 +352,38 @@ static void cv_thumb_ready(CvThumb *t) {
   g_cvThumb = t;
 }
 
+/* значки плиток «Создать» — по образцу имени и размеру */
+static struct { const wchar_t *shell; int px; HBITMAP bmp; BYTE *pix; } g_cvKinds[8];
+static const BYTE *cv_kind_icon(const CvRingItem *it, int px) {
+  int slot = -1;
+  for (int i = 0; i < 8; i++) {
+    if (g_cvKinds[i].shell == it->shell && g_cvKinds[i].px == px) return g_cvKinds[i].pix;
+    if (slot < 0 && !g_cvKinds[i].bmp) slot = i;
+  }
+  if (slot < 0) slot = 0;
+  if (g_cvKinds[slot].bmp) DeleteObject(g_cvKinds[slot].bmp);
+  g_cvKinds[slot].pix = NULL;
+  g_cvKinds[slot].bmp = cv_icon_bitmap(it->shell, it->folder, px, &g_cvKinds[slot].pix);
+  g_cvKinds[slot].shell = it->shell, g_cvKinds[slot].px = px;
+  return g_cvKinds[slot].bmp ? g_cvKinds[slot].pix : NULL;
+}
+/* центр кольца «Создать»: что появится на столе (значок из Проводника) или подсказка */
+static void cv_hub_create(BYTE *pix, int size, HDC dc, CvGeo g, COLORREF ink, COLORREF muted) {
+  const CvRingItem *it = g_cvHover >= 0 ? &kCvRing[g_cvFormats[g_cvHover]] : NULL;
+  int ipx = (int)(44 * g.s + 0.5f);
+  const BYTE *icon = it ? cv_kind_icon(it, ipx) : NULL;
+  if (icon) cv_blit(pix, size, icon, ipx, ipx, (int)(g.c - ipx / 2.0f), (int)(g.c - 26 * g.s - ipx / 2.0f), 1.0f);
+  else if (g_cvFont[CV_F_ICON_BIG]) {
+    wchar_t plus = 0xE710;
+    cv_text(pix, size, dc, CV_F_ICON_BIG, &plus, 1, cv_box(g.c, g.c - 26 * g.s, 44 * g.s, 40 * g.s), DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+            g_uiTok.accent, 1.0f);
+  }
+  cv_text(pix, size, dc, CV_F_TITLE, it ? it->title : L"Создать", -1, cv_box(g.c, g.c + 8 * g.s, g.rhub * 1.7f, 22 * g.s),
+          DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS, ink, 1.0f);
+  cv_text(pix, size, dc, CV_F_SMALL, it ? it->note : L"наведите на плитку и отпустите мышь", -1, cv_box(g.c, g.c + 34 * g.s, g.rhub * 1.5f, 32 * g.s),
+          DT_CENTER | DT_WORDBREAK, muted, 1.0f);
+}
+
 static COLORREF cv_file_tint(const wchar_t *path) {
   const wchar_t *e = cv_extension(path);
   if (cv_image_type(path) >= 0) return kCvTint[CV_T_IMAGE];
@@ -481,10 +519,14 @@ static void cv_render(BYTE *pix, int size, HDC dc, DWORD now) {
     float cx = g.c + cosf(a) * rm, cy = g.c + sinf(a) * rm, w = rm * span * 0.92f;
     if (w > 96 * g.s) w = 96 * g.s;
     COLORREF on = cv_on_accent();
-    if (g_cvFont[CV_F_ICON])
+    int kpx = (int)((n <= 4 ? 32 : 24) * g.s + 0.5f); /* у четырёх больших плиток — крупнее */
+    const BYTE *kind = it->shell ? cv_kind_icon(it, kpx) : NULL;
+    if (kind) /* «Создать»: значок из Проводника, как у такого файла на столе */
+      cv_blit(pix, size, kind, kpx, kpx, (int)(cx - kpx / 2.0f), (int)(cy - (n <= 4 ? 13 : 10) * g.s - kpx / 2.0f), 1.0f);
+    else if (g_cvFont[CV_F_ICON])
       cv_text(pix, size, dc, CV_F_ICON, &it->icon, 1, cv_box(cx, cy - 10 * g.s, 30 * g.s, 26 * g.s),
               DT_CENTER | DT_VCENTER | DT_SINGLELINE, cv_mix(kCvTint[it->tint], on, l), 1.0f);
-    RECT lr = cv_box(cx, cy + (g_cvFont[CV_F_ICON] ? 12 : 0) * g.s, w, 18 * g.s);
+    RECT lr = cv_box(cx, cy + (it->shell && n <= 4 ? 16 : g_cvFont[CV_F_ICON] ? 12 : 0) * g.s, w, 18 * g.s);
     int font = CV_F_LABEL;
     SIZE ext;
     SelectObject(dc, g_cvFont[font]);
@@ -499,7 +541,9 @@ static void cv_render(BYTE *pix, int size, HDC dc, DWORD now) {
       cv_hub_say(pix, size, dc, g, 0xE7BA, kCvTint[CV_T_ZIP], L"Не вижу файлов", L"тяните файлы из папки или со стола", ink, muted);
     else cv_hub_say(pix, size, dc, g, 0, 0, g_cvPendingData ? L"Читаю файлы…" : L"Ведите сюда",
                     g_cvPendingData ? L"держите Shift" : L"не отпускайте мышь и Shift", ink, muted);
-  } else if (g_cvHover >= 0) {
+  } else if (g_cvCreate)
+    cv_hub_create(pix, size, dc, g, ink, muted);
+  else if (g_cvHover >= 0) {
     const CvRingItem *it = &kCvRing[g_cvFormats[g_cvHover]];
     BOOL pages = g_cvFormats[g_cvHover] < 4 && !_wcsicmp(cv_extension(g_cvPath), L"pdf"); /* PDF → картинки */
     cv_hub_say(pix, size, dc, g, it->icon, kCvTint[it->tint], it->title, pages ? L"каждая страница, 300 dpi" : it->note, ink, muted);
@@ -600,4 +644,8 @@ static void cv_ring_free(void) {
   g_cvIconBmp = NULL, g_cvIconPix = NULL, g_cvIconPx = 0;
   cv_thumb_ready(NULL);
   g_cvThumbWant[0] = 0;
+  for (int i = 0; i < 8; i++) {
+    if (g_cvKinds[i].bmp) DeleteObject(g_cvKinds[i].bmp);
+    g_cvKinds[i].bmp = NULL, g_cvKinds[i].pix = NULL, g_cvKinds[i].shell = NULL;
+  }
 }

@@ -99,6 +99,9 @@ static int preview(const wchar_t *dir, int dpi) {
       preview_shot(dir, L"5b-tiffs", t); }
     preview_select(word, 1); g_cvInHub = TRUE; preview_shot(dir, L"6-word-center", t);
     preview_select(other, 1); preview_shot(dir, L"7-other", t);
+    g_cvCreate = TRUE; g_cvCount = 4; for (int i = 0; i < 4; i++) g_cvFormats[i] = 20 + i;
+    g_cvHover = -1; memset(g_cvLevel, 0, sizeof(g_cvLevel)); preview_shot(dir, L"11-desktop", t);
+    g_cvHover = 2; g_cvLevel[2] = 1; preview_shot(dir, L"12-desktop-word", t); g_cvCreate = FALSE;
     /* ожидание файлов: огонёк, затем объяснение; одни папки */
     g_cvCount = 0; g_cvSelection.count = 0; g_cvPath[0] = 0; g_cvHover = -1; g_cvInHub = FALSE; g_cvRead = CV_READ_FAILED;
     g_cvPendingData = (IDataObject *)1; g_cvEnteredAt = GetTickCount(); preview_shot(dir, L"8-reading", t);
@@ -114,7 +117,7 @@ int wmain(int argc, wchar_t **argv) {
   RegisterClassW(&klass); g_hwnd=CreateWindowW(klass.lpszClassName,L"test",WS_OVERLAPPEDWINDOW,0,0,100,100,NULL,NULL,g_inst,NULL);
   cv_init(); if (!g_cvRegistered) return 3;
   wchar_t path[MAX_PATH]; GetFullPathNameW(argv[1],MAX_PATH,path,NULL);
-  FakeData data={{&data_vtable},path,FALSE,1}; POINT show={450,300}; cv_show(show);
+  FakeData data={{&data_vtable},path,FALSE,1}; POINT show={450,300}; cv_show(show,FALSE);
   if(GetUpdateRect(g_cvWnd,NULL,FALSE))return 10;
   CvGeo geo = cv_geo(g_cvSize, 1.0f); POINTL center={g_cvAt.x+(LONG)geo.c,g_cvAt.y+(LONG)geo.c};
   DWORD effect=DROPEFFECT_COPY|DROPEFFECT_MOVE;
@@ -160,7 +163,18 @@ int wmain(int argc, wchar_t **argv) {
     MSG msg; while (PeekMessageW(&msg,NULL,0,0,PM_REMOVE)) { TranslateMessage(&msg); DispatchMessageW(&msg); } Sleep(10);
   }
   BOOL ok=!g_cvBusy && g_cvLast[0] && GetFileAttributesW(g_cvLast)!=INVALID_FILE_ATTRIBUTES;
+  /* рабочий стол: Shift и протянуть по пустому месту — кольцо «Создать»; отпустить на плитке Word — создать Word */
+  cv_hide(); g_cvDown=FALSE; POINT p0={600,400}, p1={640,400};
+  cv_gesture(p0,TRUE,TRUE,FALSE,FALSE,TRUE); cv_gesture(p1,TRUE,TRUE,FALSE,FALSE,FALSE);
+  if (!IsWindowVisible(g_cvWnd) || !g_cvCreate || g_cvCount!=4) return 18;
+  CvGeo ring=cv_geo(g_cvSize,1.0f); POINT word={g_cvAt.x+(LONG)ring.c,g_cvAt.y+(LONG)(ring.c+(ring.rin+ring.R)/2)};
+  cv_gesture(word,TRUE,TRUE,FALSE,FALSE,FALSE); if (g_cvHover!=2) return 19;
+  cv_gesture(word,FALSE,TRUE,FALSE,FALSE,FALSE);
+  MSG made; if (!PeekMessageW(&made,g_cvWnd,WM_CV_CREATE,WM_CV_CREATE,PM_REMOVE) || made.wParam!=3 || IsWindowVisible(g_cvWnd)) return 20;
+  /* отпустили в центре — ничего не создаётся, кольцо уходит само */
+  cv_gesture(p0,TRUE,TRUE,FALSE,FALSE,TRUE); cv_gesture(p1,TRUE,TRUE,FALSE,FALSE,FALSE); cv_gesture(p1,FALSE,TRUE,FALSE,FALSE,FALSE);
+  if (PeekMessageW(&made,g_cvWnd,WM_CV_CREATE,WM_CV_CREATE,PM_REMOVE) || IsWindowVisible(g_cvWnd)) return 21;
   cv_shutdown(); DestroyWindow(g_hwnd);
-  puts(ok ? "PASS: OLE registration, delayed CF_HDROP retry without re-click, immediate paint, center cancellation, Shift, multiple-file selection, folder-only selection, Shift-click range kept, COPY effect, threaded conversion" : "FAIL: conversion");
+  puts(ok ? "PASS: OLE registration, delayed CF_HDROP retry without re-click, immediate paint, center cancellation, Shift, multiple-file selection, folder-only selection, Shift-click range kept, desktop create ring, COPY effect, threaded conversion" : "FAIL: conversion");
   return ok ? 0 : 9;
 }

@@ -6,13 +6,13 @@
 #endif
 #define TIMER_CONVERT 1739
 #define WM_CONVERT_DONE (WM_APP + 139)
-#define WM_CV_CREATE_MENU (WM_APP + 141)
+#define WM_CV_CREATE (WM_APP + 141) /* wParam — что создать на рабочем столе: 1 папка, 2 TXT, 3 Word, 4 Excel */
 #define WM_CV_TIFF_MERGE (WM_APP + 142) /* lParam — CvSelection*: в окно «Объединение TIFF / PDF» */
 static HWND g_cvWnd;
 static BOOL g_cvOle, g_cvRegistered, g_cvWord, g_cvExcel;
 static BOOL g_cvDown, g_cvSource, g_cvDismissed;
 static BOOL g_cvDesktopGesture,g_cvDesktopDragged;
-static POINT g_cvCreatePoint;
+static BOOL g_cvCreate; /* кольцо «Создать» на пустом месте рабочего стола, без перетаскивания файлов */
 static POINT g_cvOrigin;
 static DWORD g_cvReleased;
 static volatile LONG g_cvBusy;
@@ -33,7 +33,7 @@ static void cv_pending_clear(void) { if(g_cvPendingData){g_cvPendingData->lpVtbl
 #include "convert_ring.c" /* вид кольца: прозрачное окно, плитки, центр */
 #include "convert_select.c" /* выделение Проводника на миг нажатия Shift */
 static void cv_redraw(void) { if(g_cvWnd&&IsWindowVisible(g_cvWnd))cv_paint(); }
-static void cv_hide(void) { cv_pending_clear();if (g_cvWnd) ShowWindow(g_cvWnd, SW_HIDE); g_cvHover = -1;g_cvInHub=FALSE; }
+static void cv_hide(void) { cv_pending_clear();if (g_cvWnd) ShowWindow(g_cvWnd, SW_HIDE); g_cvHover = -1;g_cvInHub=FALSE;g_cvCreate=FALSE; }
 static void cv_reveal(void) {
   if (!g_cvLast[0]) return;
   wchar_t args[MAX_PATH + 40]; swprintf(args, MAX_PATH + 40, L"/select,\"%ls\"", g_cvLast);
@@ -85,9 +85,12 @@ static int cv_hit(POINT point) {
   while (angle < 0) angle += 6.283185307179586;
   return (int)(angle * g_cvCount / 6.283185307179586) % g_cvCount;
 }
-static void cv_show(POINT point) {
+/* create — кольцо «Создать на рабочем столе» (папка, TXT, Word, Excel); иначе ждёт файлы от Проводника */
+static void cv_show(POINT point, BOOL create) {
   cv_pending_clear();g_cvSelection.count=0;g_cvPath[0] = 0; g_cvCount = 0; g_cvHover = -1;g_cvInHub=FALSE;g_cvRead=CV_READ_WAIT;g_cvSkipped=0;
   memset(g_cvLevel,0,sizeof(g_cvLevel));
+  g_cvCreate=create;
+  for (int i=0;create && i<4;i++) g_cvFormats[g_cvCount++]=20+i;
   g_cvDpi = cv_monitor_dpi(point); g_cvSize = MulDiv(CV_RING_BASE, g_cvDpi, 96);
   HMONITOR monitor = MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST);
   MONITORINFO info = {sizeof(info)}; GetMonitorInfoW(monitor, &info);
@@ -107,9 +110,9 @@ static void cv_gesture(POINT point,BOOL down,BOOL shift,BOOL escape,BOOL source,
   }
   g_cvDown = down;
   if (!down) {
-    if(g_cvDesktopDragged&&!g_cvDismissed&&shift&&!escape&&emptyDesktop&&!g_cvBusy) {
-      g_cvCreatePoint=point;PostMessageW(g_cvWnd,WM_CV_CREATE_MENU,0,0);
-    }
+    /* рабочий стол: отпустили на плитке, держа Shift, — создать; в центре или без Shift — ничего */
+    if(g_cvCreate&&!g_cvDismissed&&shift&&!escape&&g_cvHover>=0) PostMessageW(g_cvWnd,WM_CV_CREATE,(WPARAM)(g_cvFormats[g_cvHover]-19),0);
+    if(g_cvCreate) cv_hide(); /* здесь нет сброса OLE, ждать нечего */
     g_cvDesktopGesture=FALSE;g_cvDesktopDragged=FALSE;
     if (!g_cvReleased) g_cvReleased = GetTickCount();
     /* Let an in-flight OLE Drop arrive before hiding the target. */
@@ -118,8 +121,15 @@ static void cv_gesture(POINT point,BOOL down,BOOL shift,BOOL escape,BOOL source,
   }
   if (escape) { cv_hide(); g_cvDismissed = TRUE;g_cvDesktopGesture=FALSE;g_cvDesktopDragged=FALSE;return; }
   if (!shift || g_cvBusy) { cv_hide();g_cvDesktopGesture=FALSE;g_cvDesktopDragged=FALSE;return; }
-  if(g_cvDesktopGesture) {
-    if(abs(point.x-g_cvOrigin.x)>GetSystemMetrics(SM_CXDRAG)+8||abs(point.y-g_cvOrigin.y)>GetSystemMetrics(SM_CYDRAG)+8)g_cvDesktopDragged=TRUE;
+  if(g_cvDesktopGesture) { /* пустое место стола: протянули — кольцо «Создать» у курсора */
+    if(!g_cvDesktopDragged) {
+      if(abs(point.x-g_cvOrigin.x)>GetSystemMetrics(SM_CXDRAG)+8||abs(point.y-g_cvOrigin.y)>GetSystemMetrics(SM_CYDRAG)+8){g_cvDesktopDragged=TRUE;cv_show(point,TRUE);}
+    } else if(g_cvCreate && IsWindowVisible(g_cvWnd)) {
+      RECT r; GetWindowRect(g_cvWnd, &r); InflateRect(&r, 45, 45);
+      if (!PtInRect(&r, point)) { cv_hide(); g_cvDismissed = TRUE; return; }
+      BOOL hub=g_cvInHub; int hover=cv_hit(point); /* мышь у стола, а не у кольца, — наведение по таймеру */
+      if(hover!=g_cvHover||hub!=g_cvInHub){g_cvHover=hover;cv_redraw();}
+    }
     return;
   }
   if (IsWindowVisible(g_cvWnd)) {
@@ -129,7 +139,7 @@ static void cv_gesture(POINT point,BOOL down,BOOL shift,BOOL escape,BOOL source,
   }
   if (!g_cvDismissed && g_cvSource &&
       (abs(point.x - g_cvOrigin.x) > GetSystemMetrics(SM_CXDRAG) + 8 ||
-       abs(point.y - g_cvOrigin.y) > GetSystemMetrics(SM_CYDRAG) + 8)) cv_show(point);
+       abs(point.y - g_cvOrigin.y) > GetSystemMetrics(SM_CYDRAG) + 8)) cv_show(point,FALSE);
 }
 static void cv_tick(void) {
   if(!g_cvRegistered)return;
@@ -138,7 +148,7 @@ static void cv_tick(void) {
   POINT point;GetCursorPos(&point);BOOL down=(GetAsyncKeyState(VK_LBUTTON)&0x8000)!=0;
   BOOL shift=(GetAsyncKeyState(VK_SHIFT)&0x8000)!=0,empty=FALSE;
 #ifndef CV_RING_TEST
-  if(shift&&((down&&!g_cvDown)||(!down&&g_cvDesktopDragged)))empty=dc_empty_desktop(point);
+  if(shift&&down&&!g_cvDown)empty=dc_empty_desktop(point);
 #endif
   BOOL source=down&&!g_cvDown?cv_explorer_at(point):FALSE;
   cv_snap_track(down,shift,point);
@@ -259,7 +269,7 @@ static IDropTargetVtbl g_cvVtbl = {cv_query, cv_addref, cv_release, cv_enter, cv
 static CvDrop g_cvDrop = {{&g_cvVtbl}, 1};
 static LRESULT CALLBACK cv_proc(HWND hwnd, UINT message, WPARAM wp, LPARAM lp) {
 #ifndef CV_RING_TEST
-  if(message==WM_CV_CREATE_MENU){dc_menu(g_cvCreatePoint);return 0;}
+  if(message==WM_CV_CREATE){dc_create((int)wp);return 0;}
   if(message==WM_CV_TIFF_MERGE){ /* уже после сброса: окно с вопросом не держит Проводник */
     CvSelection *s=(CvSelection*)lp;wchar_t name[MAX_PATH];const wchar_t *slash=wcsrchr(s->paths[0],L'\\');
     lstrcpynW(name,slash?slash+1:s->paths[0],MAX_PATH);wchar_t *dot=wcsrchr(name,L'.');if(dot)*dot=0;
