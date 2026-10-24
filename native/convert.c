@@ -206,7 +206,10 @@ static void cv_read_pending(void) {
   if(!g_cvPendingData)return;
   g_cvDataAttempt=GetTickCount();
   g_cvRead=cv_data(g_cvPendingData,&g_cvSelection,&g_cvSkipped);
-  if(g_cvRead==CV_READ_OK){cv_snap_apply();lstrcpynW(g_cvPath,g_cvSelection.paths[0],MAX_PATH);cv_menu_formats();}
+  if(g_cvRead==CV_READ_OK){
+    cv_snap_apply();lstrcpynW(g_cvPath,g_cvSelection.paths[0],MAX_PATH);cv_menu_formats();
+    cv_thumb_request(g_cvPath,MulDiv(58,g_cvSize,CV_RING_BASE)); /* миниатюра в центр — своим потоком */
+  }
   /* не прочиталось — повторим в DragOver: проводник может отдать список позже */
   if(g_cvRead!=CV_READ_FAILED)cv_pending_clear();
   cv_redraw();
@@ -263,6 +266,7 @@ static LRESULT CALLBACK cv_proc(HWND hwnd, UINT message, WPARAM wp, LPARAM lp) {
     tm_open_pack(s->paths,s->count,name);free(s);return 0;
   }
 #endif
+  if (message == WM_CV_THUMB) { cv_thumb_ready((CvThumb *)lp); cv_redraw(); return 0; }
   if (message == WM_MOUSEACTIVATE) return MA_NOACTIVATE;
   return DefWindowProcW(hwnd,message,wp,lp);
 }

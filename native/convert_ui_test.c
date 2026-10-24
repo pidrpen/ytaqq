@@ -146,7 +146,13 @@ int wmain(int argc, wchar_t **argv) {
   data.multiple=FALSE; effect=DROPEFFECT_COPY|DROPEFFECT_MOVE;
   cv_enter(&g_cvDrop.iface,&data.iface,MK_SHIFT,sector,&effect); if (effect != DROPEFFECT_COPY) return 7;
   if(GetUpdateRect(g_cvWnd,NULL,FALSE))return 13;
-  capture(argv[2]);
+  /* миниатюра первого файла приходит своим потоком (WM_CV_THUMB) */
+  for (DWORD started=GetTickCount(); !g_cvThumb && GetTickCount()-started<5000;) {
+    MSG msg; while (PeekMessageW(&msg,NULL,0,0,PM_REMOVE)) { TranslateMessage(&msg); DispatchMessageW(&msg); } Sleep(10);
+  }
+  if (!g_cvThumb || _wcsicmp(g_cvThumb->path,path)) return 17;
+  int hover=g_cvHover; g_cvHover=-1; memset(g_cvLevel,0,sizeof(g_cvLevel)); cv_paint(); /* снимок — с карточкой файла в центре */
+  capture(argv[2]); g_cvHover=hover;
   effect=DROPEFFECT_COPY|DROPEFFECT_MOVE; cv_drop(&g_cvDrop.iface,&data.iface,MK_SHIFT,sector,&effect);
   if (effect != DROPEFFECT_COPY) return 8;
   DWORD started=GetTickCount();

@@ -12,6 +12,8 @@ static UiTokens g_uiTok = {RGB(255, 255, 255), RGB(243, 244, 246), RGB(255, 255,
                            RGB(107, 114, 128), RGB(226, 229, 233), RGB(37, 99, 235)};
 #endif
 
+#include <commctrl.h> /* ImageList_GetIcon */
+
 #define CV_RING_BASE 360 /* сторона окна при 96 dpi; круг — без полей под тень */
 enum { CV_T_IMAGE, CV_T_PDF, CV_T_TEXT, CV_T_ZIP, CV_T_MORE };
 typedef struct { wchar_t icon; const wchar_t *label, *title, *note; int tint; } CvRingItem;
@@ -156,6 +158,194 @@ static void cv_rrect(BYTE *pix, int size, float x0, float y0, float x1, float y1
     }
 }
 
+/* ---- значки типов файлов — те же, что в Проводнике --------------------------
+   Из системного списка значков (SHGetImageList) по расширению: файл не читается
+   (SHGFI_USEFILEATTRIBUTES), поэтому быстро и для ещё не созданных файлов
+   (меню «Создать на рабочем столе»). Результат — DIB px×px, premultiplied BGRA:
+   так его берут и меню (hbmpItem), и прозрачное окно кольца. */
+static const GUID kCvIID_ImageList = {0x46eb5926, 0x582e, 0x4017, {0x9f, 0xdf, 0xe8, 0x99, 0x8d, 0xaa, 0x09, 0x50}};
+static HBITMAP cv_icon_bitmap(const wchar_t *path, BOOL folder, int px, BYTE **pixels) {
+  SHFILEINFOW info;
+  memset(&info, 0, sizeof(info));
+  if (px < 8 || px > 512 ||
+      !SHGetFileInfoW(path, folder ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL, &info, sizeof(info), SHGFI_SYSICONINDEX | SHGFI_USEFILEATTRIBUTES))
+    return NULL;
+  BITMAPINFO bi;
+  memset(&bi, 0, sizeof(bi));
+  bi.bmiHeader.biSize = sizeof(bi.bmiHeader);
+  bi.bmiHeader.biWidth = px;
+  bi.bmiHeader.biHeight = -px;
+  bi.bmiHeader.biPlanes = 1;
+  bi.bmiHeader.biBitCount = 32;
+  BYTE *bits = NULL;
+  HBITMAP bitmap = CreateDIBSection(NULL, &bi, DIB_RGB_COLORS, (void **)&bits, NULL, 0);
+  HDC dc = bitmap ? CreateCompatibleDC(NULL) : NULL;
+  if (!dc) {
+    if (bitmap) DeleteObject(bitmap);
+    return NULL;
+  }
+  HGDIOBJ old = SelectObject(dc, bitmap);
+  /* размер списка — ближайший не меньше; «огромный» список у части типов держит лишь 48 px в углу — тогда 48, растянутый */
+  int lists[2] = {px <= 16 ? SHIL_SMALL : px <= 32 ? SHIL_LARGE : px <= 48 ? SHIL_EXTRALARGE : SHIL_JUMBO, SHIL_EXTRALARGE};
+  BOOL ok = FALSE;
+  for (int attempt = 0; attempt < 2 && !ok; attempt++) {
+    memset(bits, 0, (size_t)px * px * 4);
+    IUnknown *images = NULL;
+    if (FAILED(SHGetImageList(lists[attempt], &kCvIID_ImageList, (void **)&images)) || !images) continue;
+    HICON icon = ImageList_GetIcon((HIMAGELIST)images, info.iIcon, ILD_TRANSPARENT);
+    images->lpVtbl->Release(images);
+    if (!icon) continue;
+    DrawIconEx(dc, 0, 0, icon, px, px, 0, NULL, DI_NORMAL);
+    GdiFlush();
+    DestroyIcon(icon);
+    int right = -1, bottom = -1, alpha = 0;
+    for (int y = 0; y < px; y++)
+      for (int x = 0; x < px; x++)
+        if (bits[((size_t)y * px + x) * 4 + 3]) { alpha = 1; if (x > right) right = x; if (y > bottom) bottom = y; }
+    if (!alpha) /* старый значок без альфы: непрозрачно там, где есть цвет */
+      for (size_t i = 0; i < (size_t)px * px; i++) {
+        BYTE *p = bits + i * 4;
+        if (p[0] | p[1] | p[2]) { p[3] = 255; alpha = 1; right = px - 1; bottom = px - 1; }
+      }
+    ok = alpha && (lists[attempt] != SHIL_JUMBO || (right >= px * 6 / 10 && bottom >= px * 6 / 10));
+  }
+  SelectObject(dc, old);
+  DeleteDC(dc);
+  if (!ok) {
+    DeleteObject(bitmap);
+    return NULL;
+  }
+  if (pixels) *pixels = bits;
+  return bitmap;
+}
+/* премультиплицированный значок поверх кадра, с общей прозрачностью alpha */
+static void cv_blit(BYTE *pix, int size, const BYTE *src, int w, int h, int x0, int y0, float alpha) {
+  for (int y = 0; y < h; y++) {
+    if (y0 + y < 0 || y0 + y >= size) continue;
+    for (int x = 0; x < w; x++) {
+      if (x0 + x < 0 || x0 + x >= size) continue;
+      const BYTE *s = src + ((size_t)y * w + x) * 4;
+      if (!s[3]) continue;
+      BYTE *d = pix + ((size_t)(y0 + y) * size + x0 + x) * 4;
+      float a = s[3] / 255.0f * alpha, k = 1.0f - a;
+      for (int c = 0; c < 3; c++) d[c] = (BYTE)(s[c] * alpha + d[c] * k + 0.5f);
+      d[3] = (BYTE)(255.0f * a + d[3] * k + 0.5f);
+    }
+  }
+}
+static HBITMAP g_cvIconBmp; /* значок центра — до смены расширения или размера */
+static BYTE *g_cvIconPix;
+static wchar_t g_cvIconExt[16];
+static int g_cvIconPx;
+static const BYTE *cv_hub_icon(const wchar_t *path, int px) {
+  const wchar_t *ext = cv_extension(path);
+  if (g_cvIconPx == px && !_wcsicmp(g_cvIconExt, ext)) return g_cvIconPix;
+  if (g_cvIconBmp) DeleteObject(g_cvIconBmp);
+  g_cvIconPix = NULL;
+  g_cvIconBmp = cv_icon_bitmap(path, FALSE, px, &g_cvIconPix);
+  lstrcpynW(g_cvIconExt, ext, 16);
+  g_cvIconPx = px;
+  return g_cvIconBmp ? g_cvIconPix : NULL;
+}
+
+/* ---- миниатюра первого файла: сам чертёж или картинка, как в Проводнике ----
+   Достаёт IShellItemImageFactory в своём потоке: несжатый TIFF A0 читается
+   заметное время, а перетаскивание ждать не должно. Пока миниатюры нет — значок
+   типа. Готовая приходит сообщением WM_CV_THUMB окну кольца. */
+#define WM_CV_THUMB (WM_APP + 143)
+static const GUID kCvIID_ImageFactory = {0xbcc18b79, 0xba16, 0x442f, {0x80, 0xc4, 0x8a, 0x59, 0xc3, 0x0c, 0x46, 0x3b}};
+typedef struct { wchar_t path[MAX_PATH]; int px, w, h; BYTE *pixels; } CvThumb;
+static CvThumb *g_cvThumb;            /* готовая, premultiplied BGRA w×h */
+static wchar_t g_cvThumbWant[MAX_PATH]; /* для какого файла уже просили */
+static volatile LONG g_cvThumbBusy;
+static DWORD WINAPI cv_thumb_thread(void *parameter) {
+  CvThumb *t = (CvThumb *)parameter;
+  if (SUCCEEDED(CoInitializeEx(NULL, COINIT_APARTMENTTHREADED))) {
+    IShellItemImageFactory *factory = NULL;
+    HBITMAP bitmap = NULL;
+    if (SUCCEEDED(SHCreateItemFromParsingName(t->path, NULL, &kCvIID_ImageFactory, (void **)&factory)) && factory) {
+      SIZE want = {t->px, t->px};
+      factory->lpVtbl->GetImage(factory, want, SIIGBF_THUMBNAILONLY, &bitmap);
+      factory->lpVtbl->Release(factory);
+    }
+    BITMAP info;
+    if (bitmap && GetObjectW(bitmap, sizeof(info), &info) && info.bmWidth > 0 && info.bmHeight > 0 && info.bmWidth <= 1024 &&
+        info.bmHeight <= 1024 && (t->pixels = (BYTE *)malloc((size_t)info.bmWidth * info.bmHeight * 4)) != NULL) {
+      BITMAPINFO bi;
+      memset(&bi, 0, sizeof(bi));
+      bi.bmiHeader.biSize = sizeof(bi.bmiHeader);
+      bi.bmiHeader.biWidth = t->w = info.bmWidth;
+      bi.bmiHeader.biHeight = -(t->h = info.bmHeight);
+      bi.bmiHeader.biPlanes = 1;
+      bi.bmiHeader.biBitCount = 32;
+      HDC dc = GetDC(NULL);
+      BOOL read = GetDIBits(dc, bitmap, 0, (UINT)t->h, t->pixels, &bi, DIB_RGB_COLORS) == t->h;
+      ReleaseDC(NULL, dc);
+      size_t n = (size_t)t->w * t->h;
+      BOOL alpha = FALSE, straight = FALSE;
+      for (size_t i = 0; read && i < n; i++) {
+        BYTE *p = t->pixels + i * 4;
+        if (p[3]) alpha = TRUE;
+        if (p[0] > p[3] || p[1] > p[3] || p[2] > p[3]) straight = TRUE;
+      }
+      for (size_t i = 0; read && i < n; i++) { /* без альфы — непрозрачная; прямая альфа — домножить */
+        BYTE *p = t->pixels + i * 4;
+        if (!alpha) p[3] = 255;
+        else if (straight)
+          for (int c = 0; c < 3; c++) p[c] = (BYTE)(p[c] * p[3] / 255);
+      }
+      /* Shell может отдать квадрат с прозрачными полями — оставить только саму картинку */
+      int left = t->w, top = t->h, right = -1, bottom = -1;
+      for (int y = 0; read && y < t->h; y++)
+        for (int x = 0; x < t->w; x++)
+          if (t->pixels[((size_t)y * t->w + x) * 4 + 3]) {
+            if (x < left) left = x;
+            if (x > right) right = x;
+            if (y < top) top = y;
+            if (y > bottom) bottom = y;
+          }
+      if (read && right >= left && (left > 0 || top > 0 || right < t->w - 1 || bottom < t->h - 1)) {
+        int w = right - left + 1, h = bottom - top + 1;
+        for (int y = 0; y < h; y++) memmove(t->pixels + (size_t)y * w * 4, t->pixels + ((size_t)(y + top) * t->w + left) * 4, (size_t)w * 4);
+        t->w = w, t->h = h;
+      }
+      if (!read || right < left) {
+        free(t->pixels);
+        t->pixels = NULL;
+      }
+    }
+    if (bitmap) DeleteObject(bitmap);
+    CoUninitialize();
+  }
+  if (!t->pixels || !g_cvWnd || !PostMessageW(g_cvWnd, WM_CV_THUMB, 0, (LPARAM)t)) {
+    free(t->pixels);
+    free(t);
+  }
+  InterlockedExchange(&g_cvThumbBusy, 0);
+  return 0;
+}
+static void cv_thumb_request(const wchar_t *path, int px) {
+  if (!path[0] || !_wcsicmp(g_cvThumbWant, path) || InterlockedCompareExchange(&g_cvThumbBusy, 1, 0)) return;
+  CvThumb *t = (CvThumb *)calloc(1, sizeof(*t));
+  HANDLE thread = NULL;
+  if (t) {
+    lstrcpynW(t->path, path, MAX_PATH);
+    t->px = px;
+    thread = CreateThread(NULL, 0, cv_thumb_thread, t, 0, NULL);
+  }
+  if (thread) {
+    CloseHandle(thread);
+    lstrcpynW(g_cvThumbWant, path, MAX_PATH);
+  } else {
+    free(t);
+    InterlockedExchange(&g_cvThumbBusy, 0);
+  }
+}
+static void cv_thumb_ready(CvThumb *t) {
+  if (g_cvThumb) free(g_cvThumb->pixels), free(g_cvThumb);
+  g_cvThumb = t;
+}
+
 static COLORREF cv_file_tint(const wchar_t *path) {
   const wchar_t *e = cv_extension(path);
   if (cv_image_type(path) >= 0) return kCvTint[CV_T_IMAGE];
@@ -170,16 +360,32 @@ static COLORREF cv_file_tint(const wchar_t *path) {
 static void cv_hub_file(BYTE *pix, int size, HDC dc, CvGeo g, COLORREF ink, COLORREF muted) {
   const wchar_t *path = g_cvSelection.count ? g_cvSelection.paths[0] : g_cvPath;
   COLORREF tint = cv_file_tint(path);
-  float w = 32 * g.s, h = 40 * g.s, x0 = g.c - w / 2, y0 = g.c - 46 * g.s;
-  if (g_cvSelection.count > 1) /* стопка: второй листок позади */
-    cv_rrect(pix, size, x0 + 5 * g.s, y0 - 4 * g.s, x0 + w + 5 * g.s, y0 + h - 4 * g.s, 5 * g.s, cv_mix(tint, g_uiTok.surface, 0.55f), 1.0f);
-  cv_rrect(pix, size, x0, y0, x0 + w, y0 + h, 5 * g.s, tint, 1.0f);
-  cv_rrect(pix, size, x0 + w - 11 * g.s, y0, x0 + w, y0 + 11 * g.s, 3 * g.s, cv_mix(tint, RGB(255, 255, 255), 0.45f), 1.0f); /* загнутый угол */
-  wchar_t ext[8];
-  lstrcpynW(ext, cv_extension(path), 6);
-  CharUpperW(ext);
-  cv_text(pix, size, dc, CV_F_BADGE, ext[0] ? ext : L"?", -1, cv_box(g.c, y0 + h * 0.62f, w, 16 * g.s),
-          DT_CENTER | DT_VCENTER | DT_SINGLELINE, RGB(255, 255, 255), 1.0f);
+  int ipx = (int)(48 * g.s + 0.5f);
+  const BYTE *icon = cv_hub_icon(path, ipx);
+  if (g_cvThumb && !_wcsicmp(g_cvThumb->path, path)) { /* миниатюра — листом с тонкой рамкой и тенью */
+    /* размер уже вписан в 58 px при запросе (cv_thumb_request) */
+    int w = g_cvThumb->w, h = g_cvThumb->h, x0 = (int)(g.c - w / 2.0f), y0 = (int)(g.c - 6 * g.s) - h; /* низом — над именем */
+    if (g_cvSelection.count > 1)
+      cv_rrect(pix, size, x0 + 6 * g.s, y0 - 5 * g.s, x0 + w + 6 * g.s, y0 + h - 5 * g.s, 2 * g.s, cv_mix(g_uiTok.line, ink, 0.15f), 1.0f);
+    cv_rrect(pix, size, x0 - 1.5f, y0 + 0.5f, x0 + w + 1.5f, y0 + h + 2.5f, 2 * g.s, RGB(0, 0, 0), 0.18f); /* тень */
+    cv_rrect(pix, size, x0 - 1, y0 - 1, x0 + w + 1, y0 + h + 1, 1.5f, cv_mix(g_uiTok.line, ink, 0.25f), 1.0f); /* рамка */
+    cv_blit(pix, size, g_cvThumb->pixels, w, h, x0, y0, 1.0f);
+  } else if (icon) { /* значок, как в Проводнике; несколько файлов — стопкой */
+    int x0 = (int)(g.c - ipx / 2.0f), y0 = (int)(g.c - 52 * g.s);
+    if (g_cvSelection.count > 1) cv_blit(pix, size, icon, ipx, ipx, x0 + (int)(7 * g.s), y0 - (int)(5 * g.s), 0.45f);
+    cv_blit(pix, size, icon, ipx, ipx, x0, y0, 1.0f);
+  } else { /* значка нет — листок с расширением */
+    float w = 32 * g.s, h = 40 * g.s, x0 = g.c - w / 2, y0 = g.c - 46 * g.s;
+    if (g_cvSelection.count > 1) /* стопка: второй листок позади */
+      cv_rrect(pix, size, x0 + 5 * g.s, y0 - 4 * g.s, x0 + w + 5 * g.s, y0 + h - 4 * g.s, 5 * g.s, cv_mix(tint, g_uiTok.surface, 0.55f), 1.0f);
+    cv_rrect(pix, size, x0, y0, x0 + w, y0 + h, 5 * g.s, tint, 1.0f);
+    cv_rrect(pix, size, x0 + w - 11 * g.s, y0, x0 + w, y0 + 11 * g.s, 3 * g.s, cv_mix(tint, RGB(255, 255, 255), 0.45f), 1.0f); /* загнутый угол */
+    wchar_t ext[8];
+    lstrcpynW(ext, cv_extension(path), 6);
+    CharUpperW(ext);
+    cv_text(pix, size, dc, CV_F_BADGE, ext[0] ? ext : L"?", -1, cv_box(g.c, y0 + h * 0.62f, w, 16 * g.s),
+            DT_CENTER | DT_VCENTER | DT_SINGLELINE, RGB(255, 255, 255), 1.0f);
+  }
   wchar_t line[MAX_PATH];
   int k = g_cvSelection.count;
   if (k > 1) {
@@ -390,4 +596,8 @@ static void cv_ring_free(void) {
   g_cvBmp = g_cvTextBmp = NULL;
   g_cvPix = g_cvTextPix = NULL;
   g_cvBmpSize = g_cvFontSize = 0;
+  if (g_cvIconBmp) DeleteObject(g_cvIconBmp);
+  g_cvIconBmp = NULL, g_cvIconPix = NULL, g_cvIconPx = 0;
+  cv_thumb_ready(NULL);
+  g_cvThumbWant[0] = 0;
 }
