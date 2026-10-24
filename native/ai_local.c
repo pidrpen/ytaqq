@@ -67,9 +67,9 @@ static const AiTier kAiTiers[AI_TIERS] = {
    CursorPad, коммит закреплён, размер и sha256 сверяются. Качается сам, в фоне, и включается
    при следующем запуске модели, только для чертежей (draw-lora*.gguf, ai_server_ensure). */
 #define AI_DRAW_LORA_TIER 1
-static const AiFile kAiDrawLora = {L"pidrpen/ytaqq", L"8ecdf3739eaa1647b638e9e4cf6b520b101ab543",
-                                   L"models/draw-lora-qwen3.5-4b.gguf", 42485376ULL,
-                                   "1772624ec0b9115d88671971e2bb4e073a59bacd560549f48fa28bd98250e4d5"};
+static const AiFile kAiDrawLora = {L"pidrpen/ytaqq", L"9d44727431dc58cd658f25f0c99c2d576ca855c5",
+                                   L"models/draw-lora2-qwen3.5-4b.gguf", 42485376ULL,
+                                   "447f89880fb966de936b546052ef820440dae4b388d299d6c48203f109cd7bd1"};
 static void ai_lora_kick(const wchar_t *model);
 
 /* --- настройки ------------------------------------------------------------ */
