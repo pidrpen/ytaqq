@@ -510,6 +510,8 @@ static void dr_route_push(int i) {
     if (n < 0) n = 0;
     txt[n] = 0;
     tn_text(r, txt + n, 9000 - n);
+    txt = nm_append(txt, r, pg->f[DF_MASS], NULL); /* нормы времени — если есть папка нормативов */
+    nm_last_keep(nm_last_new(r, pg->f[DF_MASS], NULL));
     ac_route_show(txt);
     dr_status(L"Маршрут — в чате ИИ: там его можно обсудить и поправить");
   }
@@ -1431,8 +1433,10 @@ static void dr_techno_test(int argc, wchar_t **argv) {
     dr_recognize(f, pg);
     dr_tn_route(pg, r);
     tn_text(r, txt, 9000);
-    sb_add(&b, L"==== %s · %.1f с · штамп: %s / %s · модель: %s / %s\n%s%s\n\n", tm_base(pg->path), pg->secs,
-           pg->f[DF_NAME], pg->f[DF_MAT], pg->vlName, pg->vlMat, dr_tn_how(pg), txt);
+    wchar_t *nm = nm_route_text(r, pg->f[DF_MASS], NULL);
+    sb_add(&b, L"==== %s · %.1f с · штамп: %s / %s · модель: %s / %s\n%s%s%s\n\n", tm_base(pg->path), pg->secs,
+           pg->f[DF_NAME], pg->f[DF_MAT], pg->vlName, pg->vlMat, dr_tn_how(pg), txt, nm ? nm : L"");
+    free(nm);
     dr_page_free(pg);
   }
   if (b.w) share_write_ex(argv[2], b.w, TRUE);

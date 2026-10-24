@@ -45,7 +45,7 @@ jobs:
         working-directory: native
         run: |
           set -eu
-          for t in search_route_test plm_check_test techno_test store_text_test shahmaty_test; do
+          for t in search_route_test plm_check_test techno_test store_text_test shahmaty_test norms_test; do
             gcc -O2 -Wall -Werror -o "$RUNNER_TEMP/$t" "$t.c"
             "$RUNNER_TEMP/$t"
           done
@@ -53,6 +53,7 @@ jobs:
         run: |
           set -eu
           python -I -B native/test_convert_files.py
+          python -I -B native/test_norms_check.py
           python -I -B native/test_native_arguments.py
           python -I -B native/test_windows_https.py native/agent/windows_https.py
           python -I -B native/test_network_diagnostics.py native/agent/bridge.py --transport-only

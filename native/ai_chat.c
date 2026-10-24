@@ -2070,10 +2070,12 @@ static BOOL ac_tp_wanted(const wchar_t *q) {
 typedef struct {
   BYTE *png;
   DWORD len;
+  wchar_t *ask; /* вопрос: в нём могут быть L, партия, станок — для норм (norms.c) */
 } AcTpJob;
 
-/* картинка (PNG/JPG в памяти) → весь лист → маршрут; текст — free() */
-static wchar_t *ac_tp_build(const BYTE *png, DWORD len) {
+/* картинка (PNG/JPG в памяти) → весь лист → маршрут и нормы; текст — free();
+   *last — маршрут для «норма: …» в чате (окну отдаётся с WM_AC_TP) */
+static wchar_t *ac_tp_build(const BYTE *png, DWORD len, const wchar_t *ask, NmLast **last) {
   IWICImagingFactory *f = NULL;
   CoCreateInstance(&kTmClsidFactory, NULL, CLSCTX_INPROC_SERVER, &kTmIidFactory, (void **)&f);
   wchar_t tmp[MAX_PATH], path[MAX_PATH];
@@ -2101,6 +2103,8 @@ static wchar_t *ac_tp_build(const BYTE *png, DWORD len) {
     out[n] = 0;
     if (pg->text) lstrcpynW(out + n, dr_tn_how(pg), 9000 - n), n += (int)wcslen(out + n);
     tn_text(r, out + n, 9000 - n);
+    out = nm_append(out, r, pg->f[DF_MASS], ask);
+    if (last) *last = nm_last_new(r, pg->f[DF_MASS], ask);
   } else if (out) {
     lstrcpynW(out, L"Не вышло прочитать картинку для маршрута.", 9000);
   }
@@ -2115,11 +2119,15 @@ static wchar_t *ac_tp_build(const BYTE *png, DWORD len) {
 static DWORD WINAPI ac_tp_thread(LPVOID arg) {
   AcTpJob *j = (AcTpJob *)arg;
   CoInitializeEx(NULL, COINIT_MULTITHREADED);
-  wchar_t *out = ac_tp_build(j->png, j->len);
+  NmLast *last = NULL;
+  wchar_t *out = ac_tp_build(j->png, j->len, j->ask, &last);
   free(j->png);
+  free(j->ask);
   free(j);
   CoUninitialize();
-  if (out && !(g_acWnd && PostMessageW(g_acWnd, WM_AC_TP, 0, (LPARAM)out))) free(out);
+  if (out && g_acWnd && PostMessageW(g_acWnd, WM_AC_TP, (WPARAM)last, (LPARAM)out)) return 0;
+  free(out);
+  free(last);
   return 0;
 }
 
@@ -2129,7 +2137,7 @@ static void ac_tp_test(const wchar_t *img, const wchar_t *outPath) {
   CoInitializeEx(NULL, COINIT_MULTITHREADED);
   char *data = NULL;
   DWORD n = 0;
-  wchar_t *out = read_file_bytes(img, &data, &n, 64 * 1024 * 1024) ? ac_tp_build((const BYTE *)data, n) : NULL;
+  wchar_t *out = read_file_bytes(img, &data, &n, 64 * 1024 * 1024) ? ac_tp_build((const BYTE *)data, n, NULL, NULL) : NULL;
   free(data);
   if (out) share_write_ex(outPath, out, TRUE);
   free(out);
@@ -2149,6 +2157,8 @@ static BOOL ac_tp_start(const wchar_t *a) {
       any = r->cls != TN_UNK || r->s.mat; /* в вопросе нет ни вида детали, ни материала — пусть ответит модель */
       if (any) {
         tn_text(r, txt, 9000);
+        txt = nm_append(txt, r, NULL, a); /* нормы — числа из вопроса: «L 120, масса 2,4» */
+        nm_last_keep(nm_last_new(r, NULL, a));
         ac_push(0, a);
         ac_push(1, txt);
         ac_redraw();
@@ -2169,6 +2179,7 @@ static BOOL ac_tp_start(const wchar_t *a) {
   memcpy(copy, src, len);
   j->png = copy;
   j->len = len;
+  j->ask = _wcsdup(a);
   ac_push(0, a);
   if (g_acImg && g_acN) { /* миниатюра вопроса — как обычно: модель увидит её в следующих вопросах */
     g_acTurns[g_acN - 1].png = g_acImg;
@@ -2183,6 +2194,7 @@ static BOOL ac_tp_start(const wchar_t *a) {
   HANDLE th = CreateThread(NULL, 0, ac_tp_thread, j, 0, NULL);
   if (!th) {
     free(j->png);
+    free(j->ask);
     free(j);
     ac_push(1, L"Не вышло запустить чтение чертежа.");
     ac_redraw();
@@ -2244,7 +2256,24 @@ static void ac_send(void) {
     free(in);
     return;
   }
-  if (ac_tp_wanted(a) && ac_tp_start(a)) {
+  /* «норма: L 120, партия 50» после маршрута — досчитать нормы, без модели (norms.c);
+     без маршрута — маршрут и нормы по словам вопроса */
+  if (nm_ask_wanted(a) && !ac_tp_wanted(a) && g_nmLast && !g_acImg && !g_acImgFull) {
+    wchar_t *t = nm_follow_text(a);
+    if (t) {
+      const wchar_t *p = t;
+      while (*p == L'\n') p++;
+      ac_push(0, a);
+      ac_push(1, p);
+      free(t);
+      ac_redraw();
+      ac_status(L"Нормы — по таблицам нормативов: откуда каждая цифра — в разборе");
+      SetWindowTextW(g_acIn, L"");
+      free(in);
+      return;
+    }
+  }
+  if ((ac_tp_wanted(a) || nm_ask_wanted(a)) && ac_tp_start(a)) {
     SetWindowTextW(g_acIn, L"");
     free(in);
     return;
@@ -3071,6 +3100,7 @@ static LRESULT CALLBACK AcProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
     return 0;
   case WM_AC_TP: {
     wchar_t *txt = (wchar_t *)lParam;
+    nm_last_keep((NmLast *)wParam); /* маршрут — для «норма: L 120» следом */
     if (txt) {
       ac_push(1, txt);
       free(txt);
