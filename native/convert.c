@@ -15,19 +15,23 @@ static POINT g_cvCreatePoint;
 static POINT g_cvOrigin;
 static DWORD g_cvReleased;
 static volatile LONG g_cvBusy;
-static int g_cvSize = 340, g_cvCount, g_cvFormats[16], g_cvHover = -1;
+static int g_cvSize = 360, g_cvCount, g_cvFormats[16], g_cvHover = -1;
 static wchar_t g_cvPath[MAX_PATH], g_cvLast[MAX_PATH];
 #define CV_FILES 128
 typedef struct { int count; wchar_t paths[CV_FILES][MAX_PATH]; } CvSelection;
 static CvSelection g_cvSelection;
 static IDataObject *g_cvPendingData;
-static DWORD g_cvDataAttempt;
+static DWORD g_cvDataAttempt, g_cvEnteredAt;
+/* что пришло от проводника: ждём, файлы, одни папки, больше CV_FILES, не прочиталось */
+enum { CV_READ_WAIT, CV_READ_OK, CV_READ_FOLDERS, CV_READ_MANY, CV_READ_FAILED };
+static int g_cvRead, g_cvSkipped; /* g_cvSkipped — сколько папок пропущено */
 static BOOL cvx_dispatch(const CvSelection *selection, int action);
 static void cvx_show(void);
 static void cvx_shutdown(void);
 static void cv_pending_clear(void) { if(g_cvPendingData){g_cvPendingData->lpVtbl->Release(g_cvPendingData);g_cvPendingData=NULL;} }
-static void cv_redraw(void) { if(g_cvWnd)RedrawWindow(g_cvWnd,NULL,NULL,RDW_INVALIDATE|RDW_UPDATENOW); }
-static void cv_hide(void) { cv_pending_clear();if (g_cvWnd) ShowWindow(g_cvWnd, SW_HIDE); g_cvHover = -1; }
+#include "convert_ring.c" /* вид кольца: прозрачное окно, плитки, центр */
+static void cv_redraw(void) { if(g_cvWnd&&IsWindowVisible(g_cvWnd))cv_paint(); }
+static void cv_hide(void) { cv_pending_clear();if (g_cvWnd) ShowWindow(g_cvWnd, SW_HIDE); g_cvHover = -1;g_cvInHub=FALSE; }
 static void cv_reveal(void) {
   if (!g_cvLast[0]) return;
   wchar_t args[MAX_PATH + 40]; swprintf(args, MAX_PATH + 40, L"/select,\"%ls\"", g_cvLast);
@@ -68,17 +72,21 @@ static BOOL cv_explorer_at(POINT point) {
        !wcscmp(name,L"Progman") || !wcscmp(name,L"WorkerW"))) return TRUE;
   return FALSE;
 }
+/* номер плитки под точкой экрана; -1 — центр (отмена) или мимо. Плитка 0 — сверху */
 static int cv_hit(POINT point) {
-  ScreenToClient(g_cvWnd, &point);
-  double x = point.x - g_cvSize / 2.0, y = point.y - g_cvSize / 2.0;
+  CvGeo g = cv_geo(g_cvSize, 1.0f);
+  double x = point.x - g_cvAt.x - g.c, y = point.y - g_cvAt.y - g.c;
   double radius = sqrt(x*x + y*y);
-  if (!g_cvCount || radius < g_cvSize * .23 || radius > g_cvSize * .49) return -1;
-  double angle = atan2(y, x) + 1.5707963267948966;
-  if (angle < 0) angle += 6.283185307179586;
+  g_cvInHub = g_cvCount && radius < g.rin;
+  if (!g_cvCount || radius < g.rin || radius > g.R + g.pop + 6 * g.s) return -1;
+  double angle = atan2(y, x) + 1.5707963267948966 + 3.141592653589793 / g_cvCount;
+  while (angle < 0) angle += 6.283185307179586;
   return (int)(angle * g_cvCount / 6.283185307179586) % g_cvCount;
 }
 static void cv_show(POINT point) {
-  cv_pending_clear();g_cvSelection.count=0;g_cvPath[0] = 0; g_cvCount = 0; g_cvHover = -1;
+  cv_pending_clear();g_cvSelection.count=0;g_cvPath[0] = 0; g_cvCount = 0; g_cvHover = -1;g_cvInHub=FALSE;g_cvRead=CV_READ_WAIT;g_cvSkipped=0;
+  memset(g_cvLevel,0,sizeof(g_cvLevel));
+  g_cvDpi = cv_monitor_dpi(point); g_cvSize = MulDiv(CV_RING_BASE, g_cvDpi, 96);
   HMONITOR monitor = MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST);
   MONITORINFO info = {sizeof(info)}; GetMonitorInfoW(monitor, &info);
   int x = point.x - g_cvSize / 2, y = point.y - g_cvSize / 2;
@@ -86,8 +94,9 @@ static void cv_show(POINT point) {
   if (y + g_cvSize > info.rcWork.bottom) y = info.rcWork.bottom - g_cvSize;
   if (x < info.rcWork.left) x = info.rcWork.left;
   if (y < info.rcWork.top) y = info.rcWork.top;
+  g_cvAt.x = x; g_cvAt.y = y; g_cvShownAt = GetTickCount() | 1;
+  cv_paint();
   SetWindowPos(g_cvWnd, HWND_TOPMOST, x, y, g_cvSize, g_cvSize, SWP_NOACTIVATE | SWP_SHOWWINDOW);
-  cv_redraw();
 }
 static void cv_gesture(POINT point,BOOL down,BOOL shift,BOOL escape,BOOL source,BOOL emptyDesktop) {
   if (down && !g_cvDown) {
@@ -122,6 +131,8 @@ static void cv_gesture(POINT point,BOOL down,BOOL shift,BOOL escape,BOOL source,
 }
 static void cv_tick(void) {
   if(!g_cvRegistered)return;
+  /* появление, подсветка плиток и огонёк ожидания — кадрами этого же таймера */
+  if(IsWindowVisible(g_cvWnd)&&cv_animating(GetTickCount())){cv_step_levels();cv_paint();}
   POINT point;GetCursorPos(&point);BOOL down=(GetAsyncKeyState(VK_LBUTTON)&0x8000)!=0;
   BOOL shift=(GetAsyncKeyState(VK_SHIFT)&0x8000)!=0,empty=FALSE;
 #ifndef CV_RING_TEST
@@ -130,19 +141,26 @@ static void cv_tick(void) {
   BOOL source=down&&!g_cvDown?cv_explorer_at(point):FALSE;
   cv_gesture(point,down,shift,(GetAsyncKeyState(VK_ESCAPE)&0x8000)!=0,source,empty);
 }
-static BOOL cv_data(IDataObject *data, CvSelection *selection) {
+/* Файлы из перетаскивания. Папки пропускаются: Shift+щелчок в проводнике
+   выделяет диапазон, и в него легко попадает папка — раньше из-за неё
+   отказывала вся подборка, а кольцо молча ждало файлов. */
+static int cv_data(IDataObject *data, CvSelection *selection, int *skipped) {
   FORMATETC format = {CF_HDROP, NULL, DVASPECT_CONTENT, -1, TYMED_HGLOBAL}; STGMEDIUM medium;
-  memset(&medium, 0, sizeof(medium)); memset(selection,0,sizeof(*selection));
-  if (FAILED(data->lpVtbl->GetData(data, &format, &medium))) return FALSE;
+  memset(&medium, 0, sizeof(medium)); memset(selection,0,sizeof(*selection)); if(skipped)*skipped=0;
+  if (FAILED(data->lpVtbl->GetData(data, &format, &medium))) return CV_READ_FAILED;
   UINT count=medium.tymed==TYMED_HGLOBAL && medium.hGlobal ? DragQueryFileW((HDROP)medium.hGlobal,0xffffffff,NULL,0):0;
-  BOOL ok=count>0 && count<=CV_FILES;
+  BOOL ok=count>0, many=FALSE; int kept=0, folders=0;
   for (UINT i=0;ok && i<count;i++) {
-    UINT size=DragQueryFileW((HDROP)medium.hGlobal,i,NULL,0);
-    wchar_t *path=selection->paths[i];
+    UINT size=DragQueryFileW((HDROP)medium.hGlobal,i,NULL,0); wchar_t path[MAX_PATH];
     ok=size>0 && size<MAX_PATH && DragQueryFileW((HDROP)medium.hGlobal,i,path,MAX_PATH)==size;
-    if (ok) { DWORD attr=GetFileAttributesW(path); ok=attr!=INVALID_FILE_ATTRIBUTES && !(attr&FILE_ATTRIBUTE_DIRECTORY); }
+    DWORD attr=ok?GetFileAttributesW(path):INVALID_FILE_ATTRIBUTES; ok=attr!=INVALID_FILE_ATTRIBUTES;
+    if (!ok) break;
+    if (attr&FILE_ATTRIBUTE_DIRECTORY) { folders++; continue; }
+    if (kept==CV_FILES) { many=TRUE; break; }
+    lstrcpynW(selection->paths[kept++],path,MAX_PATH);
   }
-  ReleaseStgMedium(&medium); selection->count=ok?(int)count:0; return ok;
+  ReleaseStgMedium(&medium); selection->count=ok && !many?kept:0; if(skipped)*skipped=folders;
+  return !ok ? CV_READ_FAILED : many ? CV_READ_MANY : kept ? CV_READ_OK : CV_READ_FOLDERS;
 }
 static BOOL cvx_can(int action, const wchar_t *path) {
   int image=cv_image_type(path); const wchar_t *e=cv_extension(path);
@@ -169,9 +187,11 @@ static void cv_menu_formats(void) {
 static void cv_read_pending(void) {
   if(!g_cvPendingData)return;
   g_cvDataAttempt=GetTickCount();
-  if(cv_data(g_cvPendingData,&g_cvSelection)) {
-    lstrcpynW(g_cvPath,g_cvSelection.paths[0],MAX_PATH);cv_menu_formats();cv_pending_clear();cv_redraw();
-  }
+  g_cvRead=cv_data(g_cvPendingData,&g_cvSelection,&g_cvSkipped);
+  if(g_cvRead==CV_READ_OK){lstrcpynW(g_cvPath,g_cvSelection.paths[0],MAX_PATH);cv_menu_formats();}
+  /* не прочиталось — повторим в DragOver: проводник может отдать список позже */
+  if(g_cvRead!=CV_READ_FAILED)cv_pending_clear();
+  cv_redraw();
 }
 typedef struct { IDropTarget iface; LONG refs; } CvDrop;
 static HRESULT STDMETHODCALLTYPE cv_query(IDropTarget *self, REFIID iid, void **out) {
@@ -186,24 +206,24 @@ static ULONG STDMETHODCALLTYPE cv_addref(IDropTarget *self) { return (ULONG)Inte
 static ULONG STDMETHODCALLTYPE cv_release(IDropTarget *self) { return (ULONG)InterlockedDecrement(&((CvDrop *)self)->refs); }
 static HRESULT STDMETHODCALLTYPE cv_over(IDropTarget *self, DWORD keys, POINTL position, DWORD *effect) {
   (void)self;
-  if(g_cvPendingData&&(keys&MK_SHIFT)&&GetTickCount()-g_cvDataAttempt>=100)cv_read_pending();
-  POINT point = {position.x, position.y}; int hover = cv_hit(point);
-  if (g_cvBusy || !(keys & MK_SHIFT) || !g_cvPath[0] || !(*effect & DROPEFFECT_COPY)) hover = -1;
-  if (hover != g_cvHover) { g_cvHover = hover; cv_redraw(); }
+  if(g_cvPendingData&&GetTickCount()-g_cvDataAttempt>=60)cv_read_pending();
+  POINT point = {position.x, position.y}; BOOL hub = g_cvInHub; int hover = cv_hit(point);
+  if (g_cvBusy || !(keys & MK_SHIFT) || !g_cvPath[0] || !(*effect & DROPEFFECT_COPY)) { hover = -1; g_cvInHub = FALSE; }
+  if (hover != g_cvHover || hub != g_cvInHub) { g_cvHover = hover; cv_redraw(); }
   *effect = hover >= 0 ? DROPEFFECT_COPY : DROPEFFECT_NONE; return S_OK;
 }
 static HRESULT STDMETHODCALLTYPE cv_enter(IDropTarget *self, IDataObject *data, DWORD keys, POINTL position, DWORD *effect) {
-  cv_pending_clear();g_cvCount = 0; g_cvPath[0] = 0;g_cvSelection.count=0;
+  cv_pending_clear();g_cvCount = 0; g_cvPath[0] = 0;g_cvSelection.count=0;g_cvRead=CV_READ_WAIT;g_cvSkipped=0;g_cvEnteredAt=GetTickCount();
   if(data){g_cvPendingData=data;data->lpVtbl->AddRef(data);cv_read_pending();}
   cv_redraw();return cv_over(self, keys, position, effect);
 }
 static HRESULT STDMETHODCALLTYPE cv_leave(IDropTarget *self) {
-  (void)self;cv_pending_clear();g_cvHover = -1;cv_redraw();return S_OK;
+  (void)self;cv_pending_clear();g_cvHover = -1;g_cvInHub=FALSE;cv_redraw();return S_OK;
 }
 static HRESULT STDMETHODCALLTYPE cv_drop(IDropTarget *self, IDataObject *data, DWORD keys, POINTL position, DWORD *effect) {
   cv_over(self, keys, position, effect);
   CvSelection *dropped=(CvSelection*)calloc(1,sizeof(*dropped));
-  BOOL accepted=g_cvHover>=0 && dropped && cv_data(data,dropped) && dropped->count==g_cvSelection.count;
+  BOOL accepted=g_cvHover>=0 && dropped && cv_data(data,dropped,NULL)==CV_READ_OK && dropped->count==g_cvSelection.count;
   for(int i=0;accepted && i<dropped->count;i++) if(wcscmp(dropped->paths[i],g_cvSelection.paths[i])) accepted=FALSE;
   int target = accepted ? g_cvFormats[g_cvHover] : -1;
   *effect = DROPEFFECT_NONE;
@@ -218,43 +238,6 @@ static LRESULT CALLBACK cv_proc(HWND hwnd, UINT message, WPARAM wp, LPARAM lp) {
   if(message==WM_CV_CREATE_MENU){dc_menu(g_cvCreatePoint);return 0;}
 #endif
   if (message == WM_MOUSEACTIVATE) return MA_NOACTIVATE;
-  if (message == WM_ERASEBKGND) return 1;
-  if (message == WM_PAINT) {
-    PAINTSTRUCT ps; HDC screen = BeginPaint(hwnd, &ps), dc = CreateCompatibleDC(screen);
-    HBITMAP bitmap = CreateCompatibleBitmap(screen, g_cvSize, g_cvSize), oldBitmap = SelectObject(dc, bitmap);
-    RECT bounds = {0,0,g_cvSize,g_cvSize}; HBRUSH background = CreateSolidBrush(RGB(27,31,40)); FillRect(dc, &bounds, background); DeleteObject(background);
-    int count = g_cvCount ? g_cvCount : 1, center = g_cvSize / 2;
-    HPEN pen = CreatePen(PS_SOLID, 2, RGB(27,31,40)); HPEN oldPen = SelectObject(dc, pen);
-    for (int i = 0; i < count; i++) {
-      POINT points[67]; points[0].x = center; points[0].y = center;
-      for (int j = 0; j <= 64; j++) {
-        double a = -1.5707963267948966 + 6.283185307179586 * (i + j / 64.0) / count;
-        points[j+1].x = center + (int)(cos(a) * (center - 3)); points[j+1].y = center + (int)(sin(a) * (center - 3));
-      }
-      HBRUSH brush = CreateSolidBrush(i == g_cvHover ? RGB(214,153,63) : RGB(48,57,72)), oldBrush = SelectObject(dc, brush);
-      Polygon(dc, points, 66); SelectObject(dc, oldBrush); DeleteObject(brush);
-    }
-    HBRUSH inner = CreateSolidBrush(RGB(27,31,40)), oldBrush = SelectObject(dc, inner);
-    int radius = (int)(g_cvSize * .23); Ellipse(dc, center-radius, center-radius, center+radius, center+radius);
-    SelectObject(dc, oldBrush); DeleteObject(inner); SelectObject(dc, oldPen); DeleteObject(pen);
-    HFONT font = CreateFontW(-MulDiv(g_cvCount>6?12:15, g_cvSize, 340), 0, 0, 0, FW_SEMIBOLD, FALSE,FALSE,FALSE,DEFAULT_CHARSET,0,0,CLEARTYPE_QUALITY,0,L"Segoe UI");
-    HFONT oldFont = SelectObject(dc, font); SetBkMode(dc, TRANSPARENT);
-    for (int i = 0; i < count; i++) {
-      double a = -1.5707963267948966 + 6.283185307179586 * (i + .5) / count;
-      int x = center + (int)(cos(a) * g_cvSize * .355), y = center + (int)(sin(a) * g_cvSize * .355);
-      RECT label = {x-g_cvSize/6,y-24,x+g_cvSize/6,y+24};
-      SetTextColor(dc, i == g_cvHover ? RGB(25,28,34) : RGB(241,243,247));
-      DrawTextW(dc, g_cvCount ? kCvFormats[g_cvFormats[i]].label : L"Файлы сюда", -1, &label, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    }
-    RECT label = {center-radius+5,center-radius+10,center+radius-5,center+radius-10}; SetTextColor(dc, RGB(210,217,228));
-    wchar_t selected[100]; swprintf(selected,100,L"Файлов: %d\nВыберите\nдействие\n\nEsc — отмена",g_cvSelection.count);
-    const wchar_t *text = g_cvCount ? selected : g_cvPath[0] ?
-      (!_wcsicmp(cv_extension(g_cvPath), L"docx") && !g_cvWord ? L"Нужен\nWord" :
-       !_wcsicmp(cv_extension(g_cvPath), L"xlsx") && !g_cvExcel ? L"Нужен\nExcel" : L"Формат не\nподдержан") : L"Ведите файлы\nв круг\n\nНе отпускайте\nмышь и Shift";
-    DrawTextW(dc, text, -1, &label, DT_CENTER | DT_WORDBREAK);
-    SelectObject(dc, oldFont); DeleteObject(font);
-    BitBlt(screen,0,0,g_cvSize,g_cvSize,dc,0,0,SRCCOPY); SelectObject(dc,oldBitmap); DeleteObject(bitmap); DeleteDC(dc); EndPaint(hwnd,&ps); return 0;
-  }
   return DefWindowProcW(hwnd,message,wp,lp);
 }
 static void cv_init(void) {
@@ -266,12 +249,12 @@ static void cv_init(void) {
   typedef UINT (WINAPI *DpiForWindow)(HWND);
   DpiForWindow dpiForWindow = (DpiForWindow)GetProcAddress(GetModuleHandleW(L"user32.dll"),"GetDpiForWindow");
   if (dpiForWindow) dpi = (int)dpiForWindow(g_hwnd);
-  g_cvSize = MulDiv(340, dpi, 96);
+  g_cvDpi = dpi; g_cvSize = MulDiv(CV_RING_BASE, dpi, 96);
   WNDCLASSW klass = {0}; klass.lpfnWndProc = cv_proc; klass.hInstance = g_inst; klass.lpszClassName = L"CursorPadConvertRing"; klass.hCursor = LoadCursorW(NULL,IDC_ARROW);
   if (!RegisterClassW(&klass) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) return;
-  g_cvWnd = CreateWindowExW(WS_EX_TOPMOST|WS_EX_TOOLWINDOW|WS_EX_NOACTIVATE,klass.lpszClassName,L"Конвертация CursorPad",WS_POPUP,0,0,g_cvSize,g_cvSize,g_hwnd,NULL,g_inst,NULL);
+  /* прозрачное окно: форма и тень — из альфы кадра, мимо круга мышь проходит насквозь */
+  g_cvWnd = CreateWindowExW(WS_EX_LAYERED|WS_EX_TOPMOST|WS_EX_TOOLWINDOW|WS_EX_NOACTIVATE,klass.lpszClassName,L"Конвертация CursorPad",WS_POPUP,0,0,g_cvSize,g_cvSize,g_hwnd,NULL,g_inst,NULL);
   if (!g_cvWnd) return;
-  HRGN region = CreateEllipticRgn(0,0,g_cvSize,g_cvSize); if (!SetWindowRgn(g_cvWnd,region,FALSE)) DeleteObject(region);
   hr = RegisterDragDrop(g_cvWnd,&g_cvDrop.iface); g_cvRegistered = SUCCEEDED(hr);
   ai_log(L"Конвертер: OLE 0x%08lx; Word %ls; Excel %ls", (unsigned long)hr, g_cvWord ? L"есть" : L"нет", g_cvExcel ? L"есть" : L"нет");
   if (g_cvRegistered) SetTimer(g_hwnd,TIMER_CONVERT,30,NULL);
@@ -282,6 +265,7 @@ static void cv_shutdown(void) {
   KillTimer(g_hwnd,TIMER_CONVERT);
   if (g_cvRegistered) { RevokeDragDrop(g_cvWnd); g_cvRegistered = FALSE; }
   if (g_cvWnd) { DestroyWindow(g_cvWnd); g_cvWnd = NULL; }
+  cv_ring_free();
   if (g_cvOle) { OleUninitialize(); g_cvOle = FALSE; }
 }
 #ifdef CV_RING_TEST

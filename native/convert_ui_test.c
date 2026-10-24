@@ -55,20 +55,57 @@ static LRESULT CALLBACK test_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
   }
   return DefWindowProcW(hwnd,msg,wp,lp);
 }
+/* кадр кольца (premultiplied) поверх фона окна проводника — в BMP */
 static void capture(const wchar_t *path) {
-  HDC dc = GetDC(g_cvWnd), memory = CreateCompatibleDC(dc);
-  HBITMAP bitmap = CreateCompatibleBitmap(dc,g_cvSize,g_cvSize), old = SelectObject(memory,bitmap);
-  if(!PrintWindow(g_cvWnd,memory,2))SendMessageW(g_cvWnd,WM_PRINT,(WPARAM)memory,PRF_CLIENT|PRF_ERASEBKGND);
-  SelectObject(memory,old);
-  BITMAPINFO info = {0}; info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER); info.bmiHeader.biWidth = g_cvSize;
-  info.bmiHeader.biHeight = -g_cvSize; info.bmiHeader.biPlanes = 1; info.bmiHeader.biBitCount = 32;
-  DWORD size = (DWORD)g_cvSize*g_cvSize*4; BYTE *pixels = (BYTE *)malloc(size);
-  GetDIBits(memory,bitmap,0,g_cvSize,pixels,&info,DIB_RGB_COLORS);
-  BITMAPFILEHEADER header = {0}; header.bfType=0x4d42; header.bfOffBits=sizeof(header)+sizeof(info.bmiHeader); header.bfSize=header.bfOffBits+size;
-  FILE *file = _wfopen(path,L"wb"); if (file) { fwrite(&header,sizeof(header),1,file); fwrite(&info.bmiHeader,sizeof(info.bmiHeader),1,file); fwrite(pixels,size,1,file); fclose(file); }
-  free(pixels); DeleteObject(bitmap); DeleteDC(memory); ReleaseDC(g_cvWnd,dc);
+  int size = g_cvBmpSize; if (!g_cvPix || !size) return;
+  BITMAPINFOHEADER info = {0}; info.biSize = sizeof(info); info.biWidth = size; info.biHeight = -size; info.biPlanes = 1; info.biBitCount = 32;
+  DWORD bytes = (DWORD)size*size*4; BYTE *pixels = (BYTE *)malloc(bytes); if (!pixels) return;
+  COLORREF back = g_uiTok.surface == RGB(255,255,255) ? RGB(243,243,243) : RGB(25,25,25);
+  for (DWORD i = 0; i < bytes; i += 4) {
+    int a = g_cvPix[i+3];
+    pixels[i] = (BYTE)(g_cvPix[i] + GetBValue(back)*(255-a)/255); pixels[i+1] = (BYTE)(g_cvPix[i+1] + GetGValue(back)*(255-a)/255);
+    pixels[i+2] = (BYTE)(g_cvPix[i+2] + GetRValue(back)*(255-a)/255); pixels[i+3] = 255;
+  }
+  BITMAPFILEHEADER header = {0}; header.bfType=0x4d42; header.bfOffBits=sizeof(header)+sizeof(info); header.bfSize=header.bfOffBits+bytes;
+  FILE *file = _wfopen(path,L"wb"); if (file) { fwrite(&header,sizeof(header),1,file); fwrite(&info,sizeof(info),1,file); fwrite(pixels,bytes,1,file); fclose(file); }
+  free(pixels);
+}
+/* --preview папка [dpi]: состояния кольца в светлой и тёмной теме, без окон и OLE */
+static void preview_shot(const wchar_t *dir, const wchar_t *name, int theme) {
+  wchar_t path[MAX_PATH]; swprintf(path, MAX_PATH, L"%ls\\%ls-%ls.bmp", dir, name, theme ? L"dark" : L"light");
+  g_cvShownAt = 0; cv_paint(); capture(path);
+}
+static void preview_select(const wchar_t *const *paths, int count) {
+  g_cvSelection.count = count; for (int i = 0; i < count; i++) lstrcpynW(g_cvSelection.paths[i], paths[i], MAX_PATH);
+  lstrcpynW(g_cvPath, paths[0], MAX_PATH); cv_menu_formats(); memset(g_cvLevel, 0, sizeof(g_cvLevel)); g_cvHover = -1; g_cvInHub = FALSE;
+}
+static int preview(const wchar_t *dir, int dpi) {
+  static const UiTokens themes[2] = {{RGB(255,255,255),RGB(243,244,246),RGB(255,255,255),RGB(17,24,39),RGB(107,114,128),RGB(226,229,233),RGB(37,99,235)},
+                                     {RGB(32,33,36),RGB(40,42,46),RGB(32,33,36),RGB(232,234,237),RGB(154,160,166),RGB(60,64,67),RGB(138,180,248)}};
+  static const wchar_t *image[] = {L"C:\\Чертежи\\Вал РНЕ.20.031.png"}, *pdfs[] = {L"C:\\a\\Лист 1.pdf", L"C:\\a\\Лист 2.pdf", L"C:\\a\\Лист 3.pdf"},
+                       *word[] = {L"C:\\a\\Пояснительная записка.docx"}, *other[] = {L"C:\\a\\Отчёт за квартал.mp4"},
+                       *images[] = {L"C:\\a\\1.jpg", L"C:\\a\\2.png", L"C:\\a\\3.tif", L"C:\\a\\4.bmp", L"C:\\a\\5.jpg"};
+  g_cvWord = g_cvExcel = TRUE; g_cvSize = MulDiv(CV_RING_BASE, dpi, 96);
+  for (int t = 0; t < 2; t++) {
+    g_uiTok = themes[t];
+    g_cvCount = 0; g_cvSelection.count = 0; g_cvPath[0] = 0; g_cvPendingData = NULL; g_cvHover = -1; g_cvInHub = FALSE;
+    preview_shot(dir, L"1-wait", t);
+    preview_select(image, 1); preview_shot(dir, L"2-image", t);
+    g_cvHover = 0; g_cvLevel[0] = 1; preview_shot(dir, L"3-image-hover", t);
+    preview_select(images, 5); g_cvHover = 4; g_cvLevel[4] = 1; preview_shot(dir, L"4-images-resize", t);
+    preview_select(pdfs, 3); g_cvHover = 2; g_cvLevel[2] = 1; preview_shot(dir, L"5-pdf-hover", t);
+    preview_select(word, 1); g_cvInHub = TRUE; preview_shot(dir, L"6-word-center", t);
+    preview_select(other, 1); preview_shot(dir, L"7-other", t);
+    /* ожидание файлов: огонёк, затем объяснение; одни папки */
+    g_cvCount = 0; g_cvSelection.count = 0; g_cvPath[0] = 0; g_cvHover = -1; g_cvInHub = FALSE; g_cvRead = CV_READ_FAILED;
+    g_cvPendingData = (IDataObject *)1; g_cvEnteredAt = GetTickCount(); preview_shot(dir, L"8-reading", t);
+    g_cvEnteredAt = GetTickCount() - 2000; preview_shot(dir, L"9-unreadable", t);
+    g_cvPendingData = NULL; g_cvRead = CV_READ_FOLDERS; preview_shot(dir, L"10-folders", t); g_cvRead = CV_READ_WAIT;
+  }
+  return 0;
 }
 int wmain(int argc, wchar_t **argv) {
+  if (argc >= 3 && !wcscmp(argv[1], L"--preview")) return preview(argv[2], argc > 3 ? _wtoi(argv[3]) : 96);
   if (argc != 3) return 2;
   g_inst = GetModuleHandleW(NULL); WNDCLASSW klass={0}; klass.hInstance=g_inst; klass.lpfnWndProc=test_proc; klass.lpszClassName=L"ConvertTestOwner";
   RegisterClassW(&klass); g_hwnd=CreateWindowW(klass.lpszClassName,L"test",WS_OVERLAPPEDWINDOW,0,0,100,100,NULL,NULL,g_inst,NULL);
@@ -76,18 +113,23 @@ int wmain(int argc, wchar_t **argv) {
   wchar_t path[MAX_PATH]; GetFullPathNameW(argv[1],MAX_PATH,path,NULL);
   FakeData data={{&data_vtable},path,FALSE,1}; POINT show={450,300}; cv_show(show);
   if(GetUpdateRect(g_cvWnd,NULL,FALSE))return 10;
-  RECT rect; GetWindowRect(g_cvWnd,&rect); POINTL center={rect.left+g_cvSize/2,rect.top+g_cvSize/2};
+  CvGeo geo = cv_geo(g_cvSize, 1.0f); POINTL center={g_cvAt.x+(LONG)geo.c,g_cvAt.y+(LONG)geo.c};
   DWORD effect=DROPEFFECT_COPY|DROPEFFECT_MOVE;
   cv_enter(&g_cvDrop.iface,&data.iface,MK_SHIFT,center,&effect);
   if(g_cvCount||!g_cvPendingData)return 11;
   Sleep(110);effect=DROPEFFECT_COPY|DROPEFFECT_MOVE;cv_over(&g_cvDrop.iface,MK_SHIFT,center,&effect);
   if (effect != DROPEFFECT_NONE || g_cvCount < 3) return 4;
   if(g_cvPendingData||GetUpdateRect(g_cvWnd,NULL,FALSE))return 12;
-  double angle=-1.5707963267948966+3.141592653589793/g_cvCount;
-  POINTL sector={center.x+(LONG)(cos(angle)*g_cvSize*.35),center.y+(LONG)(sin(angle)*g_cvSize*.35)};
+  /* середина плитки 0 — прямо над центром */
+  POINTL sector={center.x,center.y-(LONG)((geo.rin+geo.R)/2)};
   effect=DROPEFFECT_COPY|DROPEFFECT_MOVE; cv_over(&g_cvDrop.iface,0,sector,&effect); if (effect != DROPEFFECT_NONE) return 5;
   data.multiple=TRUE; effect=DROPEFFECT_COPY|DROPEFFECT_MOVE;
   cv_enter(&g_cvDrop.iface,&data.iface,MK_SHIFT,sector,&effect); if (g_cvSelection.count != 2 || !g_cvCount) return 6;
+  /* одна папка — понятный отказ без вечного ожидания; на плитку не бросить */
+  wchar_t folder[MAX_PATH]; lstrcpynW(folder,path,MAX_PATH); wchar_t *slash=wcsrchr(folder,L'\\'); if(slash)*slash=0;
+  FakeData dir={{&data_vtable},folder,FALSE,0}; effect=DROPEFFECT_COPY|DROPEFFECT_MOVE;
+  cv_enter(&g_cvDrop.iface,&dir.iface,MK_SHIFT,sector,&effect);
+  if (g_cvRead != CV_READ_FOLDERS || g_cvCount || g_cvPendingData || effect != DROPEFFECT_NONE) return 14;
   data.multiple=FALSE; effect=DROPEFFECT_COPY|DROPEFFECT_MOVE;
   cv_enter(&g_cvDrop.iface,&data.iface,MK_SHIFT,sector,&effect); if (effect != DROPEFFECT_COPY) return 7;
   if(GetUpdateRect(g_cvWnd,NULL,FALSE))return 13;
@@ -100,6 +142,6 @@ int wmain(int argc, wchar_t **argv) {
   }
   BOOL ok=!g_cvBusy && g_cvLast[0] && GetFileAttributesW(g_cvLast)!=INVALID_FILE_ATTRIBUTES;
   cv_shutdown(); DestroyWindow(g_hwnd);
-  puts(ok ? "PASS: OLE registration, delayed CF_HDROP retry without re-click, immediate paint, center cancellation, Shift, multiple-file selection, COPY effect, threaded conversion" : "FAIL: conversion");
+  puts(ok ? "PASS: OLE registration, delayed CF_HDROP retry without re-click, immediate paint, center cancellation, Shift, multiple-file selection, folder-only selection, COPY effect, threaded conversion" : "FAIL: conversion");
   return ok ? 0 : 9;
 }
