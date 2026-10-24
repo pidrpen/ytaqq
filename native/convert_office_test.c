@@ -47,14 +47,17 @@ static HRESULT of_call(IDispatch *d, const wchar_t *name, WORD flags, VARIANT *o
 int wmain(int argc, wchar_t **argv) {
   if (argc!=2) return 2;
   wchar_t dir[MAX_PATH]; GetFullPathNameW(argv[1],MAX_PATH,dir,NULL); CreateDirectoryW(dir,NULL);
-  for (int i=0;i<4;i++) {
-    CvJob job={0}; job.format=i==0||i==2?4:i==1?5:6;
-    swprintf(job.src,MAX_PATH,L"%ls\\source-%d.%ls",dir,i,i<2?L"docx":L"xlsx");
+  /* старые .doc/.xls и .rtf/.ods идут тем же путём, что .docx/.xlsx */
+  static const wchar_t *const ext[]={L"docx",L"docx",L"xlsx",L"xlsx",L"doc",L"xls",L"rtf",L"ods"};
+  static const int format[]={4,5,4,6,5,6,4,4};
+  for (int i=0;i<8;i++) {
+    CvJob job={0}; job.format=format[i];
+    swprintf(job.src,MAX_PATH,L"%ls\\source-%d.%ls",dir,i,ext[i]);
     HANDLE f=CreateFileW(job.src,GENERIC_WRITE,0,NULL,CREATE_NEW,0,NULL); assert(f!=INVALID_HANDLE_VALUE);
     DWORD wrote; WriteFile(f,"source",6,&wrote,NULL); CloseHandle(f);
     assert(cv_convert(&job) && test_closed && job.out[0]);
     char text[128]={0}; f=CreateFileW(job.src,GENERIC_READ,FILE_SHARE_READ,NULL,OPEN_EXISTING,0,NULL); DWORD got; ReadFile(f,text,127,&got,NULL); CloseHandle(f); assert(got==6 && !memcmp(text,"source",6));
-    if (i==1) {
+    if (job.format==5) {
       f=CreateFileW(job.out,GENERIC_READ,FILE_SHARE_READ,NULL,OPEN_EXISTING,0,NULL); ReadFile(f,text,127,&got,NULL); CloseHandle(f);
       const char expected[]="\xef\xbb\xbfПривет\nМир"; assert(got==sizeof(expected)-1 && !memcmp(text,expected,got));
     }
@@ -63,6 +66,6 @@ int wmain(int argc, wchar_t **argv) {
     DeleteFileW(job.src);
   }
   RemoveDirectoryW(dir);
-  puts("PASS: Office read-only/no-password-dialog flags, Word/Excel PDF arguments, UTF-8 TXT, first-sheet CSV, source preservation and failed-output cleanup (mock Office)");
+  puts("PASS: Office read-only/no-password-dialog flags, Word/Excel PDF arguments (also .doc/.xls/.rtf/.ods), UTF-8 TXT, first-sheet CSV, source preservation and failed-output cleanup (mock Office)");
   return 0;
 }

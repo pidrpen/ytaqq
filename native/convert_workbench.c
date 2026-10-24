@@ -127,7 +127,7 @@ static DWORD WINAPI cvx_worker(void *parameter) {
   cx_raw(&files,"[");cx_raw(&prepared,"[");
   for(int i=0;i<job->files.count;i++) {
     if(g_cvxCancelled){lstrcpynW(r->error,L"Операция отменена. Исходники сохранены.",400);goto done;}
-    const wchar_t *source=job->files.paths[i];BOOL office=!_wcsicmp(cv_extension(source),L"docx")||!_wcsicmp(cv_extension(source),L"xlsx");
+    const wchar_t *source=job->files.paths[i];BOOL office=cv_word_file(source)||cv_excel_file(source);
     if(office && (job->action==4||job->action==5||job->action==6||job->action==14)) {
       CvJob converted={0};lstrcpynW(converted.src,source,MAX_PATH);converted.format=job->action==14?4:job->action;
       swprintf(scratch[scratchCount],MAX_PATH,L"%ls\\office-%d.%ls",job->run,i,kCvFormats[converted.format].ext);

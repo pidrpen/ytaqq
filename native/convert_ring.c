@@ -31,7 +31,7 @@ static const CvRingItem kCvRing[16] = {
     {0xE7C3, L"Страницы", L"Извлечь страницы", L"откроет окно параметров", CV_T_PDF},
     {0xE8C6, L"Разделить", L"Разделить PDF", L"откроет окно параметров", CV_T_PDF},
     {0xE7AD, L"Повернуть", L"Повернуть страницы", L"откроет окно параметров", CV_T_PDF},
-    {0xE8F1, L"Пакет", L"PDF-пакет чертежей", L"откроет окно параметров", CV_T_PDF},
+    {0xE8F1, L"Один PDF", L"Всё в один PDF", L"порядок — в окне параметров", CV_T_PDF},
     {0xE712, L"Ещё", L"Все действия", L"окно обработки файлов", CV_T_MORE}};
 static const COLORREF kCvTint[] = {RGB(8, 145, 178), RGB(220, 38, 38), RGB(22, 163, 74), RGB(217, 119, 6),
                                    RGB(100, 116, 139)};
@@ -157,8 +157,8 @@ static COLORREF cv_file_tint(const wchar_t *path) {
   const wchar_t *e = cv_extension(path);
   if (cv_image_type(path) >= 0) return kCvTint[CV_T_IMAGE];
   if (!_wcsicmp(e, L"pdf")) return kCvTint[CV_T_PDF];
-  if (!_wcsicmp(e, L"docx") || !_wcsicmp(e, L"doc")) return RGB(37, 99, 235);
-  if (!_wcsicmp(e, L"xlsx") || !_wcsicmp(e, L"xls") || !_wcsicmp(e, L"csv")) return RGB(21, 128, 61);
+  if (cv_word_file(path)) return RGB(37, 99, 235);
+  if (cv_excel_file(path) || !_wcsicmp(e, L"csv")) return RGB(21, 128, 61);
   return kCvTint[CV_T_MORE];
 }
 

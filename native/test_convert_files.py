@@ -6,7 +6,7 @@ from pathlib import Path
 import tempfile
 import sys
 import zipfile
-from PIL import Image
+from PIL import Image, ImageDraw
 from pypdf import PdfReader, PdfWriter
 from pypdf.generic import DictionaryObject, NameObject, DecodedStreamObject
 
@@ -56,6 +56,25 @@ with tempfile.TemporaryDirectory(prefix='cursorpad-batch-test-') as directory:
     packet=run('packet',[pdf1,a,multi,pdf2]);assert len(PdfReader(paths(packet)[0]).pages)==8
     image_pdf=run('to_pdf',[multi]);assert len(PdfReader(paths(image_pdf)[0]).pages)==2
     physical=run('to_pdf',[a]);assert abs(float(PdfReader(paths(physical)[0]).pages[0].mediabox.width)-153.6)<.1
+    # Scans of drawings and awkward modes: dpi survives, B/W stays 1-bit, CMYK and 16-bit do not fail.
+    scan=src/'Чертёж.tif';page=Image.new('1',(2480,3508),1);ImageDraw.Draw(page).rectangle((100,100,2380,3408),outline=0,width=6)
+    page.save(scan,compression='group4',dpi=(300,300))
+    cmyk=src/'Печать.jpg';Image.new('CMYK',(100,60),(0,128,255,0)).save(cmyk,dpi=(300,300))
+    deep=src/'Глубина.png';gray=Image.new('I;16',(100,60));gray.putdata([30000]*6000);gray.save(deep)
+    bw=src/'Линии.png';page.save(bw,dpi=(300,300))
+    huge=src/'Лист A0.tif';Image.new('1',(14000,13000),1).save(huge,compression='group4',dpi=(400,400))
+    source_hash.update({p:hashlib.sha256(p.read_bytes()).hexdigest() for p in (scan,cmyk,deep,bw,huge)})
+    with Image.open(paths(run('convert',[scan],format='png'))[0]) as image:assert image.mode=='1' and round(image.info['dpi'][0])==300
+    with Image.open(paths(run('convert',[scan],format='bmp'))[0]) as image:assert image.mode=='1' and round(image.info['dpi'][0])==300
+    with Image.open(paths(run('convert',[bw],format='tif'))[0]) as image:assert image.mode=='1' and image.info['compression']=='group4'
+    with Image.open(paths(run('convert',[cmyk],format='png'))[0]) as image:assert image.mode=='RGB' and round(image.info['dpi'][0])==300
+    with Image.open(paths(run('convert',[deep],format='jpg'))[0]) as image:assert abs(image.getpixel((5,5))-116)<=2
+    with Image.open(paths(run('resize',[scan],format='png',resize_mode='percent',percent=50))[0]) as image:assert round(image.info['dpi'][0])==150
+    with Image.open(paths(run('convert',[huge],format='png'))[0]) as image:assert image.size==(14000,13000)
+    scan_pdf=PdfReader(paths(run('to_pdf',[scan]))[0]);box=scan_pdf.pages[0].mediabox
+    assert abs(float(box.width)-595.2)<1 and abs(float(box.height)-842)<1
+    picture=list(scan_pdf.pages[0]['/Resources']['/XObject'].values())[0].get_object()
+    assert picture['/BitsPerComponent']==1 and '/CCITTFaxDecode' in str(picture['/Filter']) and paths(run('to_pdf',[scan]))[0].stat().st_size<20000
     # Duplicate archive names preserve every file and Unicode.
     other=src/'other';other.mkdir();duplicate=other/a.name;duplicate.write_bytes(b'other file')
     zipped=run('zip',[a,duplicate,pdf1]);archive=paths(zipped)[0]
@@ -184,4 +203,4 @@ with tempfile.TemporaryDirectory(prefix='cursorpad-batch-test-') as directory:
     for path,digest in source_hash.items():assert hashlib.sha256(path.read_bytes()).hexdigest()==digest
     assert not list(out.glob('.CursorPad-*'))
     listing=run('history');assert listing['history_ids'] and listing['history_labels']
-print('PASS: batches, real image formats/size/byte budget, multipage TIFF, PDF ordering/extract/split/rotate/packet, ZIP duplicates, persisted history, identity/hash undo, cancellation, metadata failure rollback, publication replacement guard, atomic failure rollback, unchanged sources')
+print('PASS: batches, real image formats/size/byte budget, scan dpi/1-bit/G4/CCITT PDF, CMYK, 16-bit, A0 size, multipage TIFF, PDF ordering/extract/split/rotate/packet, ZIP duplicates, persisted history, identity/hash undo, cancellation, metadata failure rollback, publication replacement guard, atomic failure rollback, unchanged sources')

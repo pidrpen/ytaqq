@@ -19,11 +19,22 @@ static int cv_image_type(const wchar_t *path) {
   if (!_wcsicmp(e, L"tif") || !_wcsicmp(e, L"tiff")) return 3;
   return -1;
 }
+/* что открывает Word / Excel: на заводе много старых .doc и .xls, не только .docx/.xlsx */
+static BOOL cv_word_file(const wchar_t *path) {
+  static const wchar_t *const ext[] = {L"docx", L"doc", L"docm", L"rtf", L"odt"};
+  for (size_t i = 0; i < sizeof(ext) / sizeof(ext[0]); i++) if (!_wcsicmp(cv_extension(path), ext[i])) return TRUE;
+  return FALSE;
+}
+static BOOL cv_excel_file(const wchar_t *path) {
+  static const wchar_t *const ext[] = {L"xlsx", L"xls", L"xlsm", L"xlsb", L"ods"};
+  for (size_t i = 0; i < sizeof(ext) / sizeof(ext[0]); i++) if (!_wcsicmp(cv_extension(path), ext[i])) return TRUE;
+  return FALSE;
+}
 static int cv_formats(const wchar_t *path, BOOL word, BOOL excel, int formats[7]) {
   int image = cv_image_type(path), count = 0;
   if (image >= 0) { for (int i = 0; i < 4; i++) if (i != image) formats[count++] = i; }
-  else if (!_wcsicmp(cv_extension(path), L"docx") && word) { formats[count++] = 4; formats[count++] = 5; }
-  else if (!_wcsicmp(cv_extension(path), L"xlsx") && excel) { formats[count++] = 4; formats[count++] = 6; }
+  else if (cv_word_file(path) && word) { formats[count++] = 4; formats[count++] = 5; }
+  else if (cv_excel_file(path) && excel) { formats[count++] = 4; formats[count++] = 6; }
   return count;
 }
 static BOOL cv_program(const wchar_t *name) {
@@ -107,7 +118,7 @@ static BOOL cv_office_open(OfSession *s, BOOL excel, const wchar_t *path) {
   VariantClear(&result); return s->doc != NULL;
 }
 static BOOL cv_office(CvJob *job, const wchar_t *temp) {
-  OfSession s; BOOL excel = !_wcsicmp(cv_extension(job->src), L"xlsx"), ok = FALSE;
+  OfSession s; BOOL excel = cv_excel_file(job->src), ok = FALSE;
   if (!cv_office_open(&s, excel, job->src)) goto done;
   if (job->format == 4) {
     VARIANT args[] = {excel ? of_int(0) : of_str(temp), excel ? of_str(temp) : of_int(17)};

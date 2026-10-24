@@ -16,6 +16,9 @@ import zipfile
 
 MAX_FILES = 128
 MAX_PAGES = 2000
+# Pillow by default refuses images over ~179 MP as a "decompression bomb". Files
+# here are local and chosen by the user; an A0 drawing scanned at 400 dpi is 266 MP.
+MAX_PIXELS = 1_000_000_000
 IMAGE_EXT = {'.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff'}
 
 
@@ -207,8 +210,58 @@ def flatten(image):
     return result
 
 
+def eight_bit(image):
+    """16/32-bit or float grayscale to 8 bits by its real range; plain convert clips it to white."""
+    if image.mode != 'F' and not image.mode.startswith('I'):
+        return image
+    wide = image.convert('F')
+    top = wide.getextrema()[1]
+    scale = 255.0 if top <= 1 else 1.0 if top <= 255 else 255.0 / 65535 if top <= 65535 else 255.0 / top
+    return wide.point(lambda value: value * scale).convert('L')
+
+
+def fit(image, ext):
+    """A mode the target format stores as is: B/W scans stay 1-bit, CMYK and 16-bit no longer fail."""
+    transparent = 'A' in image.getbands() or (image.mode == 'P' and 'transparency' in image.info)
+    if image.mode == 'F' or (image.mode.startswith('I') and not (ext in ('png', 'tif') and image.mode == 'I;16')):
+        image = eight_bit(image)
+    if ext in ('jpg', 'bmp', 'pdf'):
+        if transparent:
+            return flatten(image)
+        if image.mode == '1':
+            return image.convert('L') if ext == 'jpg' else image
+        if image.mode == 'L' or (image.mode == 'P' and ext == 'bmp'):
+            return image
+        return image.convert('RGB')
+    keep = ('1', 'L', 'LA', 'P', 'RGB', 'RGBA', 'I;16') + (('CMYK',) if ext == 'tif' else ())
+    return image if image.mode in keep else image.convert('RGBA' if transparent else 'RGB')
+
+
+def resolution(image, scale=1.0):
+    """The source dpi if plausible; scale keeps the physical size after a resize."""
+    try:
+        dpi = tuple(float(value) * scale for value in image.info.get('dpi', ()))
+    except (TypeError, ValueError):
+        return None
+    return dpi if len(dpi) == 2 and all(math.isfinite(value) and 10 <= value <= 2400 for value in dpi) else None
+
+
+def save_image(image, output, ext, dpi, icc):
+    formats = {'png': 'PNG', 'jpg': 'JPEG', 'bmp': 'BMP', 'tif': 'TIFF'}
+    # without a source dpi TIFF would get Pillow's 1 dpi; 96 is the usual screen value
+    options = {'dpi': dpi or (96, 96)} if dpi or ext == 'tif' else {}
+    if ext == 'jpg':
+        options['quality'] = 95
+    if ext == 'tif':
+        options['compression'] = 'group4' if image.mode == '1' else 'tiff_lzw'
+    if icc and ext != 'bmp':
+        options['icc_profile'] = icc
+    image.save(output, formats[ext], **options)
+
+
 def image_frames(source):
     from PIL import Image, ImageOps
+    Image.MAX_IMAGE_PIXELS = MAX_PIXELS
     with Image.open(source) as image:
         count = getattr(image, 'n_frames', 1)
         if count > MAX_PAGES:
@@ -220,7 +273,8 @@ def image_frames(source):
 
 def small_jpeg(image, budget, task):
     from PIL import Image
-    image = flatten(image)
+    dpi = resolution(image)
+    image = fit(image, 'jpg')
     for attempt in range(40):
         task.check()
         best = None
@@ -228,7 +282,7 @@ def small_jpeg(image, budget, task):
         while low <= high:
             quality = (low + high) // 2
             buffer = io.BytesIO()
-            image.save(buffer, 'JPEG', quality=quality, optimize=True, progressive=True)
+            image.save(buffer, 'JPEG', quality=quality, optimize=True, progressive=True, **({'dpi': dpi} if dpi else {}))
             value = buffer.getvalue()
             if len(value) <= budget:
                 best = value
@@ -241,14 +295,14 @@ def small_jpeg(image, budget, task):
         if width == height == 1:
             break
         image = image.resize((max(1, int(width * .8)), max(1, int(height * .8))), Image.Resampling.LANCZOS)
+        dpi = dpi and (dpi[0] * .8, dpi[1] * .8)
     raise ValueError('Лимит слишком мал: даже минимальный JPG не помещается')
 
 
 def images(task, files, op):
     from PIL import Image
     ext = task.request.get('format', 'jpg' if op == 'compress' else 'png')
-    formats = {'png': 'PNG', 'jpg': 'JPEG', 'bmp': 'BMP', 'tif': 'TIFF'}
-    if ext not in formats:
+    if ext not in ('png', 'jpg', 'bmp', 'tif'):
         raise ValueError('Неподдерживаемый формат изображения')
     for source in files:
         if source.suffix.lower() not in IMAGE_EXT:
@@ -260,6 +314,7 @@ def images(task, files, op):
             if op == 'convert' and count == 1 and original_ext == ext:
                 shutil.copyfile(source, task.stage(task.destination(source), source.name))
                 continue
+            dpi, icc = resolution(image), image.info.get('icc_profile')
             if op == 'resize':
                 width, height = image.size
                 if task.request.get('resize_mode') == 'percent':
@@ -274,6 +329,9 @@ def images(task, files, op):
                     size = target, max(1, round(height * target / width))
                 if size[0] * size[1] > 100000000:
                     raise ValueError('Результат больше 100 миллионов пикселей')
+                if image.mode in ('1', 'P'):  # 1-bit/palette resize only by nearest pixel: lines would break
+                    image = image.convert('L' if image.mode == '1' else 'RGBA')
+                dpi = resolution(image, size[0] / width)
                 image = image.resize(size, Image.Resampling.LANCZOS)
                 suffix += '-размер'
             if op == 'compress':
@@ -284,10 +342,8 @@ def images(task, files, op):
                 output.write_bytes(small_jpeg(image, budget, task))
             else:
                 output = task.stage(task.destination(source), f'{source.stem}{suffix}.{ext}')
-                if ext in ('jpg', 'bmp'):
-                    image = flatten(image)
-                options = {'quality': 95} if ext == 'jpg' else {'compression': 'tiff_lzw'} if ext == 'tif' else {}
-                image.save(output, formats[ext], **options)
+                ready = fit(image, ext)
+                save_image(ready, output, ext, dpi, icc if ready.mode == image.mode else None)
 
 
 def pdf_reader(path, stack):
@@ -316,14 +372,9 @@ def add_image_pdf(writer, source, task):
         if len(writer.pages) >= MAX_PAGES:
             raise ValueError('В итоговом PDF больше 2000 страниц')
         buffer = io.BytesIO()
-        dpi = image.info.get('dpi', (150, 150))
-        try:
-            dpi = tuple(float(value) for value in dpi)
-            if len(dpi) != 2 or not all(math.isfinite(value) and 10 <= value <= 2400 for value in dpi):
-                dpi = (150, 150)
-        except (TypeError, ValueError):
-            dpi = (150, 150)
-        flatten(image).save(buffer, 'PDF', dpi=dpi, quality=95)
+        # B/W scans stay 1-bit (CCITT G4, lossless and small) instead of a JPEG photo of the page
+        page = fit(image, 'pdf')
+        page.save(buffer, 'PDF', dpi=resolution(image) or (150, 150), **({} if page.mode == '1' else {'quality': 95}))
         buffer.seek(0)
         writer.add_page(PdfReader(buffer).pages[0])
 
