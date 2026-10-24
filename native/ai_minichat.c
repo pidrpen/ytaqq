@@ -44,7 +44,8 @@ static HBRUSH g_amBgBr, g_amFieldBr;
 static int g_amK = 100, g_amScroll, g_amHot, g_amContentH, g_amCount, g_amMaxScroll, g_amTop;
 static int g_amSeenN = -1, g_amDragY, g_amDragTop;
 static BOOL g_amTrack, g_amPlacing, g_amLeft, g_amDrag, g_amCueImg;
-static BOOL g_amOwnsInput; /* вопрос ушёл отсюда: не дошёл — вернуть в это поле, а не в скрытое поле чата */
+static BOOL g_amFace; /* беседу ведут здесь, полный чат скрыт: его поле ввода — только для пересылки */
+static const wchar_t *g_amSeenText; /* последняя реплика, какой её видели: черновик маршрута сменился ответом */
 static POINT g_amGap; /* робот относительно угла окна у его стороны */
 static RECT g_amMsgs, g_amField, g_amImg, g_amBtn[AM_BTNS];
 static AmItem g_amItems[AM_TURNS + 3];
@@ -116,7 +117,8 @@ static void am_build(HDC dc, int width) {
     it->kind = AM_HINT;
     it->turn = -1;
     it->text = w;
-    lstrcpynW(w, fresh ? L"Новая беседа: что было раньше, ИИ не помнит. Прежние реплики остались в полном чате ⤢."
+    lstrcpynW(w, fresh ? L"Новая беседа: что было раньше, ИИ не помнит. Прежняя беседа сохранена — в полном чате ⤢ "
+                         L"её можно показать."
                        : L"Спросите что-нибудь — отвечу здесь. Картинку прикрепите скрепкой, Ctrl+V или "
                          L"перетащите в окно. ⟳ — новая беседа, ⤢ — полный чат.", 300);
     w += wcslen(w) + 1;
@@ -536,9 +538,11 @@ static void am_layout(void) {
                  (LPARAM)(g_amCueImg ? L"Что сделать с картинкой? Enter — отправить" : L"Спросите… Enter — отправить"));
   }
   am_clamp();
-  if (g_acN != g_amSeenN) {
-    if (g_acN > g_amSeenN) am_anchor_last();
+  const wchar_t *lastText = g_acN ? g_acTurns[g_acN - 1].text : NULL;
+  if (g_acN != g_amSeenN || lastText != g_amSeenText) { /* новая реплика или ответ встал на место черновика */
+    if (g_acN >= g_amSeenN) am_anchor_last();
     g_amSeenN = g_acN;
+    g_amSeenText = lastText;
   }
   am_tips();
   InvalidateRect(g_amWnd, NULL, FALSE);
@@ -559,7 +563,6 @@ static void am_send(void) {
     if (g_acWnd) {
       SetWindowTextW(g_acIn, t);
       SetWindowTextW(g_amIn, L"");
-      g_amOwnsInput = TRUE;
       ac_send(); /* дальше — как из полного чата: модель, поиск, файловые задачи */
       PostMessageW(g_amWnd, WM_AM_SYNC, 0, 0);
     }
@@ -568,36 +571,35 @@ static void am_send(void) {
   am_layout();
 }
 
-/* Вопрос ушёл отсюда, но не дошёл: «Стоп», ошибка модели, «сначала план» — чат
-   вернул его в своё поле ввода, а оно, может быть, скрыто. Возвращаем сюда. */
-static void am_take_back(void) {
-  if (!g_amOwnsInput || am_busy() || !g_acIn || !g_amIn) return;
-  g_amOwnsInput = FALSE;
-  int n = GetWindowTextLengthW(g_acIn);
-  if (n <= 0 || GetWindowTextLengthW(g_amIn) > 0) return;
-  wchar_t *t = (wchar_t *)malloc(((size_t)n + 1) * sizeof(wchar_t));
+/* Черновик вопроса — один на оба окна: при смене окна он переезжает из поля
+   from в поле to (там уже что-то есть — дописывается строкой ниже). Поле чата
+   выключено, пока ИИ разбирает вопрос, — тогда ничего не трогаем. */
+static void am_move_draft(HWND from, HWND to) {
+  if (!from || !to || !IsWindowEnabled(from) || !IsWindowEnabled(to)) return;
+  int n = GetWindowTextLengthW(from), m = GetWindowTextLengthW(to);
+  if (n <= 0) return;
+  wchar_t *t = (wchar_t *)malloc(((size_t)n + m + 3) * sizeof(wchar_t));
   if (!t) return;
-  GetWindowTextW(g_acIn, t, n + 1);
-  SetWindowTextW(g_amIn, t);
-  SetWindowTextW(g_acIn, L"");
-  SendMessageW(g_amIn, EM_SETSEL, (WPARAM)n, (LPARAM)n);
+  int k = 0;
+  if (m > 0) {
+    GetWindowTextW(to, t, m + 1);
+    k = (int)wcslen(t);
+    t[k++] = L'\r';
+    t[k++] = L'\n';
+  }
+  GetWindowTextW(from, t + k, n + 1);
+  SetWindowTextW(to, t);
+  SetWindowTextW(from, L"");
+  int end = GetWindowTextLengthW(to);
+  SendMessageW(to, EM_SETSEL, (WPARAM)end, (LPARAM)end);
   free(t);
 }
 
-/* ⤢ — в полный чат; недописанный вопрос едет с собой */
-static void am_to_full(void) {
-  ac_mini_close();
-  int n = g_amIn ? GetWindowTextLengthW(g_amIn) : 0;
-  if (n > 0 && g_acIn && !GetWindowTextLengthW(g_acIn) && IsWindowEnabled(g_acIn)) {
-    wchar_t *t = (wchar_t *)malloc(((size_t)n + 1) * sizeof(wchar_t));
-    if (t) {
-      GetWindowTextW(g_amIn, t, n + 1);
-      SetWindowTextW(g_acIn, t);
-      SetWindowTextW(g_amIn, L"");
-      free(t);
-    }
-  }
-  aichat_show_full();
+/* Мини-чат — лицо беседы, а вопрос вернулся в поле скрытого чата («Стоп», ошибка
+   модели, «сначала план»): забираем его сюда, когда чат доделает своё. */
+static void am_take_back(void) {
+  if (!g_amFace || am_busy()) return;
+  am_move_draft(g_acIn, g_amIn);
 }
 
 /* «Стоп», «Применить», «Отмена» — те же кнопки полного чата */
@@ -853,7 +855,7 @@ static LRESULT CALLBACK AmProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
     switch (am_hit(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam))) {
     case AM_NEW: ac_new_topic(); break;
     case AM_UNDO: ac_new_topic_undo(); break;
-    case AM_FULL: am_to_full(); break;
+    case AM_FULL: aichat_show_full(); break; /* мини-чат закроется, черновик переедет */
     case AM_CLOSE: ac_mini_close(); break;
     case AM_ATTACH: am_attach_menu(); break;
     case AM_IMGDEL: ac_drop_img(); break;
@@ -921,7 +923,7 @@ static void ac_mini_refresh(void) {
   if (!ac_mini_open()) return;
   am_layout();
   if (am_busy()) SetTimer(g_amWnd, AM_TIMER, 120, NULL);
-  if (g_amOwnsInput) PostMessageW(g_amWnd, WM_AM_SYNC, 0, 0); /* после того, как чат доделает своё */
+  if (g_amFace) PostMessageW(g_amWnd, WM_AM_SYNC, 0, 0); /* после того, как чат доделает своё */
 }
 
 /* строка состояния чата (ac_status) — в шапку мини-чата, без подсказок про «Стоп —»
@@ -998,7 +1000,10 @@ static void ac_mini_show(void) {
   }
   BOOL was = IsWindowVisible(g_amWnd);
   g_amSeenN = -1; /* открыли — последний длинный ответ с начала */
-  am_take_back();
+  /* у беседы одно окно: полный чат прячется, его черновик переезжает сюда */
+  if (IsWindowVisible(g_acWnd)) ShowWindow(g_acWnd, SW_HIDE);
+  g_amFace = TRUE;
+  am_move_draft(g_acIn, g_amIn);
   am_layout(); /* размер и место — до показа, чтобы не мигнуло в углу экрана */
   am_place();
   ShowWindow(g_amWnd, SW_SHOWNOACTIVATE);

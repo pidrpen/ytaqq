@@ -137,6 +137,60 @@ static BOOL mct_file_has(const wchar_t *path, const wchar_t *what) {
   return ok;
 }
 
+/* есть ли слова в ленте полного чата (RichEdit) */
+static BOOL mct_log_has(const wchar_t *what) {
+  int n = GetWindowTextLengthW(g_acLog);
+  wchar_t *t = n > 0 ? (wchar_t *)malloc(((size_t)n + 1) * sizeof(wchar_t)) : NULL;
+  if (t) GetWindowTextW(g_acLog, t, n + 1);
+  BOOL ok = t && wcsstr(t, what);
+  free(t);
+  return ok;
+}
+
+static BOOL mct_text_is(HWND h, const wchar_t *what) {
+  wchar_t t[200] = L"";
+  GetWindowTextW(h, t, 200);
+  return !wcscmp(t, what);
+}
+
+/* лента полного чата — в PNG (RichEdit рисует себя по WM_PRINT) */
+static void mct_log_shot(const wchar_t *name) {
+  mct_pump();
+  RECT rc;
+  GetClientRect(g_acLog, &rc);
+  BITMAPINFO bi;
+  memset(&bi, 0, sizeof(bi));
+  bi.bmiHeader.biSize = sizeof(bi.bmiHeader);
+  bi.bmiHeader.biWidth = rc.right;
+  bi.bmiHeader.biHeight = -rc.bottom;
+  bi.bmiHeader.biPlanes = 1;
+  bi.bmiHeader.biBitCount = 32;
+  bi.bmiHeader.biCompression = BI_RGB;
+  void *bits = NULL;
+  HDC mem = CreateCompatibleDC(NULL);
+  HBITMAP bmp = mem && rc.right > 0 && rc.bottom > 0 ? CreateDIBSection(mem, &bi, DIB_RGB_COLORS, &bits, NULL, 0) : NULL;
+  DWORD len = 0;
+  if (bmp) {
+    HGDIOBJ old = SelectObject(mem, bmp);
+    SendMessageW(g_acLog, WM_PRINT, (WPARAM)mem, PRF_CLIENT | PRF_ERASEBKGND);
+    GdiFlush();
+    SelectObject(mem, old);
+    IWICImagingFactory *f = ac_factory();
+    IWICBitmap *wb = NULL;
+    BYTE *png = NULL;
+    if (f && SUCCEEDED(f->lpVtbl->CreateBitmapFromHBITMAP(f, bmp, NULL, WICBitmapIgnoreAlpha, &wb)) &&
+        ac_png(f, (IWICBitmapSource *)wb, (UINT)rc.right, (UINT)rc.bottom, &png, &len)) {
+      mct_write(name, png, len);
+      free(png);
+    }
+    if (wb) wb->lpVtbl->Release(wb);
+    if (f) f->lpVtbl->Release(f);
+    DeleteObject(bmp);
+  }
+  if (mem) DeleteDC(mem);
+  mct_check(len > 0, name);
+}
+
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
   (void)prev;
   (void)cmd;
@@ -155,9 +209,11 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
   InitCommonControlsEx(&icc);
   _snwprintf(g_dataDir, MAX_PATH, L"%ls\\data", g_mctDir);
   CreateDirectoryW(g_dataDir, NULL);
-  wchar_t hist[MAX_PATH];
+  wchar_t hist[MAX_PATH], ini[MAX_PATH];
   ac_hist_path(hist);
   DeleteFileW(hist);
+  _snwprintf(ini, MAX_PATH, L"%ls\\ai_avatar.ini", g_dataDir); /* помощника не звать: проверяем окна чата */
+  WritePrivateProfileStringW(L"Avatar", L"Visible", L"0", ini);
   g_aiUiThread = GetCurrentThreadId();
   g_fontUi = CreateFontW(-16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, 0, 0, 0, 0, L"Segoe UI");
   g_fontBody = g_fontUi;
@@ -199,7 +255,6 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
   SetWindowTextW(g_amIn, L"");
   mct_check(am_busy(), L"пока ИИ думает, мини-чат занят");
   mct_shot(L"4-busy-stop.png");
-  g_amOwnsInput = TRUE;
   g_acId = 0;
   ac_busy(FALSE);
   ac_unsend();
@@ -234,13 +289,17 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
   int before = g_acN;
   mct_check(ac_new_topic() && g_acNewAt == before && g_acContextStart == before, L"новая беседа: ИИ не видит прежних реплик");
   mct_check(mct_file_has(hist, L"2\t") && mct_file_has(hist, L"примерно вдвое"), L"ai_chat.txt хранит прежние реплики и черту");
-  wchar_t *log = NULL;
-  int ll = GetWindowTextLengthW(g_acLog);
-  if (ll > 0 && (log = (wchar_t *)malloc(((size_t)ll + 1) * sizeof(wchar_t))) != NULL) GetWindowTextW(g_acLog, log, ll + 1);
-  mct_check(log && wcsstr(log, L"новая беседа"), L"в ленте полного чата — черта «новая беседа»");
-  free(log);
+  mct_check(mct_log_has(L"Прежняя сохранена — вернуть · показать") && !mct_log_has(L"примерно вдвое"),
+            L"полный чат после ⟳ — тоже с чистого листа, прежнее скрыто строкой «вернуть · показать»");
   mct_check(ac_new_topic_undo_ready(), L"до нового вопроса беседу можно вернуть");
   mct_shot(L"8-new-topic.png");
+  mct_log_shot(L"10-full-new-topic.png");
+  ac_log_link_do(1); /* «показать» */
+  mct_check(mct_log_has(L"примерно вдвое") && mct_log_has(L"новая беседа: что выше"),
+            L"«показать» — в полном чате вся история с чертой");
+  mct_log_shot(L"11-full-shown.png");
+  ac_log_link_do(2); /* «скрыть» */
+  mct_check(!mct_log_has(L"примерно вдвое"), L"«скрыть» — снова только новая беседа");
   ac_new_topic_undo();
   mct_check(g_acNewAt == 0 && !ac_new_topic_undo_ready(), L"«Вернуть» вернуло прежнюю беседу");
   mct_shot(L"9-undo.png");
@@ -258,6 +317,50 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
   ac_redraw();
   mct_check(g_amCount > 0 && g_amItems[0].kind == AM_MORE && g_amItems[1].turn == g_acN - AM_TURNS,
             L"длинная беседа: в ленте последние реплики, о ранних — строка сверху");
+
+  /* «Новая беседа» полного чата — то же, что ⟳: обе ленты чистые, ничего не стёрто */
+  SendMessageW(g_acWnd, WM_COMMAND, MAKEWPARAM(ID_AC_CLEAR, BN_CLICKED), (LPARAM)g_acClear);
+  mct_pump();
+  mct_check(g_acNewAt == g_acN && g_amCount == 1 && g_amItems[0].kind == AM_HINT && !mct_log_has(L"Новый ответ") &&
+                mct_file_has(hist, L"Новый ответ"),
+            L"кнопка полного чата: обе ленты с чистого листа, история на месте");
+
+  /* одно окно на беседу: ⤢ закрывает мини-чат, черновик и картинка переезжают — и обратно */
+  SetWindowTextW(g_amIn, L"черновик вопроса");
+  mct_fake_image();
+  aichat_show_full();
+  mct_pump();
+  mct_check(!IsWindowVisible(g_amWnd) && IsWindowVisible(g_acWnd) && mct_text_is(g_acIn, L"черновик вопроса") &&
+                !GetWindowTextLengthW(g_amIn) && IsWindowVisible(g_acThumb),
+            L"⤢: мини-чат закрыт, черновик и картинка — в полном чате");
+  ac_mini_show();
+  mct_pump();
+  mct_check(IsWindowVisible(g_amWnd) && !IsWindowVisible(g_acWnd) && mct_text_is(g_amIn, L"черновик вопроса") &&
+                !GetWindowTextLengthW(g_acIn) && g_amImg.bottom > g_amImg.top,
+            L"щелчок по помощнику: полный чат спрятан, черновик и картинка — в мини-чате");
+  ac_drop_img();
+  SetWindowTextW(g_amIn, L"");
+
+  /* маршрут по чертежу: черновик, потом ответ на его месте — мини-чат показывает ответ */
+  ac_push(0, L"Маршрут по чертежу");
+  g_acTpSeq = 7;
+  AcTpDone *draft = (AcTpDone *)calloc(1, sizeof(AcTpDone));
+  draft->text = _wcsdup(L"Черновик по Tesseract: 005 Заготовительная, 010 Токарная.");
+  draft->seq = 7;
+  ac_tp_done(TRUE, draft);
+  int n0 = g_acN;
+  AcTpDone *done = (AcTpDone *)calloc(1, sizeof(AcTpDone));
+  done->text = _wcsdup(L"Маршрут: 005 Заготовительная, 010 Токарная черновая, 015 Термическая, 020 Токарная "
+                       L"чистовая, 025 Фрезерная, 030 Шлифовальная, 035 Контрольная. Дочитано моделью.");
+  done->seq = 7;
+  ac_tp_done(FALSE, done);
+  mct_pump();
+  last = g_amCount - 1;
+  mct_check(g_acN == n0 && last >= 0 && wcsstr(g_amItems[last].text, L"Дочитано моделью") &&
+                !wcsstr(g_amItems[last].text, L"Черновик") && g_amSeenText == g_acTurns[g_acN - 1].text &&
+                mct_log_has(L"Дочитано моделью") && !mct_log_has(L"Черновик по Tesseract"),
+            L"ответ на маршрут встал на место черновика — и в мини-чате, и в полном");
+  mct_shot(L"12-route-answer.png");
 
   char out[24000];
   int k = WideCharToMultiByte(CP_UTF8, 0, g_mctReport, -1, out, sizeof(out), NULL, NULL);
