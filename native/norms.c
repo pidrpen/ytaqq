@@ -1797,7 +1797,9 @@ static wchar_t *nm_read_file(const wchar_t *path) {
   return w;
 }
 
-/* все *.tsv и *.txt папки; FALSE — папки нет (нормирование не включено) */
+/* все *.tsv и *.txt папки; FALSE — папки нет (нормирование не включено). Служебные «.имя»
+   (.встроено.txt раскладки встроенных таблиц) не таблицы; «имя.tsv.новая» маска с коротким
+   именем 8.3 могла бы зацепить — расширение сверяем по длинному имени */
 static BOOL nm_base_load(NmBase *b, wchar_t *dir) {
   memset(b, 0, sizeof(*b));
   nm_dir(dir);
@@ -1813,6 +1815,8 @@ static BOOL nm_base_load(NmBase *b, wchar_t *dir) {
     if (f == INVALID_HANDLE_VALUE) continue;
     do {
       if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+      const wchar_t *ext = wcsrchr(fd.cFileName, L'.');
+      if (fd.cFileName[0] == L'.' || !ext || _wcsicmp(ext, masks[m] + 1)) continue;
       if (!_wcsicmp(fd.cFileName, L"README.txt") || !_wcsicmp(fd.cFileName, L"ПРОЧТИ.txt")) continue;
       _snwprintf(path, MAX_PATH, L"%s\\%s", dir, fd.cFileName);
       path[MAX_PATH - 1] = 0;

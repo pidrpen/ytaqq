@@ -64,6 +64,10 @@ int wmain(int argc, wchar_t **argv) {
   put16(argv[1], L"пз.txt", L"назначение\tтокарная.пз\r\nкарта\t4\r\nед\tмин\r\nпоз.\tзначение\r\n1\t15\r\n");
   put8(argv[1], L"испорчен.tsv", L"просто текст\n", 0);
   put8(argv[1], L"ПРОЧТИ.txt", L"не таблица — пропускается\n", 0);
+  /* раскладка встроенных таблиц: отпечатки и новая версия правленой таблицы рядом */
+  put8(argv[1], L".встроено.txt", L"0123456789abcdef\tпереход.tsv\n", 0);
+  put8(argv[1], L"переход.tsv.новая", L"назначение\tтокарная.переход\nкарта\t2\nед\tмин\nпоз.\tзначение\n1\t9\n", 0);
+  put8(argv[1], L"старое.tsvx", L"просто текст\n", 0);
 
   NmBase b;
   wchar_t dir[MAX_PATH];
@@ -71,6 +75,7 @@ int wmain(int argc, wchar_t **argv) {
   ok("прочитано 4 таблицы (UTF-8 с BOM и без, UTF-16)", b.n == 4);
   ok("испорченный — в ошибках", wcsstr(b.err, L"испорчен.tsv") != NULL);
   ok("ПРОЧТИ.txt не читается", wcsstr(b.err, L"ПРОЧТИ") == NULL);
+  ok("служебные и «.новая» не читаются", !wcsstr(b.err, L"встроено") && !wcsstr(b.err, L"tsvx"));
   nm_base_free(&b);
 
   static TnRoute r;
