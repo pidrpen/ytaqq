@@ -867,7 +867,7 @@ static int gs_is_checked(const GsTable *t) {
 static void gs_cite(const GsTable *t, GsBuf *b) {
   gs_cat(b, t->std);
   if (t->table[0]) gs_cat(b, L", табл. "), gs_cat(b, t->table);
-  gs_cat(b, gs_is_checked(t) ? L" — сверено" : L" — НЕ сверено человеком");
+  gs_cat(b, gs_is_checked(t) ? L" — сверено человеком" : t->cross[0] ? L" — сверено по двум источникам" : L" — НЕ сверено");
 }
 
 /* Найденное — текстом для человека и для модели: по таблицам, с источником. */
@@ -882,7 +882,8 @@ static void gs_text(const GsQuery *Q, const GsHit *hit, int n, GsBuf *b) {
       gs_cat(b, L"\nИсточник: ");
       gs_cat(b, t->src[0] ? t->src : L"не указан");
       if (gs_is_checked(t)) gs_cat(b, L". Сверено человеком: "), gs_cat(b, t->checked);
-      else gs_cat(b, L". НЕ СВЕРЕНО человеком с источником — числа давать с оговоркой");
+      else if (t->cross[0]) gs_cat(b, L". Сверено по двум открытым источникам (человеком — нет)");
+      else gs_cat(b, L". НЕ СВЕРЕНО ни человеком, ни по второму источнику — числа давать с оговоркой");
       if (t->cross[0]) gs_cat(b, L"\nСверка по второму источнику: "), gs_cat(b, t->cross);
       gs_ch(b, L'\n');
       int nearTok = -1;
