@@ -152,13 +152,23 @@ static DWORD WINAPI sz_auto_thread(LPVOID arg) {
               600);
     goto done;
   }
-  if (ftype != UIA_TreeItemControlTypeId) {
+  /* Дерево клиента (WinForms SysTreeView32) узлов в UI Automation не показывает: в фокусе
+     оказывается само дерево, а не узел. Узнать, тот ли узел выделен, можно только по его
+     меню — «Вставить операцию» бывает лишь у версии ТП, варианта и операции варианта. */
+  wchar_t cls[200] = L"";
+  {
+    BSTR b = NULL;
+    if (SUCCEEDED(focus->lpVtbl->get_CurrentClassName(focus, &b)) && b) lstrcpynW(cls, b, 200);
+    SysFreeString(b);
+  }
+  if (ftype != UIA_TreeItemControlTypeId && ftype != UIA_TreeControlTypeId && !wcsstr(cls, L"SysTreeView32")) {
     _snwprintf(msg, 600,
-               L"Шаг 1: в «Союзе» выделен не узел дерева («%s»). Выделите в дереве версию ТП, вариант или операцию "
+               L"Шаг 1: в «Союзе» ввод не в дереве («%s»). Щёлкните в дереве по версии ТП, варианту или операции "
                L"варианта и нажмите снова. Ничего не нажато.",
-               node[0] ? node : L"без названия");
+               node[0] ? node : cls[0] ? cls : L"без названия");
     goto done;
   }
+  if (!node[0]) lstrcpynW(node, L"выделенный узел", 200);
   if (sz_aborted()) goto stopped;
   /* 2. меню узла — как с клавиатуры */
   {
