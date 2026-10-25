@@ -60,14 +60,15 @@
 
 typedef struct {
   wchar_t name[PN_NAME];
-  double norm;       /* кг/м² за один слой */
+  double norm;       /* кг/м² на всё покрытие; perLayer — за один слой */
   wchar_t src[80];   /* откуда норма — мелко под названием */
   wchar_t tare[40];  /* тара, кг: «0,8; 2,7; 20» */
   wchar_t thin[40];  /* разбавитель, можно пусто */
   double thinPct;    /* его % к массе материала */
+  int perLayer;      /* 1 — норма за слой (паспортная, × слоёв), 0 — на всё покрытие */
 } PnMat;
 
-/* лист «Нормы» файла */
+/* лист «Нормы» файла — нормы завода, на всё покрытие (perLayer 0) */
 #define PN_SRC_XLSX L"из «Краска — расчёт.xlsx»"
 static const PnMat kPnDefMats[] = {
     {L"Эмаль ПФ-115(к)", 0.27, PN_SRC_XLSX, L"", L"", 0},  {L"Эмаль ПФ-231", 0.13, PN_SRC_XLSX, L"", L"", 0},
@@ -79,13 +80,13 @@ static const PnMat kPnDefMats[] = {
    граница диапазона из ГОСТ / паспорта — в запас */
 #define PN_DEFS 2
 static const PnMat kPnDefMats2[] = {
-    {L"Грунтовка ГФ-021", 0.10, L"ГОСТ 25129-82: 60–100 г/м² за слой, без потерь", L"", L"", 0},
-    {L"Грунтовка ХС-010", 0.125, L"ГОСТ 9355-81, паспорт: 95–125 г/м², без потерь", L"", L"", 0},
-    {L"Эмаль ХВ-124", 0.12, L"ГОСТ 10144-89, паспорт: 80–120 г/м², без потерь", L"", L"", 0},
-    {L"Эмаль ХВ-785", 0.12, L"ГОСТ 7313-75, паспорт: 80–120 г/м², без потерь", L"", L"", 0},
-    {L"Эмаль ЭП-140", 0.125, L"ГОСТ 24709-81, паспорт: 70–125 г/м², без потерь", L"", L"", 0},
-    {L"Эмаль МЛ-12", 0.10, L"ГОСТ 9754-76: 70–100 г/м², без потерь", L"", L"", 0},
-    {L"Эмаль КО-8101", 0.18, L"паспорт: 150–180 г/м², без потерь", L"", L"", 0},
+    {L"Грунтовка ГФ-021", 0.10, L"ГОСТ 25129-82: 60–100 г/м² за слой, без потерь", L"", L"", 0, 1},
+    {L"Грунтовка ХС-010", 0.125, L"ГОСТ 9355-81, паспорт: 95–125 г/м² за слой, без потерь", L"", L"", 0, 1},
+    {L"Эмаль ХВ-124", 0.12, L"ГОСТ 10144-89, паспорт: 80–120 г/м² за слой, без потерь", L"", L"", 0, 1},
+    {L"Эмаль ХВ-785", 0.12, L"ГОСТ 7313-75, паспорт: 80–120 г/м² за слой, без потерь", L"", L"", 0, 1},
+    {L"Эмаль ЭП-140", 0.125, L"ГОСТ 24709-81, паспорт: 70–125 г/м² за слой, без потерь", L"", L"", 0, 1},
+    {L"Эмаль МЛ-12", 0.10, L"ГОСТ 9754-76: 70–100 г/м² за слой, без потерь", L"", L"", 0, 1},
+    {L"Эмаль КО-8101", 0.18, L"паспорт: 150–180 г/м² за слой, без потерь", L"", L"", 0, 1},
 };
 static const wchar_t *const kPnProf[PN_NPROF] = {L"Круг",     L"Лист",    L"Труба",   L"Кв. труба", L"Квадрат",
                                                  L"Шестигр.", L"Уголок",  L"Швеллер", L"Двутавр",   L"Своя площадь"};
@@ -246,6 +247,13 @@ static int pn_find_mat(const wchar_t *name) {
   return -1;
 }
 
+/* паспортная норма (по ГОСТ, за один слой) — по названию; старый paint.txt признака не хранил */
+static int pn_passport(const wchar_t *name) {
+  for (size_t i = 0; i < sizeof(kPnDefMats2) / sizeof(kPnDefMats2[0]); i++)
+    if (!wcscmp(kPnDefMats2[i].name, name)) return 1;
+  return 0;
+}
+
 /* паспортные материалы, которых ещё нет (по названию) — в конец норм */
 static void pn_add_defs2(void) {
   for (size_t i = 0; i < sizeof(kPnDefMats2) / sizeof(kPnDefMats2[0]); i++)
@@ -283,7 +291,7 @@ static double pn_layer(const PnPart *p, int k, int *state) {
     *state = 2;
     return 0;
   }
-  double v = pn_kg(p, k, g_pnMat[j].norm);
+  double v = pn_kg(p, k, g_pnMat[j].norm, g_pnMat[j].perLayer);
   if (v < 0) return 0;
   *state = 1;
   return k < 2 ? v * pn_coef() : v;
@@ -484,7 +492,8 @@ static void pn_save(void) {
     pn_clean(m->src, src, 80);
     pn_clean(m->tare, tare, 40);
     pn_clean(m->thin, thin, 40);
-    sb_add(&b, L"norm\t%s\t%.10g\t%s\t%s\t%.10g\t%s\n", n, m->norm, tare, thin, m->thinPct, src);
+    sb_add(&b, L"norm\t%s\t%.10g\t%s\t%s\t%.10g\t%s\t%d\n", n, m->norm, tare, thin, m->thinPct, src,
+           m->perLayer);
   }
   pn_part_line(&b, L"cur", &g_pnCur);
   for (int i = 0; i < g_pnN; i++) pn_part_line(&b, L"item", &g_pnList[i]);
@@ -558,6 +567,8 @@ static BOOL pn_load(RECT *place) {
           lstrcpynW(m->thin, f[4], 40);
           m->thinPct = pn_parse_str(f[5]);
           lstrcpynW(m->src, f[6], 80);
+          if (n >= 8) m->perLayer = _wtoi(f[7]) != 0; /* с 2026.10.25: норма за слой или на покрытие */
+          else m->perLayer = pn_passport(m->name);
         } else { /* старый файл: «откуда» — от исходной нормы с тем же названием */
           for (size_t i = 0; i < sizeof(kPnDefMats) / sizeof(kPnDefMats[0]); i++)
             if (!wcscmp(kPnDefMats[i].name, m->name)) lstrcpynW(m->src, kPnDefMats[i].src, 80);
@@ -968,13 +979,11 @@ static int pn_cur_body(HDC dc, int x, int w, int y, BOOL paint) {
     } else {
       pn_num(g_pnMat[j].norm, 4, n, 32);
       int lay = g_pnCur.lay[k] > 0 ? g_pnCur.lay[k] : 1;
-      if (k < 2 && pn_coef() > 1) {
-        wchar_t c[32];
-        pn_num(pn_coef(), 2, c, 32);
-        _snwprintf(left, 160, L"%s   ·   %s кг/м² × %d сл. × %s", g_pnCur.mat[k], n, lay, c);
-      } else {
-        _snwprintf(left, 160, L"%s   ·   %s кг/м² × %d сл.", g_pnCur.mat[k], n, lay);
-      }
+      wchar_t how[40], c[32] = L"";
+      if (g_pnMat[j].perLayer) _snwprintf(how, 40, L"кг/м² × %d сл.", lay); /* паспортная — за слой */
+      else lstrcpynW(how, L"кг/м² на покрытие", 40);                         /* слои не умножают */
+      if (k < 2 && pn_coef() > 1) pn_num(pn_coef(), 2, c, 32);
+      _snwprintf(left, 160, c[0] ? L"%s   ·   %s %s × %s" : L"%s   ·   %s %s", g_pnCur.mat[k], n, how, c);
       pn_fmt(kg, v, 40);
       _snwprintf(right, 48, L"%s кг", v);
     }
@@ -1141,8 +1150,8 @@ static int pn_list_body(HDC dc, int x, int w, int y, BOOL paint) {
       if (st == 2) _snwprintf(one, 140, L"%s — нет нормы", p->mat[k]);
       else {
         pn_fmt(kg, v, 40);
-        int lay = p->lay[k] > 0 ? p->lay[k] : 1;
-        if (lay > 1) _snwprintf(one, 140, L"%s ×%d сл. %s кг", p->mat[k], lay, v);
+        int lay = p->lay[k] > 0 ? p->lay[k] : 1, j = pn_find_mat(p->mat[k]);
+        if (lay > 1 && j >= 0 && g_pnMat[j].perLayer) _snwprintf(one, 140, L"%s ×%d сл. %s кг", p->mat[k], lay, v);
         else _snwprintf(one, 140, L"%s %s кг", p->mat[k], v);
       }
       if (mats[0]) wcscat(mats, L"  ·  ");
