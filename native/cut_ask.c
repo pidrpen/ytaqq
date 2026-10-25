@@ -141,21 +141,21 @@ static int cut_answer(const wchar_t *q, wchar_t *out, int cap) {
     if (!a.mat) tn_item(need, 200, L"марку");
     if (!(a.t > 0)) tn_item(need, 200, L"толщину листа");
     if (!(a.len > 0)) tn_item(need, 200, L"длину реза одной детали (контур и отверстия)");
-    _snwprintf(out, (size_t)cap, L"Для расхода на резку назовите %ls. Например: «резка ст3 10 мм, рез 2400 мм ×20».",
+    swprintf(out, (size_t)cap, L"Для расхода на резку назовите %ls. Например: «резка ст3 10 мм, рез 2400 мм ×20».",
                need);
     if (a.named[0]) {
       size_t n = wcslen(out);
-      _snwprintf(out + n, (size_t)cap - n, L"\nМарки «%ls» в нормах резки нет.", a.named);
+      swprintf(out + n, (size_t)cap - n, L"\nМарки «%ls» в нормах резки нет.", a.named);
     }
     if (!a.mat) {
       size_t n = wcslen(out);
-      _snwprintf(out + n, (size_t)cap - n, L"\nВ нормах резки завода: ");
+      swprintf(out + n, (size_t)cap - n, L"\nВ нормах резки завода: ");
       for (int i = 0; i < CUT_NMATS; i++) {
         n = wcslen(out);
-        _snwprintf(out + n, (size_t)cap - n, L"%ls%ls", i ? L", " : L"", kCutMaterials[i]);
+        swprintf(out + n, (size_t)cap - n, L"%ls%ls", i ? L", " : L"", kCutMaterials[i]);
       }
       n = wcslen(out);
-      _snwprintf(out + n, (size_t)cap - n, L".");
+      swprintf(out + n, (size_t)cap - n, L".");
     }
     out[cap - 1] = 0;
     return 0;
@@ -166,19 +166,19 @@ static int cut_answer(const wchar_t *q, wchar_t *out, int cap) {
   if (!cut_calc(a.mat, a.t, a.len * qty, pk)) {
     wchar_t t[40];
     cut_fmt(a.t, 2, t, 40);
-    _snwprintf(out, (size_t)cap, L"В нормах резки нет %ls толщиной %ls мм.", a.mat, t);
+    swprintf(out, (size_t)cap, L"В нормах резки нет %ls толщиной %ls мм.", a.mat, t);
     out[cap - 1] = 0;
     free(pk);
     return 0;
   }
   size_t n = 0;
-  _snwprintf(out, (size_t)cap, L"Расход на резку — по нормам резки завода (как в окне «Расчёт резки и газов»).\n");
+  swprintf(out, (size_t)cap, L"Расход на резку — по нормам резки завода (как в окне «Расчёт резки и газов»).\n");
   if (qty > 1) {
     wchar_t one[40], all[40];
     cut_fmt(a.len, 0, one, 40);
     cut_fmt(a.len * qty, 0, all, 40);
     n = wcslen(out);
-    _snwprintf(out + n, (size_t)cap - n, L"%d шт × %ls мм = %ls мм реза.\n", qty, one, all);
+    swprintf(out + n, (size_t)cap - n, L"%d шт × %ls мм = %ls мм реза.\n", qty, one, all);
   }
   n = wcslen(out);
   cut_copy_text(pk, out + n, cap - (int)n);
