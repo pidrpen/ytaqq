@@ -1,6 +1,6 @@
 /* cut_ask_test.c — расход на резку по вопросу словами (cut_ask.c): разбор марки, толщины,
    длины реза и количества, ответ по нормам резки завода. Windows не нужен:
-     gcc -O2 -Wall -Werror -o cut_ask_test cut_ask_test.c && ./cut_ask_test */
+     gcc -O2 -Wall -Werror -o cut_ask_test cut_ask_test.c -lm && ./cut_ask_test */
 #include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
