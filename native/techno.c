@@ -820,8 +820,11 @@ static void tn_signs(const wchar_t *name, const wchar_t *mat, const wchar_t *tex
     tn_item(s->ax, TN_TXT, a);
   }
   /* «4 отв.», «3 отб» (курсивное «в» Tesseract читает как «б»). Одну выноску читают не раз — модель
-     и Tesseract в трёх поворотах, — поэтому одинаковые «n отв. <размер>» считаются однажды */
-  int seen[24], nSeen = 0;
+     и Tesseract в трёх поворотах, — поэтому одинаковые «n отв. <размер>» считаются однажды.
+     Первый проход — отверстия модели с местом «(поперёк оси)», «(в торце не по оси)»: они не по оси,
+     даже если по оси есть такие же по числу и размеру */
+  int seen[24], nSeen = 0, crossKey[8], nCross = 0;
+  for (int pass = 0; pass < 2; pass++)
   for (const wchar_t *p = f; *p; p++)
     if (tn_isdig(*p) && (p == f || !tn_isdig(p[-1]))) {
       int v = 0;
@@ -838,10 +841,17 @@ static void tn_signs(const wchar_t *name, const wchar_t *mat, const wchar_t *tex
         int hl, hs;
         int sized = tn_num(r2, &hd, &hl, &hs) && hd >= 1 && hd <= 200;
         int key = v * 10000 + (sized ? (int)(hd * 10 + 0.5) : 0), dup = 0;
+        if (!pass) {
+          const wchar_t *e = wcschr(r2, L'\n'), *c = wcsstr(r2, L"попер"), *c2 = wcsstr(r2, L"торц");
+          if (((c && (!e || c < e)) || (c2 && (!e || c2 < e))) && nCross < 8) crossKey[nCross++] = key;
+          continue;
+        }
         for (int i = 0; i < nSeen && !dup; i++) dup = seen[i] == key;
         if (dup) continue;
         if (nSeen < 24) seen[nSeen++] = key;
-        for (int i = 0; i < nAx && !dup; i++) dup = axKey[i] == key || axKey[i] == v * 10000; /* без размера — по числу */
+        int cross = 0;
+        for (int i = 0; i < nCross; i++) cross |= crossKey[i] == key;
+        for (int i = 0; i < nAx && !dup && !cross; i++) dup = axKey[i] == key || axKey[i] == v * 10000; /* без размера — по числу */
         if (dup) continue; /* по оси — на токарной */
         s->holes += v;
         if (sized && thr) {

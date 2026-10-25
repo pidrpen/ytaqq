@@ -1856,7 +1856,8 @@ static void dr_json_elements(const wchar_t *j, wchar_t *out, int cap) {
     for (size_t i = 0; i < sizeof(kEl) / sizeof(kEl[0]) && !line[0]; i++)
       if (!wcscmp(type, kEl[i].type)) _snwprintf(line, 96, L"§EL %s", kEl[i].code);
     if (!line[0] && (!wcscmp(type, L"отверстие") || !wcscmp(type, L"резьбовое отверстие")))
-      _snwprintf(line, 96, !wcscmp(where, L"по оси") ? L"§AX %d %s" : L"%d отв. %s", n, size);
+      _snwprintf(line, 96, !wcscmp(where, L"по оси") ? L"§AX %d %s" : where[0] ? L"%d отв. %s (%s)" : L"%d отв. %s", n,
+                 size, where);
     if (!line[0] && !wcsncmp(type, L"резьба", 6) && size[0]) lstrcpynW(line, size, 96);
     line[95] = 0;
     int len = (int)wcslen(out);

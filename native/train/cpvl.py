@@ -168,7 +168,9 @@ def sheet_text(ans):
             line = '§EL ' + EL_CODES[e['type']]
         elif e['type'] in HOLE_TYPES:
             n = max(1, int(e.get('count') or 1))
-            line = f"§AX {n} {e.get('size', '')}" if e.get('where') == 'по оси' else f"{n} отв. {e.get('size', '')}"
+            w = e.get('where') or ''
+            line = f"§AX {n} {e.get('size', '')}" if w == 'по оси' else \
+                f"{n} отв. {e.get('size', '')} ({w})" if w else f"{n} отв. {e.get('size', '')}"
         elif e['type'].startswith('резьба') and e.get('size'):
             line = e['size']
         if line:
