@@ -294,7 +294,8 @@ static void ag_tool_ready(void *result) {
           swprintf(g_agDataSrc + at, 600 - at, L"%ls%ls «%ls»", at ? L"; " : L"",
                    !wcscmp(what, L"archive_find") ? L"архив" : !wcscmp(what, L"plm_search") ? L"поиск PLM" :
                    !wcscmp(what, L"plm_where_used") ? L"входимость PLM" :
-                   !wcscmp(what, L"std_find") ? L"справочник стандартов" : L"карточка PLM", q);
+                   !wcscmp(what, L"std_find") ? L"справочник стандартов" :
+                   !wcscmp(what, L"cut_calc") ? L"нормы резки" : L"карточка PLM", q);
         g_agData = TRUE;
       }
     }
@@ -356,8 +357,9 @@ static void ag_result(AiResult *r) {
     ac_avatar_tool(ag_get(&appJson, L"tool"), target[0] ? target : ag_get(&appJson, L"src"));
   }
   if (parsed && !wcscmp(ag_get(&appJson, L"tool"), L"app") && ag_data_tool(ag_get(&appJson, L"name")))
-    ac_status(!wcscmp(ag_get(&appJson, L"name"), L"std_find") ? L"Ищу в справочнике стандартов — только чтение"
-                                                              : L"Читаю PLM «Союз» и архив — только чтение · Стоп — отменить");
+    ac_status(!wcscmp(ag_get(&appJson, L"name"), L"std_find")   ? L"Ищу в справочнике стандартов — только чтение"
+              : !wcscmp(ag_get(&appJson, L"name"), L"cut_calc") ? L"Считаю расход на резку по нормам резки завода"
+                                                                : L"Читаю PLM «Союз» и архив — только чтение · Стоп — отменить");
   else if (parsed && !wcscmp(ag_get(&appJson, L"tool"), L"app")) {
     int state = ag_app_call(&appJson, g_agObservation, 6000);
     g_agLastState = state;

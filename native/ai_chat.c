@@ -2468,6 +2468,24 @@ static BOOL ac_tp_start(const wchar_t *a) {
   return TRUE;
 }
 
+/* расход на резку словами (cut_ask.c): числа — из норм резки завода, как в окне «Расчёт резки
+   и газов»; не хватает марки, толщины или длины реза — ответ говорит, что назвать */
+static BOOL ac_cut_start(const wchar_t *a) {
+  if (g_acImg || !cut_ask_wanted(a)) return FALSE;
+  wchar_t *out = (wchar_t *)malloc(8000 * sizeof(wchar_t));
+  if (!out) return FALSE;
+  int done = cut_answer(a, out, 8000);
+  ag_stop();
+  ac_push(0, a);
+  ac_push(1, out);
+  ac_redraw();
+  ac_avatar_answer(out);
+  ac_status(done ? L"Расход на резку — по нормам резки завода, без модели"
+                 : L"Для расхода на резку не хватает марки, толщины или длины реза");
+  free(out);
+  return TRUE;
+}
+
 static void ac_send(void) {
   SetWindowTextW(g_acTitle, g_aiProvider ? L"Мини-ИИ · Z.ai API" : L"Мини-ИИ · на этом компьютере");
   if (g_acPlanOn) {
@@ -2553,6 +2571,12 @@ static void ac_send(void) {
     return;
   }
   if ((ac_tp_wanted(a) || nm_ask_wanted(a)) && ac_tp_start(a)) {
+    SetWindowTextW(g_acIn, L"");
+    free(in);
+    return;
+  }
+  /* «резка ст3 10 мм рез 2400 ×20» — расход на резку по нормам резки завода, без модели */
+  if (!g_agPending && ac_cut_start(a)) {
     SetWindowTextW(g_acIn, L"");
     free(in);
     return;
