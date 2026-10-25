@@ -259,7 +259,11 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
   st_check(iShl > 0 && !wcscmp(g_szR.it[iShl].code, L"4130") && g_szR.it[iShl].guid[0],
            L"круглошлифовальной 4131 в ТП нет — взята ходовая 4130 из запасных");
   st_check(iOkr > 0 && !g_szR.it[iOkr].guid[0], L"окрасочная: аналога нет — пойдёт текстом");
-  st_check(!wcscmp(g_stClip, g_szR.it[0].guid), L"пришёл аналог — в буфере его GUID");
+  st_check(!wcscmp(g_stClip, L"0110 Заготовительная") && g_szTextOnly,
+           L"по умолчанию — текст для «Создать операцию» (в сквозной ТП копию не вставить)");
+  st_shot(L"2a-text-default.png");
+  sz_command(ID_SZ_MODE);
+  st_check(!g_szTextOnly && !wcscmp(g_stClip, g_szR.it[0].guid), L"«Аналог» — в буфере GUID аналога");
 
   /* GUID в буфере — настоящая операция ТП с тем же кодом */
   {
@@ -329,10 +333,10 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
     st_check(!g_szAutoWait && g_szR.it[1].state == SO_DONE && g_szR.cur == 2, L"токарная встала — ожидание снято, дальше термическая");
   }
 
-  /* «Текст» — та же строка текстом, как для 1С */
+  /* «Аналог» ещё раз — та же строка текстом, как для 1С */
   sz_command(ID_SZ_MODE);
   st_pump(50);
-  st_check(!wcscmp(g_stClip, L"5000 Термическая обработка"), L"«Текст»: в буфере «5000 Термическая обработка», как для 1С");
+  st_check(!wcscmp(g_stClip, L"5000 Термическая обработка"), L"снова текст: в буфере «5000 Термическая обработка», как для 1С");
   st_note(L"     в буфере: «%ls», режим текст %d, строка %d", g_stClip, g_szTextOnly, g_szR.cur);
   st_shot(L"4-text.png");
   sz_command(ID_SZ_MODE);

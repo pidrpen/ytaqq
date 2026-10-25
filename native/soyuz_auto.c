@@ -1,12 +1,17 @@
-/* ---- «Вставить сам»: автоввод в клиент «Союза» через UI Automation (с 2026.10.24) ----
+/* ---- «Вставить»: автоввод в клиент «Союза» через UI Automation (с 2026.10.24) ----
 
    Одна операция на одно нажатие — каждое нажатие и есть подтверждение. CursorPad
    делает то же, что человек, и только штатными командами клиента:
-     1. в «Союзе» должен быть выделен узел дерева ТП (версия, вариант или операция
-        варианта), а в буфере — GUID операции-аналога (soyuz_ui.c);
+     1. в «Союзе» выделена версия ТП в дереве, в буфере — текст операции или GUID
+        аналога (soyuz_ui.c);
      2. меню узла — Shift+F10, как с клавиатуры;
-     3. в меню ищется пункт «Вставить операцию» и нажимается (Invoke);
+     3. в меню ищется пункт и нажимается (Invoke): для текста — «Создать операцию»
+        (окно «Новая технологическая операция»; в поле «Операция» человек сам
+        вставляет Ctrl+V и сохраняет — так и в сквозном ТП), для GUID — «Вставить
+        операцию» (копия аналога; в сквозной ТП завод её не пускает);
      4. встала ли операция, скажет база (слежение soyuz_ui.c).
+   Дерево клиента узлов в UI Automation не показывает (проверено дома): тот ли узел
+   выделен, видно только по меню — эти пункты есть лишь у узлов ТП.
    Перед каждым шагом — проверка: тот ли процесс (PLMClient.exe), узел ли дерева
    в фокусе, есть ли пункт и доступен ли он. Не сошлось — меню закрывается, в окне
    пишется, на каком шаге и что увидели вместо ожидаемого: после обновления клиента
@@ -20,7 +25,13 @@ static const CLSID kSzClsidUia = {0xff48dba4, 0x60ef, 0x4201, {0xaa, 0x87, 0x54,
 static const IID kSzIidUia = {0x30cbe57d, 0xd9d0, 0x452a, {0xab, 0x13, 0x7a, 0xc5, 0xac, 0x48, 0x25, 0xee}};
 static const IID kSzIidInvoke = {0xfb377fbe, 0x8ea6, 0x46d5, {0x9c, 0x73, 0x64, 0x99, 0x64, 0x2d, 0x30, 0x59}};
 
-static const wchar_t kSzPasteItem[] = L"Вставить операцию"; /* пункт меню узла ТП (PMSZ.PLMSOYUZ.CFG.MFG.UNI.STD) */
+static const wchar_t kSzPasteItem[] = L"Вставить операцию"; /* копия аналога по GUID (PMSZ.PLMSOYUZ.CFG.MFG.UNI.STD) */
+static const wchar_t kSzCreateItem[] = L"Создать операцию"; /* окно «Новая технологическая операция» — и в сквозном ТП */
+
+typedef struct {
+  DWORD pid;
+  BOOL create; /* текст: открыть «Создать операцию»; иначе — нажать «Вставить операцию» */
+} SzAutoJob;
 
 static HANDLE g_szAutoThread;
 static DWORD g_szSoyuzPid; /* процесс клиента, найденный при нажатии */
@@ -78,7 +89,8 @@ static IUIAutomationCondition *sz_cond_int(IUIAutomation *u, PROPERTYID id, int 
    «меню» (ContextMenuStrip WinForms и ContextMenu WPF — оба так). Пункты ищем
    только в нём: обход всего рабочего стола был бы долгим. *menuSeen — было ли
    меню; names — какие пункты в нём (для сообщения, если нужного нет). */
-static IUIAutomationElement *sz_find_item(IUIAutomation *u, DWORD pid, BOOL *menuSeen, wchar_t *names, int ncap) {
+static IUIAutomationElement *sz_find_item(IUIAutomation *u, DWORD pid, const wchar_t *want, BOOL *menuSeen, wchar_t *names,
+                                          int ncap) {
   IUIAutomationElement *root = NULL, *found = NULL;
   if (FAILED(u->lpVtbl->GetRootElement(u, &root)) || !root) return NULL;
   IUIAutomationCondition *cp = sz_cond_int(u, UIA_ProcessIdPropertyId, (int)pid);
@@ -104,7 +116,7 @@ static IUIAutomationElement *sz_find_item(IUIAutomation *u, DWORD pid, BOOL *men
       wchar_t raw[200], t[200];
       sz_el_name(e, raw, 200);
       sz_menu_text(raw, t, 200);
-      if (!wcscmp(t, kSzPasteItem)) {
+      if (!wcscmp(t, want)) {
         found = e;
         continue;
       }
@@ -128,7 +140,10 @@ static BOOL sz_aborted(void) { return g_szAutoAbort != 0; }
 
 /* один проход: проверка → меню → пункт → нажать; итог — сообщением окну */
 static DWORD WINAPI sz_auto_thread(LPVOID arg) {
-  DWORD pid = (DWORD)(UINT_PTR)arg;
+  SzAutoJob job = *(SzAutoJob *)arg;
+  free(arg);
+  DWORD pid = job.pid;
+  const wchar_t *want = job.create ? kSzCreateItem : kSzPasteItem;
   wchar_t msg[600] = L"";
   BOOL ok = FALSE, menuOpen = FALSE;
   CoInitializeEx(NULL, COINIT_MULTITHREADED);
@@ -182,7 +197,7 @@ static DWORD WINAPI sz_auto_thread(LPVOID arg) {
   for (int t = 0; t < 30 && !item && !sz_aborted(); t++) {
     Sleep(100);
     names[0] = 0;
-    item = sz_find_item(u, pid, &menuSeen, names, 400);
+    item = sz_find_item(u, pid, want, &menuSeen, names, 400);
   }
   if (sz_aborted()) goto stopped;
   if (!item) {
@@ -190,18 +205,19 @@ static DWORD WINAPI sz_auto_thread(LPVOID arg) {
       _snwprintf(msg, 600,
                  L"Шаг 2: меню узла «%s» не открылось за 3 с (Shift+F10). Возможно, клиент «Союза» обновился. "
                  L"Ничего не нажато — вставьте вручную: правая кнопка → «%s».",
-                 node, kSzPasteItem);
+                 node, want);
     else
       _snwprintf(msg, 600,
                  L"Шаг 3: в меню узла «%s» нет пункта «%s». Видны: %s. Выделен не тот узел, нет прав технолога или "
                  L"клиент изменился после обновления. Меню закрыто, ничего не нажато.",
-                 node, kSzPasteItem, names[0] ? names : L"—");
+                 node, want, names[0] ? names : L"—");
     goto done;
   }
   if (!sz_el_int(item, UIA_IsEnabledPropertyId)) {
     _snwprintf(msg, 600,
-               L"Шаг 3: «%s» в меню недоступна: в буфере не операция или к ТП «%s» нет прав технолога. Меню закрыто.",
-               kSzPasteItem, node);
+               L"Шаг 3: «%s» в меню недоступна%s. Меню закрыто.", want,
+               job.create ? L": в этой версии создавать операции нельзя (не последняя версия или нет прав технолога)"
+                          : L": в буфере не операция, ТП сквозной (копию в него не вставить) или нет прав технолога");
     goto done;
   }
   if (sz_aborted()) goto stopped;
@@ -210,19 +226,22 @@ static DWORD WINAPI sz_auto_thread(LPVOID arg) {
     IUIAutomationInvokePattern *inv = NULL;
     if (FAILED(item->lpVtbl->GetCurrentPatternAs(item, UIA_InvokePatternId, &kSzIidInvoke, (void **)&inv)) || !inv) {
       _snwprintf(msg, 600, L"Шаг 4: пункт «%s» нашёлся, но нажать его UI Automation не даёт. Меню закрыто — нажмите сами.",
-                 kSzPasteItem);
+                 want);
       goto done;
     }
     HRESULT hr = inv->lpVtbl->Invoke(inv);
     inv->lpVtbl->Release(inv);
     if (FAILED(hr)) {
-      _snwprintf(msg, 600, L"Шаг 4: «%s» не нажалась (0x%08lX). Меню закрыто — нажмите сами.", kSzPasteItem,
+      _snwprintf(msg, 600, L"Шаг 4: «%s» не нажалась (0x%08lX). Меню закрыто — нажмите сами.", want,
                  (unsigned long)hr);
       goto done;
     }
     menuOpen = FALSE; /* меню закрылось само */
     ok = TRUE;
-    _snwprintf(msg, 600, L"«%s» нажата на «%s» — жду операцию в ТП…", kSzPasteItem, node);
+    if (job.create)
+      lstrcpynW(msg, L"Открыто «Создать операцию»: в поле «Операция» — Ctrl+V, проверьте цех и сохраните.", 600);
+    else
+      _snwprintf(msg, 600, L"«%s» нажата — жду операцию в ТП…", want);
   }
   goto done;
 stopped:
@@ -239,7 +258,8 @@ done:
   wchar_t *m = (wchar_t *)malloc(600 * sizeof(wchar_t));
   if (m) lstrcpynW(m, msg, 600);
   InterlockedExchange(&g_szAutoBusy, 0);
-  if (!g_szWnd || !PostMessageW(g_szWnd, WM_SZ_AUTO, (WPARAM)ok, (LPARAM)m)) free(m);
+  WPARAM res = ok ? (job.create ? 2 : 1) : 0;
+  if (!g_szWnd || !PostMessageW(g_szWnd, WM_SZ_AUTO, res, (LPARAM)m)) free(m);
   return 0;
 }
 
@@ -247,11 +267,7 @@ done:
 static void sz_auto_start(void) {
   SoItem *it = sz_cur();
   if (g_szAutoBusy) return;
-  if (!it || !sz_guid_mode(it)) {
-    lstrcpynW(g_szNote, L"Автоввод — только для операций с аналогом (GUID). Эту вставьте вручную: текст в буфере.", 300);
-    sz_refresh();
-    return;
-  }
+  if (!it) return;
   if (g_szClip) {
     lstrcpynW(g_szNote, L"В буфере не операция — сначала «В буфер».", 300);
     sz_refresh();
@@ -268,8 +284,11 @@ static void sz_auto_start(void) {
   if (g_szAutoThread) CloseHandle(g_szAutoThread);
   g_szAutoAbort = 0;
   InterlockedExchange(&g_szAutoBusy, 1);
-  g_szAutoThread = CreateThread(NULL, 0, sz_auto_thread, (LPVOID)(UINT_PTR)g_szSoyuzPid, 0, NULL);
+  SzAutoJob *job = (SzAutoJob *)malloc(sizeof(SzAutoJob));
+  if (job) job->pid = g_szSoyuzPid, job->create = !sz_guid_mode(it);
+  g_szAutoThread = job ? CreateThread(NULL, 0, sz_auto_thread, job, 0, NULL) : NULL;
   if (!g_szAutoThread) {
+    free(job);
     InterlockedExchange(&g_szAutoBusy, 0);
     return;
   }

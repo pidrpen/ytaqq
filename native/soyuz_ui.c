@@ -35,7 +35,8 @@
 #define TIMER_SZ_PASTE 4860
 #define TIMER_SZ_CLIP 4861
 #define TIMER_SZ_WAIT 4862       /* после автоввода — сколько ждать операцию в базе */
-#define WM_SZ_AUTO (WM_APP + 94) /* wParam: 1 — пункт нажат; lParam — wchar_t* что вышло, освобождает окно */
+#define WM_SZ_AUTO (WM_APP + 94) /* wParam: 1 — «Вставить операцию» нажата, 2 — открыто «Создать операцию», 0 — нет;
+                                   lParam — wchar_t* что вышло, освобождает окно */
 
 enum { SZF_CODE, SZF_NAME, SZF_CEH, SZF_EQUIP, SZF_TPZ, SZF_TSHT, SZF_N };
 static const wchar_t *const kSzField[SZF_N] = {L"Код", L"Операция", L"Цех, участок", L"Оборудование", L"Тпз",
@@ -44,7 +45,8 @@ static const wchar_t *const kSzField[SZF_N] = {L"Код", L"Операция", L
 static SoRoute g_szR;
 static HWND g_szWnd, g_szList;
 static BOOL g_szOn;        /* очередь идёт */
-static BOOL g_szTextOnly;  /* «Текст»: и при аналоге — «4110 Токарная», а не GUID */
+static BOOL g_szTextOnly;  /* текст «4110 Токарная» для «Создать операцию» — по умолчанию: в сквозной ТП копию
+                              не вставить (FixThroughTechProcess); FALSE — GUID аналога для «Вставить операцию» */
 static int g_szClip;       /* что в буфере: 0 — строка очереди, 1 — поле (кнопка «Копировать»), 2 — чужое */
 static int g_szDb;         /* база: 0 — не спрашивали, 1 — ищу аналоги, 2 — слежу, 3 — нет связи */
 static BOOL g_szLoaded;    /* аналоги из базы пришли */
@@ -600,13 +602,14 @@ static void sz_hint(wchar_t *out, int cap) {
     lstrcpynW(out, L"В буфере — поле из окна. «В буфер» — вернуть туда операцию.", cap);
   } else if (sz_guid_mode(it)) {
     _snwprintf(out, cap,
-               L"В буфере — операция-аналог. В дереве: правая кнопка на версии ТП (строка «… :1», не «Основной») → "
-               L"«Вставить операцию», или выделите версию и «Вставить» здесь. Операция встанет в версию со следующим номером.");
+               L"В буфере — операция-аналог (только для несквозного ТП). Правая кнопка на версии ТП (строка «… :1», не "
+               L"«Основной») → «Вставить операцию», или выделите версию и «Вставить» здесь.");
   } else {
     wchar_t t[160];
     so_clip_text(it, t, 160);
     _snwprintf(out, cap,
-               L"В буфере — «%s». На версии ТП: «Создать операцию», Ctrl+V в поле «Операция» — следом ляжет следующая.",
+               L"В буфере — «%s». Правая кнопка на версии ТП → «Создать операцию» (или выделите версию и «Вставить» "
+               L"здесь), Ctrl+V в поле «Операция», сохраните — следом ляжет следующая.",
                t);
   }
   out[cap - 1] = 0;
@@ -639,9 +642,10 @@ static void sz_refresh(void) {
     sz_field(it, f, v, 160, NULL);
     EnableWindow(GetDlgItem(g_szWnd, ID_SZ_COPY + f), v[0] != 0);
   }
-  SetWindowTextW(GetDlgItem(g_szWnd, ID_SZ_MODE), g_szTextOnly ? L"● Текст" : L"Текст");
+  SetWindowTextW(GetDlgItem(g_szWnd, ID_SZ_MODE), g_szTextOnly ? L"Аналог" : L"● Аналог");
+  EnableWindow(GetDlgItem(g_szWnd, ID_SZ_MODE), it && it->guid[0]);
   EnableWindow(GetDlgItem(g_szWnd, ID_SZ_PUT), it != NULL);
-  EnableWindow(GetDlgItem(g_szWnd, ID_SZ_AUTO), sz_guid_mode(it) && !g_szAutoBusy);
+  EnableWindow(GetDlgItem(g_szWnd, ID_SZ_AUTO), it && !g_szAutoBusy);
   EnableWindow(GetDlgItem(g_szWnd, ID_SZ_NEXT), it != NULL);
   EnableWindow(GetDlgItem(g_szWnd, ID_SZ_SKIP), it != NULL);
   sz_list_fill();
@@ -917,7 +921,7 @@ static LRESULT CALLBACK SzProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
     wchar_t *m = (wchar_t *)lParam;
     if (m) lstrcpynW(g_szNote, m, 300);
     free(m);
-    g_szAutoWait = wParam && g_szOn;
+    g_szAutoWait = wParam == 1 && g_szOn; /* 1 — «Вставить операцию» нажата; 2 — открыто «Создать операцию» */
     if (g_szAutoWait) SetTimer(hwnd, TIMER_SZ_WAIT, g_szDb == 2 ? 15000 : 3000, NULL);
     sz_refresh();
     return 0;
@@ -1035,7 +1039,7 @@ static void sz_window(void) {
   for (int f = 0; f < SZF_N; f++) mk_btn(g_szWnd, L"Копировать", ID_SZ_COPY + f);
   mk_btn(g_szWnd, L"Назад", ID_SZ_PREV);
   mk_btn(g_szWnd, L"Пропуск", ID_SZ_SKIP);
-  mk_btn(g_szWnd, L"Текст", ID_SZ_MODE);
+  mk_btn(g_szWnd, L"Аналог", ID_SZ_MODE);
   mk_btn(g_szWnd, L"В буфер", ID_SZ_PUT);
   mk_btn(g_szWnd, L"Вставить", ID_SZ_AUTO);
   mk_btn(g_szWnd, L"Дальше", ID_SZ_NEXT);
@@ -1096,7 +1100,7 @@ static BOOL sz_start(const wchar_t *route) {
   g_szR = *r;
   free(r);
   g_szR.cur = 0;
-  g_szTextOnly = FALSE;
+  g_szTextOnly = TRUE;
   g_szClip = 0;
   g_szLoaded = FALSE;
   g_szNote[0] = 0;
