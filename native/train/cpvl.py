@@ -24,14 +24,18 @@ CAT = [('Заготовительная', 'ЗАГ'), ('Токарная', 'ТО�
        ('Гибочная', 'ГИБ'), ('Сварочная', 'СВАР'), ('Электроэрозионная', 'ЭЭ'), ('Окрасочная', 'ОКР'),
        ('Гальваническая', 'ГАЛЬВ'), ('Анодирование', 'ГАЛЬВ'), ('Маркировочная', 'МАРК'), ('Долбёжная', 'ДОЛБ'),
        ('Доводочная', 'ДОВ'), ('Отрезная', 'ОТР'), ('Штамповочная', 'ШТАМП'), ('Механическая', 'МЕХ')]
-# конструктивные элементы — как в drawrec.c (kDrVlSheetSchemaEl, dr_json_elements): тип → код строки «§EL»
-# для правил techno.c; отверстия идут строкой «n отв. размер», резьбы — самим размером
+# конструктивные элементы — как в drawrec.c (kDrVlSheetSchemaEl3, dr_json_elements): тип → код строки «§EL»
+# для правил techno.c; отверстия идут строкой «n отв. размер» (по оси тела вращения — «§AX n размер»),
+# резьбы — самим размером. «уступ» и «карман» — с третьего поколения
 ELEMENT_TYPES = ['шпоночный паз', 'шпоночный паз в отверстии', 'паз', 'лыска', 'грани под ключ', 'шлицы',
                  'шлицы в отверстии', 'зубья', 'резьба наружная', 'резьба внутренняя', 'резьбовое отверстие',
-                 'отверстие', 'канавка', 'рифление', 'выдавка', 'сварной шов']
+                 'отверстие', 'канавка', 'рифление', 'выдавка', 'сварной шов', 'уступ', 'карман']
 EL_CODES = {'шпоночный паз в отверстии': 'keyin', 'шпоночный паз': 'key', 'паз': 'slot', 'лыска': 'flat',
             'грани под ключ': 'hex', 'шлицы в отверстии': 'splinein', 'шлицы': 'spline', 'зубья': 'gear',
-            'рифление': 'knurl', 'выдавка': 'emboss', 'сварной шов': 'weld'}
+            'рифление': 'knurl', 'выдавка': 'emboss', 'сварной шов': 'weld', 'уступ': 'step', 'карман': 'pocket'}
+HOLE_TYPES = ('отверстие', 'резьбовое отверстие')
+WHERE = ['', 'по оси', 'поперёк оси', 'в торце не по оси']  # где отверстие тела вращения
+GAB_KEYS = ('d', 'l', 'b', 's')  # габариты: наибольший Ø, общая длина, ширина, толщина
 
 
 def load_presets():
@@ -77,15 +81,32 @@ def has_elements(prompts):
     return 'elements' in s.get('properties', {})
 
 
-def target(label, tag, elements=False):
+def has_gabarit(prompts):
+    """вопрос по листу спрашивает и габариты, и где отверстия (третье поколение)"""
+    s = (prompts.get('sheet') or {}).get('schema') or {}
+    return 'gabarit' in s.get('properties', {})
+
+
+def gen2_elements(elements):
+    """элементы, как их называет второе поколение: без «где», без отверстий по оси, уступов и карманов"""
+    return [{k: e[k] for k in ('type', 'size', 'count')} for e in elements
+            if e.get('where') != 'по оси' and e['type'] not in ('уступ', 'карман')]
+
+
+def target(label, tag, elements=False, gabarit=False):
     """что модель должна ответить на вопрос tag по разметке листа"""
     if tag == 'name':
         return label['name']
     if tag == 'mat':
         return label['material']
     ans = {'tt': label['tt'], 'razvertka': label['razvertka'], 'holes': label['holes']}
-    if elements:
-        ans['elements'] = label.get('elements', [])
+    if gabarit:
+        g = label.get('gabarit') or {}
+        ans['gabarit'] = {k: g.get(k) for k in GAB_KEYS}
+        ans['elements'] = [{'type': e['type'], 'size': e['size'], 'count': e['count'], 'where': e.get('where', '')}
+                           for e in label.get('elements', [])]
+    elif elements:
+        ans['elements'] = gen2_elements(label.get('elements', []))
     return json.dumps(ans, ensure_ascii=False)
 
 
@@ -138,17 +159,34 @@ def sheet_text(ans):
     if '"razvertka":true' in ans or '"razvertka": true' in ans:
         t += '\nРазвертка'
     t = _json_strings(ans, 'holes', t)
+    g = gabarit_of(ans)  # dr_json_gabarit
+    if g is not None:
+        t += '\n§GB' + ''.join(f' {k}={g[k]:g}' for k in GAB_KEYS if g.get(k))
     for e in elements_of(ans):  # dr_json_elements
         line = ''
         if e['type'] in EL_CODES:
             line = '§EL ' + EL_CODES[e['type']]
-        elif e['type'] in ('отверстие', 'резьбовое отверстие'):
-            line = f"{max(1, int(e.get('count') or 1))} отв. {e.get('size', '')}"
+        elif e['type'] in HOLE_TYPES:
+            n = max(1, int(e.get('count') or 1))
+            line = f"§AX {n} {e.get('size', '')}" if e.get('where') == 'по оси' else f"{n} отв. {e.get('size', '')}"
         elif e['type'].startswith('резьба') and e.get('size'):
             line = e['size']
         if line:
             t += '\n' + line
     return t
+
+
+def gabarit_of(ans):
+    """габариты из JSON-ответа: {'d': число или None, …}; ответа про габариты нет — None"""
+    try:
+        j = json.loads(ans) if isinstance(ans, str) else ans
+        g = j.get('gabarit')
+    except (ValueError, AttributeError):
+        return None
+    if not isinstance(g, dict):
+        return None
+    return {k: float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and 0 < v < 100000 else None
+            for k, v in ((k, g.get(k)) for k in GAB_KEYS)}
 
 
 def elements_of(ans):

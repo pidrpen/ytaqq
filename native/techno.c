@@ -69,6 +69,11 @@ typedef struct {
   double holeMin;         /* наименьший Ø у «n отв. Øx»; 0 — не прочитан */
   int edges, mark, weld, bend, key, gear, knurl, flat, hex;
   int keyIn, slotEl, splineOut, splineIn, emboss; /* элементы, увиденные моделью: строки «§EL код» */
+  int step, pocket;       /* уступы и карманы — фрезерованные, у деталей из листа и корпусов */
+  int holesAx;            /* отверстия по оси тела вращения (строки «§AX n размер») — на токарной */
+  wchar_t ax[TN_TXT];     /* они же текстом: «2 отв. Ø6» */
+  int gabarit;            /* модель отвечала про габариты (строка «§GB»), даже если их нет на листе */
+  double gD, gL, gB;      /* габариты, проставленные на листе: наибольший Ø, общая длина, ширина; 0 — нет */
   int edm;                /* «электроэрозионным способом» */
   int cutApart;           /* «разрезать на две части» */
   int gauge;              /* калибр/шаблон: ПР и НЕ */
@@ -789,6 +794,31 @@ static void tn_signs(const wchar_t *name, const wchar_t *mat, const wchar_t *tex
   /* «калить в заготовке» (Tesseract: «калить 6 заготовке») — ТО до механообработки */
   for (const wchar_t *p = f; (p = wcsstr(p, L"калит")) != NULL; p++)
     if (wcsstr(p, L"заготов") && wcsstr(p, L"заготов") - p < 20) s->heatFirst = 1;
+  /* отверстия по оси тела вращения, которые назвала модель (drawrec.c): «§AX 2 Ø6». Их сверлят на
+     токарной, поэтому та же выноска «2 отв. Ø6» в «n отв.» не идёт. Размер — как ключ выноски ниже */
+  int axKey[8], nAx = 0;
+  for (const wchar_t *p = t; (p = wcsstr(p, L"§AX ")) != NULL && nAx < 8; p += 4) {
+    const wchar_t *q = p + 4;
+    double v, hd = 0;
+    int len, sep;
+    if (!tn_num(q, &v, &len, &sep) || v < 1 || v > 64) continue;
+    q += len;
+    while (*q == L' ') q++;
+    const wchar_t *sz = q;
+    while (*q && !tn_isdig(*q) && *q != L'\n' && q - sz < 3) q++;
+    if (!tn_num(q, &hd, &len, &sep) || hd < 1 || hd > 200) hd = 0;
+    axKey[nAx++] = (int)v * 10000 + (int)(hd * 10 + 0.5);
+    s->holesAx += (int)v;
+    wchar_t a[48] = {0};
+    tn_catnum(a, 48, v), tn_cat(a, 48, L" отв.");
+    if (hd) {
+      int n = (int)wcslen(a);
+      a[n++] = L' ';
+      while (*sz && *sz != L'\n' && n < 46) a[n++] = *sz++;
+      a[n] = 0;
+    }
+    tn_item(s->ax, TN_TXT, a);
+  }
   /* «4 отв.», «3 отб» (курсивное «в» Tesseract читает как «б»). Одну выноску читают не раз — модель
      и Tesseract в трёх поворотах, — поэтому одинаковые «n отв. <размер>» считаются однажды */
   int seen[24], nSeen = 0;
@@ -811,6 +841,8 @@ static void tn_signs(const wchar_t *name, const wchar_t *mat, const wchar_t *tex
         for (int i = 0; i < nSeen && !dup; i++) dup = seen[i] == key;
         if (dup) continue;
         if (nSeen < 24) seen[nSeen++] = key;
+        for (int i = 0; i < nAx && !dup; i++) dup = axKey[i] == key || axKey[i] == v * 10000; /* без размера — по числу */
+        if (dup) continue; /* по оси — на токарной */
         s->holes += v;
         if (sized && thr) {
           wchar_t m[16] = L"M";
@@ -854,6 +886,21 @@ static void tn_signs(const wchar_t *name, const wchar_t *mat, const wchar_t *tex
     else if (!wcsncmp(c, L"knurl", 5)) s->knurl = 1;
     else if (!wcsncmp(c, L"emboss", 6)) s->emboss = 1;
     else if (!wcsncmp(c, L"weld", 4)) s->weld = 1;
+    else if (!wcsncmp(c, L"step", 4)) s->step = 1;
+    else if (!wcsncmp(c, L"pocket", 6)) s->pocket = 1;
+  }
+  /* габариты, проставленные на листе (модель третьего поколения): «§GB d=62 l=180», «§GB l=240 b=120 s=20».
+     Толщину «s=» уже взял разбор «S=» выше */
+  for (const wchar_t *p = t; (p = wcsstr(p, L"§GB")) != NULL; p += 3) {
+    s->gabarit = 1;
+    for (const wchar_t *q = p + 3; *q && *q != L'\n'; q++) {
+      double v;
+      int len, sep;
+      if (q[1] != L'=' || !tn_num(q + 2, &v, &len, &sep) || v <= 0) continue;
+      if (*q == L'd') s->gD = v;
+      else if (*q == L'l') s->gL = v;
+      else if (*q == L'b') s->gB = v;
+    }
   }
   /* признаки вращения: Ø со знаком (уверенно — наибольший Ø), фаски ×45° */
   for (const wchar_t *p = t; *p; p++) {
@@ -869,6 +916,7 @@ static void tn_signs(const wchar_t *name, const wchar_t *mat, const wchar_t *tex
     s->rot++;
     if (sure && v > s->dmax) s->dmax = v;
   }
+  if (s->gD) s->dmax = s->gD; /* наибольший Ø, который модель нашла среди размеров, точнее любого «Ø» в тексте */
   for (const wchar_t *p = f; *p; p++)
     if (tn_isdig(*p) && (p[1] == L'х' || p[1] == L'×') && p[2] == L'4' && p[3] == L'5') s->rot++;
   for (const wchar_t *p = f; *p; p++)
@@ -989,6 +1037,15 @@ static void tn_hrc_txt(const TnSigns *s, wchar_t *out, int cap) {
   tn_catnum(out, cap, s->hrcLo);
   if (s->hrcHi != s->hrcLo) tn_cat(out, cap, L"…"), tn_catnum(out, cap, s->hrcHi);
   tn_cat(out, cap, L" HRC");
+}
+
+/* способ резки листа по толщине, как режут на заводе: до 10 мм — лазер, свыше 10 до 30 — плазма,
+   толще — газокислородная (нержавейку, алюминий и медь кислород не режет — плазма) */
+static const wchar_t *tn_cut_way(double S, int mat) {
+  if (!S) return L"лазерная (до 10 мм), плазменная (10…30 мм) или газокислородная (толще) резка";
+  int noOxy = mat == TNM_STEEL_STAIN || mat == TNM_ALU || mat == TNM_ALU_CAST || mat == TNM_COPPER ||
+              mat == TNM_BRASS || mat == TNM_BRONZE;
+  return S <= 10 ? L"лазерная резка" : S <= 30 || noOxy ? L"плазменная резка" : L"газокислородная резка";
 }
 
 static void tn_route(const wchar_t *name, const wchar_t *mat, const wchar_t *text, TnRoute *r) {
@@ -1166,15 +1223,36 @@ static void tn_route(const wchar_t *name, const wchar_t *mat, const wchar_t *tex
   if (s->raDoubt && s->raMin <= 0.8) tn_item(r->check, 1200, L"Ra прочитана без запятой — проверить шероховатость");
   if (!s->nRa && r->cls != TN_REWORK && r->cls != TN_BAR && r->cls != TN_BENT) tn_item(r->check, 1200, L"шероховатость не прочитана — проверить, нужна ли шлифовка");
   if (s->hrcHi && !steel && s->mat) tn_item(r->check, 1200, L"твёрдость указана, но материал не сталь — проверить");
+  if (r->cls == TN_ROT && s->gabarit && !s->gL)
+    tn_item(r->check, 1200, L"общая длина детали на листе не проставлена — длину заготовки уточнить");
+
+  /* деталь из листа, которую потом фрезеруют (плиты, планки, кронштейны из толстого листа): уступы,
+     карманы, чистые плоскости. Режут с припуском, потом фрезерная, а не гибка */
+  double sheetS = s->thick ? s->thick : s->sort == TNS_SHEET ? s->sortSize : 0;
+  int fromSheet = s->sort == TNS_SHEET || s->sort == TNS_STRIP || (s->thick && !s->sort);
+  int plateMill = (r->cls == TN_FLAT || (r->cls == TN_BODY && fromSheet)) && !s->bend &&
+                  (s->step || s->pocket || r->cls == TN_BODY || (s->raMin && s->raMin <= 3.2 && !grind));
+  /* плазма и кислород дают конусные отверстия — у фрезеруемой детали их сверлят; лазерные — годные */
+  int plateDrill = plateMill && (!sheetS || sheetS > 10);
 
   /* 4. операции */
   if (r->cls == TN_BAR || r->cls == TN_BENT) {
     tn_cpy(w, 300, r->cls == TN_BENT ? L"Отрезать пруток по длине развёртки"
                                      : L"Отрезать в размер на ленточнопильном станке; торцы под углом — по чертежу");
     tn_op(r, L"Заготовительная", w, r->cls == TN_BENT ? L"развёртка на чертеже" : L"заготовка — прокат в размер детали");
-  } else if (r->blankRolled && r->cls != TN_FLAT) {
-    tn_cpy(w, 300, r->cls == TN_ROT ? L"Отрезать заготовку от прутка: длина детали + припуск на подрезку торцов"
-                                    : L"Отрезать (вырезать) заготовку с припуском на обработку");
+  } else if (r->cls == TN_FLAT || (r->cls == TN_BODY && fromSheet && r->blankRolled)) {
+    tn_cpy(w, 300, plateMill ? L"Вырезать заготовку из листа" : L"Вырезать деталь из листа");
+    if (sheetS) tn_cat(w, 300, L" S="), tn_catnum(w, 300, sheetS);
+    tn_cat(w, 300, L": "), tn_cat(w, 300, tn_cut_way(sheetS, s->mat)), tn_cat(w, 300, L" по контуру");
+    if (plateMill) tn_cat(w, 300, L" с припуском под фрезерование");
+    if (s->holes && !plateDrill) tn_cat(w, 300, L" вместе с отверстиями");
+    if (!plateMill && (!sheetS || sheetS <= 10)) tn_cat(w, 300, L"; прямоугольную без отверстий — на гильотине");
+    tn_op(r, L"Заготовительная (раскрой)", w,
+          sheetS ? L"деталь из листа; до 10 мм — лазер, 10…30 — плазма, толще — кислород" : L"деталь из листа");
+  } else if (r->blankRolled) {
+    tn_cpy(w, 300, r->cls == TN_ROT ? L"Отрезать заготовку от прутка: длина детали" : L"Отрезать (вырезать) заготовку с припуском на обработку");
+    if (r->cls == TN_ROT && s->gL) tn_cat(w, 300, L" "), tn_catnum(w, 300, s->gL), tn_cat(w, 300, L" мм");
+    if (r->cls == TN_ROT) tn_cat(w, 300, L" + припуск на подрезку торцов");
     tn_op(r, L"Заготовительная", w, L"заготовка — прокат");
   }
   if (s->heat & TNH_NORM) tn_op(r, L"Термическая", L"Нормализация (отжиг) заготовки", L"ТТ: нормализация/отжиг");
@@ -1195,10 +1273,10 @@ static void tn_route(const wchar_t *name, const wchar_t *mat, const wchar_t *tex
           L"на чертеже развёртка и линии сгиба");
   } else if (r->cls == TN_ROT) {
     int two = temper || hard || grind;
-    tn_op(r, two ? L"Токарная (черновая)" : L"Токарная",
-          two ? L"Подрезать торцы, точить наружные поверхности и обработать отверстия с припуском под чистовую"
-              : L"Подрезать торцы, точить наружные поверхности и отверстия начисто, фаски, канавки",
-          r->clsWhy[0] ? L"тело вращения" : L"");
+    tn_cpy(w, 300, two ? L"Подрезать торцы, точить наружные поверхности и обработать отверстия с припуском под чистовую"
+                       : L"Подрезать торцы, точить наружные поверхности и отверстия начисто, фаски, канавки");
+    if (s->ax[0]) tn_cat(w, 300, L"; сверлить по оси: "), tn_cat(w, 300, s->ax);
+    tn_op(r, two ? L"Токарная (черновая)" : L"Токарная", w, r->clsWhy[0] ? L"тело вращения" : L"");
     if (temper) {
       tn_cpy(w, 300, L"Улучшение (закалка и высокий отпуск)");
       if (hrc[0]) tn_cat(w, 300, L" до "), tn_cat(w, 300, hrc);
@@ -1224,13 +1302,18 @@ static void tn_route(const wchar_t *name, const wchar_t *mat, const wchar_t *tex
       /* резьба — переход токарной, но отдельной строкой, чтобы её не потерять */
       tn_op(r, L"Токарная (резьба)", w, why);
     }
+  } else if (plateMill) {
+    tn_cpy(w, 300, L"Фрезеровать плоскости в размер");
+    tn_cpy(why, TN_TXT, L"деталь из листа:");
+    if (s->step) tn_cat(w, 300, L", уступы"), tn_cat(why, TN_TXT, L" уступы,");
+    if (s->pocket) tn_cat(w, 300, L", карманы"), tn_cat(why, TN_TXT, L" карманы,");
+    if (s->slotEl) tn_cat(w, 300, L", пазы"), tn_cat(why, TN_TXT, L" пазы,");
+    if (s->raMin && s->raMin <= 3.2) tn_cat(why, TN_TXT, L" "), tn_cat(why, TN_TXT, ra), tn_cat(why, TN_TXT, L",");
+    if (r->cls == TN_BODY && !s->step && !s->pocket && !s->slotEl && !(s->raMin && s->raMin <= 3.2))
+      tn_cat(why, TN_TXT, L" корпусная из толстого листа,");
+    why[wcslen(why) - 1] = 0;
+    tn_op(r, L"Фрезерная", w, why);
   } else if (r->cls == TN_FLAT) {
-    tn_cpy(w, 300, L"Вырезать деталь из листа");
-    if (s->thick) tn_cat(w, 300, L" S="), tn_catnum(w, 300, s->thick);
-    tn_cat(w, 300, L": лазерная или плазменная резка по контуру");
-    if (s->holes) tn_cat(w, 300, L" вместе с отверстиями");
-    tn_cat(w, 300, L"; прямоугольную без отверстий — на гильотине");
-    tn_op(r, L"Заготовительная (раскрой)", w, L"листовая деталь");
     if (s->emboss) tn_op(r, L"Штамповочная", L"Выдавить рифты (выдавки) на прессе по штампу", L"на чертеже выдавки");
     if (s->bend) tn_op(r, L"Гибочная", L"Гнуть по чертежу (развёртка — по месту гибов)", L"на чертеже гибка");
   } else if (r->cls == TN_BODY) {
@@ -1244,8 +1327,9 @@ static void tn_route(const wchar_t *name, const wchar_t *mat, const wchar_t *tex
 
   if (s->weld && r->cls != TN_BODY) tn_op(r, L"Сварочная", L"Сварить по чертежу", L"на чертеже сварка");
   if (s->edm) s->gear = s->splineOut = s->splineIn = 0; /* шлицы по ТТ — электроэрозией, не фрезой */
-  /* паз у тела вращения и корпуса — фрезой; у листовой — вырезается с контуром, у доработки — по ТТ */
-  int slotMill = s->slotEl && (r->cls == TN_ROT || r->cls == TN_BODY || r->cls == TN_UNK);
+  /* паз у тела вращения и корпуса — фрезой; у листовой — вырезается с контуром (у фрезеруемой — уже выше),
+     у доработки — по ТТ */
+  int slotMill = s->slotEl && !plateMill && (r->cls == TN_ROT || r->cls == TN_BODY || r->cls == TN_UNK);
   if (s->key || s->flat || s->hex || s->gear || slotMill || s->splineOut) {
     w[0] = why[0] = 0;
     if (s->key) tn_item(w, 300, L"фрезеровать шпоночный паз"), tn_item(why, TN_TXT, L"шпоночный паз");
@@ -1267,10 +1351,9 @@ static void tn_route(const wchar_t *name, const wchar_t *mat, const wchar_t *tex
     tn_op(r, L"Долбёжная", w, why);
   }
   int precHoles = (s->band && s->band <= 0.05) || (s->itMin && s->itMin <= 9);
-  double sheetS = s->thick ? s->thick : s->sort == TNS_SHEET ? s->sortSize : 0;
   if (r->cls == TN_REWORK || r->cls == TN_BAR || r->cls == TN_BENT) {
     /* отверстия доработки — выше; у проката в размер своих отверстий нет */
-  } else if (s->holes && r->cls != TN_FLAT) {
+  } else if (s->holes && (r->cls != TN_FLAT || plateDrill)) {
     tn_cpy(w, 300, L"Сверлить ");
     tn_catnum(w, 300, s->holes);
     tn_cat(w, 300, L" отв.");
@@ -1334,17 +1417,18 @@ static void tn_route(const wchar_t *name, const wchar_t *mat, const wchar_t *tex
     if (s->raMin && s->raMin < 0.4) tn_cat(w, 300, L"; Ra ниже 0,4 — тонкое шлифование или полирование");
     tn_op(r, r->cls == TN_ROT ? L"Круглошлифовальная" : r->cls == TN_UNK ? L"Шлифовальная" : L"Плоскошлифовальная", w,
           why);
-  } else if (r->cls == TN_FLAT && s->raMin && s->raMin <= 3.2) {
+  } else if (r->cls == TN_FLAT && !plateMill && s->raMin && s->raMin <= 3.2) {
     tn_op(r, L"Фрезерная", L"Фрезеровать плоскости с заданной шероховатостью", ra);
   }
   if (s->knurl && r->cls != TN_ROT) tn_op(r, L"Токарная (накатка)", L"Накатать рифление", L"на чертеже накатка");
   if (s->gauge && hard && grind && r->cls != TN_REWORK)
     tn_op(r, L"Доводочная", L"Довести рабочие поверхности (ПР/НЕ) до исполнительных размеров", L"калибр/шаблон");
   if (s->cutApart) tn_op(r, L"Отрезная", L"Разрезать деталь на части по ТТ", L"ТТ: по окончании обработки разрезать");
+  int afterCut = r->cls == TN_FLAT && !plateMill;
   tn_op(r, L"Слесарная",
-        r->cls == TN_FLAT ? L"Зачистить заусенцы и окалину после резки, притупить острые кромки"
-                          : L"Притупить острые кромки, снять заусенцы",
-        s->edges ? L"ТТ: притупить кромки" : r->cls == TN_FLAT ? L"после резки" : L"после механообработки");
+        afterCut ? L"Зачистить заусенцы и окалину после резки, притупить острые кромки"
+                 : L"Притупить острые кромки, снять заусенцы",
+        s->edges ? L"ТТ: притупить кромки" : afterCut ? L"после резки" : L"после механообработки");
   if (s->mark) tn_op(r, L"Маркировочная", L"Маркировать по ТТ", L"ТТ: маркировать");
   if (s->coatKind) {
     tn_cpy(w, 300, L"Нанести покрытие: ");
@@ -1388,6 +1472,14 @@ static void tn_text(const TnRoute *r, wchar_t *out, int cap) {
   if (s->hrcHi) tn_hrc_txt(s, t, 80), tn_item(sg, 600, t);
   if (s->nThr) tn_cpy(t, 80, L"резьба "), tn_cat(t, 80, s->thr), tn_item(sg, 600, t);
   if (s->holes) t[0] = 0, tn_catnum(t, 80, s->holes), tn_cat(t, 80, L" отв."), tn_item(sg, 600, t);
+  if (s->ax[0]) tn_cpy(t, 80, L"по оси "), tn_cat(t, 80, s->ax), tn_item(sg, 600, t);
+  if (s->gD || s->gL || s->gB) {
+    tn_cpy(t, 80, L"габариты");
+    if (s->gD) tn_cat(t, 80, L" Ø"), tn_catnum(t, 80, s->gD);
+    if (s->gL) tn_cat(t, 80, L" L "), tn_catnum(t, 80, s->gL);
+    if (s->gB) tn_cat(t, 80, L" B "), tn_catnum(t, 80, s->gB);
+    tn_item(sg, 600, t);
+  }
   if (s->coat[0]) tn_cpy(t, 80, L"покрытие: "), tn_cat(t, 80, s->coat), tn_item(sg, 600, t);
   if (sg[0]) tn_cat(out, cap, L"\nПрочитано на листе: "), tn_cat(out, cap, sg);
   tn_cat(out, cap, L"\n");

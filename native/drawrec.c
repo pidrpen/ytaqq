@@ -1673,8 +1673,8 @@ static wchar_t *dr_vl_ask(const DrImg *im, const wchar_t *tag, const wchar_t *qu
     _snwprintf(p, MAX_PATH, L"%s\\%s.prompt.txt", g_drVlDump, tag);
     share_write_ex(p, question, TRUE);
     if (schema) {
-      wchar_t ws[2048];
-      MultiByteToWideChar(CP_UTF8, 0, schema, -1, ws, 2048);
+      wchar_t ws[4096];
+      MultiByteToWideChar(CP_UTF8, 0, schema, -1, ws, 4096);
       _snwprintf(p, MAX_PATH, L"%s\\%s.schema.json", g_drVlDump, tag);
       share_write_ex(p, ws, TRUE);
     }
@@ -1759,6 +1759,31 @@ static const char kDrVlSheetSchemaEl[] =
     "шов\"]},\"size\":{\"type\":\"string\",\"maxLength\":30},\"count\":{\"type\":\"integer\",\"minimum\":1,"
     "\"maximum\":99}},\"required\":[\"type\",\"size\",\"count\"],\"additionalProperties\":false}}},\"required\":"
     "[\"tt\",\"razvertka\",\"holes\",\"elements\"],\"additionalProperties\":false}";
+/* третье поколение (draw-lora3…): ещё габариты (только проставленные на листе) и где отверстие у тела
+   вращения — по оси (на токарной), поперёк оси или в торце не по оси (на сверлильной); уступы и
+   карманы деталей из листа, которые потом фрезеруют */
+static const wchar_t kDrVlSheetQEl3[] =
+    DR_VL_SHEET_HEAD L"gabarit — габаритные размеры, только если такой размер проставлен на листе: d — наибольший диаметр, "
+                     L"l — общая длина детали, b — ширина, s — толщина (у детали из листа); чего нет на листе — null, "
+                     L"цепочки размеров не складывай.\nelements — конструктивные элементы, видные на видах, разрезах и "
+                     L"сечениях: type — из списка, size — размер, как подписан (нет подписи — пусто), count — сколько таких, "
+                     L"where — у отверстий тела вращения: «по оси» (центральные, центровые), «поперёк оси» (поперечные и "
+                     L"радиальные), «в торце не по оси» (по окружности фланца); у остальных — пусто. Резьба по оси — "
+                     L"«резьба наружная» или «резьба внутренняя»; «уступ» и «карман» — фрезерованные, у плоских и "
+                     L"корпусных деталей; фаски не перечисляй; если элементов нет — пустой список.\n" DR_VL_SHEET_TAIL;
+static const char kDrVlSheetSchemaEl3[] =
+    "{\"type\":\"object\",\"properties\":{\"tt\":{\"type\":\"array\",\"maxItems\":10,\"items\":{\"type\":\"string\","
+    "\"maxLength\":220}},\"razvertka\":{\"type\":\"boolean\"},\"holes\":{\"type\":\"array\",\"maxItems\":6,\"items\":"
+    "{\"type\":\"string\",\"maxLength\":40}},\"gabarit\":{\"type\":\"object\",\"properties\":{\"d\":{\"type\":[\"number\","
+    "\"null\"]},\"l\":{\"type\":[\"number\",\"null\"]},\"b\":{\"type\":[\"number\",\"null\"]},\"s\":{\"type\":[\"number\","
+    "\"null\"]}},\"required\":[\"d\",\"l\",\"b\",\"s\"],\"additionalProperties\":false},\"elements\":{\"type\":\"array\","
+    "\"maxItems\":12,\"items\":{\"type\":\"object\",\"properties\":{\"type\":{\"type\":\"string\",\"enum\":[\"шпоночный "
+    "паз\",\"шпоночный паз в отверстии\",\"паз\",\"лыска\",\"грани под ключ\",\"шлицы\",\"шлицы в отверстии\",\"зубья\","
+    "\"резьба наружная\",\"резьба внутренняя\",\"резьбовое отверстие\",\"отверстие\",\"канавка\",\"рифление\",\"выдавка\","
+    "\"сварной шов\",\"уступ\",\"карман\"]},\"size\":{\"type\":\"string\",\"maxLength\":30},\"count\":{\"type\":"
+    "\"integer\",\"minimum\":1,\"maximum\":99},\"where\":{\"type\":\"string\",\"enum\":[\"\",\"по оси\",\"поперёк оси\","
+    "\"в торце не по оси\"]}},\"required\":[\"type\",\"size\",\"count\",\"where\"],\"additionalProperties\":false}}},"
+    "\"required\":[\"tt\",\"razvertka\",\"holes\",\"gabarit\",\"elements\"],\"additionalProperties\":false}";
 
 /* строковое поле key объекта, начиная с p (до конца объекта end): значение без кавычек */
 static void dr_json_field(const wchar_t *p, const wchar_t *end, const wchar_t *key, wchar_t *out, int cap) {
@@ -1782,30 +1807,56 @@ static void dr_json_field(const wchar_t *p, const wchar_t *end, const wchar_t *k
   out[n] = 0;
 }
 
+/* габариты из JSON-ответа (третье поколение) — строкой «§GB d=62 l=180» для techno.c; null и 0 — нет.
+   Пустая «§GB» — модель спросили, а на листе габаритов нет: techno.c попросит уточнить длину */
+static void dr_json_gabarit(const wchar_t *j, wchar_t *out, int cap) {
+  const wchar_t *p = j ? wcsstr(j, L"\"gabarit\"") : NULL, *end = p ? wcschr(p, L'}') : NULL;
+  if (!end) return;
+  wchar_t line[96] = L"§GB";
+  static const wchar_t *const kKey[] = {L"d", L"l", L"b", L"s"};
+  for (int i = 0; i < 4; i++) {
+    wchar_t k[8];
+    _snwprintf(k, 8, L"\"%s\"", kKey[i]);
+    const wchar_t *q = wcsstr(p, k);
+    if (!q || q >= end) continue;
+    for (q += 3; *q == L' ' || *q == L':'; q++) {}
+    double v = wcstod(q, NULL);
+    if (v > 0 && v < 100000) {
+      int n = (int)wcslen(line);
+      _snwprintf(line + n, 96 - n, L" %s=%g", kKey[i], v);
+    }
+  }
+  line[95] = 0;
+  int len = (int)wcslen(out);
+  if (len + (int)wcslen(line) + 2 < cap) _snwprintf(out + len, cap - len, L"\n%s", line);
+}
+
 /* элементы из JSON-ответа — строками для правил techno.c: «§EL код» для фрезерной, долбёжной,
-   штамповки, накатки и сварки; отверстия — «n отв. размер», резьбы по оси — сам размер */
+   штамповки, накатки и сварки; отверстия — «n отв. размер», по оси тела вращения — «§AX n размер»
+   (их сверлят на токарной), резьбы по оси — сам размер */
 static void dr_json_elements(const wchar_t *j, wchar_t *out, int cap) {
   static const struct {
     const wchar_t *type, *code;
   } kEl[] = {{L"шпоночный паз в отверстии", L"keyin"}, {L"шпоночный паз", L"key"}, {L"паз", L"slot"},
              {L"лыска", L"flat"}, {L"грани под ключ", L"hex"}, {L"шлицы в отверстии", L"splinein"},
              {L"шлицы", L"spline"}, {L"зубья", L"gear"}, {L"рифление", L"knurl"}, {L"выдавка", L"emboss"},
-             {L"сварной шов", L"weld"}};
+             {L"сварной шов", L"weld"}, {L"уступ", L"step"}, {L"карман", L"pocket"}};
   const wchar_t *p = j ? wcsstr(j, L"\"elements\"") : NULL;
   while (p && (p = wcsstr(p, L"\"type\"")) != NULL) {
     const wchar_t *end = wcschr(p, L'}');
     if (!end) break;
-    wchar_t type[40], size[40], count[8], line[96];
+    wchar_t type[40], size[40], count[8], where[24], line[96];
     dr_json_field(p, end, L"type", type, 40);
     dr_json_field(p, end, L"size", size, 40);
     dr_json_field(p, end, L"count", count, 8);
+    dr_json_field(p, end, L"where", where, 24);
     int n = _wtoi(count);
     if (n < 1) n = 1;
     line[0] = 0;
     for (size_t i = 0; i < sizeof(kEl) / sizeof(kEl[0]) && !line[0]; i++)
       if (!wcscmp(type, kEl[i].type)) _snwprintf(line, 96, L"§EL %s", kEl[i].code);
     if (!line[0] && (!wcscmp(type, L"отверстие") || !wcscmp(type, L"резьбовое отверстие")))
-      _snwprintf(line, 96, L"%d отв. %s", n, size);
+      _snwprintf(line, 96, !wcscmp(where, L"по оси") ? L"§AX %d %s" : L"%d отв. %s", n, size);
     if (!line[0] && !wcsncmp(type, L"резьба", 6) && size[0]) lstrcpynW(line, size, 96);
     line[95] = 0;
     int len = (int)wcslen(out);
@@ -1836,14 +1887,17 @@ static void dr_vl_read(const DrImg *m, const DrStamp *s, DrPage *pg) {
     }
   }
   if (dr_img_part(m, 0, 0, m->w, m->h, 1, 1600, &im)) {
-    /* конструктивные элементы спрашиваем, только если стоит адаптер, обученный их называть
-       (draw-lora2…): без обучения модель их выдумывает */
-    BOOL el = ai_draw_elements();
+    /* конструктивные элементы и габариты спрашиваем, только если стоит адаптер, обученный их
+       называть (draw-lora2… — элементы, draw-lora3… — и габариты): без обучения модель их выдумывает */
+    int gen = ai_draw_gen();
 #ifdef SET_TEST
-    el = el || g_drVlDump[0] || getenv("CP_DREL");
+    const char *ge = getenv("CP_DREL"); /* выгрузка — по вопросу последнего поколения; CP_DREL=2 — по второму */
+    if (ge || g_drVlDump[0]) gen = ge && atoi(ge) ? atoi(ge) : 3;
 #endif
-    a = dr_vl_ask(&im, L"sheet", el ? kDrVlSheetQEl : kDrVlSheetQ, el ? kDrVlSheetSchemaEl : kDrVlSheetSchema,
-                  el ? 1200 : 900);
+    BOOL el = gen >= 2;
+    a = dr_vl_ask(&im, L"sheet", gen >= 3 ? kDrVlSheetQEl3 : el ? kDrVlSheetQEl : kDrVlSheetQ,
+                  gen >= 3 ? kDrVlSheetSchemaEl3 : el ? kDrVlSheetSchemaEl : kDrVlSheetSchema,
+                  gen >= 3 ? 1400 : el ? 1200 : 900);
     if (a) {
       pg->vlText = (wchar_t *)calloc(4096, sizeof(wchar_t));
       if (pg->vlText) {
@@ -1851,6 +1905,7 @@ static void dr_vl_read(const DrImg *m, const DrStamp *s, DrPage *pg) {
         if (wcsstr(a, L"\"razvertka\":true") || wcsstr(a, L"\"razvertka\": true"))
           lstrcpynW(pg->vlText + wcslen(pg->vlText), L"\nРазвертка", 4096 - (int)wcslen(pg->vlText));
         dr_json_strings(a, L"holes", pg->vlText, 4096);
+        if (gen >= 3) dr_json_gabarit(a, pg->vlText, 4096);
         if (el) dr_json_elements(a, pg->vlText, 4096);
       }
       free(a);

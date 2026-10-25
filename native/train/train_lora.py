@@ -46,11 +46,17 @@ def holes_to_elements(holes):
     return out
 
 
-def fit_answer(ans, elements):
-    """ответ по листу — под вопрос: с элементами или без них"""
+def fit_answer(ans, elements, gabarit=False):
+    """ответ по листу — под вопрос: с элементами или без них, с габаритами (третье поколение) или без.
+    Листу без габаритов в ответе (synth.py: фигуры с условными размерами) вопрос с габаритами не задают — None"""
     j = json.loads(ans)
+    if gabarit:
+        return json.dumps(j, ensure_ascii=False) if 'gabarit' in j and 'elements' in j else None
+    j.pop('gabarit', None)
     if elements and 'elements' not in j:
         j['elements'] = holes_to_elements(j.get('holes') or [])
+    if elements:
+        j['elements'] = cpvl.gen2_elements(j['elements'])
     if not elements:
         j.pop('elements', None)
     return json.dumps(j, ensure_ascii=False)
@@ -58,7 +64,7 @@ def fit_answer(ans, elements):
 
 def samples(a, prompts, labels, sheets, rnd):
     train, held = [], []
-    el = cpvl.has_elements(prompts)
+    el, gab = cpvl.has_elements(prompts), cpvl.has_gabarit(prompts)
     for k, s in sheets.items():
         lab = labels.get(k)
         if not lab:
@@ -66,7 +72,7 @@ def samples(a, prompts, labels, sheets, rnd):
         for tag in cpvl.TAGS:
             if s[tag] is None or tag not in prompts:
                 continue
-            ex = {'image': str(s[tag]), 'tag': tag, 'answer': cpvl.target(lab, tag, el), 'real': True}
+            ex = {'image': str(s[tag]), 'tag': tag, 'answer': cpvl.target(lab, tag, el, gab), 'real': True}
             if lab.get('eval'):
                 held.append(ex)
             else:
@@ -76,7 +82,9 @@ def samples(a, prompts, labels, sheets, rnd):
             ex = json.loads(line)
             if ex['tag'] in prompts:
                 if ex['tag'] == 'sheet':
-                    ex['answer'] = fit_answer(ex['answer'], el)
+                    ex['answer'] = fit_answer(ex['answer'], el, gab)
+                    if ex['answer'] is None:
+                        continue
                 train.append({**ex, 'real': False})
     rnd.shuffle(train)
     return train, held

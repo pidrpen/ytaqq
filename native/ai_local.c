@@ -899,8 +899,9 @@ static int ai_server_ensure(DWORD deadline, volatile LONG *cancel, int minimumCo
     if (g_aiModel[0] && n > 0 && ai_find_near(g_aiModel, L"lora*.gguf", lora)) {
       ai_short_path(lora);
       _snwprintf(cmd + n, MAX_PATH * 4 + 300 - n, L" --lora \"%s\"", lora);
-    } else if (n > 0 && (ai_find_near(model, L"draw-lora2*.gguf", lora) || ai_find_near(model, L"draw-lora*.gguf", lora))) {
-      /* второе поколение (знает конструктивные элементы) — первым: drawrec.c спрашивает по нему */
+    } else if (n > 0 && (ai_find_near(model, L"draw-lora3*.gguf", lora) || ai_find_near(model, L"draw-lora2*.gguf", lora) ||
+                         ai_find_near(model, L"draw-lora*.gguf", lora))) {
+      /* новое поколение — первым: drawrec.c спрашивает по нему (ai_draw_gen) */
       ai_short_path(lora);
       _snwprintf(cmd + n, MAX_PATH * 4 + 300 - n, L" --lora \"%s\" --lora-init-without-apply", lora);
       g_aiDrawLora = TRUE;
@@ -1357,12 +1358,14 @@ static char *ai_content_img(const wchar_t *text, const BYTE *png, DWORD len) {
   return c;
 }
 
-/* стоит ли рядом с моделью адаптер чертежей второго поколения (draw-lora2…): он обучен называть
-   конструктивные элементы, и drawrec.c спрашивает про них только тогда */
-BOOL ai_draw_elements(void) {
-  if (g_aiProvider || ai_ext()) return FALSE;
+/* поколение адаптера чертежей рядом с моделью — тот, что сервер берёт первым (ai_server_ensure):
+   3 — draw-lora3… (ещё габариты и где отверстие), 2 — draw-lora2… (конструктивные элементы),
+   0 — нет или первое; drawrec.c спрашивает только то, чему адаптер обучен */
+int ai_draw_gen(void) {
+  if (g_aiProvider || ai_ext()) return 0;
   wchar_t m[MAX_PATH], mm[MAX_PATH], f[MAX_PATH];
-  return ai_pick_model(m, mm) && ai_find_near(m, L"draw-lora2*.gguf", f);
+  if (!ai_pick_model(m, mm)) return 0;
+  return ai_find_near(m, L"draw-lora3*.gguf", f) ? 3 : ai_find_near(m, L"draw-lora2*.gguf", f) ? 2 : 0;
 }
 
 BOOL ai_vision_ready(void) {

@@ -37,14 +37,37 @@ def score_sheet(lab, got, tess, tn):
         r['tt_n_ok'] = len(tt) == len(lab['tt'])
         r['razv_ok'] = j.get('razvertka') == lab['razvertka']
         r['holes_ok'] = sorted(map(cpvl.norm, j.get('holes') or [])) == sorted(map(cpvl.norm, lab['holes']))
-        if 'elements' in lab and 'elements' in j:  # типы элементов: сколько верно, лишних, пропущено
-            got_t = Counter(e['type'] for e in cpvl.elements_of(j))
-            want_t = Counter(e['type'] for e in lab['elements'])
+        if 'elements' in lab and 'elements' in j:
+            # типы элементов: сколько верно, лишних, пропущено — в наборе второго поколения (без отверстий
+            # по оси, уступов и карманов), чтобы поколения сравнивались честно
+            got_t = Counter(e['type'] for e in cpvl.gen2_elements(cpvl.elements_of(j)))
+            want_t = Counter(e['type'] for e in cpvl.gen2_elements(lab['elements']))
             r['el_tp'] = sum((got_t & want_t).values())
             r['el_fp'] = sum((got_t - want_t).values())
             r['el_fn'] = sum((want_t - got_t).values())
             r['el_ok'] = got_t == want_t
             r['el_got'] = sorted(got_t.elements())
+            # отверстия с тем, где они (по оси, поперёк, в торце): пары тип + где, по числу выносок
+            hw = lambda els: Counter((e['type'], e.get('where', '')) for e in els if e['type'] in cpvl.HOLE_TYPES)
+            gh, wh = hw(cpvl.elements_of(j)), hw(lab['elements'])
+            r['ho_tp'], r['ho_fp'], r['ho_fn'] = sum((gh & wh).values()), sum((gh - wh).values()), sum((wh - gh).values())
+            # выдуманные размеры: размер у элемента модели, какого нет ни у одного элемента того же типа на листе
+            want_sz = {(e['type'], cpvl.norm(e['size'])) for e in lab['elements']}
+            r['sz_fp'] = sum(1 for e in cpvl.elements_of(j)
+                             if cpvl.norm(e.get('size', '')) and (e['type'], cpvl.norm(e['size'])) not in want_sz)
+        if 'gabarit' in lab:  # габариты: верно, неверно, выдумано (на листе нет), пропущено (есть, а не названо)
+            g = cpvl.gabarit_of(j) or {}
+            for key in ('gb_ok', 'gb_bad', 'gb_fp', 'gb_fn', 'gb_n'):
+                r[key] = 0
+            for k in cpvl.GAB_KEYS:
+                w, h = lab['gabarit'].get(k), g.get(k)
+                r['gb_n'] += w is not None
+                if w is not None and h is not None:
+                    r['gb_ok' if abs(w - h) < 0.01 else 'gb_bad'] += 1
+                elif h is not None:
+                    r['gb_fp'] += 1
+                elif w is not None:
+                    r['gb_fn'] += 1
     name, mat, text = cpvl.route_input(tess, cpvl.first_line(got.get('name')), cpvl.first_line(got.get('mat')),
                                        cpvl.sheet_text(got.get('sheet')))
     cls, ops, blank = cpvl.route(tn, name, mat, text)
@@ -121,9 +144,15 @@ def main():
         'развертка': cnt('razv_ok'), 'отверстия': cnt('holes_ok'),
     }
     if any('el_tp' in r for r in res.values()):
-        summary.update({'элементы целиком': cnt('el_ok'), 'элементов верных': sum(r.get('el_tp', 0) for r in res.values()),
-                        'выдуманных': sum(r.get('el_fp', 0) for r in res.values()),
-                        'пропущенных': sum(r.get('el_fn', 0) for r in res.values())})
+        tot = lambda key: sum(r.get(key, 0) for r in res.values())
+        summary.update({'элементы целиком': cnt('el_ok'), 'элементов верных': tot('el_tp'), 'выдуманных': tot('el_fp'),
+                        'пропущенных': tot('el_fn'),
+                        'отверстия с местом: верных': tot('ho_tp'), 'отверстий лишних': tot('ho_fp'),
+                        'отверстий не названо': tot('ho_fn'), 'выдуманных размеров': tot('sz_fp')})
+    if any('gb_n' in r for r in res.values()):
+        tot = lambda key: sum(r.get(key, 0) for r in res.values())
+        summary.update({'габаритов проставлено': tot('gb_n'), 'габаритов верно': tot('gb_ok'), 'габаритов неверно': tot('gb_bad'),
+                        'габаритов выдумано': tot('gb_fp'), 'габаритов не прочитано': tot('gb_fn')})
     for k, r in res.items():
         lab = labels[k]
         miss = set(lab['route'][1].split()) - set(r['ops'])

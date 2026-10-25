@@ -1523,6 +1523,9 @@ static void nm_ctx_sheet(const TnRoute *r, const wchar_t *mass, NmCtx *c) {
   if (mc) nm_put(c, L"материал", mc, NM_NONE, NMO_DRAW, NULL);
   if (s->grade[0]) nm_put(c, L"марка", s->grade, NM_NONE, NMO_DRAW, NULL);
   if (s->dmax) nm_putv(c, L"D", s->dmax, NMO_DRAW, L"наибольший Ø с чертежа");
+  /* габариты, проставленные на листе (модель третьего поколения): длина обработки — оценка по общей длине */
+  if (s->gL) nm_putv(c, L"L", s->gL, NMO_DRAW, L"общая длина детали с чертежа");
+  if (s->gB) nm_putv(c, L"B", s->gB, NMO_DRAW, L"ширина детали с чертежа");
   const wchar_t *kr = nm_pre(r->blank, L"Круг ");
   if (kr && nm_num(kr, &v, &e)) nm_putv(c, L"Dзаг", v, NMO_CALC, L"заготовка — круг");
   if (s->thick) nm_putv(c, L"толщина", s->thick, NMO_DRAW, NULL);
