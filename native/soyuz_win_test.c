@@ -13,7 +13,8 @@
        native/soyuz_win_test.c build/soyuz_win_test.res -luser32 -lgdi32 -lshell32 -lole32 -loleaut32 \
        -luuid -lcomctl32 -lwinhttp -ladvapi32 -lodbc32 -lcrypt32 -lcomdlg32 -lmsimg32 \
        -Wl,--subsystem,windows -municode -static
-     build/soyuz_win_test.exe build/soyuz   → снимки *.png и report.txt; код 0 — всё сошлось */
+     build/soyuz_win_test.exe build/soyuz   → снимки *.png и report.txt; код 0 — всё сошлось
+     build/soyuz_win_test.exe --live [маршрут.txt] → живое окно у клиента «Союза» (буфер настоящий) */
 #define wWinMain cursorpad_wWinMain
 #include "cursorpad.c"
 #undef wWinMain
@@ -162,11 +163,52 @@ static void st_newop(long dir, long parent, const wchar_t *num) {
   st_pump(500); /* следующая ложится в буфер с паузой */
 }
 
+/* маршрут «Удлинителя вала» — как его кладёт в чат окно чертежа */
+static void st_route(wchar_t *txt, int cap) {
+  TnRoute *tr = (TnRoute *)malloc(sizeof(TnRoute));
+  tn_route(L"Удлинитель вала", L"Круг 50 ГОСТ 2590-2006 / 45 ГОСТ 1050-2013",
+           L"Ra 3,2\nRa 0,8\nØ30 -0,02\n-0,04\nM12-6H\n2 отв. Ø4+0,03\n1. 30...34 HRC\n"
+           L"2. Общие допуски по ГОСТ 30893.2-mK\n3. Покрытие: аэрозольный лак\n",
+           tr);
+  int n0 = _snwprintf(txt, cap, L"Лист: УВ-01.pdf · АБВГ.711141.001\n");
+  tn_text(tr, txt + n0, cap - n0);
+  free(tr);
+}
+
+/* --live [маршрут.txt]: окно «В Союз» на обычном рабочем столе, рядом с клиентом «Союза»,
+   с настоящим буфером, Ctrl+V и «Вставить» — для проверки на домашнем «Союзе», пока
+   запущен CursorPad человека (второй CursorPad не запустится). База — та же, что у стенда. */
+static int st_live(const wchar_t *routeFile) {
+  apply_theme();
+  g_szConnect = st_connect;
+  static wchar_t txt[9000];
+  wchar_t *file = routeFile ? ac_read_utf8(routeFile, 1 << 20) : NULL;
+  if (file) lstrcpynW(txt, file, 9000);
+  else st_route(txt, 9000);
+  free(file);
+  if (!sz_start(txt)) return 4;
+  SetTimer(NULL, 0, 500, NULL); /* будить цикл: «×» снимает g_szOn без сообщения */
+  MSG m;
+  while (g_szOn && GetMessageW(&m, NULL, 0, 0) > 0) {
+    TranslateMessage(&m);
+    DispatchMessageW(&m);
+  }
+  return 0;
+}
+
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
   (void)prev, (void)cmd, (void)show;
   int argc = 0;
   LPWSTR *argv = CommandLineToArgvW(GetCommandLineW(), &argc);
   if (!argv || argc < 2) return 2;
+  if (!wcscmp(argv[1], L"--live")) {
+    g_inst = inst;
+    enable_dpi();
+    INITCOMMONCONTROLSEX icc0 = {sizeof(icc0), ICC_STANDARD_CLASSES | ICC_BAR_CLASSES};
+    InitCommonControlsEx(&icc0);
+    CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+    return st_live(argc > 2 ? argv[2] : NULL);
+  }
   g_stDir = argv[1];
   CreateDirectoryW(g_stDir, NULL);
   HDESK desk = CreateDesktopW(L"CursorPadSoyuzTest", NULL, NULL, 0, GENERIC_ALL, NULL);
@@ -192,15 +234,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
   st_check(!sz_start(L"Ответ без маршрута.\nПросто текст 2026 года."), L"без строк «005 Операция.» очередь не начинается");
 
   /* живой маршрут, как в чате */
-  TnRoute *tr = (TnRoute *)malloc(sizeof(TnRoute));
   static wchar_t txt[9000];
-  tn_route(L"Удлинитель вала", L"Круг 50 ГОСТ 2590-2006 / 45 ГОСТ 1050-2013",
-           L"Ra 3,2\nRa 0,8\nØ30 -0,02\n-0,04\nM12-6H\n2 отв. Ø4+0,03\n1. 30...34 HRC\n"
-           L"2. Общие допуски по ГОСТ 30893.2-mK\n3. Покрытие: аэрозольный лак\n",
-           tr);
-  int n0 = _snwprintf(txt, 9000, L"Лист: УВ-01.pdf · АБВГ.711141.001\n");
-  tn_text(tr, txt + n0, 9000 - n0);
-  free(tr);
+  st_route(txt, 9000);
   st_check(sz_start(txt) && g_szWnd && g_szR.n == 10, L"маршрут из 10 операций — в очереди, окно открыто");
   st_check(g_szDb == 1, L"база: ищу аналоги");
   wchar_t first[200];
