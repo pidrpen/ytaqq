@@ -20,6 +20,7 @@ static const GUID kAcBgra = {0x6fddc324, 0x4e03, 0x4bfe, {0xb1, 0x85, 0x3d, 0x77
 #define WM_AC_TP (WM_APP + 77)   /* lParam — AcTpDone*: маршрут по чертежу; wParam 1 — черновик */
 #define WM_AC_PC (WM_APP + 78)   /* сверка с Союзом (ai_plm_check.c): wParam 1 — строка состояния, 0 — итог */
 #define WM_AC_LINK (WM_APP + 81) /* ссылка над лентой (kAcLogLinks): wParam — какая */
+#define WM_AC_NOTE (WM_APP + 82) /* строка состояния из рабочего потока: lParam — wchar_t*, free */
 #define ID_AC_LOG 4701
 #define ID_AC_IN 4702
 #define ID_AC_SEND 4703
@@ -549,6 +550,9 @@ static int ac_log_twips(void) {
    «удалить всю историю» (с вопросом). Слова-ссылки ловит EN_LINK (ac_log_link). */
 #define AC_NEW_LINE L"———  новая беседа: что выше, ИИ не помнит  ———"
 static const wchar_t *const kAcLogLinks[] = {L"вернуть", L"показать", L"скрыть", L"удалить всю историю"};
+/* под последним ответом-маршрутом — строка-кнопки (ac_route_do); номера WM_AC_LINK — с 10 */
+#define AC_ROUTE_ACTIONS L"Действия:   В Союз   ·   Подробно   ·   Excel"
+static const wchar_t *const kAcRouteLinks[] = {L"В Союз", L"Подробно", L"Excel"};
 static BOOL g_acShowOld, g_acLogTop; /* показать прежние беседы; ленту — с начала */
 
 static void ac_rtf_new_line(AcRtf *b) {
@@ -584,6 +588,38 @@ static void ac_log_links(int topLen) {
   }
 }
 
+/* последний ответ-маршрут на экране — под ним кнопки; -1 — нет */
+static int ac_route_turn(int from) {
+  for (int i = g_acN - 1; i >= from && i >= 0; i--)
+    if (g_acTurns[i].assistant && g_acTurns[i].text && wcsstr(g_acTurns[i].text, L"Маршрут обработки")) return i;
+  return -1;
+}
+
+/* слова строки-кнопок — ссылками; строка одна, ищем её с конца ленты */
+static void ac_route_links(void) {
+  FINDTEXTEXW ft;
+  memset(&ft, 0, sizeof(ft));
+  ft.chrg.cpMin = GetWindowTextLengthW(g_acLog);
+  ft.chrg.cpMax = 0;
+  ft.lpstrText = L"Действия:";
+  if (SendMessageW(g_acLog, EM_FINDTEXTEXW, 0, (LPARAM)&ft) < 0) return;
+  LONG at = ft.chrgText.cpMax;
+  for (size_t i = 0; i < sizeof(kAcRouteLinks) / sizeof(kAcRouteLinks[0]); i++) {
+    memset(&ft, 0, sizeof(ft));
+    ft.chrg.cpMin = at;
+    ft.chrg.cpMax = at + 80;
+    ft.lpstrText = kAcRouteLinks[i];
+    if (SendMessageW(g_acLog, EM_FINDTEXTEXW, FR_DOWN | FR_MATCHCASE, (LPARAM)&ft) < 0) continue;
+    SendMessageW(g_acLog, EM_EXSETSEL, 0, (LPARAM)&ft.chrgText);
+    CHARFORMAT2W cf;
+    memset(&cf, 0, sizeof(cf));
+    cf.cbSize = sizeof(cf);
+    cf.dwMask = CFM_LINK;
+    cf.dwEffects = CFE_LINK;
+    SendMessageW(g_acLog, EM_SETCHARFORMAT, SCF_SELECTION, (LPARAM)&cf);
+  }
+}
+
 static void ac_redraw(void) {
   ac_mini_refresh(); /* мини-чат у помощника показывает ту же беседу */
   int from = g_acShowOld ? 0 : g_acNewAt < g_acN ? g_acNewAt : g_acN;
@@ -596,9 +632,15 @@ static void ac_redraw(void) {
       for (const wchar_t *p = top; *p; p++) ac_rtf_char(&rtf, *p);
       ac_rtf_add(&rtf, "\\par\\pard\\cf1\\fs22 ");
     }
+    int route = ac_route_turn(from);
     for (int i = from; i < g_acN; i++) {
       if (g_acShowOld && i && i == g_acNewAt) ac_rtf_new_line(&rtf);
       ac_rtf_bubble(&rtf, &g_acTurns[i], tw);
+      if (i == route) { /* кнопки — под пузырём, мелко */
+        ac_rtf_add(&rtf, "\\pard\\li240\\sb0\\sa160\\cf3\\fs20 ");
+        for (const wchar_t *p = AC_ROUTE_ACTIONS; *p; p++) ac_rtf_char(&rtf, *p);
+        ac_rtf_add(&rtf, "\\cf1\\fs22\\par ");
+      }
     }
     if (g_acShowOld && g_acN && g_acNewAt == g_acN) ac_rtf_new_line(&rtf);
     ac_rtf_add(&rtf, "}");
@@ -615,6 +657,7 @@ static void ac_redraw(void) {
       EDITSTREAM stream = {(DWORD_PTR)&source, 0, ac_stream};
       SendMessageW(g_acLog, EM_STREAMIN, SF_RTF, (LPARAM)&stream);
       if (top) ac_log_links((int)wcslen(top));
+      if (route >= 0) ac_route_links();
       SendMessageW(g_acLog, WM_SETREDRAW, TRUE, 0);
       if (g_acLogTop) { /* показали прежние беседы — с их начала */
         g_acLogTop = FALSE;
@@ -3087,13 +3130,32 @@ static void ac_clear_ask(void) {
 
 /* щёлкнули слово-ссылку над лентой; само действие — после EN_LINK (WM_AC_LINK) */
 static void ac_log_link(const ENLINK *el) {
-  wchar_t t[40] = L"";
-  if (el->chrg.cpMax - el->chrg.cpMin <= 0 || el->chrg.cpMax - el->chrg.cpMin >= 40) return;
+  wchar_t t[2100] = L"";
+  if (el->chrg.cpMax - el->chrg.cpMin <= 0 || el->chrg.cpMax - el->chrg.cpMin >= 2048) return;
   TEXTRANGEW tr = {el->chrg, t};
   SendMessageW(g_acLog, EM_GETTEXTRANGE, 0, (LPARAM)&tr);
+  if (!wcsncmp(t, L"http://", 7) || !wcsncmp(t, L"https://", 8)) { /* источник в ответе — в браузере */
+    ShellExecuteW(g_acWnd, L"open", t, NULL, NULL, SW_SHOWNORMAL);
+    return;
+  }
   for (size_t i = 0; i < sizeof(kAcLogLinks) / sizeof(kAcLogLinks[0]); i++)
     if (!wcscmp(t, kAcLogLinks[i])) PostMessageW(g_acWnd, WM_AC_LINK, i, 0);
+  for (size_t i = 0; i < sizeof(kAcRouteLinks) / sizeof(kAcRouteLinks[0]); i++)
+    if (!wcscmp(t, kAcRouteLinks[i])) PostMessageW(g_acWnd, WM_AC_LINK, 10 + i, 0);
 }
+
+/* кнопка под маршрутом — как если бы написали это в чате; недописанный вопрос остаётся в поле */
+static void ac_route_say(const wchar_t *cmd) {
+  int n = GetWindowTextLengthW(g_acIn);
+  wchar_t *draft = (wchar_t *)malloc(((size_t)n + 1) * sizeof(wchar_t));
+  if (draft) GetWindowTextW(g_acIn, draft, n + 1);
+  SetWindowTextW(g_acIn, cmd);
+  ac_send();
+  if (draft) SetWindowTextW(g_acIn, draft);
+  free(draft);
+}
+
+static void ac_route_excel(void);
 
 static void ac_log_link_do(WPARAM which) {
   switch (which) {
@@ -3106,6 +3168,9 @@ static void ac_log_link_do(WPARAM which) {
     ac_redraw();
     break;
   case 3: ac_clear_ask(); break;
+  case 10: ac_route_say(L"в союз"); break;
+  case 11: ac_route_say(L"норма подробно"); break;
+  case 12: ac_route_excel(); break;
   }
 }
 
@@ -3396,6 +3461,9 @@ static LRESULT CALLBACK AcProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
   case WM_AC_LINK:
     ac_log_link_do(wParam);
     return 0;
+  case WM_AC_NOTE:
+    if (lParam) ac_status((const wchar_t *)lParam), free((void *)lParam);
+    return 0;
   case WM_CLOSE:
     ShowWindow(hwnd, SW_HIDE);
     return 0;
@@ -3452,6 +3520,7 @@ static void ac_create(void) {
     SendMessageW(g_acLog, EM_SETBKGNDCOLOR, 0, ac_log_bg());
     SendMessageW(g_acLog, EM_SETEDITSTYLE, SES_HIDEGRIDLINES, SES_HIDEGRIDLINES); /* у пузырей — только свои рамки */
     SendMessageW(g_acLog, EM_SETEVENTMASK, 0, SendMessageW(g_acLog, EM_GETEVENTMASK, 0, 0) | ENM_LINK); /* «показать»… */
+    SendMessageW(g_acLog, EM_AUTOURLDETECT, AURL_ENABLEURL, 0); /* адреса источников — ссылками */
   }
   g_acIn = CreateWindowExW(0, L"EDIT", L"",
                            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN,
@@ -3569,3 +3638,158 @@ static void aichat_ask(const wchar_t *q) {
 #include "ai_agent.c" /* составные файловые задачи с реальными наблюдениями и общим планом */
 #include "ai_plm_check.c" /* сверка списка, файла или чертежа с PLM «Союз» — без модели */
 #include "ai_std.c" /* вопросы о стандартных изделиях и материалах — строками справочника */
+
+/* ---- «Excel» под маршрутом: маршрут и нормы последнего ответа — в книгу ---------------
+   Строки ответа разбираются тем же ac_route_kind, что и рисует их. Книга пишется Excel'ем
+   (ai_office.c) в рабочем потоке; Excel нет — тот же лист в .csv. Файл — в Документы\CursorPad\
+   Маршруты, открывается сам. */
+typedef struct {
+  wchar_t *tsv;
+  wchar_t path[MAX_PATH];
+} AcXls;
+
+static void ac_tsv_cell(wchar_t *out, size_t cap, const wchar_t *p, const wchar_t *e) {
+  size_t k = wcslen(out);
+  while (p < e && *p == L' ') p++;
+  while (e > p && (e[-1] == L' ' || e[-1] == L'.')) e--;
+  for (; p < e && k + 1 < cap; p++) out[k++] = *p == L'\t' ? L' ' : *p;
+  out[k] = 0;
+}
+
+static void ac_tsv_row(wchar_t *out, size_t cap, const wchar_t *const *cells, const wchar_t *const *ends, int n) {
+  for (int i = 0; i < 4; i++) {
+    if (i) wcsncat(out, L"\t", cap - wcslen(out) - 1);
+    if (i < n && cells[i]) ac_tsv_cell(out, cap, cells[i], ends[i]);
+  }
+  wcsncat(out, L"\n", cap - wcslen(out) - 1);
+}
+
+/* ответ-маршрут → таблица 4 столбца: шапка детали, операции, нормы; *part — для имени файла */
+static wchar_t *ac_route_tsv(const wchar_t *text, wchar_t *part, int partCap) {
+  size_t cap = wcslen(text) + 400;
+  wchar_t *out = (wchar_t *)calloc(cap, sizeof(wchar_t));
+  if (!out) return NULL;
+  part[0] = 0;
+  BOOL ops = FALSE, norms = FALSE;
+  for (const wchar_t *p = text; *p;) {
+    const wchar_t *e = p, *mark;
+    while (*e && *e != L'\n' && *e != L'\r') e++;
+    int kind = ac_route_kind(p, e, &mark);
+    if (kind == ACR_LABEL && mark - p < 24 && (ac_route_pre(p, e, L"Деталь:") || ac_route_pre(p, e, L"Материал:") ||
+                                                ac_route_pre(p, e, L"Заготовка:"))) {
+      const wchar_t *c[2] = {p, mark}, *x[2] = {mark - 1, e};
+      ac_tsv_row(out, cap, c, x, 2);
+      if (!part[0] && ac_route_pre(p, e, L"Деталь:")) {
+        const wchar_t *d = mark, *de = d;
+        while (de < e && wcsncmp(de, L" — ", 3)) de++;
+        part[0] = 0;
+        ac_tsv_cell(part, (size_t)partCap, d, de);
+      }
+    } else if (kind == ACR_OP) {
+      if (!ops) {
+        const wchar_t *h[4] = {L"№", L"Операция", L"Содержание", L"Основание"}, *he[4];
+        for (int i = 0; i < 4; i++) he[i] = h[i] + wcslen(h[i]);
+        wcsncat(out, L"\n", cap - wcslen(out) - 1);
+        ac_tsv_row(out, cap, h, he, 4);
+        ops = TRUE;
+      }
+      const wchar_t *why = mark;
+      while (why + 3 <= e && wcsncmp(why, L" — ", 3)) why++;
+      if (why + 3 > e) why = e;
+      const wchar_t *c[4] = {p, p + 4, mark, why < e ? why + 3 : e}, *x[4] = {p + 3, mark - 1, why, e};
+      ac_tsv_row(out, cap, c, x, 4);
+    } else if (kind == ACR_NORM) {
+      if (!norms) {
+        const wchar_t *h[4] = {L"№", L"Операция", L"Тпз", L"Тшт"}, *he[4];
+        for (int i = 0; i < 4; i++) he[i] = h[i] + wcslen(h[i]);
+        wcsncat(out, L"\n", cap - wcslen(out) - 1);
+        ac_tsv_row(out, cap, h, he, 4);
+        norms = TRUE;
+      }
+      const wchar_t *v = mark + 2, *sep = v;
+      while (sep + 3 <= e && wcsncmp(sep, L" · ", 3)) sep++;
+      if (sep + 3 > e) sep = e;
+      const wchar_t *v2 = sep < e ? sep + 3 : e;
+      if (ac_route_pre(v, e, L"Тпз ")) v += 4;
+      if (ac_route_pre(v2, e, L"Тшт ")) v2 += 4;
+      const wchar_t *c[4] = {p, p + 4, v, v2}, *x[4] = {p + 3, mark, sep, e};
+      ac_tsv_row(out, cap, c, x, 4);
+    }
+    p = *e ? e + 1 : e;
+  }
+  size_t n = wcslen(out);
+  while (n && out[n - 1] == L'\n') out[--n] = 0;
+  return out;
+}
+
+static DWORD WINAPI ac_xls_thread(LPVOID arg) {
+  AcXls *j = (AcXls *)arg;
+  wchar_t why[300] = L"", *note = (wchar_t *)malloc(MAX_PATH * 2 * sizeof(wchar_t));
+  BOOL ok = of_write_excel(L"", j->path, L"Маршрут", L"A1", j->tsv, FALSE, why, 300);
+  if (!ok) { /* Excel нет или не открылся — тот же лист в CSV (UTF-8, «;») */
+    wchar_t *dot = wcsrchr(j->path, L'.');
+    if (dot) wcscpy(dot, L".csv");
+    size_t n = wcslen(j->tsv);
+    wchar_t *c = (wchar_t *)malloc((n + 2) * sizeof(wchar_t));
+    if (c) {
+      for (size_t i = 0; i <= n; i++) c[i] = j->tsv[i] == L'\t' ? L';' : j->tsv[i] == L'\n' ? L'\n' : j->tsv[i];
+      int bytes = WideCharToMultiByte(CP_UTF8, 0, c, -1, NULL, 0, NULL, NULL);
+      char *u = bytes > 0 ? (char *)malloc((size_t)bytes + 3) : NULL;
+      if (u) {
+        memcpy(u, "\xEF\xBB\xBF", 3);
+        WideCharToMultiByte(CP_UTF8, 0, c, -1, u + 3, bytes, NULL, NULL);
+        HANDLE h = CreateFileW(j->path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        DWORD w = 0;
+        ok = h != INVALID_HANDLE_VALUE && WriteFile(h, u, (DWORD)bytes + 2, &w, NULL);
+        if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+        free(u);
+      }
+      free(c);
+    }
+  }
+  if (ok) ShellExecuteW(NULL, L"open", j->path, NULL, NULL, SW_SHOWNORMAL);
+  if (note) {
+    if (ok) _snwprintf(note, MAX_PATH * 2, L"Маршрут — в %s", j->path);
+    else _snwprintf(note, MAX_PATH * 2, L"Не вышло записать маршрут в Excel: %s", why[0] ? why : L"нет доступа к папке");
+    note[MAX_PATH * 2 - 1] = 0;
+    if (!g_acWnd || !PostMessageW(g_acWnd, WM_AC_NOTE, 0, (LPARAM)note)) free(note);
+  }
+  free(j->tsv);
+  free(j);
+  return 0;
+}
+
+static void ac_route_excel(void) {
+  int i = ac_route_turn(0);
+  if (i < 0) {
+    ac_status(L"В беседе нет маршрута — сначала «Маршрут обработки» по чертежу");
+    return;
+  }
+  AcXls *j = (AcXls *)calloc(1, sizeof(AcXls));
+  wchar_t part[120], docs[MAX_PATH];
+  if (!j || !(j->tsv = ac_route_tsv(g_acTurns[i].text, part, 120)) || !j->tsv[0] ||
+      FAILED(SHGetFolderPathW(NULL, CSIDL_PERSONAL, NULL, SHGFP_TYPE_CURRENT, docs))) {
+    if (j) free(j->tsv);
+    free(j);
+    ac_status(L"Не вышло собрать таблицу маршрута");
+    return;
+  }
+  for (wchar_t *c = part; *c; c++)
+    if (wcschr(L"\\/:*?\"<>|", *c)) *c = L' ';
+  SYSTEMTIME st;
+  GetLocalTime(&st);
+  _snwprintf(j->path, MAX_PATH, L"%s\\CursorPad\\Маршруты", docs);
+  SHCreateDirectoryExW(NULL, j->path, NULL);
+  size_t k = wcslen(j->path);
+  _snwprintf(j->path + k, MAX_PATH - k, L"\\%s %04u-%02u-%02u %02u-%02u.xlsx", part[0] ? part : L"Маршрут", st.wYear,
+             st.wMonth, st.wDay, st.wHour, st.wMinute);
+  j->path[MAX_PATH - 1] = 0;
+  HANDLE th = CreateThread(NULL, 0, ac_xls_thread, j, 0, NULL);
+  if (!th) {
+    free(j->tsv);
+    free(j);
+    return;
+  }
+  CloseHandle(th);
+  ac_status(L"Пишу маршрут в Excel…");
+}

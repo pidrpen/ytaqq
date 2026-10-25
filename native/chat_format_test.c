@@ -43,6 +43,37 @@ int main(void) {
   SendMessageW(edit, EM_GETCHARFORMAT, SCF_SELECTION, (LPARAM)&format);
   CHECK(format.dwEffects & CFE_BOLD);
   CHECK(wcsstr(raw, L"**Первый**")); /* raw history untouched */
-  free(rtf.text); DestroyWindow(edit);
-  puts("PASS: RichEdit Unicode, Markdown, numbered headings, literal code/paths, escaping and bold formatting"); return 0;
+  free(rtf.text);
+
+  /* ответ-маршрут: операция — номер и название жирно, «почему» серым; нормы — колонками через табуляцию */
+  const wchar_t *route = L"Маршрут обработки — черновик по правилам, проверяет технолог\n"
+    L"Деталь: Вал промежуточный — тело вращения\n"
+    L"005 Заготовительная. Отрезать заготовку от прутка — заготовка — прокат\n"
+    L"010 Токарная (черновая). Подрезать торцы — тело вращения\n"
+    L"Нормы времени (ОМН; проверяет технолог):\n"
+    L"010 Токарная (черновая): Тпз 14 мин · Тшт ≥ 0,864 мин без машинного То\n"
+    L"Разбор каждой цифры и источники — «норма подробно».\n"
+    L"Ответ 12.5 — не операция.";
+  AcRtf r2 = {0}; ac_rtf_begin(&r2);
+  ac_rtf_message(&r2, route, TRUE, FALSE); ac_rtf_add(&r2, "}"); CHECK(!r2.failed);
+  CHECK(strstr(r2.text, "\\tab ")); /* колонки норм */
+  Source s2 = {&r2, 0}; EDITSTREAM in2 = {(DWORD_PTR)&s2, 0, stream};
+  SendMessageW(edit, EM_STREAMIN, SF_RTF, (LPARAM)&in2); CHECK(!in2.dwError);
+  SendMessageW(edit, EM_GETTEXTEX, (WPARAM)&get, (LPARAM)text);
+  CHECK(wcsstr(text, L"005 Заготовительная. Отрезать заготовку от прутка — заготовка — прокат")); /* текст тот же */
+  CHECK(wcsstr(text, L"010 Токарная (черновая)\tТпз 14 мин\tТшт ≥ 0,864 мин")); /* « · » и «:» — в колонки */
+  CHECK(wcsstr(text, L"Ответ 12.5 — не операция."));
+  const wchar_t *op = wcsstr(text, L"Заготовительная"), *why = wcsstr(text, L"заготовка — прокат");
+  CHECK(op && why);
+  CHARRANGE r_op = {(LONG)(op - text), (LONG)(op - text + 5)}, r_why = {(LONG)(why - text), (LONG)(why - text + 5)};
+  CHARFORMAT2W f2 = {0}; f2.cbSize = sizeof(f2);
+  SendMessageW(edit, EM_EXSETSEL, 0, (LPARAM)&r_op);
+  SendMessageW(edit, EM_GETCHARFORMAT, SCF_SELECTION, (LPARAM)&f2);
+  CHECK(f2.dwEffects & CFE_BOLD);
+  memset(&f2, 0, sizeof(f2)); f2.cbSize = sizeof(f2);
+  SendMessageW(edit, EM_EXSETSEL, 0, (LPARAM)&r_why);
+  SendMessageW(edit, EM_GETCHARFORMAT, SCF_SELECTION, (LPARAM)&f2);
+  CHECK(!(f2.dwEffects & CFE_BOLD) && f2.crTextColor == RGB(100, 116, 139)); /* «почему» — серым (cf3) */
+  free(r2.text); DestroyWindow(edit);
+  puts("PASS: RichEdit Unicode, Markdown, numbered headings, literal code/paths, escaping, bold, route and norm lines"); return 0;
 }
