@@ -1,7 +1,10 @@
-2026102602
-2026.10.26.2
-sha256 9c9a166077644234e98f2eda525ddeb121832d74f476701d327c28e659f2ddc7
-== 0 signature-rsa-sha256 w7VTRr+jMn6GzR5eVfDj+tgBPNxoFWf5nu0KW4vgXKEeR5KzJG9lCCJ5JRyYcQTH15EH4sNJxqkiqFmz2sm3SV60TEYf8YXgjOiScH/RVEXpFjsS7zUCjll23IMYxC3CXVg8l0++Te7/3Xsdx0qEidMsLu6LrI6/jFjaUUUa7Dz0BnZlkukpYQTaL0iYK7RWFI85TUXdbSlzRxRVx4ZNAdv4AjwA1lidozOtz9pJxdjRnxQnuRxhVg/+PeZOqwDxaxfD5noBkvigCj+CJdiQCiagqdzXmxWn1hhrN2E8cU3vL3Hw2EaD+ks0BpLecmej5stEvoDHLJsfUM+X/iGIII7C/c+jBBl2RMRNnL0Ds/eip2evTBWS2FazXMiGDZtqThKu9uvy5wzRwwfWjJdZkl5FP1DXRX3BwPW2RlfX9VJKT3OHXrolkES4bEVDSZma1STl8Kk7rKrkKZ/8Qtv9DvTvPLqEAUfZBtg+FaOzravYwQj9xBBrCDVKnSe5B5fq
+2026102603
+2026.10.26.3
+sha256 bdf67f029a33aabf7cbb67c756beb2fbfeae6dde5501e6826096ffd594d413c0
+== 0 signature-rsa-sha256 rQ8rVPEb3pzrTPE/KftBec6Kk8Oeni/HkM6ZQ9DTJbLBSolIzA9sPqhCFCFin3DnhLuGE12TuK0Jv3Gr5VjbrF/NwZYQ+8LEwzn21E0EqbERCmRdQ9YP+3O/mEmSds3tEp+mzY7CSEjlAlWd3n/n1lIy7byBdtk21Y5jMUAvTv5cseNy9oY6ZLW7prgk5K7MNg6j5m6mHoWOnENPjc2WCQjZuvhtYctf91NxlVp5dyWL8F/lpmCSG550AYUPpZN0MxImd5rcrlFjX9u9YwGYpIyB6280bzJxAyUsZjmJ8wfO9zyeEKi7flbNXPf/kFY3ZznuxYBxcAxmI1L4/N2P0Fqe3MgNExtxkkOJ3JZUcavMqU0+l3Ay9ubm+k2LiN1PFydr2s+rQsz1NK0Q3mKUmF9YQguBkMezTL37K7VkhuccVCAsBeC6jye3nVOcMXcqQoR58Xcxt2q8CAOn1JnskX7z0YiwGvTQ2r6BRqcBaEBk3X6U66MdvSus9BPK1eUs
+== 2026.10.26.3
+Исправлено: просьба вроде «переведи этот PDF в Excel» больше не заканчивается ошибкой «трижды вызвала инструмент неверно». Раньше помощник пытался открыть PDF как Word или Excel и сдавался; теперь PDF, сканы и картинки он читает распознаванием (Tesseract), как и обычные файлы по пути.
+
 == 2026.10.26.2
 Исправлена ошибка помощника «трижды вызвал инструмент неверно»: когда помощник читает названный файл (скан, PDF, Word, Excel), он теперь принимает путь и там, куда его положила модель, а список возможностей показывает, что нужен именно полный путь. Если помощник всё же не справился, в сообщении теперь написано, чем кончился последний отказ, и подсказано, как назвать файл.
 
