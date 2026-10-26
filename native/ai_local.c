@@ -254,7 +254,8 @@ static int g_aiPersona;
    если человек сам разрешил на вкладке «ИИ»; локальной модели можно всегда */
 static BOOL g_aiZaiPlm;
 /* размышление модели в чате: просим его у локальной модели и показываем свёрнутым блоком;
-   «think» в ai.txt. Агент (JSON-действия) и Z.ai размышления не используют */
+   «think» в ai.txt. Агент (JSON-действия), ответ по уже собранным данным инструментов
+   (ai_ask_chat_plain_async) и Z.ai размышления не используют */
 static BOOL g_aiThink = TRUE;
 static BOOL ai_think_on(void) { return g_aiThink && !g_aiProvider; }
 /* папка справочника стандартов (std_files.c): «std_dir» в ai.txt; пусто — %USERPROFILE%\CursorPad-std */
@@ -882,22 +883,31 @@ static int ai_server_ensure(DWORD deadline, volatile LONG *cancel, int minimumCo
   }
   for (int attempt = 0; attempt < 6 && rc != AI_OK; attempt++) {
     int port = AI_PORT0 + (attempt % 4) * 7;
-    wchar_t cmd[MAX_PATH * 4 + 300], wkey[40];
+    /* exe, модель, проектор и адаптер — до MAX_PATH каждый, остальное ключи и фраза предела размышления */
+#define AI_CMD_CAP (MAX_PATH * 4 + 600)
+    wchar_t cmd[AI_CMD_CAP], wkey[40];
     MultiByteToWideChar(CP_UTF8, 0, g_aiKey, -1, wkey, 40);
-    int n = _snwprintf(cmd, MAX_PATH * 4 + 300,
+    int n = _snwprintf(cmd, AI_CMD_CAP,
                        L"\"%s\" -m \"%s\" --host 127.0.0.1 --port %d --api-key %s -c %d -np %d -t %d -ngl %s",
                        exe, model, port, wkey, ctx, np, ai_cores(), ngl ? L"auto" : L"0");
     if (mm[0] && n > 0)
-      n += _snwprintf(cmd + n, MAX_PATH * 4 + 300 - n, L" --mmproj \"%s\"%s", mm, mmCpu ? L" --no-mmproj-offload" : L"");
+      n += _snwprintf(cmd + n, AI_CMD_CAP - n, L" --mmproj \"%s\"%s", mm, mmCpu ? L" --no-mmproj-offload" : L"");
     /* Qwen3 / Qwen3.5 default to thinking. Tool JSON has a small output budget, so
        reasoning must not consume that budget before the action is returned.
        Server default also covers QwenPaw's auxiliary checklist/audit calls. */
     if (ai_qwen_thinking(model) && n > 0)
-      n += _snwprintf(cmd + n, MAX_PATH * 4 + 300 - n, L" --jinja --chat-template-kwargs \"{\\\"enable_thinking\\\":false}\"");
+      n += _snwprintf(cmd + n, AI_CMD_CAP - n, L" --jinja --chat-template-kwargs \"{\\\"enable_thinking\\\":false}\"");
+    /* Размышление в чате (enable_thinking в запросе) ограничено: иначе 4B может продумать все
+       свои AI_THINK_TOKENS и не дойти до ответа. По исчерпании сервер закрывает размышление
+       фразой-напоминанием (как в рекомендации Qwen) — модели остаётся весь лимит ответа. */
+    if (ai_qwen_thinking(model) && n > 0)
+      n += _snwprintf(cmd + n, AI_CMD_CAP - n,
+                      L" --reasoning-budget %d --reasoning-budget-message \"Considering the limited time by the user, I have to give the solution based on the thinking directly now.\"",
+                      AI_THINK_TOKENS - 256);
     /* The vision loader recommends at least 1024 image tokens for details.
        This affects attached images only; text requests keep their budget. */
     if (ai_qwen35(model) && mm[0] && n > 0)
-      n += _snwprintf(cmd + n, MAX_PATH * 4 + 300 - n, L" --image-min-tokens 1024");
+      n += _snwprintf(cmd + n, AI_CMD_CAP - n, L" --image-min-tokens 1024");
     /* дообучение: адаптер LoRA рядом с моделью подключается сам. lora*.gguf — к своей модели,
        на все ответы (обучена на своих документах); draw-lora*.gguf — к любой, только для
        чтения чертежей (native/train): в остальных запросах вес адаптера 0, чат прежний */
@@ -905,15 +915,15 @@ static int ai_server_ensure(DWORD deadline, volatile LONG *cancel, int minimumCo
     g_aiDrawLora = FALSE;
     if (g_aiModel[0] && n > 0 && ai_find_near(g_aiModel, L"lora*.gguf", lora)) {
       ai_short_path(lora);
-      _snwprintf(cmd + n, MAX_PATH * 4 + 300 - n, L" --lora \"%s\"", lora);
+      _snwprintf(cmd + n, AI_CMD_CAP - n, L" --lora \"%s\"", lora);
     } else if (n > 0 && (ai_find_near(model, L"draw-lora3*.gguf", lora) || ai_find_near(model, L"draw-lora2*.gguf", lora) ||
                          ai_find_near(model, L"draw-lora*.gguf", lora))) {
       /* новое поколение — первым: drawrec.c спрашивает по нему (ai_draw_gen) */
       ai_short_path(lora);
-      _snwprintf(cmd + n, MAX_PATH * 4 + 300 - n, L" --lora \"%s\" --lora-init-without-apply", lora);
+      _snwprintf(cmd + n, AI_CMD_CAP - n, L" --lora \"%s\" --lora-init-without-apply", lora);
       g_aiDrawLora = TRUE;
     }
-    cmd[MAX_PATH * 4 + 299] = 0;
+    cmd[AI_CMD_CAP - 1] = 0;
     SECURITY_ATTRIBUTES sa = {sizeof(sa), NULL, TRUE};
     HANDLE lf = CreateFileW(log, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, CREATE_ALWAYS,
                             FILE_ATTRIBUTE_NORMAL, NULL);
@@ -1417,7 +1427,7 @@ BOOL ai_vision_ready(void) {
 static long ai_turn_cost(const AiTurn *t) { return (long)wcslen(t->text) + (t->png ? 3000 : 0); }
 
 #include "ai_agent_schema.h"
-static char *ai_body_chat(const wchar_t *instruction, const AiTurn *t, int n, BOOL fileTools) {
+static char *ai_body_chat(const wchar_t *instruction, const AiTurn *t, int n, BOOL fileTools, BOOL plain) {
   char *sys = ai_json_str(instruction);
   char **js = (char **)calloc(n > 0 ? n : 1, sizeof(char *));
   if (!sys || !js) {
@@ -1425,9 +1435,10 @@ static char *ai_body_chat(const wchar_t *instruction, const AiTurn *t, int n, BO
     free(js);
     return NULL;
   }
-  /* размышление — только в обычном чате: агент ждёт JSON-действие, ему оно не нужно.
+  /* размышление — только в обычном чате: агент ждёт JSON-действие, ему оно не нужно; plain —
+     ответ по уже собранным данным или выбор команды, там оно лишь тратит время и лимит.
      Реплики уходят модели только текстом: размышление в беседу не попадает */
-  BOOL think = !fileTools && ai_think_on();
+  BOOL think = !fileTools && !plain && ai_think_on();
   size_t total = strlen(sys) + strlen(g_aiExtModel) + 400 + (fileTools ? strlen(kAiAgentSchema) : 0);
   for (int i = 0; i < n; i++) {
     js[i] = t[i].png ? ai_content_img(t[i].text, t[i].png, t[i].pngLen) : ai_json_str(t[i].text);
@@ -1457,7 +1468,7 @@ int ai_agent_budget(void) { return (16384 - 1024 - 300) * 2; }
 int ai_ctx_size(void) { return g_aiCtx; }
 
 static int ai_ask_chat_kind(const wchar_t *instruction, const AiTurn *turns, int n, DWORD timeoutMs, HWND notify,
-                            UINT msg, void *user, BOOL fileTools) {
+                            UINT msg, void *user, BOOL fileTools, BOOL plain) {
   if (ai_precheck() != AI_OK || !notify || !turns || n < 1 || !turns[n - 1].text) return 0;
   /* роль system не входит в бюджет реплик: длинная тетрадь иначе вытесняет вопрос из окна */
   long budget = ai_chat_budget();
@@ -1471,22 +1482,27 @@ static int ai_ask_chat_kind(const wchar_t *instruction, const AiTurn *turns, int
   int s = n - 1;
   while (s > 0 && used + ai_turn_cost(&turns[s - 1]) <= budget) used += ai_turn_cost(&turns[--s]);
   while (s < n - 1 && turns[s].assistant) s++; /* модель начинает с вопроса */
-  char *body = ai_body_chat(instruction, turns + s, n - s, fileTools);
+  char *body = ai_body_chat(instruction, turns + s, n - s, fileTools, plain);
   if (!body) return 0;
-  if (!fileTools && ai_think_on()) timeoutMs += AI_THINK_MS; /* размышление — лишние токены, на ЦП это минуты */
+  if (!fileTools && !plain && ai_think_on()) timeoutMs += AI_THINK_MS; /* размышление — лишние токены, на ЦП это минуты */
   return ai_ask_body(body, timeoutMs, notify, msg, user);
 }
 
 int ai_ask_chat_async(const wchar_t *instruction, const AiTurn *turns, int n, DWORD timeoutMs, HWND notify,
                       UINT msg, void *user) {
-  return ai_ask_chat_kind(instruction, turns, n, timeoutMs, notify, msg, user, FALSE);
+  return ai_ask_chat_kind(instruction, turns, n, timeoutMs, notify, msg, user, FALSE, FALSE);
+}
+
+int ai_ask_chat_plain_async(const wchar_t *instruction, const AiTurn *turns, int n, DWORD timeoutMs, HWND notify,
+                            UINT msg, void *user) {
+  return ai_ask_chat_kind(instruction, turns, n, timeoutMs, notify, msg, user, FALSE, TRUE);
 }
 
 int ai_ask_files_async(const wchar_t *instruction, const AiTurn *turns, int n, HWND notify, UINT msg,
                        LONG task, const wchar_t *goal, const wchar_t *plan,
                        const wchar_t *observation, int observationState, int planCount) {
   if (ai_precheck() != AI_OK || !notify || n != 1 || !turns || !turns[0].text || task <= 0) return 0;
-  char *body = ai_body_chat(instruction, turns, n, TRUE), *g = ai_json_str(goal), *p = ai_json_str(plan);
+  char *body = ai_body_chat(instruction, turns, n, TRUE, FALSE), *g = ai_json_str(goal), *p = ai_json_str(plan);
   char *o = ai_json_str(observation);
   if (!body || !g || !p || !o) { free(body); free(g); free(p); free(o); return 0; }
   size_t size = strlen(body) + strlen(g) + strlen(p) + strlen(o) + 200;

@@ -253,7 +253,8 @@ static BOOL ag_data_answer(void) {
   swprintf(note, 700, L"Данные: %ls — только чтение.", g_agDataSrc[0] ? g_agDataSrc : L"PLM «Союз» и архив");
   ag_stop();
   ac_review_reset();
-  int id = ai_ask_chat_async(sys, &turn, 1, 180000, g_acWnd, WM_AI_CHAT, NULL);
+  /* данные уже в руках — без размышления: с ним 4B за 40 с проговаривала весь лимит и не отвечала */
+  int id = ai_ask_chat_plain_async(sys, &turn, 1, 180000, g_acWnd, WM_AI_CHAT, NULL);
   free(sys);
   if (!id) return FALSE;
   ac_web_foot(NULL, note);

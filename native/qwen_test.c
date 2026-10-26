@@ -383,7 +383,7 @@ static int aq_test(void) {
     ok = ok && ac_picture_context(L"а размеры у этого вала") && !ac_picture_context(L"погода завтра");
     AiTurn image = {0}; image.text = L"напиши тех процесс, и че тут за материал"; image.png = pixel; image.pngLen = 1;
     wchar_t sys[14000]; ac_sys_build(image.text, NULL, sys, 14000);
-    char *body = ai_body_chat(sys, &image, 1, FALSE);
+    char *body = ai_body_chat(sys, &image, 1, FALSE, FALSE);
     ok = ok && body && strstr(body, "image_url") && strstr(body, "data:image/png;base64,");
     ok = ok && wcsstr(sys, L"предварительный маршрут") && wcsstr(sys, L"не удалось разобрать");
     free(body); ac_clear_turns();
@@ -448,7 +448,7 @@ static int aq_test(void) {
       ac_web_read_pages(question, testedWeb, AC_WEB_CAP, &info);
       ac_sys_build(question, testedWeb, sys, 14000);
       AiTurn turn = {0}; turn.text = question;
-      char *body = ai_body_chat(sys, &turn, 1, FALSE);
+      char *body = ai_body_chat(sys, &turn, 1, FALSE, FALSE);
       free(job.body); job.body = body;
       if (body) { ai_job_run(&job); status = job.status; testedSlot = g_aiSlotCtx; }
       else status = AI_ERROR;
@@ -518,7 +518,7 @@ static int aq_test(void) {
         turn.png = (BYTE *)raw; turn.pngLen = (DWORD)ai_file_size(argv[5]);
         wchar_t sys[14000];
         if (port == -13) ac_sys_build(question, NULL, sys, 14000);
-        char *body = ai_body_chat(port == -13 ? sys : L"Ответь на вопрос по приложенной картинке. Кратко, по-русски.", &turn, 1, FALSE);
+        char *body = ai_body_chat(port == -13 ? sys : L"Ответь на вопрос по приложенной картинке. Кратко, по-русски.", &turn, 1, FALSE, FALSE);
         free(job.body); job.body = body;
         if (body) { ai_job_run(&job); status = job.status; testedSlot = g_aiSlotCtx; }
         else status = AI_ERROR;
