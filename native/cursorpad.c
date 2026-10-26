@@ -1839,6 +1839,7 @@ static void flatten_clip_line(wchar_t *s) {
   }
 }
 
+static BOOL flk_clip_is_link(const wchar_t *s); /* file_link_ui.c */
 static void grab_last_copy(void) {
   if (g_ownClip) {
     g_ownClip = FALSE;
@@ -1848,6 +1849,7 @@ static void grab_last_copy(void) {
   if (!clipboard_text(q, 400)) return;
   flatten_clip_line(q);
   if (!q[0]) return;
+  if (flk_clip_is_link(q)) return; /* ссылка с файлом — мегабайты текста, в историю копий не кладём */
   /* в начало списка; уже был — поднимаем наверх, а не дублируем */
   int at = g_clipHistN < CLIP_HIST ? g_clipHistN : CLIP_HIST - 1;
   for (int k = 0; k < g_clipHistN; k++)
@@ -4581,6 +4583,7 @@ static void create_settings(HWND owner) {
 #include "hotkeys.c"    /* F8, F6, Pause… — какие назначены в Настройках */
 #include "layout_fix.c" /* Pause: «ghbdtn» → «привет» */
 #include "msg.c"        /* исчезающие сообщения коллегам — через ту же папку, что нарды */
+#include "file_link_ui.c" /* «ссылка с файлом»: плитка кольца Shift и приём из буфера — до convert.c */
 #include "convert.c" /* Shift-drag conversion ring; real OLE drop target */
 #include "ai_file_ask.c" /* «прочитай / переведи файл» в чате: Tesseract и исполнитель конвертера — после convert.c */
 #include "tools.c" /* после нардов: автообновление смотрит, не открыты ли они */
@@ -5103,7 +5106,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
   case WM_CLIPBOARDUPDATE:
     if (lf_quiet()) return 0; /* это исправление раскладки гоняет буфер — не копирование человека */
     /* своё мы помечаем флажком; без него — скопировал человек */
-    if (!g_ownClip) onec_foreign_copy(), sz_foreign_copy();
+    if (!g_ownClip) onec_foreign_copy(), sz_foreign_copy(), flk_on_copy();
     grab_last_copy();
     return 0;
   case WM_NCHITTEST: {
@@ -5136,6 +5139,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
       else if (g_balloonKind == 7) morskoy_show();
       else if (g_balloonKind == 8) shahmaty_show();
       else if (g_balloonKind == 6) cv_reveal();
+      else if (g_balloonKind == 10) flk_receive(); /* «скопирована ссылка с файлом» — сохранить */
+      else if (g_balloonKind == 9) { /* «ссылка скопирована» — сказано всё во всплывашке */ }
       else if (g_balloonKind == 2) { /* «вышла новая версия» — поставить сейчас */
         if (g_updReady && g_updPath[0]) {
           KillTimer(hwnd, TIMER_UPD_IDLE);
@@ -5468,6 +5473,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
     if (argv && argc >= 3 && !wcscmp(argv[1], L"--xptest")) export_test(argv[2]);
     if (argv && argc >= 4 && !wcscmp(argv[1], L"--drawrec")) dr_test(argc, argv);
     if (argv && argc >= 4 && !wcscmp(argv[1], L"--fqread")) fq_test(argc, argv);
+    if (argv && argc >= 4 && !wcscmp(argv[1], L"--linktest")) flk_test(argv[2], argv[3], FALSE);
+    if (argv && argc >= 4 && !wcscmp(argv[1], L"--linksave")) flk_test(argv[2], argv[3], TRUE);
     if (argv && argc >= 3 && !wcscmp(argv[1], L"--avatarshot")) ac_avatar_shot(argv[2]);
     if (argv && argc >= 4 && !wcscmp(argv[1], L"--drawui")) dr_ui_test(argc, argv);
     if (argv && argc >= 4 && !wcscmp(argv[1], L"--techno")) dr_techno_test(argc, argv);

@@ -8,6 +8,7 @@
 #define WM_CONVERT_DONE (WM_APP + 139)
 #define WM_CV_CREATE (WM_APP + 141) /* wParam — что создать на рабочем столе: 1 папка, 2 TXT, 3 Word, 4 Excel */
 #define WM_CV_TIFF_MERGE (WM_APP + 142) /* lParam — CvSelection*: в окно «Объединение TIFF / PDF» */
+#define WM_CV_LINK (WM_APP + 144) /* lParam — путь (malloc): ссылка с файлом в буфер обмена */
 static HWND g_cvWnd;
 static BOOL g_cvOle, g_cvRegistered, g_cvWord, g_cvExcel;
 static BOOL g_cvDown, g_cvSource, g_cvDismissed;
@@ -210,7 +211,9 @@ static void cv_menu_formats(void) {
     if(pdfs) for(int i=10;i<=13;i++) g_cvFormats[g_cvCount++]=i;
   } else if (pdfs) { for(int i=10;i<=13;i++) g_cvFormats[g_cvCount++]=i; }
   else { for(int i=4;i<=6;i++) if(cvx_all(&g_cvSelection,i)) g_cvFormats[g_cvCount++]=i; if (!g_cvCount && cvx_all(&g_cvSelection,14)) g_cvFormats[g_cvCount++]=14; }
-  g_cvFormats[g_cvCount++]=7; g_cvFormats[g_cvCount++]=15;
+  g_cvFormats[g_cvCount++]=7;
+  if(g_cvSelection.count==1) g_cvFormats[g_cvCount++]=24; /* ссылка с файлом — любого формата, по одному */
+  g_cvFormats[g_cvCount++]=15;
 }
 static void cv_read_pending(void) {
   if(!g_cvPendingData)return;
@@ -275,6 +278,7 @@ static LRESULT CALLBACK cv_proc(HWND hwnd, UINT message, WPARAM wp, LPARAM lp) {
     lstrcpynW(name,slash?slash+1:s->paths[0],MAX_PATH);wchar_t *dot=wcsrchr(name,L'.');if(dot)*dot=0;
     tm_open_pack(s->paths,s->count,name);free(s);return 0;
   }
+  if(message==WM_CV_LINK){flk_send((const wchar_t*)lp);free((void*)lp);return 0;} /* после сброса, как и выше */
 #endif
   if (message == WM_CV_THUMB) { cv_thumb_ready((CvThumb *)lp); cv_redraw(); return 0; }
   if (message == WM_MOUSEACTIVATE) return MA_NOACTIVATE;
