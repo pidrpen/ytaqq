@@ -64,6 +64,19 @@ static BOOL ag_wants(const wchar_t *text) {
   return g_agPending || ag_file_intent(text) || ac_is_file_cmd(text);
 }
 
+/* шаг агента для показа над ответом: что вызвали и что ответил инструмент, одной строкой.
+   В запросы модели не идёт: только g_acStepsNext, его забирает ac_append у ответа */
+static void ag_step_show(const wchar_t *tool, const wchar_t *observation) {
+  wchar_t call[220], result[160], line[480];
+  lstrcpynW(call, tool, 220);
+  lstrcpynW(result, observation, 160);
+  for (wchar_t *p = call; *p; p++) if (*p == L'\r' || *p == L'\n' || *p == L'\t') *p = L' ';
+  for (wchar_t *p = result; *p; p++) if (*p == L'\r' || *p == L'\n' || *p == L'\t') *p = L' ';
+  swprintf(line, 480, L"• %ls\n   → %ls\n", call, result);
+  if (wcslen(g_acStepsNext) + wcslen(line) + 1 > sizeof(g_acStepsNext) / sizeof(wchar_t)) return;
+  wcscat(g_acStepsNext, line);
+}
+
 static void ag_note(const wchar_t *tool, const wchar_t *observation) {
   size_t n = wcslen(g_agNotes);
   size_t need = wcslen(tool) + wcslen(observation) + 40;
@@ -75,6 +88,7 @@ static void ag_note(const wchar_t *tool, const wchar_t *observation) {
     n -= drop;
   }
   swprintf(g_agNotes + n, AG_TEXT - n, L"\nВызов: %ls\nРезультат: %ls\n", tool, observation);
+  ag_step_show(tool, observation);
 }
 
 static void ag_stop(void) {
