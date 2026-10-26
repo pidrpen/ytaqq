@@ -816,7 +816,7 @@ static int ag_stage_dir_move(AgFs *fs, const wchar_t *src, const wchar_t *dstRaw
    roll back this tool's staged changes, never leave a partial bulk transfer. */
 static int ag_tool(AgFs *fs, const wchar_t *json, wchar_t *out, int cap) {
   AgJson j;
-  lstrcpynW(out, L"Ошибка: нужен один JSON-объект со строковыми полями tool, path/src/dst/pattern/text/recursive.", cap);
+  lstrcpynW(out, L"Ошибка: нужен один JSON-объект со строковыми полями tool, path/src/dst/pattern/text/recursive. Обратный слэш в пути пишется двумя: \"C:\\\\Сканы\\\\письмо.pdf\"; все значения — в кавычках, без лишнего текста вокруг.", cap);
   if (!ag_json(json, &j)) return -1;
   const wchar_t *tool = ag_get(&j, L"tool");
   if (!wcscmp(tool, L"done")) {

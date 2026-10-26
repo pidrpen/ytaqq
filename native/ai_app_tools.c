@@ -604,6 +604,12 @@ static int ag_data_call(const AgJson *j, AgFs *fs, wchar_t *out, int cap, volati
   const wchar_t *name = ag_get(j, L"name");
   const wchar_t *text = ag_get(j, L"text");
   *got = FALSE;
+  /* модель кладёт аргумент куда придётся (по списку возможностей «text=…» — и
+     путь файла тоже туда): не заставляем её переспрашивать трижды */
+  if (!text[0]) {
+    static const wchar_t *const alt[] = {L"query", L"q", L"path", L"src", L"file"};
+    for (size_t i = 0; i < sizeof(alt) / sizeof(alt[0]) && !text[0]; i++) text = ag_get(j, alt[i]);
+  }
   if (!ag_data_tool(name)) {
     lstrcpynW(out, L"Неизвестная команда CursorPad. Используй app name=capabilities; произвольные команды запрещены.", cap);
     return -1;
@@ -633,14 +639,18 @@ static int ag_data_call(const AgJson *j, AgFs *fs, wchar_t *out, int cap, volati
     return 0;
   }
   if (!wcscmp(name, L"file_read")) { /* файл назвал пользователь — как office_read, и для Z.ai */
-    const wchar_t *path = ag_get(j, L"path");
-    if (!path[0]) {
-      lstrcpynW(out, L"file_read: нужен path — полный путь к файлу (скан, картинка, PDF, Word, Excel, TXT).", cap);
+    const wchar_t *path = ag_get(j, L"path"), *flag = ag_get(j, L"text");
+    if (!path[0]) { /* путь модель могла положить в text (так в списке возможностей) */
+      path = flag;
+      flag = L"";
+    }
+    if (!path[0] || (!wcschr(path, L'\\') && !wcschr(path, L'/') && path[0] != L'@')) {
+      lstrcpynW(out, L"file_read: нужен path — полный путь к файлу с диском, например path=C:\\\\Сканы\\\\письмо.pdf (в JSON обратный слэш пишется двумя). Это скан, картинка, PDF, Word, Excel или TXT. Если пути нет — спроси пользователя через ask.", cap);
       return -1;
     }
     wchar_t actual[MAX_PATH], why[600], low[80];
     if (!fs || !ag_path(fs, path, actual)) lstrcpynW(actual, path, MAX_PATH);
-    lstrcpynW(low, text, 80);
+    lstrcpynW(low, flag, 80);
     CharLowerBuffW(low, (DWORD)wcslen(low));
     int pages = 0, all = 0;
     wchar_t *t = fq_read_text(actual, wcsstr(low, L"черт") || wcsstr(low, L"штамп"), cancel, NULL, NULL, &pages, &all,
@@ -734,7 +744,9 @@ static int ag_app_call(const AgJson *j, wchar_t *out, int cap) {
     for (size_t i = 0; i < sizeof(kAgCapabilities) / sizeof(kAgCapabilities[0]); i++)
       swprintf(out + wcslen(out), cap - wcslen(out), L"app name=%ls — %ls.\r\n", kAgCapabilities[i].name, kAgCapabilities[i].description);
     for (size_t i = 0; i < sizeof(kAgDataTools) / sizeof(kAgDataTools[0]); i++)
-      swprintf(out + wcslen(out), cap - wcslen(out), L"app name=%ls text=… — только чтение: %ls.\r\n", kAgDataTools[i].name, kAgDataTools[i].description);
+      swprintf(out + wcslen(out), cap - wcslen(out), L"app name=%ls %ls — только чтение: %ls.\r\n", kAgDataTools[i].name,
+               !wcscmp(kAgDataTools[i].name, L"file_read") ? L"path=полный_путь" :
+               !wcscmp(kAgDataTools[i].name, L"plm_check") ? L"text=… или path=полный_путь" : L"text=…", kAgDataTools[i].description);
     wcscat(out, L"Открытие окна не означает выполнение расчёта или сравнения. Прямой доступ к химическому составу материалов СОЮЗ ещё не настроен.\r\n");
     return 0;
   }

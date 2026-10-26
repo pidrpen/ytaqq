@@ -322,7 +322,9 @@ static void ag_tool_ready(void *result) {
     af_say(g_agObservation); ac_status(L"Ответьте на уточнение в поле ввода"); return;
   }
   if (state < 0 && ++g_agErrors >= 3) {
-    ag_plan_failure(L"Модель трижды предложила некорректное действие и не смогла исправить его по результату инструмента. Файлы не изменены."); return;
+    wchar_t why[900];
+    swprintf(why, 900, L"Модель трижды вызвала инструмент неверно и не смогла исправиться по ответу. Файлы не изменены.\r\nПоследний отказ: %.600ls\r\nПопробуйте назвать файл полным путём, например C:\\Сканы\\письмо.pdf.", g_agObservation);
+    ag_plan_failure(why); return;
   }
   ag_request();
 }
