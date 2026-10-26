@@ -1,25 +1,33 @@
-/* Вид кольца Shift-перетаскивания (с 2026.10.24). Своё полупрозрачное окно
-   (UpdateLayeredWindow): сглаженные края, мягкая тень, цвета темы g_uiTok.
-   Секторы — плитки с зазорами, у каждой значок и короткая подпись; плитка
-   под курсором окрашивается акцентом и выдвигается наружу. В центре —
-   карточка файла, а при наведении — что сделает действие; центр — отмена.
+/* Вид кольца Shift-перетаскивания (с 2026.10.24, стили и стекло — с 2026.10.26).
+   Своё полупрозрачное окно (UpdateLayeredWindow): плитки — «стекло» поверх
+   размытого снимка экрана, по контуру каждой — неяркие точки, у плитки под
+   курсором они бегут; плитка окрашивается акцентом и выдвигается наружу.
+   В центре — карточка файла, а при наведении — что сделает действие.
+   «Ссылка» задержана — снаружи вокруг кольца выезжает дуга из двух сегментов
+   («Включая файл» выше, «До файла» ниже), в том же окне, что и кольцо.
+   Стиль (kCvStyles: «Матовое стекло», «Лепестки», «Тёмное стекло», «Тонкое
+   кольцо»), размытие, точки и анимации выбираются на вкладке «Кастомизация»
+   Настроек (g_ringStyle, g_ringBlur, g_ringDots, g_ringAnim).
    Пока проводник не отдал список файлов, по плиткам бежит огонёк.
    Подключается из convert.c после его переменных; рисует только по ним. */
 #ifdef CV_RING_TEST
-/* проверочные сборки без ui_theme.c: светлая тема по умолчанию */
+/* проверочные сборки без ui_theme.c и Настроек: светлая тема и стиль по умолчанию */
 typedef struct { COLORREF bg, bg2, surface, ink, muted, line, accent; } UiTokens;
 static UiTokens g_uiTok = {RGB(255, 255, 255), RGB(243, 244, 246), RGB(255, 255, 255), RGB(17, 24, 39),
                            RGB(107, 114, 128), RGB(226, 229, 233), RGB(37, 99, 235)};
+static int g_ringStyle;
+static BOOL g_ringBlur = TRUE, g_ringDots = TRUE, g_ringAnim = TRUE;
 #endif
 
 #include <commctrl.h> /* ImageList_GetIcon */
 
-#define CV_RING_BASE 360 /* сторона окна при 96 dpi; круг — без полей под тень */
+#define CV_RING_BASE 360 /* диаметр кольца при 96 dpi */
+#define CV_WIN_BASE 460  /* сторона окна: вокруг кольца место под дугу «Ссылки» и тень */
 enum { CV_T_IMAGE, CV_T_PDF, CV_T_TEXT, CV_T_ZIP, CV_T_MORE };
 /* shell — образец имени для значка из Проводника (кольцо «Создать»); folder — значок папки */
 typedef struct { wchar_t icon; const wchar_t *label, *title, *note; int tint; const wchar_t *shell; BOOL folder; } CvRingItem;
 /* по номерам действий: 0–3 картинки, 4 PDF, 5 TXT, 6 CSV, 7 ZIP, 8–14 окно параметров, 15 «Ещё»,
-   24 — «Ссылка», 25 и 26 — её полукруги рядом с кольцом: «Включая файл» и «До файла» (file_link_ui.c) */
+   24 — «Ссылка», 25 и 26 — сегменты её дуги вокруг кольца: «Включая файл» и «До файла» (file_link_ui.c) */
 static const CvRingItem kCvRing[27] = {
     {0xEB9F, L"PNG", L"В PNG", L"копия рядом с исходником", CV_T_IMAGE},
     {0xEB9F, L"JPG", L"В JPG", L"копия рядом с исходником", CV_T_IMAGE},
@@ -51,40 +59,68 @@ static const CvRingItem kCvRing[27] = {
 static const COLORREF kCvTint[] = {RGB(8, 145, 178), RGB(220, 38, 38), RGB(22, 163, 74), RGB(217, 119, 6),
                                    RGB(100, 116, 139)};
 
+/* ---- стили панели (вкладка «Кастомизация») ---------------------------------
+   Размеры — в px при 96 dpi, доли — 0…1. tileA/plateA/hubA — сколько тона
+   стекла поверх размытого снимка (0 — чистое размытие). */
+#define CV_STYLES 4
+typedef struct {
+  const wchar_t *name;
+  float rinK;            /* внутренний радиус плиток — доля внешнего */
+  float hubGap;          /* зазор между центром и плитками */
+  float gap, round, pop; /* зазор между плитками, скругление, выдвижение под мышью */
+  float inset;           /* отступ плиток от края круга */
+  float plateA, tileA, hubA; /* тон стекла: подложка-круг, плитка, центр */
+  float blur;            /* радиус размытия снимка */
+  BOOL dark;             /* тёмное стекло — свои цвета поверх любой темы */
+  float edgeA;           /* кромка плитки */
+  float dotA, dotStep, dotR; /* точки по контуру: яркость, шаг, радиус */
+  float shadowA;
+  float arcGap, arcW, arcRound; /* дуга «Ссылки» снаружи кольца */
+  BOOL halo;             /* пунктирная орбита вокруг кольца, пока открыта дуга */
+  int appear;            /* 0 — рост от 90 % с волной по плиткам, 1 — «цветение» из центра */
+} CvStyle;
+static const CvStyle kCvStyles[CV_STYLES] = {
+    {L"Матовое стекло", 0.50f, 6, 5, 8, 7, 6, 0.34f, 0.62f, 0.76f, 18, FALSE, 0.85f, 0.55f, 7, 1.1f, 0.22f, 9, 46, 9, FALSE, 0},
+    {L"Лепестки", 0.545f, 16, 11, 16, 6, 0, 0.0f, 0.60f, 0.72f, 16, FALSE, 0.90f, 0.55f, 8, 1.1f, 0.30f, 12, 46, 16, FALSE, 1},
+    {L"Тёмное стекло", 0.50f, 6, 4, 7, 7, 6, 0.30f, 0.58f, 0.70f, 20, TRUE, 0.22f, 0.75f, 6, 1.0f, 0.45f, 8, 46, 8, FALSE, 0},
+    {L"Тонкое кольцо", 0.67f, 6, 2, 5, 14, 2, 0.0f, 0.64f, 0.30f, 14, FALSE, 0.16f, 0.85f, 6, 1.0f, 0.20f, 7, 40, 6, TRUE, 0}};
+static const CvStyle *cv_style(void) { return &kCvStyles[g_ringStyle >= 0 && g_ringStyle < CV_STYLES ? g_ringStyle : 0]; }
+
 static int g_cvDpi = 96;
-static DWORD g_cvShownAt;   /* начало появления: 150 мс от 92 % к полному */
+static DWORD g_cvShownAt;   /* начало появления */
 static float g_cvLevel[16]; /* подсветка плиток 0…1, плавно к цели */
 static BOOL g_cvInHub;      /* курсор в центре — отпускание ничего не делает */
 static POINT g_cvAt;        /* левый верхний угол окна на экране */
-/* полукруги «Ссылки» — своё окно рядом с кольцом (g_cvSub): 0 — «Включая файл» сверху, 1 — «До файла» снизу */
+/* дуга «Ссылки» вокруг кольца: 0 — «Включая файл» (выше), 1 — «До файла» (ниже) */
 static BOOL g_cvSubOn;
-static int g_cvSubTile = -1, g_cvSubHover = -1, g_cvSubSize; /* g_cvSubTile — номер плитки «Ссылка» в кольце */
+static int g_cvSubTile = -1, g_cvSubHover = -1; /* g_cvSubTile — номер плитки «Ссылка» в кольце */
 static float g_cvSubLevel[2];
-static POINT g_cvSubAt;
 static DWORD g_cvSubShownAt;
-static HBITMAP g_cvSubBmp, g_cvSubTextBmp;
-static BYTE *g_cvSubPix, *g_cvSubTextPix;
-static int g_cvSubBmpSize;
 static HBITMAP g_cvBmp, g_cvTextBmp;
 static BYTE *g_cvPix, *g_cvTextPix; /* premultiplied BGRA; второй — под текст */
 static int g_cvBmpSize, g_cvFontSize;
 enum { CV_F_LABEL, CV_F_SMALL, CV_F_TITLE, CV_F_BADGE, CV_F_ICON, CV_F_ICON_BIG, CV_F_N };
 static HFONT g_cvFont[CV_F_N];
 
-typedef struct { float c, R, rin, rhub, pop, s; } CvGeo;
-/* scale — анимация появления; попадания считаются при scale = 1 */
+typedef struct { float c, R, rin, rhub, pop, s, gap, round, inset; } CvGeo;
+/* size — диаметр кольца; центр — середина окна g_cvWin; scale — анимация появления (попадания при 1) */
 static CvGeo cv_geo(int size, float scale) {
+  const CvStyle *st = cv_style();
   CvGeo g;
   g.s = (float)size / CV_RING_BASE;
-  g.c = size * 0.5f;
-  g.R = (g.c - 22.0f * g.s) * scale;
-  g.rin = g.R * 0.5f;
-  g.rhub = g.rin - 6.0f * g.s;
-  g.pop = 7.0f * g.s;
+  g.c = (g_cvWin > 0 ? g_cvWin : size * CV_WIN_BASE / CV_RING_BASE) * 0.5f;
+  g.R = (size * 0.5f - 22.0f * g.s) * scale;
+  g.rin = g.R * st->rinK;
+  g.rhub = g.rin - st->hubGap * g.s;
+  g.pop = st->pop * g.s;
+  g.gap = st->gap * g.s;
+  g.round = st->round * g.s;
+  g.inset = st->inset * g.s;
   return g;
 }
 
 static float cv_clamp01(float v) { return v < 0.0f ? 0.0f : v > 1.0f ? 1.0f : v; }
+static float cv_ease(float t) { t = cv_clamp01(t); return 1.0f - (1.0f - t) * (1.0f - t); }
 static COLORREF cv_mix(COLORREF a, COLORREF b, float t) {
   t = cv_clamp01(t);
   return RGB((int)(GetRValue(a) + (GetRValue(b) - GetRValue(a)) * t), (int)(GetGValue(a) + (GetGValue(b) - GetGValue(a)) * t),
@@ -101,9 +137,25 @@ static void cv_px(BYTE *p, COLORREF c, float a) {
   p[3] = (BYTE)(255.0f * a + p[3] * k + 0.5f);
 }
 static int cv_luma(COLORREF c) { return (GetRValue(c) * 299 + GetGValue(c) * 587 + GetBValue(c) * 114) / 1000; }
-static BOOL cv_dark(void) { return cv_luma(g_uiTok.surface) < 128; }
+/* тёмный кадр: тёмное стекло или тёмная тема — тени гуще, точки ярче */
+static BOOL cv_dark(void) { return cv_style()->dark || cv_luma(g_uiTok.surface) < 128; }
 /* чем писать по акценту: светлый акцент тёмной темы — тёмным, остальные — белым */
 static COLORREF cv_on_accent(void) { return cv_luma(g_uiTok.accent) > 150 ? RGB(17, 24, 39) : RGB(255, 255, 255); }
+/* палитра кадра: у тёмного стекла своя, остальные — из темы */
+typedef struct { COLORREF tint, ink, muted, accent, on, edge; } CvPal;
+static CvPal cv_pal(void) {
+  const CvStyle *st = cv_style();
+  CvPal p;
+  if (st->dark) {
+    p.tint = RGB(18, 22, 30); p.ink = RGB(243, 244, 246); p.muted = RGB(180, 186, 196);
+    p.accent = RGB(96, 165, 250); p.on = RGB(255, 255, 255); p.edge = RGB(255, 255, 255);
+  } else {
+    p.tint = g_uiTok.surface; p.ink = g_uiTok.ink; p.muted = g_uiTok.muted;
+    p.accent = g_uiTok.accent; p.on = cv_on_accent();
+    p.edge = RGB(255, 255, 255);
+  }
+  return p;
+}
 
 static int CALLBACK cv_face_cb(const LOGFONTW *lf, const TEXTMETRICW *tm, DWORD type, LPARAM lp) {
   (void)lf; (void)tm; (void)type;
@@ -120,7 +172,7 @@ static BOOL cv_face(const wchar_t *face) {
   if (dc) { EnumFontFamiliesExW(dc, &lf, cv_face_cb, (LPARAM)&found, 0); ReleaseDC(NULL, dc); }
   return found;
 }
-/* шрифты под размер окна; сглаживание без ClearType — у прозрачного окна нет своего фона */
+/* шрифты под размер кольца; сглаживание без ClearType — у прозрачного окна нет своего фона */
 static void cv_fonts(int size) {
   if (g_cvFontSize == size && g_cvFont[CV_F_LABEL]) return;
   for (int i = 0; i < CV_F_N; i++) if (g_cvFont[i]) { DeleteObject(g_cvFont[i]); g_cvFont[i] = NULL; }
@@ -140,18 +192,8 @@ static void cv_fonts(int size) {
   }
 }
 
-/* текст цветом col: белым по чёрному в g_cvTextPix, яркость — покрытие */
-static void cv_text(BYTE *pix, int size, HDC dc, int font, const wchar_t *s, int n, RECT r, UINT fmt, COLORREF col, float alpha) {
-  if (!g_cvFont[font] || !s || !*s) return;
-  if (r.left < 0) r.left = 0;
-  if (r.top < 0) r.top = 0;
-  if (r.right > size) r.right = size;
-  if (r.bottom > size) r.bottom = size;
-  if (r.right <= r.left || r.bottom <= r.top) return;
-  for (int y = r.top; y < r.bottom; y++) memset(g_cvTextPix + ((size_t)y * size + r.left) * 4, 0, (size_t)(r.right - r.left) * 4);
-  SelectObject(dc, g_cvFont[font]);
-  DrawTextW(dc, s, n, &r, fmt | DT_NOPREFIX);
-  GdiFlush();
+/* маска текста из g_cvTextPix (белым по чёрному) — цветом col с покрытием alpha */
+static void cv_text_apply(BYTE *pix, int size, RECT r, COLORREF col, float alpha) {
   for (int y = r.top; y < r.bottom; y++)
     for (int x = r.left; x < r.right; x++) {
       const BYTE *t = g_cvTextPix + ((size_t)y * size + x) * 4;
@@ -159,6 +201,52 @@ static void cv_text(BYTE *pix, int size, HDC dc, int font, const wchar_t *s, int
       if (t[2] > m) m = t[2];
       if (m) cv_px(pix + ((size_t)y * size + x) * 4, col, m / 255.0f * alpha);
     }
+}
+static BOOL cv_clip(RECT *r, int size) {
+  if (r->left < 0) r->left = 0;
+  if (r->top < 0) r->top = 0;
+  if (r->right > size) r->right = size;
+  if (r->bottom > size) r->bottom = size;
+  return r->right > r->left && r->bottom > r->top;
+}
+/* текст цветом col: белым по чёрному в g_cvTextPix, яркость — покрытие */
+static void cv_text(BYTE *pix, int size, HDC dc, int font, const wchar_t *s, int n, RECT r, UINT fmt, COLORREF col, float alpha) {
+  if (!g_cvFont[font] || !s || !*s || !cv_clip(&r, size)) return;
+  for (int y = r.top; y < r.bottom; y++) memset(g_cvTextPix + ((size_t)y * size + r.left) * 4, 0, (size_t)(r.right - r.left) * 4);
+  SelectObject(dc, g_cvFont[font]);
+  DrawTextW(dc, s, n, &r, fmt | DT_NOPREFIX);
+  GdiFlush();
+  cv_text_apply(pix, size, r, col, alpha);
+}
+/* текст вдоль дуги: повёрнут так, что читается по направлению ang (градусы, по часовой на экране),
+   центр строки — в (cx, cy) */
+static void cv_text_rot(BYTE *pix, int size, HDC dc, int font, const wchar_t *s, float cx, float cy, float ang, COLORREF col, float alpha) {
+  if (!g_cvFont[font] || !s || !*s) return;
+  LOGFONTW lf;
+  if (!GetObjectW(g_cvFont[font], sizeof(lf), &lf)) return;
+  int esc = (int)(-ang * 10.0f) % 3600;
+  if (esc < 0) esc += 3600;
+  lf.lfEscapement = lf.lfOrientation = esc;
+  HFONT rot = CreateFontIndirectW(&lf);
+  if (!rot) return;
+  SelectObject(dc, g_cvFont[font]);
+  SIZE ext = {0, 0};
+  GetTextExtentPoint32W(dc, s, lstrlenW(s), &ext);
+  int hb = (ext.cx + ext.cy) / 2 + 6;
+  RECT r = {(int)cx - hb, (int)cy - hb, (int)cx + hb + 1, (int)cy + hb + 1};
+  if (cv_clip(&r, size)) {
+    for (int y = r.top; y < r.bottom; y++) memset(g_cvTextPix + ((size_t)y * size + r.left) * 4, 0, (size_t)(r.right - r.left) * 4);
+    float a = ang * 0.017453292f, ux = sinf(a), uy = -cosf(a); /* «верх» букв */
+    float off = ext.cy * 0.36f; /* базовая линия — ниже центра строки */
+    HGDIOBJ old = SelectObject(dc, rot);
+    UINT align = SetTextAlign(dc, TA_CENTER | TA_BASELINE | TA_NOUPDATECP);
+    TextOutW(dc, (int)(cx - ux * off + 0.5f), (int)(cy - uy * off + 0.5f), s, lstrlenW(s));
+    SetTextAlign(dc, align);
+    SelectObject(dc, old);
+    GdiFlush();
+    cv_text_apply(pix, size, r, col, alpha);
+  }
+  DeleteObject(rot);
 }
 static RECT cv_box(float cx, float cy, float w, float h) {
   RECT r = {(int)(cx - w / 2), (int)(cy - h / 2), (int)(cx + w / 2 + 0.5f), (int)(cy + h / 2 + 0.5f)};
@@ -175,6 +263,19 @@ static void cv_rrect(BYTE *pix, int size, float x0, float y0, float x1, float y1
       float d = sqrtf((qx > 0 ? qx * qx : 0) + (qy > 0 ? qy * qy : 0)) + (qx > qy ? (qx < 0 ? qx : 0) : (qy < 0 ? qy : 0)) - rad;
       cv_px(pix + ((size_t)y * size + x) * 4, c, cv_clamp01(0.5f - d) * a);
     }
+}
+/* кружок со сглаженным краем — точка по контуру плитки */
+static void cv_disc(BYTE *pix, int size, float cx, float cy, float rad, COLORREF c, float a) {
+  if (a <= 0.003f) return;
+  int x0 = (int)(cx - rad - 1), y0 = (int)(cy - rad - 1), x1 = (int)(cx + rad + 1), y1 = (int)(cy + rad + 1);
+  for (int y = y0; y <= y1; y++) {
+    if (y < 0 || y >= size) continue;
+    for (int x = x0; x <= x1; x++) {
+      if (x < 0 || x >= size) continue;
+      float dx = x + 0.5f - cx, dy = y + 0.5f - cy;
+      cv_px(pix + ((size_t)y * size + x) * 4, c, cv_clamp01(0.5f + rad - sqrtf(dx * dx + dy * dy)) * a);
+    }
+  }
 }
 
 /* ---- значки типов файлов — те же, что в Проводнике --------------------------
@@ -389,7 +490,7 @@ static void cv_hub_create(BYTE *pix, int size, HDC dc, CvGeo g, COLORREF ink, CO
   else if (g_cvFont[CV_F_ICON_BIG]) {
     wchar_t plus = 0xE710;
     cv_text(pix, size, dc, CV_F_ICON_BIG, &plus, 1, cv_box(g.c, g.c - 26 * g.s, 44 * g.s, 40 * g.s), DT_CENTER | DT_VCENTER | DT_SINGLELINE,
-            g_uiTok.accent, 1.0f);
+            cv_pal().accent, 1.0f);
   }
   cv_text(pix, size, dc, CV_F_TITLE, it ? it->title : L"Создать", -1, cv_box(g.c, g.c + 8 * g.s, g.rhub * 1.7f, 22 * g.s),
           DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS, ink, 1.0f);
@@ -410,16 +511,16 @@ static COLORREF cv_file_tint(const wchar_t *path) {
    курсор появляется именно здесь, поэтому центр — спокойная карточка, а не «Отмена» */
 static void cv_hub_file(BYTE *pix, int size, HDC dc, CvGeo g, COLORREF ink, COLORREF muted) {
   const wchar_t *path = g_cvSelection.count ? g_cvSelection.paths[0] : g_cvPath;
-  COLORREF tint = cv_file_tint(path);
+  COLORREF tint = cv_file_tint(path), frame = cv_style()->dark ? RGB(140, 146, 158) : cv_mix(g_uiTok.line, ink, 0.25f);
   int ipx = (int)(48 * g.s + 0.5f);
   const BYTE *icon = cv_hub_icon(path, ipx);
   if (g_cvThumb && !_wcsicmp(g_cvThumb->path, path)) { /* миниатюра — листом с тонкой рамкой и тенью */
     /* размер уже вписан в 58 px при запросе (cv_thumb_request) */
     int w = g_cvThumb->w, h = g_cvThumb->h, x0 = (int)(g.c - w / 2.0f), y0 = (int)(g.c - 6 * g.s) - h; /* низом — над именем */
     if (g_cvSelection.count > 1)
-      cv_rrect(pix, size, x0 + 6 * g.s, y0 - 5 * g.s, x0 + w + 6 * g.s, y0 + h - 5 * g.s, 2 * g.s, cv_mix(g_uiTok.line, ink, 0.15f), 1.0f);
+      cv_rrect(pix, size, x0 + 6 * g.s, y0 - 5 * g.s, x0 + w + 6 * g.s, y0 + h - 5 * g.s, 2 * g.s, cv_mix(frame, ink, 0.1f), 1.0f);
     cv_rrect(pix, size, x0 - 1.5f, y0 + 0.5f, x0 + w + 1.5f, y0 + h + 2.5f, 2 * g.s, RGB(0, 0, 0), 0.18f); /* тень */
-    cv_rrect(pix, size, x0 - 1, y0 - 1, x0 + w + 1, y0 + h + 1, 1.5f, cv_mix(g_uiTok.line, ink, 0.25f), 1.0f); /* рамка */
+    cv_rrect(pix, size, x0 - 1, y0 - 1, x0 + w + 1, y0 + h + 1, 1.5f, frame, 1.0f); /* рамка */
     cv_blit(pix, size, g_cvThumb->pixels, w, h, x0, y0, 1.0f);
   } else if (icon) { /* значок, как в Проводнике; несколько файлов — стопкой */
     int x0 = (int)(g.c - ipx / 2.0f), y0 = (int)(g.c - 52 * g.s);
@@ -470,114 +571,508 @@ static void cv_hub_say(BYTE *pix, int size, HDC dc, CvGeo g, wchar_t icon, COLOR
   cv_text(pix, size, dc, CV_F_SMALL, note, -1, r, DT_CENTER | DT_WORDBREAK, muted, 1.0f);
 }
 
-/* весь кадр: тень, круг, плитки, центр. now — для огонька ожидания */
-static void cv_render(BYTE *pix, int size, HDC dc, DWORD now) {
+/* ---- снимок экрана под кольцом и его размытие («стекло») --------------------
+   BitBlt с экрана без CAPTUREBLT не берёт слоистые окна — ни само кольцо, ни
+   картинку перетаскивания Проводника. Снимается при показе кольца; окно на
+   месте не двигается, так что снимок живёт, пока кольцо открыто. */
+static HBITMAP g_cvBackBmp;
+static BYTE *g_cvBackPix;
+static int g_cvBackSize;
+static BOOL g_cvBackOk;
+static unsigned g_cvBackGen; /* растёт с каждым снимком — для кэша кадра */
+static BYTE *g_cvBlurTmp;
+static void cv_blur_pass(const BYTE *src, BYTE *dst, int size, int rad, BOOL vertical) {
+  int n = 2 * rad + 1;
+  for (int line = 0; line < size; line++) {
+    int sum[3] = {0, 0, 0};
+    for (int i = -rad; i <= rad; i++) {
+      int j = i < 0 ? 0 : i >= size ? size - 1 : i;
+      const BYTE *p = src + (vertical ? ((size_t)j * size + line) : ((size_t)line * size + j)) * 4;
+      sum[0] += p[0], sum[1] += p[1], sum[2] += p[2];
+    }
+    for (int i = 0; i < size; i++) {
+      BYTE *d = dst + (vertical ? ((size_t)i * size + line) : ((size_t)line * size + i)) * 4;
+      d[0] = (BYTE)(sum[0] / n), d[1] = (BYTE)(sum[1] / n), d[2] = (BYTE)(sum[2] / n), d[3] = 255;
+      int add = i + rad + 1, rem = i - rad;
+      if (add >= size) add = size - 1;
+      if (rem < 0) rem = 0;
+      const BYTE *pa = src + (vertical ? ((size_t)add * size + line) : ((size_t)line * size + add)) * 4;
+      const BYTE *pr = src + (vertical ? ((size_t)rem * size + line) : ((size_t)line * size + rem)) * 4;
+      sum[0] += pa[0] - pr[0], sum[1] += pa[1] - pr[1], sum[2] += pa[2] - pr[2];
+    }
+  }
+}
+#ifdef CV_RING_TEST
+/* стенд без экрана: условный «проводник» — светлое окно со строками на цветном столе */
+static void cv_backdrop_fake(int size) {
+  for (int y = 0; y < size; y++)
+    for (int x = 0; x < size; x++) {
+      BYTE *p = g_cvBackPix + ((size_t)y * size + x) * 4;
+      BOOL win = x < size * 2 / 3;
+      if (win) {
+        BOOL row = (y / 26) % 2 == 0, text = (x % 90) < 50 && (y % 26) > 8 && (y % 26) < 18;
+        int v = row ? 250 : 244;
+        p[0] = p[1] = p[2] = (BYTE)(text ? 120 : v);
+      } else {
+        p[2] = (BYTE)(20 + x * 60 / size), p[1] = (BYTE)(60 + y * 120 / size), p[0] = (BYTE)(120 + x * 100 / size);
+      }
+      p[3] = 255;
+    }
+}
+#endif
+static void cv_backdrop_capture(void) {
+  g_cvBackOk = FALSE;
+  g_cvBackGen++;
+  int size = g_cvWin;
+  if (!g_ringBlur || size <= 0) return;
+  if (g_cvBackSize != size) {
+    if (g_cvBackBmp) DeleteObject(g_cvBackBmp);
+    free(g_cvBlurTmp);
+    g_cvBackBmp = NULL, g_cvBackPix = NULL, g_cvBlurTmp = NULL, g_cvBackSize = 0;
+    BITMAPINFO info;
+    memset(&info, 0, sizeof(info));
+    info.bmiHeader.biSize = sizeof(info.bmiHeader);
+    info.bmiHeader.biWidth = size;
+    info.bmiHeader.biHeight = -size;
+    info.bmiHeader.biPlanes = 1;
+    info.bmiHeader.biBitCount = 32;
+    info.bmiHeader.biCompression = BI_RGB;
+    g_cvBackBmp = CreateDIBSection(NULL, &info, DIB_RGB_COLORS, (void **)&g_cvBackPix, NULL, 0);
+    g_cvBlurTmp = (BYTE *)malloc((size_t)size * size * 4);
+    if (!g_cvBackBmp || !g_cvBackPix || !g_cvBlurTmp) {
+      if (g_cvBackBmp) DeleteObject(g_cvBackBmp);
+      free(g_cvBlurTmp);
+      g_cvBackBmp = NULL, g_cvBackPix = NULL, g_cvBlurTmp = NULL;
+      return;
+    }
+    g_cvBackSize = size;
+  }
+  BOOL ok = FALSE;
+  if (g_cvWnd) {
+    HDC screen = GetDC(NULL), mem = screen ? CreateCompatibleDC(screen) : NULL;
+    if (mem) {
+      HGDIOBJ old = SelectObject(mem, g_cvBackBmp);
+      ok = BitBlt(mem, 0, 0, size, size, screen, g_cvAt.x, g_cvAt.y, SRCCOPY);
+      GdiFlush();
+      SelectObject(mem, old);
+      DeleteDC(mem);
+    }
+    if (screen) ReleaseDC(NULL, screen);
+  }
+#ifdef CV_RING_TEST
+  if (!g_cvWnd) { cv_backdrop_fake(size); ok = TRUE; }
+#endif
+  if (!ok) return;
+  int rad = (int)(cv_style()->blur * ((float)g_cvSize / CV_RING_BASE) * 0.55f + 0.5f);
+  if (rad < 1) rad = 1;
+  for (int pass = 0; pass < 2; pass++) {
+    cv_blur_pass(g_cvBackPix, g_cvBlurTmp, size, rad, FALSE);
+    cv_blur_pass(g_cvBlurTmp, g_cvBackPix, size, rad, TRUE);
+  }
+  g_cvBackOk = TRUE;
+}
+
+/* ---- геометрия плиток и дуги --------------------------------------------- */
+/* скругление, которое помещается в узкий сектор (иначе у «Лепестков» при 16 плитках углы сходятся) */
+static float cv_round_fit(float round, float rIn, float half, float gap, float s) {
+  float max = (2.0f * rIn * sinf(half) - gap) / 2 - 1.5f * s;
+  if (round > max) round = max;
+  return round < 1.5f * s ? 1.5f * s : round;
+}
+/* расстояние до скруглённого сектора: r, da — полярные относительно его середины; половина раствора half */
+static float cv_sector_sdf(float r, float da, float rIn, float rOut, float half, float gap, float round) {
+  float dr = fabsf(r - (rIn + rOut) / 2) - (rOut - rIn) / 2, dt = r * sinf(fabsf(da) - half) + gap / 2;
+  float qx = dr + round, qy = dt + round;
+  return sqrtf((qx > 0 ? qx * qx : 0) + (qy > 0 ? qy * qy : 0)) + (qx > qy ? (qx < 0 ? qx : 0) : (qy < 0 ? qy : 0)) - round;
+}
+/* внешний и внутренний радиусы плитки i при подсветке l */
+static void cv_tile_radii(CvGeo g, float l, float *rIn, float *rOut) {
+  *rIn = g.rin + 2.0f * g.s * l;
+  *rOut = g.R - g.inset + g.pop * l;
+}
+/* дуга «Ссылки»: середина сегмента k (радианы, по часовой на экране) и его радиусы при подсветке l */
+#define CV_ARC_HALF 0.4363323f /* 25° — сегмент в 50° */
+static float cv_arc_mid(int k) {
+  float a = -1.5707963f + (g_cvCount > 0 ? g_cvSubTile * 6.2831853f / g_cvCount : 0.0f);
+  /* выше тот сегмент, чья середина выше на экране (меньше sin); при равенстве — левый */
+  float up = sinf(a - CV_ARC_HALF) <= sinf(a + CV_ARC_HALF) + 1e-4f ? a - CV_ARC_HALF : a + CV_ARC_HALF;
+  float down = up == a - CV_ARC_HALF ? a + CV_ARC_HALF : a - CV_ARC_HALF;
+  return k == 0 ? up : down;
+}
+static void cv_arc_radii(CvGeo g, float l, float t, float *r0, float *r1) {
+  const CvStyle *st = cv_style();
+  float in = g.R + g.pop + st->arcGap * g.s, out = in + (st->arcW + 5.0f * l) * g.s;
+  /* выезжает из-под кольца: радиусы растут от края круга к своим */
+  *r0 = g.R - 4 * g.s + (in - g.R + 4 * g.s) * t;
+  *r1 = g.R + (out - g.R) * t;
+}
+static float cv_wrap(float a) {
+  while (a < -3.1415927f) a += 6.2831853f;
+  while (a > 3.1415927f) a -= 6.2831853f;
+  return a;
+}
+#ifdef CV_RING_TEST
+/* середина сегмента k дуги — в координатах экрана (для стенда) */
+static POINT cv_sub_center(int k) {
+  CvGeo g = cv_geo(g_cvSize, 1.0f);
+  float r0, r1;
+  cv_arc_radii(g, 0.0f, 1.0f, &r0, &r1);
+  float a = cv_arc_mid(k), rm = (r0 + r1) / 2;
+  POINT p = {g_cvAt.x + (LONG)(g.c + cosf(a) * rm), g_cvAt.y + (LONG)(g.c + sinf(a) * rm)};
+  return p;
+}
+#endif
+/* сегмент дуги под точкой экрана: 0 — «Включая файл», 1 — «До файла», -1 — мимо */
+static int cv_sub_hit(POINT point) {
+  if (!g_cvSubOn || g_cvSubTile < 0 || g_cvSubTile >= g_cvCount) return -1;
+  CvGeo g = cv_geo(g_cvSize, 1.0f);
+  float x = point.x - g_cvAt.x - g.c, y = point.y - g_cvAt.y - g.c, r = sqrtf(x * x + y * y), r0, r1;
+  cv_arc_radii(g, 0.0f, 1.0f, &r0, &r1);
+  if (r < r0 - 3 * g.s || r > r1 + 8 * g.s) return -1;
+  float a = atan2f(y, x);
+  for (int k = 0; k < 2; k++)
+    if (fabsf(cv_wrap(a - cv_arc_mid(k))) <= CV_ARC_HALF) return k;
+  return -1;
+}
+
+/* обход контура скруглённого сектора: точки через ~2 px, замкнуто */
+typedef struct { float x, y; } CvPt;
+#define CV_OUTLINE_MAX 1024
+static int cv_outline_arc(CvPt *out, int n, float cx, float cy, float rad, float from, float to) {
+  float sweep = to - from;
+  int steps = (int)(fabsf(sweep) * rad / 2.0f) + 1;
+  for (int i = 0; i <= steps && n < CV_OUTLINE_MAX; i++) {
+    float a = from + sweep * i / steps;
+    out[n].x = cx + cosf(a) * rad, out[n].y = cy + sinf(a) * rad;
+    n++;
+  }
+  return n;
+}
+static int cv_sector_outline(CvPt *out, float cx, float cy, float r0, float r1, float a0, float a1, float gap, float k) {
+  float off = gap / 2 + k, R1 = r1 - k, R0 = r0 + k;
+  if (R1 <= R0 + 1.0f || R0 <= off + 0.5f) return 0;
+  float t0 = sqrtf(R0 * R0 - off * off), t1 = sqrtf(R1 * R1 - off * off);
+  float d0 = atan2f(off, t0), d1 = atan2f(off, t1);
+  float ac1 = a0 + d1, ac2 = a1 - d1, ac3 = a1 - d0, ac4 = a0 + d0;
+  if (ac2 <= ac1 || ac3 <= ac4) return 0;
+  float c1x = cx + cosf(ac1) * R1, c1y = cy + sinf(ac1) * R1, c2x = cx + cosf(ac2) * R1, c2y = cy + sinf(ac2) * R1;
+  float c3x = cx + cosf(ac3) * R0, c3y = cy + sinf(ac3) * R0, c4x = cx + cosf(ac4) * R0, c4y = cy + sinf(ac4) * R0;
+  const float h = 1.5707963f;
+  int n = 0;
+  n = cv_outline_arc(out, n, cx, cy, r1, ac1, ac2);                 /* внешняя дуга */
+  n = cv_outline_arc(out, n, c2x, c2y, k, ac2, a1 + h);             /* угол у c2 */
+  n = cv_outline_arc(out, n, c3x, c3y, k, a1 + h, ac3 + 3.1415927f); /* угол у c3 (прямая между ними — сама собой) */
+  n = cv_outline_arc(out, n, cx, cy, r0, ac3, ac4);                 /* внутренняя дуга, назад */
+  n = cv_outline_arc(out, n, c4x, c4y, k, ac4 + 3.1415927f, a0 + 3 * h); /* угол у c4 */
+  n = cv_outline_arc(out, n, c1x, c1y, k, a0 - h, ac1);             /* угол у c1 */
+  return n;
+}
+/* точки через step вдоль замкнутой ломаной, со сдвигом phase */
+static void cv_dots_along(BYTE *pix, int size, const CvPt *pts, int n, float step, float phase, float rad, COLORREF col, float alpha) {
+  if (n < 2 || step <= 0.5f || alpha <= 0.003f) return;
+  float next = phase;
+  while (next < 0) next += step;
+  float walked = 0;
+  for (int i = 0; i < n; i++) {
+    const CvPt *a = &pts[i], *b = &pts[(i + 1) % n];
+    float dx = b->x - a->x, dy = b->y - a->y, len = sqrtf(dx * dx + dy * dy);
+    if (len <= 0.0001f) continue;
+    while (next <= walked + len) {
+      float t = (next - walked) / len;
+      cv_disc(pix, size, a->x + dx * t, a->y + dy * t, rad, col, alpha);
+      next += step;
+    }
+    walked += len;
+  }
+}
+
+/* ---- кадр ------------------------------------------------------------------
+   Тяжёлая часть (тень, стекло, кромки — попиксельно) считается в g_cvBasePix
+   и пересчитывается только когда меняется её состояние (ключ g_cvBaseKey);
+   точки, значки, подписи и центр кладутся поверх каждый кадр. */
+static BYTE *g_cvBasePix;
+static int g_cvBaseSize;
+static unsigned g_cvBaseKey;
+static unsigned cv_hash(unsigned h, int v) { return (h ^ (unsigned)v) * 16777619u; }
+
+typedef struct { float in[16], sc[16], hub, scale, arc; } CvAnim; /* появление: прозрачность и масштаб плиток, центра, дуги */
+static CvAnim cv_anim(DWORD now) {
+  const CvStyle *st = cv_style();
+  CvAnim a;
+  float e = g_cvShownAt && g_ringAnim ? (float)(now - g_cvShownAt) : 1e6f;
+  for (int i = 0; i < 16; i++) {
+    if (st->appear == 1) { /* цветение: лепестки вырастают из центра друг за другом, с перелётом */
+      float t = cv_clamp01((e - i * 28.0f) / 260.0f), u = t - 1.0f;
+      float back = 1.0f + 2.70158f * u * u * u + 1.70158f * u * u;
+      a.sc[i] = 0.55f + 0.45f * back;
+      a.in[i] = cv_clamp01(t * 2.5f);
+    } else {
+      a.sc[i] = 1.0f;
+      a.in[i] = cv_clamp01((e - i * 22.0f) / 110.0f);
+    }
+  }
+  a.hub = cv_ease(e / 150.0f);
+  a.scale = st->appear == 1 ? 1.0f : 0.9f + 0.1f * cv_ease(e / 180.0f);
+  a.arc = g_cvSubOn ? (g_cvSubShownAt && g_ringAnim ? cv_ease((float)(now - g_cvSubShownAt) / 160.0f) : 1.0f) : 0.0f;
+  return a;
+}
+static BOOL cv_appearing(DWORD now) {
+  if (!g_ringAnim) return FALSE;
+  if (g_cvShownAt && now - g_cvShownAt < (DWORD)(cv_style()->appear == 1 ? 260 + 16 * 28 : 180 + 16 * 22)) return TRUE;
+  if (g_cvSubOn && g_cvSubShownAt && now - g_cvSubShownAt < 180) return TRUE;
+  return FALSE;
+}
+
+/* стекло, тень и кромки — в base */
+static void cv_render_base(BYTE *pix, int size, DWORD now, CvAnim an) {
+  const CvStyle *st = cv_style();
+  CvPal pal = cv_pal();
   memset(pix, 0, (size_t)size * size * 4);
-  float t = g_cvShownAt ? cv_clamp01((float)(now - g_cvShownAt) / 150.0f) : 1.0f;
-  float e = 1.0f - (1.0f - t) * (1.0f - t);
-  CvGeo g = cv_geo(size, 0.92f + 0.08f * e);
-  BOOL dark = cv_dark(), wait = !g_cvCount;
-  COLORREF surface = g_uiTok.surface, ink = g_uiTok.ink, muted = g_uiTok.muted, accent = g_uiTok.accent;
-  COLORREF tile = cv_mix(surface, ink, dark ? 0.12f : 0.06f), line = cv_mix(g_uiTok.line, ink, dark ? 0.25f : 0.12f);
+  CvGeo g = cv_geo(g_cvSize, an.scale);
+  BOOL wait = !g_cvCount;
   int n = wait ? 6 : g_cvCount;
-  float span = 6.2831853f / n, half = span / 2, gap = 5.0f * g.s, round = 8.0f * g.s;
+  float span = 6.2831853f / n, half = span / 2;
+  float round = cv_round_fit(g.round, g.rin, half, g.gap, g.s);
   /* огонёк ожидания: какая плитка горит сейчас (доля с хвостом) — первую секунду чтения */
   float spin = (float)(now % 1200) / 1200.0f * n;
   BOOL reading = g_cvPendingData && now - g_cvEnteredAt <= 1000;
+  float shadowA = st->shadowA * (cv_dark() ? 1.6f : 1.0f);
+  float arcR0 = 0, arcR1 = 0, arcMid[2] = {0, 0}, arcRound = 0;
+  BOOL arc = g_cvSubOn && an.arc > 0.001f && g_cvSubTile >= 0 && g_cvSubTile < g_cvCount;
+  if (arc) {
+    cv_arc_radii(g, 0.0f, an.arc, &arcR0, &arcR1);
+    arcMid[0] = cv_arc_mid(0), arcMid[1] = cv_arc_mid(1);
+    arcRound = cv_round_fit(st->arcRound * g.s, arcR0, CV_ARC_HALF, g.gap, g.s);
+  }
+  float rMax = (arc ? arcR1 + 6 * g.s : g.R + g.pop) + 26.0f * g.s;
   for (int y = 0; y < size; y++) {
     BYTE *row = pix + (size_t)y * size * 4;
     float dy = y + 0.5f - g.c;
     for (int x = 0; x < size; x++) {
-      BYTE *p = row + (size_t)x * 4;
       float dx = x + 0.5f - g.c, r = sqrtf(dx * dx + dy * dy);
-      /* тень чуть ниже круга */
-      float sy = dy - 4.0f * g.s, ds = sqrtf(dx * dx + sy * sy) - g.R;
-      if (ds > -3.0f) cv_px(p, RGB(0, 0, 0), (dark ? 0.42f : 0.20f) * expf(-(ds > 0 ? ds : 0) / (8.0f * g.s)) * cv_clamp01(ds + 3.0f));
-      float dd = r - g.R;
-      if (dd < 1.0f) cv_px(p, surface, cv_clamp01(0.5f - dd) * 0.97f);
-      float b = 1.0f - fabsf(dd + 0.5f);
-      if (b > 0) cv_px(p, line, b * 0.9f);
-      if (r > g.rin - 2 && r < g.R + g.pop + 2) {
-        float a = atan2f(dy, dx) + 1.5707963f + half;
-        while (a < 0) a += 6.2831853f;
-        while (a >= 6.2831853f) a -= 6.2831853f;
-        int i = (int)(a / span) % n;
-        float da = a - (i + 0.5f) * span, l = wait ? 0.0f : g_cvLevel[i];
-        float rIn = g.rin + 2.0f * g.s * l, rOut = g.R - 6.0f * g.s + g.pop * l;
-        float dr = fabsf(r - (rIn + rOut) / 2) - (rOut - rIn) / 2, dt = r * sinf(fabsf(da) - half) + gap / 2;
-        float qx = dr + round, qy = dt + round;
-        float d = sqrtf((qx > 0 ? qx * qx : 0) + (qy > 0 ? qy * qy : 0)) + (qx > qy ? (qx < 0 ? qx : 0) : (qy < 0 ? qy : 0)) - round;
-        float cov = cv_clamp01(0.5f - d);
-        if (cov > 0) {
-          if (wait) {
-            float lag = spin - i;
-            while (lag < 0) lag += n;
-            float glow = lag < 1.0f ? 1.0f : expf(-(lag - 1.0f) * 1.6f);
-            cv_px(p, cv_mix(tile, accent, reading ? 0.15f + 0.45f * glow : 0.0f), cov * 0.8f);
-          } else {
-            cv_px(p, cv_mix(tile, accent, l), cov);
-          }
+      if (r > rMax) continue;
+      BYTE *p = row + (size_t)x * 4;
+      const BYTE *bp = g_cvBackOk ? g_cvBackPix + ((size_t)y * size + x) * 4 : NULL;
+      COLORREF back = bp ? RGB(bp[2], bp[1], bp[0]) : pal.tint;
+      float a = atan2f(dy, dx), ai = a + 1.5707963f + half;
+      while (ai < 0) ai += 6.2831853f;
+      while (ai >= 6.2831853f) ai -= 6.2831853f;
+      int i = (int)(ai / span) % n;
+      float da = ai - (i + 0.5f) * span, l = wait ? 0.0f : g_cvLevel[i];
+      float rIn, rOut;
+      cv_tile_radii(g, l, &rIn, &rOut);
+      float rt = r / an.sc[i]; /* лепесток растёт из центра */
+      float dTile = cv_sector_sdf(rt, da, rIn, rOut, half, g.gap, round);
+      float tileIn = wait ? an.hub : an.in[i];
+      /* тень: у сплошного круга — от круга, у лепестков — от каждой плитки и центра; чуть ниже */
+      float sy = dy - 4.0f * g.s, rs = sqrtf(dx * dx + sy * sy), ds;
+      if (st->plateA > 0.0f) ds = rs - g.R;
+      else {
+        float dsh = cv_sector_sdf(rs / an.sc[i], atan2f(sy, dx) + 1.5707963f + half - (i + 0.5f) * span, rIn, rOut, half, g.gap, round);
+        float dh = rs - g.rhub;
+        ds = dsh < dh ? dsh : dh;
+        /* плитка ещё не появилась — без тени */
+        if (dsh < dh && tileIn < 0.999f) ds = dh + (dsh - dh) * tileIn;
+      }
+      if (arc) {
+        for (int k = 0; k < 2; k++) {
+          float dk = cv_sector_sdf(rs, cv_wrap(atan2f(sy, dx) - arcMid[k]), arcR0, arcR1 + 5.0f * g.s * g_cvSubLevel[k], CV_ARC_HALF, g.gap, arcRound);
+          if (dk < ds) ds = dk;
         }
       }
-      float dh = fabsf(r - g.rhub);
-      if (dh < 1.0f) cv_px(p, line, (1.0f - dh) * 0.6f);
+      if (ds > -3.0f) cv_px(p, RGB(0, 0, 0), shadowA * expf(-(ds > 0 ? ds : 0) / (8.0f * g.s)) * cv_clamp01(ds + 3.0f) * an.hub);
+      /* подложка-круг */
+      if (st->plateA > 0.0f) {
+        float dd = r - g.R, cov = cv_clamp01(0.5f - dd);
+        if (cov > 0) cv_px(p, cv_mix(back, pal.tint, st->plateA), cov * (bp ? 0.98f : 0.97f) * an.hub);
+        float b = 1.0f - fabsf(dd + 0.5f);
+        if (b > 0) cv_px(p, pal.edge, b * st->edgeA * 0.8f * an.hub);
+      }
+      /* плитка */
+      float cov = cv_clamp01(0.5f - dTile);
+      if (cov > 0 && r > g.rin * 0.8f) {
+        COLORREF glass;
+        if (wait) {
+          float lag = spin - i;
+          while (lag < 0) lag += n;
+          float glow = lag < 1.0f ? 1.0f : expf(-(lag - 1.0f) * 1.6f);
+          glass = cv_mix(cv_mix(back, pal.tint, st->tileA), pal.accent, reading ? 0.12f + 0.4f * glow : 0.0f);
+          cv_px(p, glass, cov * 0.85f * tileIn);
+        } else {
+          glass = cv_mix(cv_mix(back, pal.tint, st->tileA), pal.accent, st->dark ? 0.42f * l : 0.86f * l);
+          cv_px(p, glass, cov * (bp ? 1.0f : 0.97f) * tileIn);
+        }
+        float b = 1.0f - fabsf(dTile + 0.5f);
+        if (b > 0) cv_px(p, st->dark && l > 0 ? cv_mix(pal.edge, RGB(147, 197, 253), l) : pal.edge, b * st->edgeA * (st->dark ? 1.0f + 3.0f * l : 1.0f) * tileIn);
+      }
+      /* центр */
+      float dh = r - g.rhub, ch = cv_clamp01(0.5f - dh);
+      if (ch > 0) {
+        if (st->plateA <= 0.0f || st->hubA > st->plateA) cv_px(p, cv_mix(back, pal.tint, st->hubA), ch * (st->plateA > 0 ? 0.7f : 0.97f) * an.hub);
+        float b = 1.0f - fabsf(dh + 0.5f);
+        if (b > 0) cv_px(p, pal.edge, b * st->edgeA * 0.7f * an.hub);
+      }
+      /* дуга «Ссылки» */
+      if (arc)
+        for (int k = 0; k < 2; k++) {
+          float lk = g_cvSubLevel[k];
+          float dk = cv_sector_sdf(r, cv_wrap(a - arcMid[k]), arcR0, arcR1 + 5.0f * g.s * lk, CV_ARC_HALF, g.gap, arcRound);
+          float ck = cv_clamp01(0.5f - dk);
+          if (ck <= 0) continue;
+          COLORREF glass = cv_mix(cv_mix(back, pal.tint, st->tileA + 0.02f), pal.accent, st->dark ? 0.42f * lk : 0.86f * lk);
+          cv_px(p, glass, ck * (bp ? 1.0f : 0.97f) * an.arc);
+          float b = 1.0f - fabsf(dk + 0.5f);
+          if (b > 0) cv_px(p, pal.edge, b * st->edgeA * an.arc);
+        }
     }
   }
+}
+
+/* точки по контуру плитки (или сегмента дуги) */
+static void cv_dots_shape(BYTE *pix, int size, CvGeo g, float rIn, float rOut, float mid, float half, float round, float phase, COLORREF col, float alpha) {
+  const CvStyle *st = cv_style();
+  static CvPt pts[CV_OUTLINE_MAX];
+  float ins = 6.0f * g.s * (st->dotStep <= 6 ? 0.85f : 1.0f);
+  float k = round - ins / 2;
+  if (k < 1.5f * g.s) k = 1.5f * g.s;
+  int n = cv_sector_outline(pts, g.c, g.c, rIn + ins, rOut - ins, mid - half, mid + half, g.gap + 2 * ins, k);
+  cv_dots_along(pix, size, pts, n, st->dotStep * g.s, phase, st->dotR * g.s, col, alpha);
+}
+
+/* весь кадр: база (стекло) из кэша или заново, затем точки, подписи и центр */
+static void cv_render(BYTE *pix, int size, HDC dc, DWORD now) {
+  const CvStyle *st = cv_style();
+  CvPal pal = cv_pal();
+  CvAnim an = cv_anim(now);
+  BOOL wait = !g_cvCount;
+  int n = wait ? 6 : g_cvCount;
+  /* ключ состояния базы: что угодно из этого меняет стекло */
+  unsigned key = cv_hash(2166136261u, size);
+  key = cv_hash(key, g_ringStyle), key = cv_hash(key, g_ringBlur), key = cv_hash(key, (int)g_cvBackGen), key = cv_hash(key, g_cvBackOk);
+  key = cv_hash(key, g_cvCount), key = cv_hash(key, g_cvHover), key = cv_hash(key, g_cvSubOn), key = cv_hash(key, g_cvSubTile);
+  key = cv_hash(key, (int)g_uiTok.surface), key = cv_hash(key, (int)g_uiTok.accent), key = cv_hash(key, (int)g_uiTok.ink);
+  key = cv_hash(key, (int)(an.hub * 512)), key = cv_hash(key, (int)(an.scale * 4096)), key = cv_hash(key, (int)(an.arc * 512));
+  for (int i = 0; i < 16; i++) key = cv_hash(key, (int)(g_cvLevel[i] * 256) + (int)(an.in[i] * 256) * 1000 + (int)(an.sc[i] * 2048) * 1000000);
+  key = cv_hash(key, (int)(g_cvSubLevel[0] * 256) + (int)(g_cvSubLevel[1] * 256) * 1000);
+  if (wait) key = cv_hash(key, (int)((now % 1200) / 30)), key = cv_hash(key, g_cvPendingData && now - g_cvEnteredAt <= 1000);
+  if (!g_cvBasePix || g_cvBaseSize != size) {
+    free(g_cvBasePix);
+    g_cvBasePix = (BYTE *)malloc((size_t)size * size * 4);
+    g_cvBaseSize = g_cvBasePix ? size : 0;
+    g_cvBaseKey = 0;
+  }
+  if (g_cvBasePix) {
+    if (key != g_cvBaseKey || !key) { cv_render_base(g_cvBasePix, size, now, an); g_cvBaseKey = key ? key : 1; }
+    memcpy(pix, g_cvBasePix, (size_t)size * size * 4);
+  } else
+    cv_render_base(pix, size, now, an);
+  CvGeo g = cv_geo(g_cvSize, an.scale);
+  float span = 6.2831853f / n, half = span / 2;
+  float round = cv_round_fit(g.round, g.rin, half, g.gap, g.s);
+  BOOL arc = g_cvSubOn && an.arc > 0.001f && g_cvSubTile >= 0 && g_cvSubTile < g_cvCount;
+  float breathe = st->dark && g_ringAnim ? 0.75f + 0.25f * sinf((float)(now % 2600) / 2600.0f * 6.2831853f) : 1.0f;
+  float runStep = st->dotStep * g.s, phase = g_ringAnim ? (float)((now - g_cvShownAt) % 1100) / 1100.0f * runStep : 0.0f;
+  /* точки по контуру каждой плитки; у плитки под мышью — ярче и бегут */
+  if (g_ringDots)
+    for (int i = 0; !wait && i < n; i++) {
+      float l = g_cvLevel[i], mid = -1.5707963f + i * span, rIn, rOut;
+      cv_tile_radii(g, l, &rIn, &rOut);
+      COLORREF col = st->dark && l > 0.5f ? RGB(191, 219, 254) : RGB(255, 255, 255);
+      float alpha = st->dotA * (0.9f + 0.1f * l) * (l > 0.5f ? 1.0f : breathe) * an.in[i];
+      if (an.sc[i] != 1.0f) { rIn *= an.sc[i]; rOut *= an.sc[i]; }
+      cv_dots_shape(pix, size, g, rIn, rOut, mid, half, round, l > 0.5f ? -phase : 0.0f, col, alpha);
+    }
   if (!dc) return;
   /* подписи плиток: значок над словом, всегда прямо */
   for (int i = 0; !wait && i < n; i++) {
     const CvRingItem *it = &kCvRing[g_cvFormats[i]];
-    float l = g_cvLevel[i], a = -1.5707963f + i * span;
-    float rm = (g.rin + 2.0f * g.s * l + g.R - 6.0f * g.s + g.pop * l) / 2;
+    float l = g_cvLevel[i], a = -1.5707963f + i * span, rIn, rOut;
+    cv_tile_radii(g, l, &rIn, &rOut);
+    float rm = (rIn + rOut) / 2 * an.sc[i];
     float cx = g.c + cosf(a) * rm, cy = g.c + sinf(a) * rm, w = rm * span * 0.92f;
     if (w > 96 * g.s) w = 96 * g.s;
-    COLORREF on = cv_on_accent();
-    int kpx = (int)((n <= 4 ? 32 : 24) * g.s + 0.5f); /* у четырёх больших плиток — крупнее */
+    BOOL thin = rOut - rIn < 60 * g.s;
+    int kpx = (int)((n <= 4 ? 32 : thin ? 20 : 24) * g.s + 0.5f); /* у четырёх больших плиток — крупнее */
     const BYTE *kind = it->shell ? cv_kind_icon(it, kpx) : NULL;
+    float alpha = an.in[i];
+    COLORREF iconCol = cv_mix(st->dark ? cv_mix(kCvTint[it->tint], RGB(255, 255, 255), 0.3f) : kCvTint[it->tint], pal.on, l);
     if (kind) /* «Создать»: значок из Проводника, как у такого файла на столе */
-      cv_blit(pix, size, kind, kpx, kpx, (int)(cx - kpx / 2.0f), (int)(cy - (n <= 4 ? 13 : 10) * g.s - kpx / 2.0f), 1.0f);
+      cv_blit(pix, size, kind, kpx, kpx, (int)(cx - kpx / 2.0f), (int)(cy - (n <= 4 ? 13 : thin ? 8 : 10) * g.s - kpx / 2.0f), alpha);
     else if (g_cvFont[CV_F_ICON])
-      cv_text(pix, size, dc, CV_F_ICON, &it->icon, 1, cv_box(cx, cy - 10 * g.s, 30 * g.s, 26 * g.s),
-              DT_CENTER | DT_VCENTER | DT_SINGLELINE, cv_mix(kCvTint[it->tint], on, l), 1.0f);
-    RECT lr = cv_box(cx, cy + (it->shell && n <= 4 ? 16 : g_cvFont[CV_F_ICON] ? 12 : 0) * g.s, w, 18 * g.s);
-    int font = CV_F_LABEL;
+      cv_text(pix, size, dc, CV_F_ICON, &it->icon, 1, cv_box(cx, cy - (thin ? 8 : 10) * g.s, 30 * g.s, 26 * g.s),
+              DT_CENTER | DT_VCENTER | DT_SINGLELINE, iconCol, alpha);
+    RECT lr = cv_box(cx, cy + (it->shell && n <= 4 ? 16 : g_cvFont[CV_F_ICON] ? (thin ? 11 : 12) : 0) * g.s, w, 18 * g.s);
+    int font = thin ? CV_F_SMALL : CV_F_LABEL;
     SIZE ext;
     SelectObject(dc, g_cvFont[font]);
     if (GetTextExtentPoint32W(dc, it->label, lstrlenW(it->label), &ext) && ext.cx > lr.right - lr.left) font = CV_F_SMALL; /* тесно — помельче */
-    cv_text(pix, size, dc, font, it->label, -1, lr, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS, cv_mix(ink, on, l), 1.0f);
+    cv_text(pix, size, dc, font, it->label, -1, lr, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS, cv_mix(pal.ink, pal.on, l), alpha);
+  }
+  /* дуга «Ссылки»: точки, орбита «Тонкого кольца» и подписи вдоль дуги */
+  if (arc) {
+    float r0, r1;
+    cv_arc_radii(g, 0.0f, an.arc, &r0, &r1);
+    float arcRound = cv_round_fit(st->arcRound * g.s, r0, CV_ARC_HALF, g.gap, g.s);
+    if (st->halo) { /* пунктирная орбита вокруг всего кольца */
+      float rh = (r0 + r1) / 2, stepA = 8.0f * g.s / rh;
+      for (float a = 0; a < 6.2831853f; a += stepA) cv_disc(pix, size, g.c + cosf(a) * rh, g.c + sinf(a) * rh, st->dotR * g.s, RGB(255, 255, 255), 0.5f * an.arc);
+    }
+    for (int k = 0; k < 2; k++) {
+      float lk = g_cvSubLevel[k], mid = cv_arc_mid(k);
+      if (g_ringDots)
+        cv_dots_shape(pix, size, g, r0, r1 + 5.0f * g.s * lk, mid, CV_ARC_HALF, arcRound, lk > 0.5f ? -phase : 0.0f,
+                      st->dark && lk > 0.5f ? RGB(191, 219, 254) : RGB(255, 255, 255), st->dotA * an.arc);
+      float rm = (r0 + r1 + 5.0f * g.s * lk) / 2, cx = g.c + cosf(mid) * rm, cy = g.c + sinf(mid) * rm;
+      /* читается вдоль дуги, верх букв наружу; внизу — наоборот, чтобы не вверх ногами */
+      float deg = mid * 57.29578f + (sinf(mid) > 0.2f ? -90.0f : 90.0f);
+      cv_text_rot(pix, size, dc, CV_F_LABEL, kCvRing[25 + k].label, cx, cy, deg, cv_mix(pal.ink, pal.on, lk), an.arc);
+    }
   }
   /* центр */
+  COLORREF ink = pal.ink, muted = pal.muted;
   if (wait) {
     if (g_cvRead == CV_READ_FOLDERS) cv_hub_say(pix, size, dc, g, 0xE8B7, kCvTint[CV_T_ZIP], L"Это папки", L"преобразуются только файлы", ink, muted);
     else if (g_cvRead == CV_READ_MANY) cv_hub_say(pix, size, dc, g, 0xE7BA, kCvTint[CV_T_ZIP], L"Больше 128 файлов", L"возьмите поменьше", ink, muted);
-    else if (g_cvPendingData && !reading) /* проводник так и не отдал список */
+    else if (g_cvPendingData && now - g_cvEnteredAt > 1000) /* проводник так и не отдал список */
       cv_hub_say(pix, size, dc, g, 0xE7BA, kCvTint[CV_T_ZIP], L"Не вижу файлов", L"тяните файлы из папки или со стола", ink, muted);
     else cv_hub_say(pix, size, dc, g, 0, 0, g_cvPendingData ? L"Читаю файлы…" : L"Ведите сюда",
                     g_cvPendingData ? L"держите Shift" : L"не отпускайте мышь и Shift", ink, muted);
   } else if (g_cvCreate)
     cv_hub_create(pix, size, dc, g, ink, muted);
-  else if (g_cvHover >= 0 || g_cvSubOn) { /* мышь на полукруге «Ссылки» — в центре кольца его пояснение */
+  else if (g_cvHover >= 0 || g_cvSubOn) { /* мышь на дуге «Ссылки» — в центре кольца её пояснение */
     int action = g_cvHover >= 0 ? g_cvFormats[g_cvHover] : g_cvSubHover >= 0 ? 25 + g_cvSubHover : 24;
     const CvRingItem *it = &kCvRing[action];
     BOOL pages = action < 4 && !_wcsicmp(cv_extension(g_cvPath), L"pdf"); /* PDF → картинки */
-    cv_hub_say(pix, size, dc, g, it->icon, kCvTint[it->tint], it->title, pages ? L"каждая страница, 300 dpi" : it->note, ink, muted);
+    cv_hub_say(pix, size, dc, g, it->icon, kCvTint[it->tint], it->title, pages ? L"каждая страница, 300 dpi" : it->note, ink, muted);
   } else
     cv_hub_file(pix, size, dc, g, ink, muted);
 }
 
-/* плитки ещё доезжают или ждём файлы — нужен следующий кадр */
+/* плитки ещё доезжают, бегут точки или ждём файлы — нужен следующий кадр */
 static BOOL cv_animating(DWORD now) {
-  if (g_cvShownAt && now - g_cvShownAt < 170) return TRUE;
+  if (cv_appearing(now)) return TRUE;
   if (!g_cvCount) return g_cvPendingData && now - g_cvEnteredAt < 1100; /* огонёк — секунду, потом подпись */
   for (int i = 0; i < g_cvCount; i++)
     if (fabsf(g_cvLevel[i] - (i == g_cvHover || (g_cvSubOn && i == g_cvSubTile) ? 1.0f : 0.0f)) > 0.01f) return TRUE;
+  for (int k = 0; k < 2; k++)
+    if (fabsf(g_cvSubLevel[k] - (g_cvSubOn && k == g_cvSubHover ? 1.0f : 0.0f)) > 0.01f) return TRUE;
+  if (g_ringAnim && g_ringDots) {
+    if (cv_style()->dark) return TRUE; /* точки «дышат» */
+    if (g_cvHover >= 0 || g_cvSubHover >= 0 || (g_cvSubOn && g_cvSubTile >= 0)) return TRUE; /* бегут по контуру */
+  }
   return FALSE;
 }
 static void cv_step_levels(void) {
+  float k = g_ringAnim ? 0.5f : 1.0f;
   for (int i = 0; i < 16; i++) {
-    float to = i == g_cvHover || (g_cvSubOn && i == g_cvSubTile) ? 1.0f : 0.0f; /* «Ссылка» горит, пока открыты её полукруги */
-    g_cvLevel[i] += (to - g_cvLevel[i]) * 0.5f;
+    float to = i == g_cvHover || (g_cvSubOn && i == g_cvSubTile) ? 1.0f : 0.0f; /* «Ссылка» горит, пока открыта её дуга */
+    g_cvLevel[i] += (to - g_cvLevel[i]) * k;
     if (fabsf(to - g_cvLevel[i]) < 0.01f) g_cvLevel[i] = to;
+  }
+  for (int j = 0; j < 2; j++) {
+    float to = g_cvSubOn && j == g_cvSubHover ? 1.0f : 0.0f;
+    g_cvSubLevel[j] += (to - g_cvSubLevel[j]) * k;
+    if (fabsf(to - g_cvSubLevel[j]) < 0.01f) g_cvSubLevel[j] = to;
   }
 }
 
@@ -608,9 +1103,10 @@ static BOOL cv_buffers(int size) {
 
 /* отрисовать кадр в g_cvPix; окно (если есть) получает его целиком */
 static void cv_paint(void) {
-  int size = g_cvSize;
+  if (g_cvWin <= 0) g_cvWin = g_cvSize * CV_WIN_BASE / CV_RING_BASE;
+  int size = g_cvWin;
   if (!cv_buffers(size)) return;
-  cv_fonts(size);
+  cv_fonts(g_cvSize);
   HDC screen = GetDC(NULL), tdc = CreateCompatibleDC(screen);
   if (!tdc) { ReleaseDC(NULL, screen); return; }
   HGDIOBJ oldText = SelectObject(tdc, g_cvTextBmp), oldFont = GetCurrentObject(tdc, OBJ_FONT);
@@ -623,116 +1119,11 @@ static void cv_paint(void) {
   if (g_cvWnd) {
     HDC mem = CreateCompatibleDC(screen);
     HGDIOBJ old = SelectObject(mem, g_cvBmp);
-    float t = g_cvShownAt ? cv_clamp01((float)(now - g_cvShownAt) / 150.0f) : 1.0f;
-    BLENDFUNCTION blend = {AC_SRC_OVER, 0, (BYTE)(255.0f * (1.0f - (1.0f - t) * (1.0f - t))), AC_SRC_ALPHA};
+    float t = g_cvShownAt && g_ringAnim ? cv_ease((float)(now - g_cvShownAt) / 150.0f) : 1.0f;
+    BLENDFUNCTION blend = {AC_SRC_OVER, 0, (BYTE)(255.0f * t), AC_SRC_ALPHA};
     POINT origin = {0, 0};
     SIZE sz = {size, size};
     UpdateLayeredWindow(g_cvWnd, screen, &g_cvAt, &sz, mem, &origin, 0, &blend, ULW_ALPHA);
-    SelectObject(mem, old);
-    DeleteDC(mem);
-  }
-  DeleteDC(tdc);
-  ReleaseDC(NULL, screen);
-}
-
-/* ---- полукруги «Ссылки» -----------------------------------------------------
-   Окно со стороной в половину кольца: круг из двух полукруглых окошек с зазором,
-   сверху «Включая файл», снизу «До файла». Ставит его convert.c (cv_sub_show)
-   снаружи кольца у плитки «Ссылка»; само кольцо не меняется. */
-static float cv_sub_radius(int size) { return size * 0.5f - 16.0f * (float)g_cvSize / CV_RING_BASE; }
-/* расстояние до полукруга радиуса r с плоской стороной на y = -gap/2 (выпуклость вверх), углы скруглены на rad */
-static float cv_half_sdf(float dx, float dy, float r, float gap, float rad) {
-  float a = sqrtf(dx * dx + dy * dy) - r + rad, b = dy + gap / 2 + rad;
-  return sqrtf((a > 0 ? a * a : 0) + (b > 0 ? b * b : 0)) + (a > b ? (a < 0 ? a : 0) : (b < 0 ? b : 0)) - rad;
-}
-static void cv_sub_render(BYTE *pix, int size, HDC dc, DWORD now) {
-  memset(pix, 0, (size_t)size * size * 4);
-  float s = (float)g_cvSize / CV_RING_BASE, c = size * 0.5f;
-  float t = g_cvSubShownAt ? cv_clamp01((float)(now - g_cvSubShownAt) / 120.0f) : 1.0f;
-  float rs = cv_sub_radius(size) * (0.85f + 0.15f * (1.0f - (1.0f - t) * (1.0f - t))), gap = 6.0f * s;
-  BOOL dark = cv_dark();
-  COLORREF surface = g_uiTok.surface, ink = g_uiTok.ink, accent = g_uiTok.accent, on = cv_on_accent();
-  COLORREF tile = cv_mix(surface, ink, dark ? 0.12f : 0.06f), line = cv_mix(g_uiTok.line, ink, dark ? 0.25f : 0.12f);
-  for (int y = 0; y < size; y++)
-    for (int x = 0; x < size; x++) {
-      BYTE *p = pix + ((size_t)y * size + x) * 4;
-      float dx = x + 0.5f - c, dy = y + 0.5f - c, shade = 0;
-      /* сначала тени обоих полукругов (чуть ниже), потом сами полукруги — тень нижнего не ложится на верхний */
-      for (int k = 0; k < 2; k++) {
-        float ds = cv_half_sdf(dx, (k ? -1.0f : 1.0f) * (dy - 4.0f * s), rs, gap, 10.0f * s);
-        float a = ds > -3.0f ? (dark ? 0.42f : 0.20f) * expf(-(ds > 0 ? ds : 0) / (8.0f * s)) * cv_clamp01(ds + 3.0f) : 0;
-        if (a > shade) shade = a;
-      }
-      cv_px(p, RGB(0, 0, 0), shade);
-      for (int k = 0; k < 2; k++) {
-        float side = k ? -1.0f : 1.0f, l = g_cvSubLevel[k];
-        float d = cv_half_sdf(dx, side * dy, rs, gap, 10.0f * s);
-        if (d >= 1.0f) continue;
-        cv_px(p, surface, cv_clamp01(0.5f - d) * 0.97f);
-        float b = 1.0f - fabsf(d + 0.5f);
-        if (b > 0) cv_px(p, line, b * 0.9f);
-        float inset = (5.0f - 2.0f * l) * s; /* под мышью — чуть шире, как плитка кольца */
-        float di = cv_half_sdf(dx, side * dy, rs - inset, gap + 2 * inset, 7.0f * s);
-        cv_px(p, cv_mix(tile, accent, l), cv_clamp01(0.5f - di));
-      }
-    }
-  if (!dc) return;
-  for (int k = 0; k < 2; k++) {
-    const CvRingItem *it = &kCvRing[25 + k];
-    float l = g_cvSubLevel[k], cy = c + (k ? 1.0f : -1.0f) * rs * 0.42f;
-    if (g_cvFont[CV_F_ICON])
-      cv_text(pix, size, dc, CV_F_ICON, &it->icon, 1, cv_box(c, cy - 10 * s, 30 * s, 26 * s), DT_CENTER | DT_VCENTER | DT_SINGLELINE,
-              cv_mix(kCvTint[it->tint], on, l), 1.0f);
-    cv_text(pix, size, dc, CV_F_LABEL, it->label, -1, cv_box(c, cy + (g_cvFont[CV_F_ICON] ? 12 : 0) * s, rs * 1.5f, 18 * s),
-            DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS, cv_mix(ink, on, l), 1.0f);
-  }
-}
-static BOOL cv_sub_animating(DWORD now) {
-  if (g_cvSubShownAt && now - g_cvSubShownAt < 140) return TRUE;
-  for (int k = 0; k < 2; k++)
-    if (fabsf(g_cvSubLevel[k] - (k == g_cvSubHover ? 1.0f : 0.0f)) > 0.01f) return TRUE;
-  return FALSE;
-}
-static void cv_sub_step(void) {
-  for (int k = 0; k < 2; k++) {
-    float to = k == g_cvSubHover ? 1.0f : 0.0f;
-    g_cvSubLevel[k] += (to - g_cvSubLevel[k]) * 0.5f;
-    if (fabsf(to - g_cvSubLevel[k]) < 0.01f) g_cvSubLevel[k] = to;
-  }
-}
-/* кадр полукругов в g_cvSubPix; окно (если открыто) получает его целиком */
-static void cv_sub_paint(void) {
-  int size = g_cvSubSize;
-  if (size <= 0) return;
-  if (g_cvSubBmpSize != size) {
-    if (g_cvSubBmp) DeleteObject(g_cvSubBmp);
-    if (g_cvSubTextBmp) DeleteObject(g_cvSubTextBmp);
-    g_cvSubBmp = cv_dib(size, &g_cvSubPix);
-    g_cvSubTextBmp = cv_dib(size, &g_cvSubTextPix);
-    g_cvSubBmpSize = g_cvSubBmp && g_cvSubTextBmp ? size : 0;
-    if (!g_cvSubBmpSize) return;
-  }
-  cv_fonts(g_cvSize); /* шрифты — кольца, того же размера */
-  HDC screen = GetDC(NULL), tdc = CreateCompatibleDC(screen);
-  if (!tdc) { ReleaseDC(NULL, screen); return; }
-  HGDIOBJ oldText = SelectObject(tdc, g_cvSubTextBmp), oldFont = GetCurrentObject(tdc, OBJ_FONT);
-  SetBkMode(tdc, TRANSPARENT);
-  SetTextColor(tdc, RGB(255, 255, 255));
-  BYTE *ringText = g_cvTextPix;
-  g_cvTextPix = g_cvSubTextPix; /* cv_text берёт буфер под текст со стороной size */
-  DWORD now = GetTickCount();
-  cv_sub_render(g_cvSubPix, size, tdc, now);
-  g_cvTextPix = ringText;
-  SelectObject(tdc, oldFont);
-  SelectObject(tdc, oldText);
-  if (g_cvSub && g_cvSubOn) {
-    HDC mem = CreateCompatibleDC(screen);
-    HGDIOBJ old = SelectObject(mem, g_cvSubBmp);
-    float t = g_cvSubShownAt ? cv_clamp01((float)(now - g_cvSubShownAt) / 120.0f) : 1.0f;
-    BLENDFUNCTION blend = {AC_SRC_OVER, 0, (BYTE)(255.0f * (1.0f - (1.0f - t) * (1.0f - t))), AC_SRC_ALPHA};
-    POINT origin = {0, 0};
-    SIZE sz = {size, size};
-    UpdateLayeredWindow(g_cvSub, screen, &g_cvSubAt, &sz, mem, &origin, 0, &blend, ULW_ALPHA);
     SelectObject(mem, old);
     DeleteDC(mem);
   }
@@ -762,11 +1153,10 @@ static void cv_ring_free(void) {
   g_cvBmp = g_cvTextBmp = NULL;
   g_cvPix = g_cvTextPix = NULL;
   g_cvBmpSize = g_cvFontSize = 0;
-  if (g_cvSubBmp) DeleteObject(g_cvSubBmp);
-  if (g_cvSubTextBmp) DeleteObject(g_cvSubTextBmp);
-  g_cvSubBmp = g_cvSubTextBmp = NULL;
-  g_cvSubPix = g_cvSubTextPix = NULL;
-  g_cvSubBmpSize = 0;
+  if (g_cvBackBmp) DeleteObject(g_cvBackBmp);
+  g_cvBackBmp = NULL, g_cvBackPix = NULL, g_cvBackSize = 0, g_cvBackOk = FALSE;
+  free(g_cvBlurTmp), g_cvBlurTmp = NULL;
+  free(g_cvBasePix), g_cvBasePix = NULL, g_cvBaseSize = 0, g_cvBaseKey = 0;
   if (g_cvIconBmp) DeleteObject(g_cvIconBmp);
   g_cvIconBmp = NULL, g_cvIconPix = NULL, g_cvIconPx = 0;
   cv_thumb_ready(NULL);

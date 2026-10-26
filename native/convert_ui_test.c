@@ -71,30 +71,10 @@ static void capture_pix(const wchar_t *path, const BYTE *pix, int w, int h) {
   free(pixels);
 }
 static void capture(const wchar_t *path) { capture_pix(path, g_cvPix, g_cvBmpSize, g_cvBmpSize); }
-/* кольцо и окно полукругов «Ссылки» — как стоят на экране, одним кадром */
-static void capture_pair(const wchar_t *path) {
-  int rs = g_cvBmpSize, ss = g_cvSubBmpSize; if (!g_cvPix || !g_cvSubPix || !rs || !ss) return;
-  int x0 = min(g_cvAt.x, g_cvSubAt.x), y0 = min(g_cvAt.y, g_cvSubAt.y);
-  int w = max(g_cvAt.x + rs, g_cvSubAt.x + ss) - x0, h = max(g_cvAt.y + rs, g_cvSubAt.y + ss) - y0;
-  BYTE *canvas = (BYTE *)calloc((size_t)w * h, 4); if (!canvas) return;
-  const BYTE *src[2] = {g_cvPix, g_cvSubPix}; int side[2] = {rs, ss}; POINT at[2] = {g_cvAt, g_cvSubAt};
-  for (int k = 0; k < 2; k++)
-    for (int y = 0; y < side[k]; y++)
-      for (int x = 0; x < side[k]; x++) {
-        const BYTE *p = src[k] + ((size_t)y * side[k] + x) * 4; BYTE *d = canvas + ((size_t)(at[k].y - y0 + y) * w + at[k].x - x0 + x) * 4;
-        for (int c = 0; c < 4; c++) d[c] = (BYTE)(p[c] + d[c] * (255 - p[3]) / 255);
-      }
-  capture_pix(path, canvas, w, h);
-  free(canvas);
-}
 /* --preview папка [dpi]: состояния кольца в светлой и тёмной теме, без окон и OLE */
 static void preview_shot(const wchar_t *dir, const wchar_t *name, int theme) {
   wchar_t path[MAX_PATH]; swprintf(path, MAX_PATH, L"%ls\\%ls-%ls.bmp", dir, name, theme ? L"dark" : L"light");
   g_cvShownAt = 0; cv_paint(); capture(path);
-}
-static void preview_pair(const wchar_t *dir, const wchar_t *name, int theme) {
-  wchar_t path[MAX_PATH]; swprintf(path, MAX_PATH, L"%ls\\%ls-%ls.bmp", dir, name, theme ? L"dark" : L"light");
-  g_cvShownAt = g_cvSubShownAt = 0; cv_paint(); cv_sub_paint(); capture_pair(path);
 }
 static void preview_select(const wchar_t *const *paths, int count) {
   g_cvSelection.count = count; for (int i = 0; i < count; i++) lstrcpynW(g_cvSelection.paths[i], paths[i], MAX_PATH);
@@ -106,9 +86,9 @@ static int preview(const wchar_t *dir, int dpi) {
   static const wchar_t *image[] = {L"C:\\Чертежи\\Вал РНЕ.20.031.png"}, *pdfs[] = {L"C:\\a\\Лист 1.pdf", L"C:\\a\\Лист 2.pdf", L"C:\\a\\Лист 3.pdf"},
                        *word[] = {L"C:\\a\\Пояснительная записка.docx"}, *other[] = {L"C:\\a\\Отчёт за квартал.mp4"},
                        *images[] = {L"C:\\a\\1.jpg", L"C:\\a\\2.png", L"C:\\a\\3.tif", L"C:\\a\\4.bmp", L"C:\\a\\5.jpg"};
-  g_cvWord = g_cvExcel = TRUE; g_cvSize = MulDiv(CV_RING_BASE, dpi, 96);
+  g_cvWord = g_cvExcel = TRUE; g_cvSize = MulDiv(CV_RING_BASE, dpi, 96); g_cvWin = MulDiv(CV_WIN_BASE, dpi, 96);
   for (int t = 0; t < 2; t++) {
-    g_uiTok = themes[t];
+    g_uiTok = themes[t]; g_ringStyle = 0; cv_backdrop_capture(); /* без экрана — условный проводник под стеклом */
     g_cvCount = 0; g_cvSelection.count = 0; g_cvPath[0] = 0; g_cvPendingData = NULL; g_cvHover = -1; g_cvInHub = FALSE;
     preview_shot(dir, L"1-wait", t);
     preview_select(image, 1); preview_shot(dir, L"2-image", t);
@@ -122,11 +102,11 @@ static int preview(const wchar_t *dir, int dpi) {
     preview_select(other, 1); preview_shot(dir, L"7-other", t);
     for (int i = 0; i < g_cvCount; i++) if (g_cvFormats[i] == 24) g_cvHover = i, g_cvLevel[i] = 1; /* «Ссылка» */
     preview_shot(dir, L"7b-other-link", t);
-    /* задержались на «Ссылке» — рядом с кольцом её полукруги; мышь на верхнем, потом на нижнем */
-    g_cvAt.x = 300; g_cvAt.y = 150; cv_sub_place(); g_cvHover = -1; memset(g_cvLevel, 0, sizeof(g_cvLevel)); g_cvLevel[g_cvSubTile] = 1;
-    g_cvSubHover = 0; g_cvSubLevel[0] = 1; preview_pair(dir, L"7c-link-file", t);
-    g_cvSubHover = 1; g_cvSubLevel[0] = 0; g_cvSubLevel[1] = 1; preview_pair(dir, L"7d-link-folder", t);
-    g_cvSubOn = FALSE; g_cvSubHover = -1;
+    /* задержались на «Ссылке» — вокруг кольца её дуга; мышь на верхнем сегменте, потом на нижнем */
+    g_cvHover = -1; memset(g_cvLevel, 0, sizeof(g_cvLevel)); g_cvLevel[g_cvSubTile] = 1;
+    g_cvSubOn = TRUE; g_cvSubShownAt = 0; g_cvSubHover = 0; g_cvSubLevel[0] = 1; g_cvSubLevel[1] = 0; preview_shot(dir, L"7c-link-file", t);
+    g_cvSubHover = 1; g_cvSubLevel[0] = 0; g_cvSubLevel[1] = 1; preview_shot(dir, L"7d-link-folder", t);
+    g_cvSubOn = FALSE; g_cvSubHover = -1; memset(g_cvSubLevel, 0, sizeof(g_cvSubLevel));
     g_cvCreate = TRUE; g_cvCount = 4; for (int i = 0; i < 4; i++) g_cvFormats[i] = 20 + i;
     g_cvHover = -1; memset(g_cvLevel, 0, sizeof(g_cvLevel)); preview_shot(dir, L"11-desktop", t);
     g_cvHover = 2; g_cvLevel[2] = 1; preview_shot(dir, L"12-desktop-word", t); g_cvCreate = FALSE;
@@ -136,6 +116,19 @@ static int preview(const wchar_t *dir, int dpi) {
     g_cvEnteredAt = GetTickCount() - 2000; preview_shot(dir, L"9-unreadable", t);
     g_cvPendingData = NULL; g_cvRead = CV_READ_FOLDERS; preview_shot(dir, L"10-folders", t); g_cvRead = CV_READ_WAIT;
   }
+  /* остальные стили панели (вкладка «Кастомизация»): покой, наведение, дуга «Ссылки» — светлая тема */
+  g_uiTok = themes[0];
+  for (int st = 1; st < CV_STYLES; st++) {
+    static const wchar_t *const kStyle[CV_STYLES] = {L"", L"-petals", L"-dark-glass", L"-thin"};
+    wchar_t name[64];
+    g_ringStyle = st; cv_backdrop_capture();
+    preview_select(image, 1); swprintf(name, 64, L"2-image%ls", kStyle[st]); preview_shot(dir, name, 0);
+    g_cvHover = 2; g_cvLevel[2] = 1; swprintf(name, 64, L"3-image-hover%ls", kStyle[st]); preview_shot(dir, name, 0);
+    g_cvHover = -1; memset(g_cvLevel, 0, sizeof(g_cvLevel)); g_cvLevel[g_cvSubTile] = 1;
+    g_cvSubOn = TRUE; g_cvSubShownAt = 0; g_cvSubHover = 0; g_cvSubLevel[0] = 1; swprintf(name, 64, L"7c-link-file%ls", kStyle[st]); preview_shot(dir, name, 0);
+    g_cvSubOn = FALSE; g_cvSubHover = -1; memset(g_cvSubLevel, 0, sizeof(g_cvSubLevel)); memset(g_cvLevel, 0, sizeof(g_cvLevel));
+  }
+  g_ringStyle = 0;
   return 0;
 }
 int wmain(int argc, wchar_t **argv) {
@@ -202,8 +195,8 @@ int wmain(int argc, wchar_t **argv) {
   /* отпустили в центре — ничего не создаётся, кольцо уходит само */
   cv_gesture(p0,TRUE,TRUE,FALSE,FALSE,TRUE); cv_gesture(p1,TRUE,TRUE,FALSE,FALSE,FALSE); cv_gesture(p1,FALSE,TRUE,FALSE,FALSE,FALSE);
   if (PeekMessageW(&made,g_cvWnd,WM_CV_CREATE,WM_CV_CREATE,PM_REMOVE) || IsWindowVisible(g_cvWnd)) return 21;
-  /* «Ссылка»: 250 мс на плитке — рядом с кольцом её полукруги, кольцо на месте; центр кольца их убирает;
-     с полукругов назад на «Ссылку» — остаются; отпустили на нижнем — «До файла» (26) */
+  /* «Ссылка»: 250 мс на плитке — вокруг кольца её дуга; центр кольца её убирает;
+     с дуги назад на «Ссылку» — остаётся; отпустили на нижнем сегменте — «До файла» (26) */
   POINT at={450,300}; cv_show(at,FALSE); g_cvDismissed=FALSE;
   CvGeo lg=cv_geo(g_cvSize,1.0f); POINTL mid={g_cvAt.x+(LONG)lg.c,g_cvAt.y+(LONG)lg.c};
   effect=DROPEFFECT_COPY|DROPEFFECT_MOVE; cv_enter(&g_cvDrop.iface,&data.iface,MK_SHIFT,mid,&effect);
@@ -214,23 +207,20 @@ int wmain(int argc, wchar_t **argv) {
   if (g_cvHover!=g_cvSubTile || g_cvSubOn) return 23;
   g_cvLinkSince=(GetTickCount()-300)|1; cv_link_dwell();
   int ringCount=g_cvCount;
-  if (!g_cvSubOn || !IsWindowVisible(g_cvSub) || !IsWindowVisible(g_cvWnd) || g_cvFormats[g_cvSubTile]!=24) return 24;
-  effect=DROPEFFECT_COPY|DROPEFFECT_MOVE; cv_over(&g_cvDrop.iface,MK_SHIFT,mid,&effect);
-  if (g_cvSubOn || IsWindowVisible(g_cvSub) || !IsWindowVisible(g_cvWnd)) return 25;
+  if (!g_cvSubOn || !IsWindowVisible(g_cvWnd) || g_cvFormats[g_cvSubTile]!=24) return 24;
+  effect=DROPEFFECT_COPY|DROPEFFECT_MOVE; cv_over(&g_cvDrop.iface,MK_SHIFT,mid,&effect); /* центр кольца — дуга убирается */
+  if (g_cvSubOn || !IsWindowVisible(g_cvWnd)) return 25;
   effect=DROPEFFECT_COPY|DROPEFFECT_MOVE; cv_over(&g_cvDrop.iface,MK_SHIFT,tile,&effect);
   g_cvLinkSince=(GetTickCount()-300)|1; cv_link_dwell(); if (!g_cvSubOn) return 26;
-  int half=g_cvSubSize/2; POINTL low={g_cvSubAt.x+half,g_cvSubAt.y+half+half/2};
-  cv_leave(&g_cvDrop.iface); effect=DROPEFFECT_COPY|DROPEFFECT_MOVE;
-  g_cvSubDrop.iface.lpVtbl->DragEnter(&g_cvSubDrop.iface,&data.iface,MK_SHIFT,low,&effect);
-  if (g_cvSubHover!=1 || effect!=DROPEFFECT_COPY || !g_cvSubOn) return 27;
-  g_cvSubDrop.iface.lpVtbl->DragLeave(&g_cvSubDrop.iface); effect=DROPEFFECT_COPY|DROPEFFECT_MOVE;
-  cv_enter(&g_cvDrop.iface,&data.iface,MK_SHIFT,tile,&effect);
-  if (!g_cvSubOn || g_cvCount!=ringCount || g_cvHover!=g_cvSubTile) return 28;
-  cv_leave(&g_cvDrop.iface); effect=DROPEFFECT_COPY|DROPEFFECT_MOVE;
-  g_cvSubDrop.iface.lpVtbl->DragEnter(&g_cvSubDrop.iface,&data.iface,MK_SHIFT,low,&effect);
-  effect=DROPEFFECT_COPY|DROPEFFECT_MOVE; g_cvSubDrop.iface.lpVtbl->Drop(&g_cvSubDrop.iface,&data.iface,MK_SHIFT,low,&effect);
-  if (g_cvTestLink!=26 || effect!=DROPEFFECT_COPY || IsWindowVisible(g_cvSub) || IsWindowVisible(g_cvWnd)) return 29;
+  POINT lowAt=cv_sub_center(1); POINTL low={lowAt.x,lowAt.y}; /* нижний сегмент — «До файла» */
+  effect=DROPEFFECT_COPY|DROPEFFECT_MOVE; cv_over(&g_cvDrop.iface,MK_SHIFT,low,&effect);
+  if (g_cvSubHover!=1 || g_cvHover!=-1 || effect!=DROPEFFECT_COPY || !g_cvSubOn) return 27;
+  effect=DROPEFFECT_COPY|DROPEFFECT_MOVE; cv_over(&g_cvDrop.iface,MK_SHIFT,tile,&effect); /* назад на «Ссылку» — дуга остаётся */
+  if (!g_cvSubOn || g_cvCount!=ringCount || g_cvHover!=g_cvSubTile || g_cvSubHover!=-1) return 28;
+  effect=DROPEFFECT_COPY|DROPEFFECT_MOVE; cv_over(&g_cvDrop.iface,MK_SHIFT,low,&effect);
+  effect=DROPEFFECT_COPY|DROPEFFECT_MOVE; cv_drop(&g_cvDrop.iface,&data.iface,MK_SHIFT,low,&effect);
+  if (g_cvTestLink!=26 || effect!=DROPEFFECT_COPY || IsWindowVisible(g_cvWnd)) return 29;
   cv_shutdown(); DestroyWindow(g_hwnd);
-  puts(ok ? "PASS: OLE registration, delayed CF_HDROP retry without re-click, immediate paint, center cancellation, Shift, multiple-file selection, folder-only selection, Shift-click range kept, desktop create ring, COPY effect, threaded conversion, link semicircles beside the ring" : "FAIL: conversion");
+  puts(ok ? "PASS: OLE registration, delayed CF_HDROP retry without re-click, immediate paint, center cancellation, Shift, multiple-file selection, folder-only selection, Shift-click range kept, desktop create ring, COPY effect, threaded conversion, link arc around the ring" : "FAIL: conversion");
   return ok ? 0 : 9;
 }

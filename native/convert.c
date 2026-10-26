@@ -9,7 +9,7 @@
 #define WM_CV_CREATE (WM_APP + 141) /* wParam — что создать на рабочем столе: 1 папка, 2 TXT, 3 Word, 4 Excel */
 #define WM_CV_TIFF_MERGE (WM_APP + 142) /* lParam — CvSelection*: в окно «Объединение TIFF / PDF» */
 #define WM_CV_LINK (WM_APP + 144) /* lParam — CvSelection* (malloc), wParam — путь к папке (иначе к файлу): «Ссылка» в буфер */
-static HWND g_cvWnd, g_cvSub; /* кольцо и окно полукругов «Ссылки» рядом с ним */
+static HWND g_cvWnd; /* кольцо; дуга «Ссылки» — в нём же */
 static BOOL g_cvOle, g_cvRegistered, g_cvWord, g_cvExcel;
 static BOOL g_cvDown, g_cvSource, g_cvDismissed;
 static BOOL g_cvDesktopGesture,g_cvDesktopDragged;
@@ -17,7 +17,7 @@ static BOOL g_cvCreate; /* кольцо «Создать» на пустом м�
 static POINT g_cvOrigin;
 static DWORD g_cvReleased;
 static volatile LONG g_cvBusy;
-static int g_cvSize = 360, g_cvCount, g_cvFormats[20], g_cvHover = -1;
+static int g_cvSize = 360, g_cvWin = 460, g_cvCount, g_cvFormats[20], g_cvHover = -1; /* g_cvWin — сторона окна (кольцо + дуга) */
 static wchar_t g_cvPath[MAX_PATH], g_cvLast[MAX_PATH];
 #define CV_FILES 128
 typedef struct { int count; wchar_t paths[CV_FILES][MAX_PATH]; } CvSelection;
@@ -31,7 +31,7 @@ static DWORD g_cvDataAttempt, g_cvEnteredAt;
 enum { CV_READ_WAIT, CV_READ_OK, CV_READ_FOLDERS, CV_READ_MANY, CV_READ_FAILED };
 static int g_cvRead, g_cvSkipped; /* g_cvSkipped — сколько папок пропущено */
 static BOOL cvx_dispatch(const CvSelection *selection, int action);
-/* «Ссылка» (24): подержали на плитке — рядом с кольцом её полукруги, «Включая файл» (25) и «До файла» (26) */
+/* «Ссылка» (24): подержали на плитке — вокруг кольца её дуга, «Включая файл» (25) и «До файла» (26) */
 static DWORD g_cvLinkSince;
 static void cv_link_dwell(void);
 static void cv_sub_hide(void);
@@ -99,17 +99,18 @@ static void cv_show(POINT point, BOOL create) {
   memset(g_cvLevel,0,sizeof(g_cvLevel));
   g_cvCreate=create;
   for (int i=0;create && i<4;i++) g_cvFormats[g_cvCount++]=20+i;
-  g_cvDpi = cv_monitor_dpi(point); g_cvSize = MulDiv(CV_RING_BASE, g_cvDpi, 96);
+  g_cvDpi = cv_monitor_dpi(point); g_cvSize = MulDiv(CV_RING_BASE, g_cvDpi, 96); g_cvWin = MulDiv(CV_WIN_BASE, g_cvDpi, 96);
   HMONITOR monitor = MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST);
   MONITORINFO info = {sizeof(info)}; GetMonitorInfoW(monitor, &info);
-  int x = point.x - g_cvSize / 2, y = point.y - g_cvSize / 2;
-  if (x + g_cvSize > info.rcWork.right) x = info.rcWork.right - g_cvSize;
-  if (y + g_cvSize > info.rcWork.bottom) y = info.rcWork.bottom - g_cvSize;
+  int x = point.x - g_cvWin / 2, y = point.y - g_cvWin / 2;
+  if (x + g_cvWin > info.rcWork.right) x = info.rcWork.right - g_cvWin;
+  if (y + g_cvWin > info.rcWork.bottom) y = info.rcWork.bottom - g_cvWin;
   if (x < info.rcWork.left) x = info.rcWork.left;
   if (y < info.rcWork.top) y = info.rcWork.top;
   g_cvAt.x = x; g_cvAt.y = y; g_cvShownAt = GetTickCount() | 1;
+  cv_backdrop_capture(); /* снимок экрана под кольцом — пока окно ещё скрыто */
   cv_paint();
-  SetWindowPos(g_cvWnd, HWND_TOPMOST, x, y, g_cvSize, g_cvSize, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+  SetWindowPos(g_cvWnd, HWND_TOPMOST, x, y, g_cvWin, g_cvWin, SWP_NOACTIVATE | SWP_SHOWWINDOW);
 }
 static void cv_gesture(POINT point,BOOL down,BOOL shift,BOOL escape,BOOL source,BOOL emptyDesktop) {
   if (down && !g_cvDown) {
@@ -142,8 +143,7 @@ static void cv_gesture(POINT point,BOOL down,BOOL shift,BOOL escape,BOOL source,
   }
   if (IsWindowVisible(g_cvWnd)) {
     RECT r; GetWindowRect(g_cvWnd, &r); InflateRect(&r, 45, 45);
-    RECT sub = {g_cvSubAt.x, g_cvSubAt.y, g_cvSubAt.x + g_cvSubSize, g_cvSubAt.y + g_cvSubSize}; InflateRect(&sub, 45, 45);
-    if (!PtInRect(&r, point) && !(g_cvSubOn && PtInRect(&sub, point))) { cv_hide(); g_cvDismissed = TRUE; } /* ушли к полукругам — не уход */
+    if (!PtInRect(&r, point)) { cv_hide(); g_cvDismissed = TRUE; } /* окно шире кольца: дуга «Ссылки» внутри него */
     return;
   }
   if (!g_cvDismissed && g_cvSource &&
@@ -154,7 +154,6 @@ static void cv_tick(void) {
   if(!g_cvRegistered)return;
   /* появление, подсветка плиток и огонёк ожидания — кадрами этого же таймера */
   if(IsWindowVisible(g_cvWnd)&&cv_animating(GetTickCount())){cv_step_levels();cv_paint();}
-  if(g_cvSubOn&&cv_sub_animating(GetTickCount())){cv_sub_step();cv_sub_paint();}
   POINT point;GetCursorPos(&point);BOOL down=(GetAsyncKeyState(VK_LBUTTON)&0x8000)!=0;
   BOOL shift=(GetAsyncKeyState(VK_SHIFT)&0x8000)!=0,empty=FALSE;
 #ifndef CV_RING_TEST
@@ -226,52 +225,18 @@ static void cv_menu_formats(void) {
   g_cvFormats[g_cvCount++]=24; /* «Ссылка»: путь к файлу или к папке — любого формата */
   g_cvFormats[g_cvCount++]=15;
 }
-/* окно полукругов — снаружи кольца у плитки «Ссылка»; у края экрана — с другой стороны */
-static void cv_sub_place(void) {
-  CvGeo g = cv_geo(g_cvSize, 1.0f);
-  int size = g_cvSize / 2;
-  float d = g.R + g.pop + 8.0f * g.s + cv_sub_radius(size), a = -1.5707963f + g_cvSubTile * 6.2831853f / g_cvCount;
-  POINT center = {g_cvAt.x + (LONG)g.c, g_cvAt.y + (LONG)g.c};
-  MONITORINFO info = {sizeof(info)};
-  GetMonitorInfoW(MonitorFromPoint(center, MONITOR_DEFAULTTONEAREST), &info);
-  RECT w = info.rcWork;
-  float tries[4] = {a, 3.1415927f - a, -a, a + 3.1415927f};
-  for (int k = 0; k < 5; k++) {
-    float t = tries[k < 4 ? k : 0];
-    int x = center.x + (int)(cosf(t) * d) - size / 2, y = center.y + (int)(sinf(t) * d) - size / 2;
-    if (k == 4) { /* нигде не влезло — прижать к краю */
-      if (x + size > w.right) x = w.right - size;
-      if (y + size > w.bottom) y = w.bottom - size;
-      if (x < w.left) x = w.left;
-      if (y < w.top) y = w.top;
-    } else if (x < w.left || y < w.top || x + size > w.right || y + size > w.bottom) continue;
-    g_cvSubAt.x = x; g_cvSubAt.y = y;
-    break;
-  }
-  g_cvSubSize = size; g_cvSubHover = -1; g_cvSubOn = TRUE;
-  memset(g_cvSubLevel, 0, sizeof(g_cvSubLevel));
-}
+/* дуга «Ссылки» — вокруг кольца, в его же окне (вид и попадания — convert_ring.c) */
 static void cv_sub_show(void) {
-  if (!g_cvSub || g_cvSubTile < 0 || g_cvSubTile >= g_cvCount) return;
-  cv_sub_place();
+  if (g_cvSubTile < 0 || g_cvSubTile >= g_cvCount) return;
+  g_cvSubOn = TRUE; g_cvSubHover = -1; memset(g_cvSubLevel, 0, sizeof(g_cvSubLevel));
   g_cvSubShownAt = GetTickCount() | 1;
-  cv_sub_paint();
-  SetWindowPos(g_cvSub, HWND_TOPMOST, g_cvSubAt.x, g_cvSubAt.y, g_cvSubSize, g_cvSubSize, SWP_NOACTIVATE | SWP_SHOWWINDOW);
   cv_redraw();
 }
 static void cv_sub_hide(void) {
   if (!g_cvSubOn) return;
-  g_cvSubOn = FALSE; g_cvSubHover = -1; g_cvLinkSince = 0;
-  if (g_cvSub) ShowWindow(g_cvSub, SW_HIDE);
+  g_cvSubOn = FALSE; g_cvSubHover = -1; g_cvLinkSince = 0; memset(g_cvSubLevel, 0, sizeof(g_cvSubLevel));
 }
-/* полукруг под точкой экрана: 0 — «Включая файл», 1 — «До файла», -1 — мимо */
-static int cv_sub_hit(POINT point) {
-  if (!g_cvSubOn) return -1;
-  float c = g_cvSubSize * 0.5f, x = point.x - g_cvSubAt.x - c, y = point.y - g_cvSubAt.y - c, r = cv_sub_radius(g_cvSubSize) + 3.0f;
-  if (x * x + y * y > r * r) return -1;
-  return y < 0 ? 0 : 1;
-}
-/* «Ссылка» под мышью 250 мс — выезжают полукруги; другая плитка или центр кольца — убираются */
+/* «Ссылка» под мышью 250 мс — выезжает дуга; другая плитка или центр кольца — убирается */
 static void cv_link_dwell(void) {
   if (g_cvCreate || !g_cvWnd || !IsWindowVisible(g_cvWnd)) return;
   BOOL onLink = g_cvCount && g_cvHover >= 0 && g_cvFormats[g_cvHover] == 24;
@@ -311,10 +276,11 @@ static HRESULT STDMETHODCALLTYPE cv_over(IDropTarget *self, DWORD keys, POINTL p
   (void)self;
   if(g_cvPendingData&&GetTickCount()-g_cvDataAttempt>=60)cv_read_pending();
   POINT point = {position.x, position.y}; BOOL hub = g_cvInHub; int hover = cv_hit(point);
-  if (g_cvBusy || !(keys & MK_SHIFT) || !g_cvPath[0] || !(*effect & DROPEFFECT_COPY)) { hover = -1; g_cvInHub = FALSE; }
-  if (hover != g_cvHover || hub != g_cvInHub) { g_cvHover = hover; cv_redraw(); }
+  int sub = hover < 0 ? cv_sub_hit(point) : -1; /* сегмент дуги «Ссылки» снаружи кольца */
+  if (g_cvBusy || !(keys & MK_SHIFT) || !g_cvPath[0] || !(*effect & DROPEFFECT_COPY)) { hover = -1; sub = -1; g_cvInHub = FALSE; }
+  if (hover != g_cvHover || hub != g_cvInHub || sub != g_cvSubHover) { g_cvHover = hover; g_cvSubHover = sub; cv_redraw(); }
   cv_link_dwell();
-  *effect = g_cvHover >= 0 ? DROPEFFECT_COPY : DROPEFFECT_NONE; return S_OK;
+  *effect = g_cvHover >= 0 || g_cvSubHover >= 0 ? DROPEFFECT_COPY : DROPEFFECT_NONE; return S_OK;
 }
 static HRESULT STDMETHODCALLTYPE cv_enter(IDropTarget *self, IDataObject *data, DWORD keys, POINTL position, DWORD *effect) {
   /* полукруги «Ссылки» не трогаем: сюда же возвращаются с них */
@@ -323,7 +289,7 @@ static HRESULT STDMETHODCALLTYPE cv_enter(IDropTarget *self, IDataObject *data, 
   cv_redraw();return cv_over(self, keys, position, effect);
 }
 static HRESULT STDMETHODCALLTYPE cv_leave(IDropTarget *self) {
-  (void)self;cv_pending_clear();g_cvHover = -1;g_cvInHub=FALSE;cv_redraw();return S_OK;
+  (void)self;cv_pending_clear();g_cvHover = -1;g_cvSubHover = -1;g_cvInHub=FALSE;cv_redraw();return S_OK;
 }
 /* сброс: action — плитка или полукруг под мышью (-1 — мимо); TRUE — действие запущено */
 static BOOL cv_accept(IDataObject *data, int action) {
@@ -339,32 +305,11 @@ static BOOL cv_accept(IDataObject *data, int action) {
 }
 static HRESULT STDMETHODCALLTYPE cv_drop(IDropTarget *self, IDataObject *data, DWORD keys, POINTL position, DWORD *effect) {
   cv_over(self, keys, position, effect);
-  *effect = cv_accept(data, g_cvHover >= 0 ? g_cvFormats[g_cvHover] : -1) ? DROPEFFECT_COPY : DROPEFFECT_NONE;
+  *effect = cv_accept(data, g_cvHover >= 0 ? g_cvFormats[g_cvHover] : g_cvSubHover >= 0 ? 25 + g_cvSubHover : -1) ? DROPEFFECT_COPY : DROPEFFECT_NONE;
   g_cvDismissed = TRUE; cv_hide(); return S_OK;
 }
 static IDropTargetVtbl g_cvVtbl = {cv_query, cv_addref, cv_release, cv_enter, cv_over, cv_leave, cv_drop};
 static CvDrop g_cvDrop = {{&g_cvVtbl}, 1};
-/* окно полукругов — свой приёмник: вход в него не сбрасывает кольцо */
-static HRESULT STDMETHODCALLTYPE cv_sub_over(IDropTarget *self, DWORD keys, POINTL position, DWORD *effect) {
-  (void)self;
-  POINT point = {position.x, position.y}; int hover = cv_sub_hit(point);
-  if (g_cvBusy || !(keys & MK_SHIFT) || !g_cvSelection.count || !(*effect & DROPEFFECT_COPY)) hover = -1;
-  if (hover != g_cvSubHover) { g_cvSubHover = hover; cv_sub_paint(); cv_redraw(); }
-  *effect = hover >= 0 ? DROPEFFECT_COPY : DROPEFFECT_NONE; return S_OK;
-}
-static HRESULT STDMETHODCALLTYPE cv_sub_enter(IDropTarget *self, IDataObject *data, DWORD keys, POINTL position, DWORD *effect) {
-  (void)data; return cv_sub_over(self, keys, position, effect);
-}
-static HRESULT STDMETHODCALLTYPE cv_sub_leave(IDropTarget *self) {
-  (void)self; if (g_cvSubHover >= 0) { g_cvSubHover = -1; cv_sub_paint(); cv_redraw(); } return S_OK;
-}
-static HRESULT STDMETHODCALLTYPE cv_sub_drop(IDropTarget *self, IDataObject *data, DWORD keys, POINTL position, DWORD *effect) {
-  cv_sub_over(self, keys, position, effect);
-  *effect = cv_accept(data, g_cvSubHover >= 0 ? 25 + g_cvSubHover : -1) ? DROPEFFECT_COPY : DROPEFFECT_NONE;
-  g_cvDismissed = TRUE; cv_hide(); return S_OK;
-}
-static IDropTargetVtbl g_cvSubVtbl = {cv_query, cv_addref, cv_release, cv_sub_enter, cv_sub_over, cv_sub_leave, cv_sub_drop};
-static CvDrop g_cvSubDrop = {{&g_cvSubVtbl}, 1};
 static LRESULT CALLBACK cv_proc(HWND hwnd, UINT message, WPARAM wp, LPARAM lp) {
 #ifndef CV_RING_TEST
   if(message==WM_CV_CREATE){dc_create((int)wp);return 0;}
@@ -388,15 +333,13 @@ static void cv_init(void) {
   typedef UINT (WINAPI *DpiForWindow)(HWND);
   DpiForWindow dpiForWindow = (DpiForWindow)GetProcAddress(GetModuleHandleW(L"user32.dll"),"GetDpiForWindow");
   if (dpiForWindow) dpi = (int)dpiForWindow(g_hwnd);
-  g_cvDpi = dpi; g_cvSize = MulDiv(CV_RING_BASE, dpi, 96);
+  g_cvDpi = dpi; g_cvSize = MulDiv(CV_RING_BASE, dpi, 96); g_cvWin = MulDiv(CV_WIN_BASE, dpi, 96);
   WNDCLASSW klass = {0}; klass.lpfnWndProc = cv_proc; klass.hInstance = g_inst; klass.lpszClassName = L"CursorPadConvertRing"; klass.hCursor = LoadCursorW(NULL,IDC_ARROW);
   if (!RegisterClassW(&klass) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) return;
-  /* прозрачное окно: форма и тень — из альфы кадра, мимо круга мышь проходит насквозь */
-  g_cvWnd = CreateWindowExW(WS_EX_LAYERED|WS_EX_TOPMOST|WS_EX_TOOLWINDOW|WS_EX_NOACTIVATE,klass.lpszClassName,L"Конвертация CursorPad",WS_POPUP,0,0,g_cvSize,g_cvSize,g_hwnd,NULL,g_inst,NULL);
+  /* прозрачное окно шире кольца (место под дугу «Ссылки» и тень): форма — из альфы кадра, мимо мышь проходит насквозь */
+  g_cvWnd = CreateWindowExW(WS_EX_LAYERED|WS_EX_TOPMOST|WS_EX_TOOLWINDOW|WS_EX_NOACTIVATE,klass.lpszClassName,L"Конвертация CursorPad",WS_POPUP,0,0,g_cvWin,g_cvWin,g_hwnd,NULL,g_inst,NULL);
   if (!g_cvWnd) return;
   hr = RegisterDragDrop(g_cvWnd,&g_cvDrop.iface); g_cvRegistered = SUCCEEDED(hr);
-  g_cvSub = CreateWindowExW(WS_EX_LAYERED|WS_EX_TOPMOST|WS_EX_TOOLWINDOW|WS_EX_NOACTIVATE,klass.lpszClassName,L"Ссылка CursorPad",WS_POPUP,0,0,g_cvSize/2,g_cvSize/2,g_hwnd,NULL,g_inst,NULL);
-  if (g_cvSub && FAILED(RegisterDragDrop(g_cvSub,&g_cvSubDrop.iface))) { DestroyWindow(g_cvSub); g_cvSub = NULL; } /* без него «Ссылка» — просто плитка */
   ai_log(L"Конвертер: OLE 0x%08lx; Word %ls; Excel %ls", (unsigned long)hr, g_cvWord ? L"есть" : L"нет", g_cvExcel ? L"есть" : L"нет");
   if (g_cvRegistered) SetTimer(g_hwnd,TIMER_CONVERT,30,NULL);
 }
@@ -404,7 +347,6 @@ static void cv_shutdown(void) {
   cv_pending_clear();
   cvx_shutdown();
   KillTimer(g_hwnd,TIMER_CONVERT);
-  if (g_cvSub) { RevokeDragDrop(g_cvSub); DestroyWindow(g_cvSub); g_cvSub = NULL; g_cvSubOn = FALSE; }
   if (g_cvRegistered) { RevokeDragDrop(g_cvWnd); g_cvRegistered = FALSE; }
   if (g_cvWnd) { DestroyWindow(g_cvWnd); g_cvWnd = NULL; }
   cv_ring_free();

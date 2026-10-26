@@ -65,6 +65,11 @@
 #define ID_IDLE_SZ 486      /* 486..488: бойцы мелкие, средние, крупные */
 #define IDLE_SIZES 3
 #define ID_IDLE_WATCH 489   /* «Режим просмотра»: бой идёт и при работе мышью */
+#define ID_RING_BASE 490    /* 490..493: стиль панели Shift (вкладка «Кастомизация», convert_ring.c) */
+#define RING_STYLES 4
+#define ID_RING_BLUR 494    /* размытие снимка экрана под плитками */
+#define ID_RING_DOTS 495    /* точки по контуру плиток */
+#define ID_RING_ANIM 496    /* плавные анимации кольца */
 #define ID_MIN 106
 #define ID_OCR 107
 #define ID_ALPHA_BG 108
@@ -192,7 +197,7 @@ static wchar_t g_hkName[HK_COUNT][40]; /* на чём работает сейч�
 #define ASK_W 312
 #define ASK_H 224 /* room for the drawn header */
 #define ID_THEME_BASE 140
-#define THEME_COUNT 5
+#define THEME_COUNT 9
 
 static COLORREF COL_PAPER = RGB(255, 255, 255);
 static COLORREF COL_PAPER_DARK = RGB(243, 244, 246);
@@ -207,6 +212,7 @@ static COLORREF COL_LINE = RGB(226, 229, 233);
 #define BTN_SOFT 0  /* мягкая заливка и тонкая рамка */
 #define BTN_LINE 1  /* только контур, как на чертеже */
 #define BTN_TONE 2  /* цветная подложка без рамки */
+#define BTN_DOTS 4  /* стекло: мягкая заливка и пунктир из точек по контуру (как у плиток панели Shift) */
 #define HEAD_BAND 0  /* шапка полосой */
 #define HEAD_RULE 1  /* шапка на фоне, под ней линия */
 #define HEAD_PLAIN 2 /* без полосы и линии, заголовок цветом */
@@ -260,6 +266,23 @@ static const PadTheme kThemes[THEME_COUNT] = {
     {RGB(241, 228, 195), RGB(228, 211, 168), RGB(43, 27, 14), RGB(118, 88, 54), KN_CRIMSON,
      L"Рыцарская", L"Palatino Linotype", L"Georgia", L"Old English Text MT",
      L"Palatino Linotype", 2, BTN_KNIGHT, HEAD_BANNER, 1, FALSE, TRUE},
+    /* с 2026.10.26 — четыре темы с вкладки «Кастомизация»: */
+    /* стекло: холодная светлая бумага, крупное скругление, пунктир из точек по контуру кнопок */
+    {RGB(246, 248, 252), RGB(234, 239, 247), RGB(17, 24, 39), RGB(96, 106, 122), RGB(37, 99, 235),
+     L"Стекло", L"Segoe UI Variable Text", L"Segoe UI", L"Segoe UI Variable Display",
+     L"Segoe UI Variable Small", 10, BTN_DOTS, HEAD_PLAIN, 2, FALSE, FALSE},
+    /* графит: тёмная, не перекраска — свои углы и линии, голубой акцент; заголовок окна тёмный (DWM) */
+    {RGB(27, 30, 36), RGB(36, 40, 48), RGB(232, 234, 240), RGB(154, 163, 178), RGB(138, 180, 248),
+     L"Графит", L"Segoe UI Variable Text", L"Segoe UI", L"Segoe UI Variable Display",
+     L"Segoe UI Variable Small", 6, BTN_SOFT, HEAD_RULE, 3, FALSE, FALSE},
+    /* синька: чертёж наоборот — белые линии по синей бумаге, прямые углы, прописные */
+    {RGB(14, 42, 76), RGB(18, 52, 89), RGB(234, 244, 255), RGB(156, 192, 230), RGB(125, 211, 252),
+     L"Синька", L"Bahnschrift", L"Segoe UI", L"Bahnschrift", L"Bahnschrift", 0, BTN_LINE,
+     HEAD_RULE, 1, TRUE, FALSE},
+    /* цех: тёмная сталь и янтарь, узкий технический шрифт, шапка полосой */
+    {RGB(35, 38, 43), RGB(43, 47, 53), RGB(241, 243, 245), RGB(163, 169, 179), RGB(245, 158, 11),
+     L"Цех", L"Bahnschrift SemiCondensed", L"Segoe UI", L"Bahnschrift SemiBold Condensed",
+     L"Bahnschrift SemiCondensed", 4, BTN_SOFT, HEAD_BAND, 3, TRUE, FALSE},
 };
 
 static COLORREF blend_rgb(COLORREF a, COLORREF b, int t) {
@@ -306,6 +329,10 @@ static HWND g_btnIdle[IDLE_OPTIONS]; /* бой при бездействии: ч
 static HWND g_btnIdleShow;           /* «Показать бой сейчас» */
 static HWND g_btnIdleSz[IDLE_SIZES];  /* размер бойцов */
 static HWND g_btnIdleWatch;           /* режим просмотра */
+/* панель Shift (кольцо перетаскивания, convert_ring.c): стиль и переключатели — вкладка «Кастомизация» */
+static HWND g_btnRing[RING_STYLES], g_btnRingBlur, g_btnRingDots, g_btnRingAnim;
+static int g_ringStyle; /* 0 Матовое стекло, 1 Лепестки, 2 Тёмное стекло, 3 Тонкое кольцо */
+static BOOL g_ringBlur = TRUE, g_ringDots = TRUE, g_ringAnim = TRUE;
 static HWND g_btnSet;
 static HWND g_btnAsk;
 static HWND g_btnNd; /* кнопка «Нарды» в Настройках */
@@ -1182,9 +1209,9 @@ static void load_cursor_pref(void) {
   HANDLE h = CreateFileW(g_prefPath, GENERIC_READ, FILE_SHARE_READ, NULL,
                          OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
   if (h == INVALID_HANDLE_VALUE) return;
-  char buf[320];
+  char buf[400];
   DWORD n = 0;
-  ReadFile(h, buf, 319, &n, NULL);
+  ReadFile(h, buf, 399, &n, NULL);
   CloseHandle(h);
   buf[n] = 0;
   char skin[16] = {0};
@@ -1204,9 +1231,15 @@ static void load_cursor_pref(void) {
   int idle = -1; /* нет в файле — бой через минуту */
   int idleSz = -1; /* нет в файле — средние бойцы */
   int idleWatch = 0; /* нет в файле — режим просмотра выключен */
-  sscanf(buf, "%15s %d %d %15s %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d", skin,
+  int ringStyle = -1, ringBlur = -1, ringDots = -1, ringAnim = -1; /* панель Shift; нет в файле — стекло, всё включено */
+  sscanf(buf, "%15s %d %d %15s %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d", skin,
          &bg, &fg, eng, &autoOn, &theme, &aw, &ah, &cw, &ch, &pt, &keep, &ax, &ay, &cx, &cy, &cpt,
-         &ox, &oy, &ow, &oh, &opt, &sparkle, &padMode, &flame, &catFx, &fxPick, &tab, &order, &idle, &idleSz, &idleWatch);
+         &ox, &oy, &ow, &oh, &opt, &sparkle, &padMode, &flame, &catFx, &fxPick, &tab, &order, &idle, &idleSz, &idleWatch,
+         &ringStyle, &ringBlur, &ringDots, &ringAnim);
+  if (ringStyle >= 0 && ringStyle < RING_STYLES) g_ringStyle = ringStyle;
+  if (ringBlur == 0 || ringBlur == 1) g_ringBlur = ringBlur == 1;
+  if (ringDots == 0 || ringDots == 1) g_ringDots = ringDots == 1;
+  if (ringAnim == 0 || ringAnim == 1) g_ringAnim = ringAnim == 1;
   g_idleWatch = idleWatch == 1;
   if (idleSz >= 0 && idleSz < IDLE_SIZES) g_idleSize = idleSz;
   for (int i = 0; i < IDLE_OPTIONS; i++)
@@ -1282,14 +1315,15 @@ static void save_cursor_pref(void) {
                   : g_skin == 4 ? "k5"
                   : g_skin == 3 ? "k4" : (g_skin == 2 ? "k3" : (g_skin == 0 ? "system" : "k2"));
   const char *e = g_engine == 4 ? "plm" : (g_engine == 5 ? "files" : "ai");
-  char buf[280];
+  char buf[360];
   int order = 0;
   for (int i = 0; i < SEC_COUNT; i++) order = order * 10 + g_tabOrder[i];
-  snprintf(buf, sizeof(buf), "%s %d %d %s %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d\n",
+  snprintf(buf, sizeof(buf), "%s %d %d %s %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d\n",
            v, g_alphaFollow, g_alphaPinned, e, g_autostart ? 1 : 0, g_theme, g_ansW, g_ansH,
            g_cardW, g_cardH, g_ansPt, g_ansKeepPos ? 1 : 0, g_ansX, g_ansY, g_cardX, g_cardY,
            g_cardPt, g_ocrX, g_ocrY, g_ocrW, g_ocrH, g_ocrPt, g_sparkle ? 1 : 0, g_padMode,
-           g_flame ? 1 : 0, g_catFx, g_fxPick, g_tab, order, g_idleSec, g_idleSize, g_idleWatch);
+           g_flame ? 1 : 0, g_catFx, g_fxPick, g_tab, order, g_idleSec, g_idleSize, g_idleWatch,
+           g_ringStyle, g_ringBlur ? 1 : 0, g_ringDots ? 1 : 0, g_ringAnim ? 1 : 0);
   HANDLE h = CreateFileW(g_prefPath, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
                          FILE_ATTRIBUTE_NORMAL, NULL);
   if (h == INVALID_HANDLE_VALUE) return;
@@ -2237,6 +2271,15 @@ static void update_idle_buttons(void) {
                                                : L"Режим просмотра: бой и при работе мышью");
 }
 
+/* панель Shift: стиль и переключатели, ● у выбранного и включённого */
+static const wchar_t *const kRingNames[RING_STYLES] = {L"Матовое стекло", L"Лепестки", L"Тёмное стекло", L"Тонкое кольцо"};
+static void update_ring_buttons(void) {
+  for (int i = 0; i < RING_STYLES; i++) set_mark(g_btnRing[i], g_ringStyle == i, kRingNames[i]);
+  set_mark(g_btnRingBlur, g_ringBlur, L"Размытие под плитками");
+  set_mark(g_btnRingDots, g_ringDots, L"Точки по контуру");
+  set_mark(g_btnRingAnim, g_ringAnim, L"Плавные анимации");
+}
+
 static void set_idle_watch(int on) {
   idle_fight_watch(on);
   save_cursor_pref();
@@ -2853,6 +2896,19 @@ static void draw_pad_button(const DRAWITEMSTRUCT *dis) {
   if (themeBtn) label = kThemes[ti].name;
   else if (t[0] == 0x25CF && t[1] == L' ') label = t + 2;
   pad_btn_paint(dis, fill, bd, rad, fg, label, id == ID_CLIPHIST ? -2 : gl, icon);
+  /* «Стекло»: по контуру кнопки — пунктир из точек, как у плиток панели Shift */
+  if (kThemes[themeBtn && ti >= 0 ? ti : g_theme].btn == BTN_DOTS && !disab) {
+    LOGBRUSH lb = {BS_SOLID, (on || primary) ? blend_rgb(fg, fill, 70) : blend_rgb(COL_SAGE, fill, 150), 0};
+    HPEN pen = ExtCreatePen(PS_GEOMETRIC | PS_DOT | PS_ENDCAP_ROUND | PS_JOIN_ROUND, 2, &lb, 0, NULL);
+    if (pen) {
+      HGDIOBJ oldPen = SelectObject(dis->hDC, pen), oldBrush = SelectObject(dis->hDC, GetStockObject(NULL_BRUSH));
+      int in = 4, rr = rad > in ? (rad - in) * 2 : 2;
+      RoundRect(dis->hDC, rc.left + in, rc.top + in, rc.right - in, rc.bottom - in, rr, rr);
+      SelectObject(dis->hDC, oldBrush);
+      SelectObject(dis->hDC, oldPen);
+      DeleteObject(pen);
+    }
+  }
 }
 
 static HWND mk_btn(HWND parent, const wchar_t *text, int id) {
@@ -3437,7 +3493,7 @@ static void draw_set_label(HDC hdc, const wchar_t *text, RECT r, int clientBotto
    можно менять правым щелчком по разделу, он запоминается (g_tabOrder), как и
    открытый раздел. Элементы других разделов уезжают далеко за край — их
    прячет clip_settings_children, как и всё, что ушло под шапку при прокрутке. */
-static const wchar_t *const kSecNames[SEC_COUNT] = {L"Курсор", L"Эффект", L"Вид", L"Поиск", L"Ещё", L"ИИ"};
+static const wchar_t *const kSecNames[SEC_COUNT] = {L"Курсор", L"Эффект", L"Кастомизация", L"Поиск", L"Ещё", L"ИИ"};
 #define SET_SEC_H 28
 static int g_setContentH = 480; /* высота содержимого: по самой длинной вкладке */
 static BOOL g_layOpen;          /* раскладывается открытая вкладка */
@@ -3638,6 +3694,18 @@ static void layout_settings(void) {
       int y = sd_stack(L"Тема", L"Меняет шрифт, форму кнопок, шапки и углы окон");
       y += set_grid(g_btnTheme, THEME_COUNT, 3, x0, y, iw, btnH, gap) - gap;
       sd_stack_end(y);
+      sd_card_end();
+      sd_group(L"Панель Shift");
+      sd_card_begin();
+      y = sd_stack(L"Стиль кольца", L"Shift-перетаскивание файлов: стекло поверх экрана, точки по контуру, дуга «Ссылки»");
+      y += set_grid(g_btnRing, RING_STYLES, 2, x0, y, iw, btnH, gap) - gap;
+      sd_stack_end(y);
+      {
+        HWND c[3] = {g_btnRingBlur, g_btnRingDots, g_btnRingAnim};
+        y = sd_stack(L"Эффекты", L"Размытие снимка экрана под плитками, точки по контуру, плавное появление и наведение");
+        y += set_grid(c, 3, 3, x0, y, iw, btnH, gap) - gap;
+        sd_stack_end(y);
+      }
       sd_card_end();
       sd_group(L"Прозрачность окна");
       sd_card_begin();
@@ -4038,6 +4106,21 @@ static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
     if (LOWORD(wParam) == ID_HOTKEYS && HIWORD(wParam) == BN_CLICKED) hk_show();
     if (LOWORD(wParam) >= ID_THEME_BASE && LOWORD(wParam) < ID_THEME_BASE + THEME_COUNT)
       set_theme(LOWORD(wParam) - ID_THEME_BASE);
+    if (LOWORD(wParam) >= ID_RING_BASE && LOWORD(wParam) < ID_RING_BASE + RING_STYLES) {
+      g_ringStyle = LOWORD(wParam) - ID_RING_BASE;
+      save_cursor_pref();
+      update_ring_buttons();
+      wchar_t msg[96];
+      _snwprintf(msg, 96, L"Панель Shift: %s. Зажмите Shift и потяните файл из Проводника", kRingNames[g_ringStyle]);
+      show_status(msg);
+    }
+    if (LOWORD(wParam) == ID_RING_BLUR || LOWORD(wParam) == ID_RING_DOTS || LOWORD(wParam) == ID_RING_ANIM) {
+      if (LOWORD(wParam) == ID_RING_BLUR) g_ringBlur = !g_ringBlur;
+      else if (LOWORD(wParam) == ID_RING_DOTS) g_ringDots = !g_ringDots;
+      else g_ringAnim = !g_ringAnim;
+      save_cursor_pref();
+      update_ring_buttons();
+    }
     if (LOWORD(wParam) >= ID_IDLE_BASE && LOWORD(wParam) < ID_IDLE_BASE + IDLE_OPTIONS)
       set_idle_sec(kIdleSec[LOWORD(wParam) - ID_IDLE_BASE]);
     if (LOWORD(wParam) >= ID_IDLE_SZ && LOWORD(wParam) < ID_IDLE_SZ + IDLE_SIZES) {
@@ -4482,6 +4565,11 @@ static void create_settings(HWND owner) {
   g_btnIdleShow = mk_btn(g_setHwnd, L"Показать бой сейчас", ID_IDLE_SHOW);
   for (int i = 0; i < IDLE_SIZES; i++) g_btnIdleSz[i] = mk_btn(g_setHwnd, kIdleSzNames[i], ID_IDLE_SZ + i);
   g_btnIdleWatch = mk_btn(g_setHwnd, L"Режим просмотра", ID_IDLE_WATCH);
+  for (int i = 0; i < RING_STYLES; i++) g_btnRing[i] = mk_btn(g_setHwnd, kRingNames[i], ID_RING_BASE + i);
+  g_btnRingBlur = mk_btn(g_setHwnd, L"Размытие под плитками", ID_RING_BLUR);
+  g_btnRingDots = mk_btn(g_setHwnd, L"Точки по контуру", ID_RING_DOTS);
+  g_btnRingAnim = mk_btn(g_setHwnd, L"Плавные анимации", ID_RING_ANIM);
+  update_ring_buttons();
   g_tbBg = CreateWindowExW(0, TRACKBAR_CLASSW, L"", WS_CHILD | WS_VISIBLE | TBS_NOTICKS | TBS_TOOLTIPS,
                            0, 0, 120, 28, g_setHwnd, (HMENU)(INT_PTR)ID_ALPHA_BG, NULL, NULL);
   g_tbFg = CreateWindowExW(0, TRACKBAR_CLASSW, L"", WS_CHILD | WS_VISIBLE | TBS_NOTICKS | TBS_TOOLTIPS,

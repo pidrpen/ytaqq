@@ -261,14 +261,16 @@ static void ui_dwm_set(HWND h, DWORD attr, DWORD v) {
 #define UI_DWMWA_BACKDROP 38 /* DWMWA_SYSTEMBACKDROP_TYPE */
 
 /* углы окна — из темы (у «Чертежа» прямые); у окон с системным заголовком
-   (расчёты, TIFF) заголовок — Mica, как у приложений Windows 11. Тёмных
-   тем нет, поэтому заголовок светлый. */
+   (расчёты, TIFF) заголовок — Mica, как у приложений Windows 11; у тёмных
+   тем он тёмный. */
 static void ui_window_chrome(HWND h) {
   if (!h || !ui_dwm()) return;
   const PadTheme *t = &kThemes[(g_theme >= 0 && g_theme < THEME_COUNT) ? g_theme : 0];
   ui_dwm_set(h, UI_DWMWA_CORNER, (DWORD)t->corners);
   if ((GetWindowLongW(h, GWL_STYLE) & WS_CAPTION) == WS_CAPTION) {
-    ui_dwm_set(h, UI_DWMWA_DARK, 0);
+    /* тёмные темы («Графит», «Синька», «Цех») — тёмный заголовок, остальные светлый */
+    int luma = (GetRValue(t->paper) * 299 + GetGValue(t->paper) * 587 + GetBValue(t->paper) * 114) / 1000;
+    ui_dwm_set(h, UI_DWMWA_DARK, luma < 128 ? 1 : 0);
     ui_dwm_set(h, UI_DWMWA_BACKDROP, 2); /* DWMSBT_MAINWINDOW — Mica */
   }
 }
