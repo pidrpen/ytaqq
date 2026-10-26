@@ -221,7 +221,7 @@ static int aq_run(AiJob *j, DWORD deadline, int port) {
   if (j->provider) {
     wchar_t protectedKey[MAX_PATH]; ai_zai_key_path(protectedKey);
     swprintf(cmd, MAX_PATH * 8, L"\"%ls\" -I -B \"%ls\" --request \"%ls\" --response \"%ls\" --state \"%ls\" --provider zai --protected-key \"%ls\" --endpoint https://api.z.ai/api/paas/v4/chat/completions --timeout 120 %ls", py, script, input, output, state, protectedKey, j->agentTask ? L"" : L"--chat");
-  } else swprintf(cmd, MAX_PATH * 8, L"\"%ls\" -I -B \"%ls\" --request \"%ls\" --response \"%ls\" --state \"%ls\" --key-file \"%ls\" --endpoint http://127.0.0.1:%d/v1/chat/completions --timeout 120", py, script, input, output, state, key, port);
+  } else swprintf(cmd, MAX_PATH * 8, L"\"%ls\" -I -B \"%ls\" --request \"%ls\" --response \"%ls\" --state \"%ls\" --key-file \"%ls\" --endpoint http://127.0.0.1:%d/v1/chat/completions --timeout 500", py, script, input, output, state, key, port);
   status = aq_process(py, cmd, root, j, deadline);
   if (status == AI_OK) {
     char *response = aq_read(output);
