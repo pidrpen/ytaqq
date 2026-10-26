@@ -1,7 +1,10 @@
-2026102601
-2026.10.26.1
-sha256 0f816712a4ddb332e8f7cf1e7b829c1f90b82f95aca93394b0789bc3eb130a25
-== 0 signature-rsa-sha256 j7P3VuAaMnk/tIzWkRDHtKSLMIFoPCznRBdlUYkWo2nLLZy+UjqAyxUv4D7JJCwfMxu9DtI3XIbWdt01UBnkY6V7cQ/it8jzisB2OfsHySiQ25kjqgU/Yt3DdRVXYP5IN/5+pPh3I8o5rjJFZViX9U1p0Y37+QkeZUeh391uCv+IHYcS+Zb+3uBG4yNp73lFofoROl8L3qtI3H3rghJUmjyEaI4T0crhGf0oc6Mnrlj/aHr0RFfpGdv90EYriyo7XtWUxI5qI+mSWrdPBNXXTBtWhnkdBgvxyOcRk+UKWL2sujNyG6+OCmJq/6CoUdQ60GZPQyvBlutJO7zA9RLAsAvu3FK+WHpGF8Moa9nFHcMqhFTwGz6rwJ2UnHVtiNxmXR83oXXkuNjt3XHcgh1LyWp23Y3EBd5cGTJ4uqemC/Jzta0w6riKWWLOeAZZzka4hKYwIRDpAN2w0ISeeEDk8shuPO2B7IZ0JuCTn+SS5qnXA32Y16M2Hbd6+quE7VxL
+2026102602
+2026.10.26.2
+sha256 9c9a166077644234e98f2eda525ddeb121832d74f476701d327c28e659f2ddc7
+== 0 signature-rsa-sha256 w7VTRr+jMn6GzR5eVfDj+tgBPNxoFWf5nu0KW4vgXKEeR5KzJG9lCCJ5JRyYcQTH15EH4sNJxqkiqFmz2sm3SV60TEYf8YXgjOiScH/RVEXpFjsS7zUCjll23IMYxC3CXVg8l0++Te7/3Xsdx0qEidMsLu6LrI6/jFjaUUUa7Dz0BnZlkukpYQTaL0iYK7RWFI85TUXdbSlzRxRVx4ZNAdv4AjwA1lidozOtz9pJxdjRnxQnuRxhVg/+PeZOqwDxaxfD5noBkvigCj+CJdiQCiagqdzXmxWn1hhrN2E8cU3vL3Hw2EaD+ks0BpLecmej5stEvoDHLJsfUM+X/iGIII7C/c+jBBl2RMRNnL0Ds/eip2evTBWS2FazXMiGDZtqThKu9uvy5wzRwwfWjJdZkl5FP1DXRX3BwPW2RlfX9VJKT3OHXrolkES4bEVDSZma1STl8Kk7rKrkKZ/8Qtv9DvTvPLqEAUfZBtg+FaOzravYwQj9xBBrCDVKnSe5B5fq
+== 2026.10.26.2
+Исправлена ошибка помощника «трижды вызвал инструмент неверно»: когда помощник читает названный файл (скан, PDF, Word, Excel), он теперь принимает путь и там, куда его положила модель, а список возможностей показывает, что нужен именно полный путь. Если помощник всё же не справился, в сообщении теперь написано, чем кончился последний отказ, и подсказано, как назвать файл.
+
 == 2026.10.26.1
 Помощник читает файлы сам, без F6. Напишите в чате «Спросить ИИ», например, «прочитай C:\Сканы\письмо.pdf» — текст придёт прямо в чат; «сделай из C:\Сканы\лист.tif ворд» — скан распознается и сохранится в Word рядом с исходником; «переведи C:\Отчёты\отчёт.docx в pdf» (так же — в png, jpg, tiff, csv, zip; если формат не подходит, помощник скажет, во что можно) — файл переведётся тем же конвертером, что в окне «Обработка файлов», и лишнюю копию можно убрать там же, в «История и отмена копий». Добавьте «на рабочий стол» или «в папку C:\…», чтобы положить результат туда, а «покажи в проводнике» откроет папку с ним. Сканы, картинки и PDF распознаёт Tesseract, как F6, до 30 страниц за раз; со словом «чертёж» лист читается как чертёж — штамп и спецификация, сомнительные графы помечены «(проверить)». Модель для этого не нужна и исходный файл не меняется. Цифры в скане проверяйте: распознавание путает О и 0, З и 3. Excel из скана и Word из Excel делает ИИ-помощник — он теперь сам читает названный файл; для Word и Excel нужен установленный Office.
 
