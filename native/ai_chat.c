@@ -61,6 +61,10 @@ static HBITMAP g_acThumbBmp; /* миниатюра ждущей картинки
 static void ac_relayout(void);
 static void ac_layout(int W, int H);
 static void aichat_show(void);
+/* ai_minichat.c (подключается ниже): меню скрепки общее с мини-чатом, цвета темы */
+static void am_attach_menu_at(HWND owner, POINT at, BOOL mini);
+static void am_retheme(void);
+static BOOL g_acInBar = TRUE; /* у поля ввода сейчас видна полоса прокрутки (создаётся с WS_VSCROLL) */
 static BOOL g_acPlanOn; /* план «было → станет» ждёт «Применить» */
 static void ac_plan_ui(BOOL on);
 static void ac_files_run(const wchar_t *j);
@@ -333,12 +337,24 @@ static void ac_draw_title(const DRAWITEMSTRUCT *dis) {
     *src = 0;
     src += 3;
   }
+  /* огонёк состояния помощника перед именем — как в мини-чате и его меню (с 2026.10.26) */
+  int dotR = ui_px(g_acWnd, 5), dotGap = ui_px(g_acWnd, 18);
+  {
+    UiShape d;
+    memset(&d, 0, sizeof(d));
+    d.r = -1;
+    d.fill = kAcAvatarMood[g_acAvatarState];
+    d.fillA = 255;
+    RECT dr = {pr.left, (pr.top + pr.bottom) / 2 - dotR, pr.left + 2 * dotR, (pr.top + pr.bottom) / 2 + dotR};
+    ui_shape(&cv, dr, &d);
+  }
   HFONT big = g_fontDisplay ? g_fontDisplay : g_fontUi;
   HGDIOBJ of = big ? SelectObject(cv.dc, big) : NULL;
   SIZE sz = {0, 0};
   GetTextExtentPoint32W(cv.dc, t, (int)wcslen(t), &sz);
   SetTextColor(cv.dc, COL_INK);
   RECT tr = pr;
+  tr.left += dotGap;
   DrawTextW(cv.dc, t, -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
   wchar_t chip[96];
   _snwprintf(chip, 96, L"%s%s%s", src ? src : L"", (src && g_acBusyFx) ? L" · " : L"", g_acBusyFx ? L"думает…" : L"");
@@ -347,7 +363,7 @@ static void ac_draw_title(const DRAWITEMSTRUCT *dis) {
     if (g_fontSmall) SelectObject(cv.dc, g_fontSmall);
     SIZE cz = {0, 0};
     GetTextExtentPoint32W(cv.dc, chip, (int)wcslen(chip), &cz);
-    int ch = cz.cy + 8, cx = pr.left + sz.cx + 12, cy = (pr.top + pr.bottom - ch) / 2;
+    int ch = cz.cy + 8, cx = pr.left + dotGap + sz.cx + 12, cy = (pr.top + pr.bottom - ch) / 2;
     RECT pill = {cx, cy, cx + cz.cx + 20, cy + ch};
     if (pill.right > pr.right) pill.right = pr.right;
     UiShape s;
@@ -371,7 +387,7 @@ static void ac_draw_title(const DRAWITEMSTRUCT *dis) {
 /* мелкие кнопки под полем ввода: значок и короткая подпись, без рамки */
 static wchar_t ac_tool_icon(int id) {
   switch (id) {
-  case ID_AC_SHOT: return 0xE722;
+  case ID_AC_SHOT: return 0xE723; /* скрепка */
   case ID_AC_CLEAR: return 0xE72C; /* «Новая беседа» — как ⟳ в мини-чате */
   case ID_AC_COPY: return 0xE8C8;
   case ID_AC_LEARN: return 0xE734;
@@ -790,17 +806,51 @@ static void ac_status(const wchar_t *t) { SetWindowTextW(g_acStat, t ? t : L"");
 static void ac_busy(BOOL on) {
   EnableWindow(g_acSend, !on);
   EnableWindow(g_acStop, on);
+  if (!g_acPlanOn) { /* одна кнопка на одном месте: «Отправить» или «Стоп» (с 2026.10.26; раньше обе всегда) */
+    ShowWindow(g_acStop, on ? SW_SHOW : SW_HIDE);
+    ShowWindow(g_acSend, on ? SW_HIDE : SW_SHOW);
+  }
   ac_busy_fx(on); /* рамка ленты переливается, пока ИИ думает */
   ac_avatar_busy(on);
   ac_avatar_set(on ? (g_agActive ? AC_AV_FILES : AC_AV_THINKING) : AC_AV_IDLE);
 }
 
-/* план ждёт ответа: «Применить» и «Отмена» над полем ввода, вместо «С экрана» */
+/* полоса прокрутки поля ввода — только когда строк больше, чем видно: пустое поле со
+   стрелками прокрутки выглядело тяжело (с 2026.10.26) */
+static void ac_in_scrollbar(void) {
+  if (!g_acIn) return;
+  int lines = (int)SendMessageW(g_acIn, EM_GETLINECOUNT, 0, 0);
+  RECT rc;
+  GetClientRect(g_acIn, &rc);
+  TEXTMETRICW tm;
+  memset(&tm, 0, sizeof(tm));
+  HDC dc = GetDC(g_acIn);
+  if (dc) {
+    HFONT f = (HFONT)SendMessageW(g_acIn, WM_GETFONT, 0, 0);
+    HGDIOBJ of = f ? SelectObject(dc, f) : NULL;
+    GetTextMetricsW(dc, &tm);
+    if (of) SelectObject(dc, of);
+    ReleaseDC(g_acIn, dc);
+  }
+  int lh = tm.tmHeight + tm.tmExternalLeading;
+  if (lh <= 0) lh = 18;
+  BOOL need = lines * lh > rc.bottom;
+  if (need != g_acInBar) {
+    g_acInBar = need;
+    ShowScrollBar(g_acIn, SB_VERT, need);
+  }
+}
+
+/* план ждёт ответа: «Применить» и «Отмена» над полем ввода, вместо скрепки */
 static void ac_layout(int W, int H);
 static void ac_plan_ui(BOOL on) {
   ac_mini_refresh(); /* в мини-чате — «Применить» / «Отмена» */
   SetWindowTextW(g_acSend, on ? L"Применить" : L"Отправить");
   SetWindowTextW(g_acStop, on ? L"Отмена" : L"Стоп");
+  if (on) { /* обе кнопки: «Отмена» над «Применить» (ac_layout) */
+    ShowWindow(g_acStop, SW_SHOW);
+    ShowWindow(g_acSend, SW_SHOW);
+  }
   ShowWindow(g_acApply, on ? SW_SHOW : SW_HIDE);
   ShowWindow(g_acCancel, on ? SW_SHOW : SW_HIDE);
   ShowWindow(g_acShot, on ? SW_HIDE : SW_SHOW);
@@ -3361,7 +3411,10 @@ static void ac_layout(int W, int H) {
   MoveWindow(g_acIn, inX, cardY + 10, inW, inH, TRUE);
   int sx = W - pad - 12 - sendW;
   MoveWindow(g_acSend, sx, cardY + 10 + inH - btnH, sendW, btnH, TRUE);
-  MoveWindow(g_acStop, sx, cardY + 10, sendW, 28, TRUE);
+  /* «Стоп» — на месте «Отправить», пока ИИ думает (ac_busy); при плане нужны обе: «Отмена» над «Применить» */
+  if (g_acPlanOn) MoveWindow(g_acStop, sx, cardY + 10, sendW, 28, TRUE);
+  else MoveWindow(g_acStop, sx, cardY + 10 + inH - btnH, sendW, btnH, TRUE);
+  ac_in_scrollbar();
   g_acToolTop = cardY + 10 + inH + 6;
   {
     HWND tools[6] = {g_acShot, g_acClear, g_acCopy, g_acLearn, g_acAvatarBtn, g_acSet};
@@ -3506,11 +3559,16 @@ static LRESULT CALLBACK AcProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
       InvalidateRect(hwnd, &r, FALSE);
       return 0;
     }
+    if (LOWORD(wParam) == ID_AC_IN && HIWORD(wParam) == EN_CHANGE) ac_in_scrollbar();
     if (HIWORD(wParam) != BN_CLICKED) break;
     switch (LOWORD(wParam)) {
-    case ID_AC_SHOT:
-      ac_shot();
+    case ID_AC_SHOT: { /* скрепка: картинка из файла, снимок области экрана, из буфера — как в мини-чате */
+      RECT br;
+      GetWindowRect(g_acShot, &br);
+      POINT at = {br.left, br.top};
+      am_attach_menu_at(hwnd, at, FALSE);
       break;
+    }
     case ID_PANEL_CLOSE:
       ShowWindow(hwnd, SW_HIDE);
       break;
@@ -3674,11 +3732,12 @@ static void ac_create(void) {
   g_acCopy = mk_btn(g_acWnd, L"Копировать", ID_AC_COPY);
   g_acLearn = mk_btn(g_acWnd, L"Запомнить", ID_AC_LEARN);
   g_acSet = mk_btn(g_acWnd, L"Настройки", ID_AC_SET);
-  g_acShot = mk_btn(g_acWnd, L"С экрана", ID_AC_SHOT);
+  g_acShot = mk_btn(g_acWnd, L"Прикрепить", ID_AC_SHOT); /* скрепка: файл, снимок экрана, буфер — как в мини-чате */
   g_acApply = mk_btn(g_acWnd, L"Применить", ID_AC_APPLY);
   g_acCancel = mk_btn(g_acWnd, L"Отмена", ID_AC_CANCEL);
   ShowWindow(g_acApply, SW_HIDE);
   ShowWindow(g_acCancel, SW_HIDE);
+  ShowWindow(g_acStop, SW_HIDE); /* появится на месте «Отправить», когда ИИ думает */
   /* «Помощник» — призвать или отозвать аватар; подсказка говорит, что будет */
   g_acAvatarBtn = mk_btn(g_acWnd, L"Помощник", ID_AC_AVATAR);
   g_acTip = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, NULL, WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX, CW_USEDEFAULT,
@@ -3702,6 +3761,7 @@ static void ac_create(void) {
         c != g_acShot && c != g_acTip) SendMessageW(c, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
   SendMessageW(g_acLog, WM_SETFONT, (WPARAM)g_fontBody, TRUE);
   SendMessageW(g_acIn, WM_SETFONT, (WPARAM)g_fontBody, TRUE);
+  SendMessageW(g_acStat, WM_SETFONT, (WPARAM)g_fontBody, TRUE); /* строка состояния — обычным весом, не кнопочным */
   g_acEditOld = (WNDPROC)SetWindowLongPtrW(g_acIn, GWLP_WNDPROC, (LONG_PTR)AcEditProc);
   g_acLogOld = (WNDPROC)SetWindowLongPtrW(g_acLog, GWLP_WNDPROC, (LONG_PTR)AcEditProc);
   SendMessageW(g_acIn, EM_SETCUEBANNER, FALSE, (LPARAM)L"Напишите задачу. Enter — отправить, Shift+Enter — новая строка");
@@ -3720,8 +3780,13 @@ static void ac_retheme(void) {
   if (g_acLogBrush) DeleteObject(g_acLogBrush);
   g_acLogBrush = NULL;
   if (g_acRich) SendMessageW(g_acLog, EM_SETBKGNDCOLOR, 0, ac_log_bg());
+  /* шрифты темы пересозданы (theme_fonts удаляет прежние): поле, лента, строка состояния */
+  SendMessageW(g_acIn, WM_SETFONT, (WPARAM)g_fontBody, TRUE);
+  SendMessageW(g_acLog, WM_SETFONT, (WPARAM)g_fontBody, TRUE);
+  SendMessageW(g_acStat, WM_SETFONT, (WPARAM)g_fontBody, TRUE);
   if (g_acN) ac_redraw();
   RedrawWindow(g_acWnd, NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
+  am_retheme(); /* мини-чат — в тех же цветах и шрифтах */
 }
 
 #include "ai_minichat.c" /* мини-чат у помощника: та же беседа в маленьком окне у робота */

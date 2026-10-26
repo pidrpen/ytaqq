@@ -218,6 +218,7 @@ static void ac_avatar_set(int state) {
   g_acAvatarState = state;
   g_acAvatarFrame = 0;
   g_acAvatarStateAt = now;
+  if (g_acTitle) InvalidateRect(g_acTitle, NULL, FALSE); /* огонёк состояния в шапке чата */
   if (state == AC_AV_IDLE) ac_avatar_schedule_idle(now);
   ac_avatar_present();
 }
@@ -857,6 +858,7 @@ static void ac_bubble_update(void) {
     float tri[6] = {baseX - tail * 0.5f, edge, baseX + tail * 0.5f, edge, tipX, tipY};
     float c1x = baseX + (tipX - baseX) * 0.35f, c1y = edge + (tipY - edge) * 0.42f, c1r = tail * 0.27f;
     float c2x = baseX + (tipX - baseX) * 0.8f, c2y = edge + (tipY - edge) * 0.85f, c2r = tail * 0.16f;
+    COLORREF hair = ui_hairline();
     for (int py = 0; py < H; py++) {
       for (int px = 0; px < W; px++) {
         float fx = px + 0.5f, fy = py + 0.5f;
@@ -873,24 +875,23 @@ static void ac_bubble_update(void) {
           dist = ac_smin(dist, ac_triangle(fx, fy, tri), 3.0f);
         }
         BYTE *dst = pix + ((size_t)py * W + px) * 4;
-        if (dist > 0.0f) ac_px_over(dst, RGB(0, 0, 0), 0.32f * expf(-dist / 3.5f));
-        ac_px_over(dst, RGB(17, 21, 38), 0.94f * (0.5f - dist));
-        float band = 1.3f - fabsf(dist + 0.9f);
-        if (band > 0.0f)
-          ac_px_over(dst, ac_mix(RGB(123, 92, 255), RGB(56, 225, 255), (fx - bx) / (bw > 1 ? bw : 1)), band * 0.95f);
+        /* бумага темы с тонкой кромкой (с 2026.10.26; раньше — тёмное стекло) */
+        if (dist > 0.0f) ac_px_over(dst, RGB(0, 0, 0), 0.26f * expf(-dist / 3.5f));
+        ac_px_over(dst, COL_PAPER, 0.97f * (0.5f - dist));
+        float band = 1.0f - fabsf(dist + 0.5f);
+        if (band > 0.0f) ac_px_over(dst, hair, band);
       }
     }
     RECT tr2 = {(int)bx + pad, (int)by + pad, (int)bx + pad + textW, (int)by + pad + textH};
     ac_text(pix, W, H, dc, g_acBubbleText, -1, tr2, DT_WORDBREAK | DT_NOPREFIX | DT_EDITCONTROL | DT_END_ELLIPSIS,
-            RGB(236, 240, 255));
-    /* ИИ ещё работает: три точки бегут волной */
+            COL_INK);
+    /* ИИ ещё работает: три точки бегут волной — акцентом темы */
     if (dots) {
       for (int i = 0; i < 3; i++) {
         float ph = 0.5f + 0.5f * sinf(now / 170.0f - i * 1.1f);
         float dot[2] = {bx + bw - pad - dotsW + (i + 0.5f) * dotsW / 3.0f, cy - ph * fontPx * 0.12f};
-        ac_paint_stroke(pix, W, H, dot, 1, fontPx * (0.12f + 0.06f * ph),
-                        ac_mix(RGB(123, 92, 255), RGB(56, 225, 255), i / 2.0f), RGB(56, 225, 255), 1.5f,
-                        0.55f + 0.45f * ph);
+        ac_paint_stroke(pix, W, H, dot, 1, fontPx * (0.12f + 0.06f * ph), COL_SAGE,
+                        blend_rgb(COL_SAGE, RGB(255, 255, 255), 120), 1.5f, 0.55f + 0.45f * ph);
       }
     }
     HGDIOBJ oldBmp = SelectObject(dc, g_acBubbleBitmap);
@@ -1211,7 +1212,7 @@ static void ac_menu_track(float *x0, float *x1, float *y) {
 static void ac_menu_switch(BYTE *pix, int W, int H, RECT row, BOOL on) {
   float w = (float)ac_mpx(38), h = (float)ac_mpx(21), x1 = (float)(row.right - ac_mpx(12)), x0 = x1 - w;
   float cy = (row.top + row.bottom) * 0.5f;
-  ac_rrect(pix, W, H, x0, cy - h / 2, x1, cy + h / 2, h / 2, on ? RGB(56, 200, 255) : RGB(58, 64, 96), 1.0f);
+  ac_rrect(pix, W, H, x0, cy - h / 2, x1, cy + h / 2, h / 2, on ? COL_SAGE : blend_rgb(COL_PAPER, COL_INK, 70), 1.0f);
   float knob[2] = {on ? x1 - h / 2 : x0 + h / 2, cy};
   ac_paint_stroke(pix, W, H, knob, 1, h / 2 - ac_mpx(3), RGB(255, 255, 255), RGB(255, 255, 255), 0.0f, 1.0f);
 }
@@ -1230,7 +1231,7 @@ static void ac_menu_line(BYTE *pix, int W, int H, HDC dc, RECT row, wchar_t icon
   if (note) {
     RECT nr = {row.right - ac_mpx(110), row.top, row.right - ac_mpx(12), row.top + height};
     SelectObject(dc, g_acMenuSmall);
-    ac_text(pix, W, H, dc, note, -1, nr, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX, RGB(140, 150, 190));
+    ac_text(pix, W, H, dc, note, -1, nr, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX, COL_MUTED);
   }
 }
 
@@ -1273,24 +1274,26 @@ static void ac_menu_render(void) {
   if (!g_acMenuBmp || !pix) { DeleteDC(dc); ReleaseDC(NULL, screen); return; }
   memset(pix, 0, (size_t)W * H * 4);
   HGDIOBJ oldFont = SelectObject(dc, g_acMenuFont);
-  /* стекло: тень, тёмная заливка, кромка от фиолетового к бирюзовому */
+  /* карточка в цветах темы (с 2026.10.26; раньше — тёмное стекло при любой теме):
+     тень, бумага, тонкая кромка в цвет линий темы */
+  COLORREF paper = COL_PAPER, hair = ui_hairline(), red = RGB(196, 43, 28);
   float m = (float)ac_mpx(14), r = (float)ac_mpx(14);
   for (int y = 0; y < H; y++) {
     for (int x = 0; x < W; x++) {
       float d = ac_rrect_sd(x + 0.5f, y + 0.5f, m, m, W - m, H - m, r);
       BYTE *dst = pix + ((size_t)y * W + x) * 4;
-      if (d > 0.0f) ac_px_over(dst, RGB(0, 0, 0), 0.38f * expf(-d / (m * 0.4f)));
-      ac_px_over(dst, RGB(17, 21, 38), 0.97f * (0.5f - d));
-      float band = 1.3f - fabsf(d + 0.9f);
-      if (band > 0.0f) ac_px_over(dst, ac_mix(RGB(123, 92, 255), RGB(56, 225, 255), (float)x / W), band * 0.9f);
+      if (d > 0.0f) ac_px_over(dst, RGB(0, 0, 0), 0.30f * expf(-d / (m * 0.4f)));
+      ac_px_over(dst, paper, 0.98f * (0.5f - d));
+      float band = 1.0f - fabsf(d + 0.5f);
+      if (band > 0.0f) ac_px_over(dst, hair, band);
     }
   }
   if (g_acMenuHot >= 0 && ac_menu_pick(g_acMenuHot)) {
     RECT hr = g_acMenuRow[g_acMenuHot];
     ac_rrect(pix, W, H, (float)hr.left, hr.top + 1.0f, (float)hr.right, hr.bottom - 1.0f, (float)ac_mpx(9),
-             g_acMenuHot == ACM_DISMISS ? RGB(72, 32, 50) : RGB(36, 43, 74), 1.0f);
+             g_acMenuHot == ACM_DISMISS ? blend_rgb(paper, red, 30) : blend_rgb(paper, COL_INK, 16), 1.0f);
   }
-  COLORREF ink = RGB(236, 240, 255), cyan = RGB(56, 225, 255);
+  COLORREF ink = COL_INK, cyan = COL_SAGE; /* cyan — акцент темы (имя осталось от тёмного вида) */
   /* шапка: огонёк настроения, имя и что сейчас делает */
   RECT hd = g_acMenuRow[ACM_HEAD];
   COLORREF mood = kAcAvatarMood[g_acAvatarState];
@@ -1301,9 +1304,9 @@ static void ac_menu_render(void) {
   ac_text(pix, W, H, dc, L"Мини-ИИ", -1, nm, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX, ink);
   RECT st = {hd.left + ac_mpx(42), hd.top + ac_mpx(30), hd.right - ac_mpx(8), hd.top + ac_mpx(50)};
   SelectObject(dc, g_acMenuSmall);
-  ac_text(pix, W, H, dc, ac_menu_state(), -1, st, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX, RGB(140, 150, 190));
+  ac_text(pix, W, H, dc, ac_menu_state(), -1, st, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX, COL_MUTED);
   float rule[4] = {(float)hd.left + ac_mpx(8), hd.bottom - 0.5f, (float)hd.right - ac_mpx(8), hd.bottom - 0.5f};
-  ac_paint_stroke(pix, W, H, rule, 2, 0.5f, RGB(46, 54, 88), RGB(46, 54, 88), 0.0f, 1.0f);
+  ac_paint_stroke(pix, W, H, rule, 2, 0.5f, hair, hair, 0.0f, 1.0f);
   /* строки */
   int lineH = ac_mpx(38);
   ac_menu_line(pix, W, H, dc, g_acMenuRow[ACM_CHAT], 0xE8BD, L"Открыть чат", L"2× щелчок", ink, cyan, lineH);
@@ -1314,7 +1317,7 @@ static void ac_menu_render(void) {
   ac_menu_track(&tx0, &tx1, &ty);
   float pos = (float)(g_acAvatarSize - AC_AVATAR_MIN) / (AC_AVATAR_MAX - AC_AVATAR_MIN), kx = tx0 + (tx1 - tx0) * pos;
   float track[4] = {tx0, ty, tx1, ty}, fill[4] = {tx0, ty, kx, ty}, knob[2] = {kx, ty};
-  ac_paint_stroke(pix, W, H, track, 2, (float)ac_mpx(2), RGB(58, 64, 96), RGB(58, 64, 96), 0.0f, 1.0f);
+  ac_paint_stroke(pix, W, H, track, 2, (float)ac_mpx(2), COL_LINE, COL_LINE, 0.0f, 1.0f);
   ac_paint_stroke(pix, W, H, fill, 2, (float)ac_mpx(2), cyan, cyan, (float)ac_mpx(2), 1.0f);
   ac_paint_stroke(pix, W, H, knob, 1, (float)ac_mpx(7), RGB(255, 255, 255), cyan,
                   (float)ac_mpx(g_acMenuDrag ? 5 : 3), 1.0f);
@@ -1329,9 +1332,8 @@ static void ac_menu_render(void) {
   RECT sp = g_acMenuRow[ACM_SEP];
   float sep[4] = {(float)sp.left + ac_mpx(8), (sp.top + sp.bottom) * 0.5f, (float)sp.right - ac_mpx(8),
                   (sp.top + sp.bottom) * 0.5f};
-  ac_paint_stroke(pix, W, H, sep, 2, 0.5f, RGB(46, 54, 88), RGB(46, 54, 88), 0.0f, 1.0f);
-  ac_menu_line(pix, W, H, dc, g_acMenuRow[ACM_DISMISS], 0xE711, L"Отозвать помощника", NULL, RGB(255, 128, 146),
-               RGB(255, 107, 129), lineH);
+  ac_paint_stroke(pix, W, H, sep, 2, 0.5f, hair, hair, 0.0f, 1.0f);
+  ac_menu_line(pix, W, H, dc, g_acMenuRow[ACM_DISMISS], 0xE711, L"Отозвать помощника", NULL, red, red, lineH);
   SelectObject(dc, oldFont);
   HGDIOBJ oldBmp = SelectObject(dc, g_acMenuBmp);
   RECT wr;

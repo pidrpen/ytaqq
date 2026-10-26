@@ -214,6 +214,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
   DeleteFileW(hist);
   _snwprintf(ini, MAX_PATH, L"%ls\\ai_avatar.ini", g_dataDir); /* помощника не звать: проверяем окна чата */
   WritePrivateProfileStringW(L"Avatar", L"Visible", L"0", ini);
+  WritePrivateProfileStringW(L"MiniChat", L"Width", L"380", ini); /* как при написании проверки: длинный ответ выше ленты */
   g_aiUiThread = GetCurrentThreadId();
   g_fontUi = CreateFontW(-16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, 0, 0, 0, 0, L"Segoe UI");
   g_fontBody = g_fontUi;
