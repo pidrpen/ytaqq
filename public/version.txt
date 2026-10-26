@@ -1,7 +1,10 @@
-2026102607
-2026.10.26.7
-sha256 dc43b0566712725c3c84c977bcde969f4f009c07c15e5c1ee2b6dacc3172cee5
-== 0 signature-rsa-sha256 nGDce4T9XZgA6v6gdg1YBuBeTMUdUq8I8+RZdqC9AdcQFK1kQ5y7To06/kSaFTM1vR6IeYz7UtB5yA+DXwubn4x/88nZxUQPGBgtG8WDc7QhmxthW/4ejTdO7ptcUIGKINe3PuKjZnx2dRZiFeTUgOmloDvzUTrxltokzbKbbJpFyC63T81MSHb6JyIoGYRJ9XPTxiV3z/8vSkP1DUvBXRWun5uZxNnoH6hCyYn00KXNPUSobE9uJxw77yWQt4K5ij/t/DEebIJUFgxOPl1QxlVxUP830iR3++G9Yt1zWCzZcl/cF2SsGEdLquC4Gyn89l0RqsO0gwtsoHJEAO66DiMkQxP2091voXYYt9mDgNjH4WRiXMx/Po+RW8H35C07sXNJHfrzpcZQhrLXlJI/aKGPZU/VXS3ldPoF7KmjMT0kPd5rUJr9taOrGLvTJ2nXUZ1789ZLCrO0/lmjrp/xyb7Nz584nBv7gxMuESSSS6kFUrlYOFNTyXXXi9rldqWi
+2026102608
+2026.10.26.8
+sha256 95cbc5a625848a508bd79b315926e806117bd3b7876483b9b9db96d7a8114a34
+== 0 signature-rsa-sha256 hMZGg5YyxvuBLz4hMzxbwAeDCjsy4KLGTFZNEk7I0JrjYe6yDEDBLhHZj33jsfRr8CF5PqtEwsRS2UCwz6y6nWuvK2n0BuNkqnLTXy9tJONC1N7w/FTDnnzQ6xf/G6Q8Sdv6NxPyTp3Y8PKLwzixRQPVGWscDShitOtBjYeuwoIlEJUVMZCv84Y6JDmz2NHNgKAwIaBSfcdaA2wPf3EmZwq+xe6VZcCzc67rc8XCN2K1Jt/tUQcvxl21uf4F01f3Ek1bP2D40mYobzLo14K2YM0bkrhgBGn9KhSt1rWBtd5WfZ29vDhz/w7ciYgyHOjSC9XS+Iy174lKmPeMCh1DK4+r3a3hoM3sdkmyYMEZBq7y9E/oObfg5fiX22nUrYfxPbQF6mpuF9hZJfmRDAWhZJCLTNJIVKFX4FIIP4yrVju/4k1rz98ES3heKHdU1FjY3s8CzDRZb18swYK4/N5koHmM60RIbQTrA5GgEYm1YNgM1r4KRDLbvr+XQZggLiAl
+== 2026.10.26.8
+В Настройках появилась вкладка «Кастомизация» (бывшая «Вид»). В карточке «Панель Shift» выбирается стиль кольца, которое появляется при Shift-перетаскивании файлов: «Матовое стекло» — светлое стекло поверх экрана, как раньше; «Лепестки» — плитки врозь, расцветают из центра; «Тёмное стекло» — тёмная панель с огоньками; «Тонкое кольцо» — узкая полоса, значки крупнее подписей. Рядом три переключателя: «Размытие под плитками» — под кольцом просвечивает размытый экран, как в окнах Windows 11; «Точки по контуру» — неяркие белые точки по краю каждой плитки, у плитки под мышью они бегут; «Плавные анимации» — появление кольца, подсветка и выезд дуги. Полукруги «Ссылки» теперь обнимают само кольцо: «Включая файл» сверху, «До файла» снизу, подписи идут по дуге. Темы: добавлены «Стекло», «Графит», «Синька» и «Цех»; у тёмных тем заголовок окна тоже тёмный. Выбор запоминается.
+
 == 2026.10.26.7
 «Ссылка» в кольце Shift доработана. Задержите мышь на плитке «Ссылка» — рядом с кольцом выедут два полукруга, а само кольцо останется на месте. «Включая файл» (верхний) кладёт в буфер путь с именем файла, например C:\Чертежи\Вал.pdf. «До файла» (нижний) кладёт путь к папке, где лежит файл, например C:\Чертежи. В письме Outlook и в Word вставленный путь кликабельный: щелчок откроет файл или папку. Центр кольца или другая плитка убирают полукруги.
 
