@@ -31,6 +31,7 @@ static void ag_doc_context(BOOL save) {
   }
 }
 static int g_agSteps, g_agErrors;
+static wchar_t g_agBad[160]; /* начало прошлого отказа инструмента: тот же отказ дважды — модель не исправится */
 static int g_agLastState;
 static wchar_t g_agNotes[AG_TEXT], g_agObservation[6000];
 static wchar_t g_agReadout[100000];
@@ -179,7 +180,7 @@ static BOOL ag_start(const wchar_t *text) {
   g_agFs.author = ag_author;
   ag_doc_context(FALSE); lstrcpynW(g_agFs.lastDoc, g_agLastDoc, MAX_PATH);
   lstrcpynW(g_agFs.goal, goal, 4000);
-  g_agNotes[0] = g_agReadout[0] = 0; g_agSteps = g_agErrors = 0;
+  g_agNotes[0] = g_agReadout[0] = 0; g_agSteps = g_agErrors = 0; g_agBad[0] = 0;
   g_agData = FALSE; g_agDataSrc[0] = 0;
   g_agObservation[0] = 0; g_agLastState = 0;
   g_agGeneration++;
@@ -335,11 +336,19 @@ static void ag_tool_ready(void *result) {
     g_agActive = FALSE; g_agPending = TRUE; g_agFs.count = 0;
     af_say(g_agObservation); ac_status(L"Ответьте на уточнение в поле ввода"); return;
   }
-  if (state < 0 && ++g_agErrors >= 3) {
-    wchar_t why[900];
-    swprintf(why, 900, L"Модель трижды вызвала инструмент неверно и не смогла исправиться по ответу. Файлы не изменены.\r\nПоследний отказ: %.600ls\r\nПопробуйте назвать файл полным путём, например C:\\Сканы\\письмо.pdf.", g_agObservation);
-    ag_plan_failure(why); return;
-  }
+  if (state < 0) {
+    /* каждый шаг — полный вызов модели (на процессоре минуты): тот же отказ
+       второй раз подряд не ждём до третьего */
+    BOOL same = g_agBad[0] && !wcsncmp(g_agBad, g_agObservation, 159);
+    wcsncpy(g_agBad, g_agObservation, 159); g_agBad[159] = 0;
+    if (++g_agErrors >= 3 || same) {
+      wchar_t why[1000];
+      BOOL pathy = wcsstr(g_agObservation, L"path") || wcsstr(g_agObservation, L"путь");
+      swprintf(why, 1000, L"Модель %ls вызвала инструмент неверно и не смогла исправиться по ответу. Файлы не изменены.\r\nПоследний отказ: %.600ls%ls", same ? L"дважды" : L"трижды", g_agObservation,
+               pathy ? L"\r\nЕсли файл назван без полного пути, укажите его полностью." : L"");
+      ag_plan_failure(why); return;
+    }
+  } else g_agBad[0] = 0;
   ag_request();
 }
 
