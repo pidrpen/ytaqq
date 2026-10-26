@@ -46,6 +46,10 @@ typedef struct {
   wchar_t *text;
   BYTE *png; /* картинка к вопросу, PNG; NULL — без неё */
   DWORD pngLen;
+  /* только для показа: размышление модели и шаги агента над ответом. В файл беседы,
+     в «Что помнит ИИ» и в запросы модели не попадают — модели уходит только text */
+  wchar_t *think;
+  wchar_t *steps;
 } AcTurn;
 static HWND g_acWnd, g_acLog, g_acIn, g_acSend, g_acStop, g_acClear, g_acCopy, g_acSet, g_acStat, g_acTitle,
     g_acShot, g_acThumb, g_acLearn, g_acApply, g_acCancel;
@@ -116,6 +120,10 @@ static WNDPROC g_acEditOld, g_acLogOld;
 static BOOL g_acRich;
 static AcTurn *g_acTurns;
 static int g_acN, g_acCap, g_acRendered;
+/* показ размышления и шагов: общий для полного чата и мини-чата; по умолчанию свёрнуто */
+static BOOL g_acShowThink, g_acShowSteps;
+static wchar_t *g_acThinkNext;        /* размышление ответа, который сейчас придёт (ac_result) */
+static wchar_t g_acStepsNext[2400];   /* шаги агента с последнего вопроса — к следующему ответу */
 /* The visible log remains intact. Cancelled tasks are outside model context. */
 static int g_acContextStart;
 /* «Новая беседа» (мини-чат ⟳, «/новая»): с этой реплики ИИ не помнит прежних,
@@ -149,6 +157,17 @@ static void ac_append(int assistant, const wchar_t *text) {
   g_acTurns[g_acN].text = c;
   g_acTurns[g_acN].png = NULL;
   g_acTurns[g_acN].pngLen = 0;
+  g_acTurns[g_acN].think = NULL;
+  g_acTurns[g_acN].steps = NULL;
+  if (assistant) { /* размышление и шаги — к ответу; вопрос их сбрасывает */
+    g_acTurns[g_acN].think = g_acThinkNext;
+    g_acThinkNext = NULL;
+    if (g_acStepsNext[0]) g_acTurns[g_acN].steps = _wcsdup(g_acStepsNext);
+  } else {
+    free(g_acThinkNext);
+    g_acThinkNext = NULL;
+  }
+  g_acStepsNext[0] = 0;
   g_acN++;
 }
 
@@ -172,6 +191,8 @@ static void ac_unsend(void) {
     }
   }
   free(t->text);
+  free(t->think);
+  free(t->steps);
   g_acN--;
   if (g_acNewAt > g_acN) g_acNewAt = g_acN;
   ac_hist_save();
@@ -181,6 +202,8 @@ static void ac_clear_turns(void) {
   for (int i = 0; i < g_acN; i++) {
     free(g_acTurns[i].text);
     free(g_acTurns[i].png);
+    free(g_acTurns[i].think);
+    free(g_acTurns[i].steps);
   }
   g_acN = g_acRendered = g_acContextStart = g_acNewAt = 0;
   g_acUndoAt = -1;
@@ -485,9 +508,64 @@ static void ac_rtf_addn(AcRtf *b, const char *s, size_t n) {
    chat_format_test.c); здесь её абзацы переносятся в ячейку: \pard →
    \pard\intbl, последний \par → \cell\row, отступ над подписью меньше,
    у кода — подложка. Экранированные «\\», «\{», «\}» из текста не трогаем. */
+/* заголовки в полном чате — ссылки; щелчок раскрывает или сворачивает блок у всех ответов */
+static const wchar_t *const kAcThinkLinks[] = {L"Размышление ►", L"Размышление ▼", L"Шаги ►", L"Шаги ▼"};
+#define AC_THINK_LINK_NUM 30 /* WM_AC_LINK: 30 — размышление, 31 — шаги */
+
+/* текст ответа с размышлением и шагами: заголовки, а раскрытые блоки — над ответом.
+   Для показа только: в запросы модели и в файл беседы идёт t->text. NULL — показывать как есть */
+static wchar_t *ac_turn_show_text(const AcTurn *t) {
+  if (!t->assistant || (!t->think && !t->steps)) return NULL;
+  size_t cap = wcslen(t->text) + (t->think ? wcslen(t->think) : 0) + (t->steps ? wcslen(t->steps) : 0) + 200;
+  wchar_t *s = (wchar_t *)malloc(cap * sizeof(wchar_t));
+  if (!s) return NULL;
+  s[0] = 0;
+  if (t->think) {
+    wcscat(s, g_acShowThink ? L"Размышление ▼\n" : L"Размышление ►\n");
+    if (g_acShowThink) {
+      wcscat(s, t->think);
+      wcscat(s, L"\n");
+    }
+  }
+  if (t->steps) {
+    wcscat(s, g_acShowSteps ? L"Шаги ▼\n" : L"Шаги ►\n");
+    if (g_acShowSteps) {
+      wcscat(s, t->steps);
+      wcscat(s, L"\n");
+    }
+  }
+  wcscat(s, t->text);
+  return s;
+}
+
+/* заголовки «Размышление ►» и «Шаги ►» — ссылками (ac_think_links), как строка над лентой */
+static void ac_think_links(void) {
+  for (size_t i = 0; i < sizeof(kAcThinkLinks) / sizeof(kAcThinkLinks[0]); i++) {
+    LONG at = 0;
+    for (;;) {
+      FINDTEXTEXW ft;
+      memset(&ft, 0, sizeof(ft));
+      ft.chrg.cpMin = at;
+      ft.chrg.cpMax = -1;
+      ft.lpstrText = kAcThinkLinks[i];
+      if (SendMessageW(g_acLog, EM_FINDTEXTEXW, FR_DOWN | FR_MATCHCASE, (LPARAM)&ft) < 0) break;
+      SendMessageW(g_acLog, EM_EXSETSEL, 0, (LPARAM)&ft.chrgText);
+      CHARFORMAT2W cf;
+      memset(&cf, 0, sizeof(cf));
+      cf.cbSize = sizeof(cf);
+      cf.dwMask = CFM_LINK;
+      cf.dwEffects = CFE_LINK;
+      SendMessageW(g_acLog, EM_SETCHARFORMAT, SCF_SELECTION, (LPARAM)&cf);
+      at = ft.chrgText.cpMax;
+    }
+  }
+}
+
 static void ac_rtf_bubble(AcRtf *out, const AcTurn *t, int widthTw) {
   AcRtf one = {0};
-  ac_rtf_message(&one, t->text, t->assistant, t->png != NULL);
+  wchar_t *shown = ac_turn_show_text(t);
+  ac_rtf_message(&one, shown ? shown : t->text, t->assistant, t->png != NULL);
+  free(shown);
   if (one.failed || !one.text) {
     out->failed = TRUE;
     free(one.text);
@@ -664,6 +742,7 @@ static void ac_redraw(void) {
       SendMessageW(g_acLog, EM_STREAMIN, SF_RTF, (LPARAM)&stream);
       if (top) ac_log_links((int)wcslen(top));
       if (route >= 0) ac_route_links();
+      ac_think_links();
       SendMessageW(g_acLog, WM_SETREDRAW, TRUE, 0);
       if (g_acLogTop) { /* показали прежние беседы — с их начала */
         g_acLogTop = FALSE;
@@ -909,6 +988,8 @@ static void ac_hist_load(void) {
     t[n].text = s;
     t[n].png = NULL;
     t[n].pngLen = 0;
+    t[n].think = NULL;
+    t[n].steps = NULL;
     n++;
   }
   free(text);
@@ -3114,7 +3195,14 @@ static void ac_result(AiResult *r) {
       ai_result_free(r); return;
     }
     if (g_acReviewStage == 3) { ac_review_finish(r->text); ai_result_free(r); return; }
-    ac_push_with_foot(r->text);
+    /* размышление уходит к этому ответу (ac_append); если лимит съело оно — так и сказать */
+    g_acThinkNext = r->think;
+    r->think = NULL;
+    static const wchar_t kNoAnswer[] = L"Ответ не уместился: модель потратила лимит на размышление. Размышление ниже; "
+                                       L"его можно выключить в «Настройки → ИИ» или спросить короче.";
+    ac_push_with_foot(g_acThinkNext && (!r->text || !r->text[0]) ? kNoAnswer : r->text);
+    free(g_acThinkNext);
+    g_acThinkNext = NULL;
     ac_redraw();
     ac_avatar_answer(r->text);
     ac_status(L"");
@@ -3179,6 +3267,8 @@ static void ac_log_link(const ENLINK *el) {
     if (!wcscmp(t, kAcLogLinks[i])) PostMessageW(g_acWnd, WM_AC_LINK, i, 0);
   for (size_t i = 0; i < sizeof(kAcRouteLinks) / sizeof(kAcRouteLinks[0]); i++)
     if (!wcscmp(t, kAcRouteLinks[i])) PostMessageW(g_acWnd, WM_AC_LINK, 10 + i, 0);
+  for (size_t i = 0; i < sizeof(kAcThinkLinks) / sizeof(kAcThinkLinks[0]); i++)
+    if (!wcscmp(t, kAcThinkLinks[i])) PostMessageW(g_acWnd, WM_AC_LINK, AC_THINK_LINK_NUM + (i < 2 ? 0 : 1), 0);
 }
 
 /* кнопка под маршрутом — как если бы написали это в чате; недописанный вопрос остаётся в поле */
@@ -3194,8 +3284,18 @@ static void ac_route_say(const wchar_t *cmd) {
 
 static void ac_route_excel(void);
 
+/* размышление (steps FALSE) или шаги: раскрыть или свернуть — в полном чате и в мини-чате сразу */
+static void ac_show_toggle(BOOL steps) {
+  if (steps) g_acShowSteps = !g_acShowSteps;
+  else g_acShowThink = !g_acShowThink;
+  g_acRendered = 0;
+  ac_redraw();
+}
+
 static void ac_log_link_do(WPARAM which) {
   switch (which) {
+  case AC_THINK_LINK_NUM: ac_show_toggle(FALSE); break;
+  case AC_THINK_LINK_NUM + 1: ac_show_toggle(TRUE); break;
   case 0: ac_new_topic_undo(); break; /* вернуть */
   case 1: /* показать */
   case 2: /* скрыть */

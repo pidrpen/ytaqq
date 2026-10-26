@@ -20,7 +20,9 @@
 #define AM_TIMER 0xA181          /* точки «думает…» */
 #define AM_TURNS 40              /* реплик в ленте; раньше — в полном чате */
 enum { AM_NONE, AM_NEW, AM_FULL, AM_CLOSE, AM_ATTACH, AM_SEND, AM_IMGDEL, AM_UNDO, AM_APPLY, AM_CANCEL, AM_BTNS };
-enum { AM_USER, AM_AI, AM_DOTS, AM_HINT, AM_MORE };
+/* у ответа до четырёх строк: заголовок и текст размышления, заголовок и текст шагов */
+#define AM_ITEMS (AM_TURNS * 5 + 8)
+enum { AM_USER, AM_AI, AM_DOTS, AM_HINT, AM_MORE, AM_THINK_HEAD, AM_STEPS_HEAD, AM_NOTE_BODY };
 enum { AM_MENU_FILE = 1, AM_MENU_SHOT, AM_MENU_PASTE, AM_MENU_DROP, AM_MENU_COPY };
 
 #define AM_BG RGB(17, 21, 38)
@@ -48,7 +50,7 @@ static BOOL g_amFace; /* беседу ведут здесь, полный чат
 static const wchar_t *g_amSeenText; /* последняя реплика, какой её видели: черновик маршрута сменился ответом */
 static POINT g_amGap; /* робот относительно угла окна у его стороны */
 static RECT g_amMsgs, g_amField, g_amImg, g_amBtn[AM_BTNS];
-static AmItem g_amItems[AM_TURNS + 3];
+static AmItem g_amItems[AM_ITEMS];
 static wchar_t *g_amText; /* тексты пузырей подряд, по нулю на каждый */
 static size_t g_amTextCap;
 static wchar_t g_amStatus[200];
@@ -86,6 +88,32 @@ static void am_clean(const wchar_t *s, wchar_t *out) {
 static int am_from(void) { return g_acNewAt < g_acN ? g_acNewAt : g_acN; }
 static int am_first(void) { return g_acN - am_from() > AM_TURNS ? g_acN - AM_TURNS : am_from(); }
 
+/* «Размышление ►» или «Шаги ►» над ответом; раскрыт — и текст блоком под заголовком.
+   Щелчок по заголовку — am_note_at / ac_show_toggle. y — куда встаёт следующая строка ленты */
+static void am_note(HDC dc, int width, int turn, int head, const wchar_t *body, BOOL open, wchar_t **w, int *y) {
+  int padX = am_px(10), padY = am_px(7), gap = am_px(8);
+  AmItem *it = &g_amItems[g_amCount++];
+  it->kind = head;
+  it->turn = turn;
+  if (head == AM_THINK_HEAD) it->text = open ? L"Размышление ▼" : L"Размышление ►";
+  else it->text = open ? L"Шаги ▼" : L"Шаги ►";
+  SetRect(&it->r, 0, *y, width, *y + am_px(22));
+  *y = it->r.bottom + am_px(2);
+  if (!open) return;
+  AmItem *b = &g_amItems[g_amCount++];
+  b->kind = AM_NOTE_BODY;
+  b->turn = turn;
+  b->text = *w;
+  am_clean(body, *w);
+  *w += wcslen(*w) + 1;
+  int maxW = (int)(width * 0.94f) - 2 * padX;
+  RECT tr = {0, 0, maxW, 0};
+  SelectObject(dc, g_amSmall);
+  DrawTextW(dc, b->text, -1, &tr, DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX | DT_EDITCONTROL);
+  SetRect(&b->r, 0, *y, (int)(width * 0.94f), *y + tr.bottom + 2 * padY);
+  *y = b->r.bottom + gap;
+}
+
 /* реплики пузырями: ширина, высота, место в ленте. Тексты целиком — в g_amText. */
 static void am_build(HDC dc, int width) {
   int padX = am_px(10), padY = am_px(7), gap = am_px(8), y = 0;
@@ -93,7 +121,10 @@ static void am_build(HDC dc, int width) {
   g_amCount = 0;
   g_amContentH = 0;
   size_t need = 600;
-  for (int i = first; i < g_acN; i++) need += (g_acTurns[i].text ? wcslen(g_acTurns[i].text) : 0) + 16;
+  for (int i = first; i < g_acN; i++) {
+    need += (g_acTurns[i].text ? wcslen(g_acTurns[i].text) : 0) + 16;
+    need += (g_acTurns[i].think ? wcslen(g_acTurns[i].think) : 0) + (g_acTurns[i].steps ? wcslen(g_acTurns[i].steps) : 0) + 32;
+  }
   if (need > g_amTextCap) {
     wchar_t *t = (wchar_t *)realloc(g_amText, need * sizeof(wchar_t));
     if (!t) return;
@@ -129,7 +160,9 @@ static void am_build(HDC dc, int width) {
     SetRect(&it->r, 0, y, width, y + h);
     y = it->r.bottom + gap;
   }
-  for (int i = first; i < g_acN && g_amCount < AM_TURNS + 2; i++) {
+  for (int i = first; i < g_acN && g_amCount < AM_ITEMS - 6; i++) {
+    if (g_acTurns[i].assistant && g_acTurns[i].think) am_note(dc, width, i, AM_THINK_HEAD, g_acTurns[i].think, g_acShowThink, &w, &y);
+    if (g_acTurns[i].assistant && g_acTurns[i].steps) am_note(dc, width, i, AM_STEPS_HEAD, g_acTurns[i].steps, g_acShowSteps, &w, &y);
     AmItem *it = &g_amItems[g_amCount++];
     it->kind = g_acTurns[i].assistant ? AM_AI : AM_USER;
     it->turn = i;
@@ -307,6 +340,23 @@ static void am_draw(HWND hwnd, HDC pdc) {
       SelectObject(dc, g_amSmall);
       SetTextColor(dc, AM_MUTED);
       DrawTextW(dc, it->text, -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+      continue;
+    }
+    if (it->kind == AM_THINK_HEAD || it->kind == AM_STEPS_HEAD) { /* заголовок блока: мелкой строкой, как ссылка */
+      SelectObject(dc, g_amSmall);
+      SetTextColor(dc, AM_CYAN);
+      RECT hr = r;
+      hr.left += am_px(4);
+      DrawTextW(dc, it->text, -1, &hr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+      continue;
+    }
+    if (it->kind == AM_NOTE_BODY) { /* раскрытый блок: тексты размышления и шагов — приглушённо, в тёмной полосе */
+      am_shape(dc, r, (float)am_px(10), RGB(20, 25, 44), 0, 0.0f);
+      SelectObject(dc, g_amSmall);
+      SetTextColor(dc, AM_MUTED);
+      RECT tr = r;
+      InflateRect(&tr, -am_px(10), -am_px(7));
+      DrawTextW(dc, it->text, -1, &tr, DT_WORDBREAK | DT_NOPREFIX | DT_EDITCONTROL);
       continue;
     }
     if (it->kind == AM_HINT) {
@@ -735,6 +785,19 @@ static int am_hit(int x, int y) {
   return AM_NONE;
 }
 
+/* заголовок «Размышление ►» или «Шаги ►» под курсором; NULL — нет */
+static const AmItem *am_note_at(int x, int y) {
+  POINT p = {x, y};
+  for (int i = 0; i < g_amCount; i++) {
+    const AmItem *it = &g_amItems[i];
+    if (it->kind != AM_THINK_HEAD && it->kind != AM_STEPS_HEAD) continue;
+    RECT r = it->r;
+    OffsetRect(&r, g_amMsgs.left, g_amTop);
+    if (PtInRect(&r, p) && PtInRect(&g_amMsgs, p)) return it;
+  }
+  return NULL;
+}
+
 static LRESULT CALLBACK am_in_proc(HWND h, UINT m, WPARAM w, LPARAM l) {
   BOOL shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0, ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
   if (m == WM_KEYDOWN && w == VK_RETURN && !shift) {
@@ -816,7 +879,7 @@ static LRESULT CALLBACK AmProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
     POINT p;
     GetCursorPos(&p);
     ScreenToClient(hwnd, &p);
-    if (LOWORD(lParam) == HTCLIENT && am_hit(p.x, p.y) != AM_NONE) {
+    if (LOWORD(lParam) == HTCLIENT && (am_hit(p.x, p.y) != AM_NONE || am_note_at(p.x, p.y))) {
       SetCursor(LoadCursorW(NULL, IDC_HAND));
       return TRUE;
     }
@@ -851,6 +914,13 @@ static LRESULT CALLBACK AmProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
     if (g_amDrag) {
       ReleaseCapture();
       return 0;
+    }
+    {
+      const AmItem *note = am_note_at(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
+      if (note) { /* раскрыть или свернуть блок */
+        ac_show_toggle(note->kind == AM_STEPS_HEAD);
+        return 0;
+      }
     }
     switch (am_hit(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam))) {
     case AM_NEW: ac_new_topic(); break;

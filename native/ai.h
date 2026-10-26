@@ -35,6 +35,7 @@ typedef struct AiResult {
   int id;        /* что вернул ai_ask_async */
   int status;    /* AI_OK… */
   wchar_t *text; /* ответ (AI_OK) или пояснение ошибки; не NULL */
+  wchar_t *think; /* размышление модели, если она его отдала (включено в «ИИ»); иначе NULL */
   void *user;    /* что передали в ai_ask_async */
   DWORD ms;      /* сколько ушло */
 } AiResult;

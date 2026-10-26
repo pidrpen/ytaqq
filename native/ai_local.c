@@ -253,6 +253,10 @@ static int g_aiPersona;
 /* Z.ai может получать данные PLM «Союз» и архива из инструментов ИИ — только
    если человек сам разрешил на вкладке «ИИ»; локальной модели можно всегда */
 static BOOL g_aiZaiPlm;
+/* размышление модели в чате: просим его у локальной модели и показываем свёрнутым блоком;
+   «think» в ai.txt. Агент (JSON-действия) и Z.ai размышления не используют */
+static BOOL g_aiThink = TRUE;
+static BOOL ai_think_on(void) { return g_aiThink && !g_aiProvider; }
 /* папка справочника стандартов (std_files.c): «std_dir» в ai.txt; пусто — %USERPROFILE%\CursorPad-std */
 static wchar_t g_gsDir[MAX_PATH];
 
@@ -264,8 +268,8 @@ static void ai_save(void) {
   WideCharToMultiByte(CP_UTF8, 0, g_aiModel, -1, model, sizeof(model), NULL, NULL);
   int n = snprintf(buf, sizeof(buf), "on %d\r\ntier %d\r\nctx %d\r\ngpu %d\r\nmodel %s\r\n", g_aiOn ? 1 : 0, g_aiTier, g_aiCtx,
                    g_aiGpu ? 1 : 0, model);
-  n += snprintf(buf + n, sizeof(buf) - n, "provider %d\r\nzai_model %s\r\npersona %d\r\nzai_plm %d\r\n", g_aiProvider, g_aiZaiModel,
-                g_aiPersona, g_aiZaiPlm ? 1 : 0);
+  n += snprintf(buf + n, sizeof(buf) - n, "provider %d\r\nzai_model %s\r\npersona %d\r\nzai_plm %d\r\nthink %d\r\n", g_aiProvider, g_aiZaiModel,
+                g_aiPersona, g_aiZaiPlm ? 1 : 0, g_aiThink ? 1 : 0);
   if (g_aiSrvExe[0]) {
     char se[MAX_PATH * 3];
     WideCharToMultiByte(CP_UTF8, 0, g_aiSrvExe, -1, se, sizeof(se), NULL, NULL);
@@ -306,6 +310,7 @@ static void ai_load(void) {
     else if (sscanf(line, "provider %d", &v) == 1 && (v == 0 || v == 1)) g_aiProvider = v;
     else if (sscanf(line, "persona %d", &v) == 1 && v >= 0 && v < AI_PERSONAS) g_aiPersona = v;
     else if (sscanf(line, "zai_plm %d", &v) == 1) g_aiZaiPlm = v == 1;
+    else if (sscanf(line, "think %d", &v) == 1) g_aiThink = v == 1;
     else if (!strncmp(line, "zai_model ", 10)) {
       migratedZai = !ai_zai_model_valid(line + 10);
       lstrcpynA(g_aiZaiModel, migratedZai ? "glm-4.5-flash" : line + 10, 64);
@@ -450,6 +455,8 @@ static wchar_t *ai_json_unstr(const char *p) {
   free(u);
   return w;
 }
+
+#include "ai_think.h" /* размышление отдельно от ответа — ai_think_split */
 
 /* ответ модели: убрать рассуждения <think>…</think> и пробелы по краям */
 static void ai_tidy(wchar_t *t) {
@@ -1058,6 +1065,7 @@ typedef struct AiJob {
   void *volatile req; /* открытый запрос — закрыть, чтобы оборвать */
   int status;
   wchar_t *text;
+  wchar_t *think; /* размышление модели, NULL — нет; отдаётся вместе с text */
   DWORD ms;
   volatile LONG refs;
   struct AiJob *next;
@@ -1085,10 +1093,28 @@ static char *ai_body(const wchar_t *instruction, const char *userContent, int ma
   return b;
 }
 
-/* ответ потоком (SSE): строки «data: {…"delta":{"content":"кусок"}…}» — склеить куски */
-static wchar_t *ai_sse_text(const char *s) {
-  size_t cap = 256, n = 0;
-  wchar_t *acc = (wchar_t *)malloc(cap * sizeof(wchar_t));
+/* кусок — в конец растущего буфера; FALSE — памяти нет, буфер прежний */
+static BOOL ai_sse_add(wchar_t **acc, size_t *n, size_t *cap, const wchar_t *piece) {
+  size_t pl = wcslen(piece);
+  if (*n + pl + 1 > *cap) {
+    size_t nc = *cap ? *cap : 256;
+    while (*n + pl + 1 > nc) nc *= 2;
+    wchar_t *na = (wchar_t *)realloc(*acc, nc * sizeof(wchar_t));
+    if (!na) return FALSE;
+    *acc = na;
+    *cap = nc;
+  }
+  wmemcpy(*acc + *n, piece, pl + 1);
+  *n += pl;
+  return TRUE;
+}
+
+/* ответ потоком (SSE): строки «data: {…"delta":{"content":"кусок"}…}» — склеить куски.
+   «reasoning_content» — размышление модели: в *think, NULL — если его не было */
+static wchar_t *ai_sse_text(const char *s, wchar_t **think) {
+  size_t cap = 256, n = 0, tcap = 0, tn = 0;
+  wchar_t *acc = (wchar_t *)malloc(cap * sizeof(wchar_t)), *thought = NULL;
+  *think = NULL;
   if (!acc) return NULL;
   acc[0] = 0;
   for (const char *p = strstr(s, "data:"); p; p = strstr(p + 5, "data:")) {
@@ -1100,22 +1126,20 @@ static wchar_t *ai_sse_text(const char *s) {
     line[ln] = 0;
     const char *c = json_find_string(line, "content");
     wchar_t *piece = c ? ai_json_unstr(c) : NULL;
+    const char *r = json_find_string(line, "reasoning_content");
+    wchar_t *rpiece = r ? ai_json_unstr(r) : NULL;
     free(line);
-    if (!piece) continue;
-    size_t pl = wcslen(piece);
-    if (n + pl + 1 > cap) {
-      while (n + pl + 1 > cap) cap *= 2;
-      wchar_t *na = (wchar_t *)realloc(acc, cap * sizeof(wchar_t));
-      if (!na) {
-        free(piece);
-        break;
-      }
-      acc = na;
+    if (rpiece) {
+      ai_sse_add(&thought, &tn, &tcap, rpiece); /* без памяти — размышление короче, ответ цел */
+      free(rpiece);
     }
-    wmemcpy(acc + n, piece, pl + 1);
-    n += pl;
+    if (!piece) continue;
+    BOOL ok = ai_sse_add(&acc, &n, &cap, piece);
     free(piece);
+    if (!ok) break;
   }
+  if (tn) *think = thought;
+  else free(thought);
   return acc;
 }
 
@@ -1152,12 +1176,16 @@ static void ai_job_run(AiJob *j) {
     if (j->cancel) st = AI_CANCELLED;
     else if (!code) st = GetTickCount() - t0 >= j->timeout - 500 ? AI_TIMEOUT : AI_NO_SERVER;
     else {
-      if (code == 200 && resp && strstr(resp, "data:")) j->text = ai_sse_text(resp);
+      if (code == 200 && resp && strstr(resp, "data:")) j->text = ai_sse_text(resp, &j->think);
       else {
         const char *c = resp ? json_find_string(resp, code == 200 ? "content" : "message") : NULL;
         if (c) j->text = ai_json_unstr(c);
       }
       if (code == 200 && j->text) {
+        wchar_t *inl = NULL;
+        ai_think_split(j->text, &inl); /* размышление внутри текста, если модель не отдала его отдельно */
+        if (inl && !j->think) j->think = inl;
+        else free(inl);
         ai_tidy(j->text);
         st = AI_OK;
       } else {
@@ -1198,6 +1226,7 @@ static void ai_job_release(AiJob *j) {
   if (last) {
     free(j->body);
     free(j->text);
+    free(j->think);
     free(j);
   }
 }
@@ -1252,9 +1281,11 @@ void ai_disable(void) {
 }
 
 /* запустить ходящий поток и ждать: ответа, отмены (j->cancel или ext) или срока.
-   Ответ — в *text (malloc). Освобождает ссылку ждущего. */
-static int ai_wait(AiJob *j, volatile LONG *ext, wchar_t **text, DWORD *ms) {
+   Ответ — в *text (malloc), размышление — в *think, если нужно (иначе остаётся у job).
+   Освобождает ссылку ждущего. */
+static int ai_wait(AiJob *j, volatile LONG *ext, wchar_t **text, wchar_t **think, DWORD *ms) {
   *text = NULL;
+  if (think) *think = NULL;
   DWORD t0 = GetTickCount();
   InterlockedIncrement(&j->refs);
   HANDLE th = CreateThread(NULL, 0, ai_worker, j, 0, NULL);
@@ -1269,6 +1300,10 @@ static int ai_wait(AiJob *j, volatile LONG *ext, wchar_t **text, DWORD *ms) {
       st = j->status;
       *text = j->text;
       j->text = NULL;
+      if (think) {
+        *think = j->think;
+        j->think = NULL;
+      }
       break;
     }
     BOOL stop = j->cancel || (ext && *ext);
@@ -1288,6 +1323,7 @@ static int ai_wait(AiJob *j, volatile LONG *ext, wchar_t **text, DWORD *ms) {
 void ai_result_free(AiResult *r) {
   if (!r) return;
   free(r->text);
+  free(r->think);
   free(r);
 }
 
@@ -1308,18 +1344,20 @@ typedef struct {
 static DWORD WINAPI ai_async_thread(LPVOID p) {
   AiAsync *a = (AiAsync *)p;
   AiResult *r = (AiResult *)calloc(1, sizeof(AiResult));
-  wchar_t *text = NULL;
+  wchar_t *text = NULL, *think = NULL;
   DWORD ms = 0;
-  int st = ai_wait(a->j, NULL, &text, &ms);
+  int st = ai_wait(a->j, NULL, &text, &think, &ms);
   if (r) {
     r->id = a->id;
     r->status = st;
     r->text = text ? text : _wcsdup(ai_status_text(st));
+    r->think = think;
     r->user = a->user;
     r->ms = ms;
     if (!PostMessageW(a->notify, a->msg, 0, (LPARAM)r)) ai_result_free(r); /* окно закрыто */
   } else {
     free(text);
+    free(think);
   }
   free(a);
   return 0;
@@ -1387,6 +1425,9 @@ static char *ai_body_chat(const wchar_t *instruction, const AiTurn *t, int n, BO
     free(js);
     return NULL;
   }
+  /* размышление — только в обычном чате: агент ждёт JSON-действие, ему оно не нужно.
+     Реплики уходят модели только текстом: размышление в беседу не попадает */
+  BOOL think = !fileTools && ai_think_on();
   size_t total = strlen(sys) + strlen(g_aiExtModel) + 400 + (fileTools ? strlen(kAiAgentSchema) : 0);
   for (int i = 0; i < n; i++) {
     js[i] = t[i].png ? ai_content_img(t[i].text, t[i].png, t[i].pngLen) : ai_json_str(t[i].text);
@@ -1402,8 +1443,8 @@ static char *ai_body_chat(const wchar_t *instruction, const AiTurn *t, int n, BO
       k += snprintf(b + k, total - k, ",{\"role\":\"%s\",\"content\":%s}", t[i].assistant ? "assistant" : "user",
                     js[i]);
     snprintf(b + k, total - k,
-             "],\"temperature\":0.2,\"max_tokens\":%d,\"stream\":true,\"cache_prompt\":true,\"chat_template_kwargs\":{\"enable_thinking\":false}%s}", g_aiOutCap,
-             fileTools ? kAiAgentSchema : "");
+             "],\"temperature\":0.2,\"max_tokens\":%d,\"stream\":true,\"cache_prompt\":true,\"chat_template_kwargs\":{\"enable_thinking\":%s}%s}",
+             g_aiOutCap + (think ? AI_THINK_TOKENS : 0), think ? "true" : "false", fileTools ? kAiAgentSchema : "");
   }
   for (int i = 0; i < n; i++) free(js[i]);
   free(js);
@@ -1432,6 +1473,7 @@ static int ai_ask_chat_kind(const wchar_t *instruction, const AiTurn *turns, int
   while (s < n - 1 && turns[s].assistant) s++; /* модель начинает с вопроса */
   char *body = ai_body_chat(instruction, turns + s, n - s, fileTools);
   if (!body) return 0;
+  if (!fileTools && ai_think_on()) timeoutMs += AI_THINK_MS; /* размышление — лишние токены, на ЦП это минуты */
   return ai_ask_body(body, timeoutMs, notify, msg, user);
 }
 
@@ -1492,7 +1534,7 @@ static int ai_run_sync(char *body, DWORD timeoutMs, volatile LONG *cancel, wchar
   AiJob *j = ai_job_new(body, timeoutMs);
   if (!j) return AI_BUSY;
   wchar_t *text = NULL;
-  int st = ai_wait(j, cancel, &text, NULL);
+  int st = ai_wait(j, cancel, &text, NULL, NULL);
   if (answer) *answer = text;
   else free(text);
   return st;
