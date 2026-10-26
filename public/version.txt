@@ -1,7 +1,10 @@
-2026102606
-2026.10.26.6
-sha256 aa22e03d759a9261ee4aeadec880ff91082a4a813afaa11ce5c8efc05e0b5706
-== 0 signature-rsa-sha256 w2Q5XXVQYBEpt73WW9haHu2bn9umuHbTydbFapsr9cv1UbdSPkbKbnryubXuGQqPT+2E2jda3iJGnmHqu92F9T4lvaDhBohhg1lxokCaATOGvDyHv9g06U0AwHnn3TA55qppsjvdXLn8dtoxlcAJnH3yIgq3ZaHYvNdzctQ3fexP+V0u3jLRVrXvYb5rU0WoeRfq5l/N4RzqYIHnStzc78XG1D10gRuBcUBF0BqdxaIZ7f1oC2n77Ghgtvg2C+mOhAQ9oEB/hC6yw3rHqJyE68QG5+ZJy3otIIE8iOuO5CV71b361mVbchDF12MDwT/dHGF6uW0JulpeStgfWCtkxUQJ7s7/OF5zHqQ8c8OplIm0qNWV6bb+kgeTZ7uyBBP4fg1OJRXGdW+4Y97oA2qupLRtySKufzVnqLqx0KRAYLdQIOCkjLhzhM38LVdT2ec5xRBUhCmTe5l4k2rzqQxMCZY25BEM0EDClsHeT22cJd45R5CHG3CIN1CNA2zqorlN
+2026102607
+2026.10.26.7
+sha256 dc43b0566712725c3c84c977bcde969f4f009c07c15e5c1ee2b6dacc3172cee5
+== 0 signature-rsa-sha256 nGDce4T9XZgA6v6gdg1YBuBeTMUdUq8I8+RZdqC9AdcQFK1kQ5y7To06/kSaFTM1vR6IeYz7UtB5yA+DXwubn4x/88nZxUQPGBgtG8WDc7QhmxthW/4ejTdO7ptcUIGKINe3PuKjZnx2dRZiFeTUgOmloDvzUTrxltokzbKbbJpFyC63T81MSHb6JyIoGYRJ9XPTxiV3z/8vSkP1DUvBXRWun5uZxNnoH6hCyYn00KXNPUSobE9uJxw77yWQt4K5ij/t/DEebIJUFgxOPl1QxlVxUP830iR3++G9Yt1zWCzZcl/cF2SsGEdLquC4Gyn89l0RqsO0gwtsoHJEAO66DiMkQxP2091voXYYt9mDgNjH4WRiXMx/Po+RW8H35C07sXNJHfrzpcZQhrLXlJI/aKGPZU/VXS3ldPoF7KmjMT0kPd5rUJr9taOrGLvTJ2nXUZ1789ZLCrO0/lmjrp/xyb7Nz584nBv7gxMuESSSS6kFUrlYOFNTyXXXi9rldqWi
+== 2026.10.26.7
+«Ссылка» в кольце Shift доработана. Задержите мышь на плитке «Ссылка» — рядом с кольцом выедут два полукруга, а само кольцо останется на месте. «Включая файл» (верхний) кладёт в буфер путь с именем файла, например C:\Чертежи\Вал.pdf. «До файла» (нижний) кладёт путь к папке, где лежит файл, например C:\Чертежи. В письме Outlook и в Word вставленный путь кликабельный: щелчок откроет файл или папку. Центр кольца или другая плитка убирают полукруги.
+
 == 2026.10.26.6
 «Ссылка» в кольце Shift переделана: вместо текста на тысячи знаков с файлом внутри теперь обычная ссылка на файл. Потяните файл с зажатым Shift и задержите мышь на плитке «Ссылка» — кольцо разделится на два полукруга. «Включая файл» кладёт в буфер ссылку: вставьте её в письмо Outlook или документ Word, и щелчок по ней сразу откроет файл. «До файла» кладёт только путь текстом. Отпустить прямо на «Ссылке» — то же, что «Включая файл». Для файла на сетевом диске берётся сетевой путь (\\сервер\папка\…), чтобы ссылка открылась и у коллеги; файл с вашего диска C: у коллеги не откроется — CursorPad об этом предупредит. Пункт «Ещё → Сохранить файл из ссылки» убран.
 
