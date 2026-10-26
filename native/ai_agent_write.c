@@ -38,6 +38,35 @@ static BOOL ag_xml_add(char *xml, size_t cap, const char *part) {
   if (n + length >= cap) return FALSE;
   memcpy(xml + n, part, length + 1); return TRUE;
 }
+/* Stored (uncompressed) ZIP of count parts, sizes by strlen. CREATE_NEW; on
+   failure the partial file is removed and GetLastError is kept. */
+static BOOL ag_zip_new(const wchar_t *path, const char *const *names, const char *const *data, int count) {
+  HANDLE h = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
+  if (h == INVALID_HANDLE_VALUE) return FALSE;
+  BOOL ok = TRUE;
+  DWORD offsets[8], crcs[8], pos = 0;
+  if (count > 8) ok = FALSE;
+  for (int i = 0; i < count && ok; i++) {
+    DWORD size = (DWORD)strlen(data[i]), len = (DWORD)strlen(names[i]);
+    offsets[i] = pos; crcs[i] = ag_crc(data[i], size);
+    BYTE head[30] = {0}; ag_le32(head, 0x04034b50); ag_le16(head + 4, 20); ag_le16(head + 6, 0x800);
+    ag_le16(head + 12, 0x21); ag_le32(head + 14, crcs[i]); ag_le32(head + 18, size); ag_le32(head + 22, size); ag_le16(head + 26, len);
+    ok = ag_bytes(h, head, 30) && ag_bytes(h, names[i], len) && ag_bytes(h, data[i], size); pos += 30 + len + size;
+  }
+  DWORD cd = pos;
+  for (int i = 0; i < count && ok; i++) {
+    DWORD size = (DWORD)strlen(data[i]), len = (DWORD)strlen(names[i]);
+    BYTE head[46] = {0}; ag_le32(head, 0x02014b50); ag_le16(head + 4, 20); ag_le16(head + 6, 20);
+    ag_le16(head + 8, 0x800); ag_le16(head + 14, 0x21); ag_le32(head + 16, crcs[i]);
+    ag_le32(head + 20, size); ag_le32(head + 24, size); ag_le16(head + 28, len); ag_le32(head + 42, offsets[i]);
+    ok = ag_bytes(h, head, 46) && ag_bytes(h, names[i], len); pos += 46 + len;
+  }
+  BYTE end[22] = {0}; ag_le32(end, 0x06054b50); ag_le16(end + 8, count); ag_le16(end + 10, count); ag_le32(end + 12, pos - cd); ag_le32(end + 16, cd);
+  ok = ok && ag_bytes(h, end, 22);
+  DWORD error = GetLastError(); CloseHandle(h);
+  if (!ok) { DeleteFileW(path); SetLastError(error); }
+  return ok;
+}
 static BOOL ag_write_document(const wchar_t *path, const wchar_t *text, AgKind kind, const char *sheetXml) {
   BOOL docx = kind == AG_DOCX, xlsx = kind == AG_XLSX;
   if (xlsx && text[0]) { SetLastError(ERROR_NOT_SUPPORTED); return FALSE; }
@@ -46,10 +75,10 @@ static BOOL ag_write_document(const wchar_t *path, const wchar_t *text, AgKind k
   char utf8[8001], xml[128000];
   int n = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, text, -1, utf8, sizeof(utf8), NULL, NULL);
   if (!n) return FALSE;
-  if (docx && sheetXml) {
-    if (strlen(sheetXml) >= sizeof(xml)) return FALSE;
-    strcpy(xml, sheetXml);
-  } else if (docx) {
+  /* у Word sheetXml — готовый document.xml (таблица, текст распознанного скана):
+     он пишется как есть, без копии в xml и без его предела */
+  const char *document = docx && sheetXml ? sheetXml : xml;
+  if (docx && !sheetXml) {
     strcpy(xml, "<?xml version=\"1.0\" encoding=\"UTF-8\"?><w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:p><w:r><w:t xml:space=\"preserve\">");
     size_t at = strlen(xml);
     for (int i = 0; i < n - 1; i++) {
@@ -66,46 +95,28 @@ static BOOL ag_write_document(const wchar_t *path, const wchar_t *text, AgKind k
     }
     strcpy(xml + at, "</w:t></w:r></w:p><w:sectPr><w:pgSz w:w=\"12240\" w:h=\"15840\"/><w:pgMar w:top=\"1440\" w:right=\"1440\" w:bottom=\"1440\" w:left=\"1440\"/></w:sectPr></w:body></w:document>");
   }
-  HANDLE h = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
-  if (h == INVALID_HANDLE_VALUE) return FALSE;
-  BOOL ok = TRUE;
-  if (!docx && !xlsx) ok = ag_bytes(h, utf8, (DWORD)n - 1);
-  else {
-    const char *names[5] = {"[Content_Types].xml", "_rels/.rels", "word/document.xml"};
-    const char *data[5] = {
-      "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/><Default Extension=\"xml\" ContentType=\"application/xml\"/><Override PartName=\"/word/document.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml\"/></Types>",
-      "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"word/document.xml\"/></Relationships>", xml};
-    int count = docx ? 3 : 5;
-    if (xlsx) {
-      names[2] = "xl/workbook.xml"; names[3] = "xl/_rels/workbook.xml.rels"; names[4] = "xl/worksheets/sheet1.xml";
-      data[0] = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/><Default Extension=\"xml\" ContentType=\"application/xml\"/><Override PartName=\"/xl/workbook.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml\"/><Override PartName=\"/xl/worksheets/sheet1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\"/></Types>";
-      data[1] = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"xl/workbook.xml\"/></Relationships>";
-      data[2] = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><sheets><sheet name=\"Лист1\" sheetId=\"1\" r:id=\"rId1\"/></sheets></workbook>";
-      data[3] = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" Target=\"worksheets/sheet1.xml\"/></Relationships>";
-      data[4] = sheetXml ? sheetXml : "<?xml version=\"1.0\" encoding=\"UTF-8\"?><worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><sheetData/></worksheet>";
-    }
-    DWORD offsets[5], crcs[5], pos = 0;
-    for (int i = 0; i < count && ok; i++) {
-      DWORD size = (DWORD)strlen(data[i]), len = (DWORD)strlen(names[i]);
-      offsets[i] = pos; crcs[i] = ag_crc(data[i], size);
-      BYTE head[30] = {0}; ag_le32(head, 0x04034b50); ag_le16(head + 4, 20); ag_le16(head + 6, 0x800);
-      ag_le16(head + 12, 0x21); ag_le32(head + 14, crcs[i]); ag_le32(head + 18, size); ag_le32(head + 22, size); ag_le16(head + 26, len);
-      ok = ag_bytes(h, head, 30) && ag_bytes(h, names[i], len) && ag_bytes(h, data[i], size); pos += 30 + len + size;
-    }
-    DWORD cd = pos;
-    for (int i = 0; i < count && ok; i++) {
-      DWORD size = (DWORD)strlen(data[i]), len = (DWORD)strlen(names[i]);
-      BYTE head[46] = {0}; ag_le32(head, 0x02014b50); ag_le16(head + 4, 20); ag_le16(head + 6, 20);
-      ag_le16(head + 8, 0x800); ag_le16(head + 14, 0x21); ag_le32(head + 16, crcs[i]);
-      ag_le32(head + 20, size); ag_le32(head + 24, size); ag_le16(head + 28, len); ag_le32(head + 42, offsets[i]);
-      ok = ag_bytes(h, head, 46) && ag_bytes(h, names[i], len); pos += 46 + len;
-    }
-    BYTE end[22] = {0}; ag_le32(end, 0x06054b50); ag_le16(end + 8, count); ag_le16(end + 10, count); ag_le32(end + 12, pos - cd); ag_le32(end + 16, cd);
-    ok = ok && ag_bytes(h, end, 22);
+  if (!docx && !xlsx) {
+    HANDLE h = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) return FALSE;
+    BOOL ok = ag_bytes(h, utf8, (DWORD)n - 1);
+    DWORD error = GetLastError(); CloseHandle(h);
+    if (!ok) { DeleteFileW(path); SetLastError(error); }
+    return ok;
   }
-  DWORD error = GetLastError(); CloseHandle(h);
-  if (!ok) { DeleteFileW(path); SetLastError(error); }
-  return ok;
+  const char *names[5] = {"[Content_Types].xml", "_rels/.rels", "word/document.xml"};
+  const char *data[5] = {
+    "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/><Default Extension=\"xml\" ContentType=\"application/xml\"/><Override PartName=\"/word/document.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml\"/></Types>",
+    "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"word/document.xml\"/></Relationships>", document};
+  int count = docx ? 3 : 5;
+  if (xlsx) {
+    names[2] = "xl/workbook.xml"; names[3] = "xl/_rels/workbook.xml.rels"; names[4] = "xl/worksheets/sheet1.xml";
+    data[0] = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/><Default Extension=\"xml\" ContentType=\"application/xml\"/><Override PartName=\"/xl/workbook.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml\"/><Override PartName=\"/xl/worksheets/sheet1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\"/></Types>";
+    data[1] = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"xl/workbook.xml\"/></Relationships>";
+    data[2] = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><sheets><sheet name=\"Лист1\" sheetId=\"1\" r:id=\"rId1\"/></sheets></workbook>";
+    data[3] = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" Target=\"worksheets/sheet1.xml\"/></Relationships>";
+    data[4] = sheetXml ? sheetXml : "<?xml version=\"1.0\" encoding=\"UTF-8\"?><worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><sheetData/></worksheet>";
+  }
+  return ag_zip_new(path, names, data, count);
 }
 static BOOL ag_write_new(const wchar_t *path, const wchar_t *text, AgKind kind) {
   return ag_write_document(path, text, kind, NULL);

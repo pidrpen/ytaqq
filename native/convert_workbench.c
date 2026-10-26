@@ -116,8 +116,12 @@ static void cvx_history_update(char *report) {
   for(int i=0;i<g_cvxHistoryCount;i++)if(!wcscmp(selectedId,g_cvxIds[i]))SendMessageW(g_cvxHistory,LB_SETCURSEL,i,0);
   cx_list_extent(g_cvxHistory);free(ids);free(labels);
 }
-static DWORD WINAPI cvx_worker(void *parameter) {
-  CvxJob *job=(CvxJob*)parameter;CvJob *r=&job->result;AiJob control={0};
+/* Задание целиком, в рабочем потоке: Office — сразу, остальное — convert_files.py.
+   Итог — в job->result и job->report. Папка задания job->run удаляется. Окну
+   ничего не шлёт: это делает cvx_worker, а чат («переведи … в pdf», ai_file_ask.c)
+   ждёт сам. */
+static void cvx_exec(CvxJob *job) {
+  CvJob *r=&job->result;AiJob control={0};
   DWORD deadline=GetTickCount()+300000;wchar_t root[MAX_PATH],python[MAX_PATH],script[MAX_PATH],input[MAX_PATH],output[MAX_PATH],history[MAX_PATH],cancel[MAX_PATH];
   char *request=NULL; CvxJson files={NULL,0,0,TRUE},prepared={NULL,0,0,TRUE},wire={NULL,0,0,TRUE};
   wchar_t scratch[CV_FILES][MAX_PATH];int scratchCount=0,filesCount=0,preparedCount=0;
@@ -167,18 +171,28 @@ done:
   for(int i=0;i<scratchCount;i++)DeleteFileW(scratch[i]);
   swprintf(input,MAX_PATH,L"%ls\\request.json",job->run);swprintf(output,MAX_PATH,L"%ls\\response.json",job->run);swprintf(cancel,MAX_PATH,L"%ls\\cancel",job->run);
   DeleteFileW(input);DeleteFileW(output);DeleteFileW(cancel);RemoveDirectoryW(job->run);
+}
+static DWORD WINAPI cvx_worker(void *parameter) {
+  CvxJob *job=(CvxJob*)parameter;cvx_exec(job);
   if(!PostMessageW(g_hwnd,WM_CVX_DONE,0,(LPARAM)job)){free(job->report);free(job);InterlockedExchange(&g_cvBusy,0);}
   return 0;
 }
-static BOOL cvx_start(CvxJob *job) {
-  if(InterlockedCompareExchange(&g_cvBusy,1,0)){free(job);return FALSE;}
+/* Занять конвертер и завести папку задания. FALSE — занят другим заданием или
+   папки не завести; job при этом не освобождается. Освобождает g_cvBusy тот,
+   кто дождался конца задания. */
+static BOOL cvx_claim(CvxJob *job) {
+  if(InterlockedCompareExchange(&g_cvBusy,1,0))return FALSE;
   g_cvxCancelled=0;g_cvxCancelPath[0]=0;
-  if(wcslen(g_dataDir)>MAX_PATH-80){free(job);g_cvBusy=0;return FALSE;}
+  if(wcslen(g_dataDir)>MAX_PATH-80){g_cvBusy=0;return FALSE;}
   wchar_t dir[MAX_PATH];swprintf(dir,MAX_PATH,L"%ls\\conversions",g_dataDir);CreateDirectoryW(dir,NULL);
   BOOL made=FALSE;
   for(int i=0;i<100;i++){swprintf(job->run,MAX_PATH,L"%ls\\run-%lu-%lu-%d",dir,GetCurrentProcessId(),GetTickCount(),i);if(CreateDirectoryW(job->run,NULL)){made=TRUE;break;}}
-  if(!made){free(job);g_cvBusy=0;return FALSE;}
+  if(!made){g_cvBusy=0;return FALSE;}
   swprintf(g_cvxCancelPath,MAX_PATH,L"%ls\\cancel",job->run);
+  return TRUE;
+}
+static BOOL cvx_start(CvxJob *job) {
+  if(!cvx_claim(job)){free(job);return FALSE;}
   lstrcpynW(job->result.label,job->action<15?kCvxActions[job->action]:job->action==18?L"Разделение TIFF":L"История",80);
   HANDLE thread=CreateThread(NULL,0,cvx_worker,job,0,NULL);
   if(!thread){RemoveDirectoryW(job->run);free(job);g_cvBusy=0;return FALSE;}CloseHandle(thread);

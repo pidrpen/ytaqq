@@ -58,7 +58,7 @@ static void am_layout(void);
 static void ac_mini_show(void);
 
 static int am_px(int v) { return v * g_amK / 100; }
-static BOOL am_busy(void) { return g_acId || g_agActive || g_acWebOn || ac_pc_busy(); }
+static BOOL am_busy(void) { return g_acId || g_agActive || g_acWebOn || ac_pc_busy() || ac_fq_busy(); }
 static int am_gutter(void) { return am_px(10); } /* полоса прокрутки справа от пузырей */
 
 static BOOL ac_mini_open(void) { return g_amWnd && IsWindowVisible(g_amWnd); }

@@ -21,6 +21,7 @@ static const GUID kAcBgra = {0x6fddc324, 0x4e03, 0x4bfe, {0xb1, 0x85, 0x3d, 0x77
 #define WM_AC_PC (WM_APP + 78)   /* сверка с Союзом (ai_plm_check.c): wParam 1 — строка состояния, 0 — итог */
 #define WM_AC_LINK (WM_APP + 81) /* ссылка над лентой (kAcLogLinks): wParam — какая */
 #define WM_AC_NOTE (WM_APP + 82) /* строка состояния из рабочего потока: lParam — wchar_t*, free */
+#define WM_AC_FQ (WM_APP + 83)   /* прочитать / перевести файл (ai_file_ask.c): wParam 1 — строка состояния, 0 — итог */
 #define ID_AC_LOG 4701
 #define ID_AC_IN 4702
 #define ID_AC_SEND 4703
@@ -87,6 +88,11 @@ static BOOL ac_pc_start(const wchar_t *a);
 static void ac_pc_ready(WPARAM wp, LPARAM lp);
 static BOOL ac_pc_busy(void);
 static BOOL ac_pc_cancel(void);
+/* «прочитай C:\…\скан.pdf», «переведи … в pdf» без модели — ai_file_ask.c (после convert.c) */
+static BOOL ac_fq_start(const wchar_t *a);
+static void ac_fq_ready(WPARAM wp, LPARAM lp);
+static BOOL ac_fq_busy(void);
+static BOOL ac_fq_cancel(void);
 /* справочник стандартов без модели — ai_std.c */
 static BOOL ac_std_start(const wchar_t *a);
 static BOOL g_acRouting;
@@ -2111,7 +2117,7 @@ static BOOL ac_provider_change(int provider) {
    и в ai_chat.txt, а пока новый вопрос не задан, их можно «Вернуть». Пока ИИ
    работает или план ждёт решения — нельзя, причина в строке состояния. */
 static BOOL ac_new_topic(void) {
-  if (g_acId || g_agActive || g_acWebOn || g_acRouting || ac_pc_busy()) {
+  if (g_acId || g_agActive || g_acWebOn || g_acRouting || ac_pc_busy() || ac_fq_busy()) {
     ac_status(L"Сначала дождитесь ответа или нажмите «Стоп»");
     return FALSE;
   }
@@ -2141,7 +2147,7 @@ static BOOL ac_new_topic(void) {
 static BOOL ac_new_topic_undo_ready(void) { return g_acUndoAt >= 0 && g_acUndoAt == g_acN && g_acNewAt == g_acN; }
 
 static void ac_new_topic_undo(void) {
-  if (!ac_new_topic_undo_ready() || g_acId || g_agActive || g_acWebOn || g_acRouting || ac_pc_busy()) return;
+  if (!ac_new_topic_undo_ready() || g_acId || g_agActive || g_acWebOn || g_acRouting || ac_pc_busy() || ac_fq_busy()) return;
   g_acNewAt = g_acUndoNewAt;
   g_acContextStart = g_acUndoCtx;
   g_acUndoAt = -1;
@@ -2536,13 +2542,20 @@ static void ac_send(void) {
     free(in);
     return;
   }
-  if (g_acId || g_agActive || g_acWebOn || ac_pc_busy()) {
+  if (g_acId || g_agActive || g_acWebOn || ac_pc_busy() || ac_fq_busy()) {
     free(in);
     return;
   }
   ac_avatar_set(AC_AV_LISTENING);
   /* «есть ли в Союзе…», «сверь с союзом список…» — сверку ведёт код, не модель */
   if (!g_agPending && ac_pc_wanted(a) && ac_pc_start(a)) {
+    SetWindowTextW(g_acIn, L"");
+    free(in);
+    return;
+  }
+  /* «прочитай C:\…\скан.pdf», «переведи C:\…\отчёт.docx в pdf» — читает и переводит код,
+     без F6 и без модели; таблицу из скана он отдаёт помощнику (g_acRouteDispatch) */
+  if (!g_agPending && !g_acRouteDispatch && ac_fq_start(a)) {
     SetWindowTextW(g_acIn, L"");
     free(in);
     return;
@@ -3411,7 +3424,7 @@ static LRESULT CALLBACK AcProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
     case ID_AC_STOP:
     case ID_AC_CANCEL:
       if (g_acPlanOn) ac_files_cancel();
-      else if (ac_pc_cancel()) {
+      else if (ac_pc_cancel() || ac_fq_cancel()) {
       } else if (g_acWebOn) {
         ac_web_cancel();
         ac_unsend();
@@ -3469,6 +3482,9 @@ static LRESULT CALLBACK AcProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
     return 0;
   case WM_AG_TOOL:
     ag_tool_ready((void *)lParam);
+    return 0;
+  case WM_AC_FQ:
+    ac_fq_ready(wParam, lParam);
     return 0;
   case WM_AC_PC:
     ac_pc_ready(wParam, lParam);

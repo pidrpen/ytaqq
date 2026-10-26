@@ -4582,6 +4582,7 @@ static void create_settings(HWND owner) {
 #include "layout_fix.c" /* Pause: «ghbdtn» → «привет» */
 #include "msg.c"        /* исчезающие сообщения коллегам — через ту же папку, что нарды */
 #include "convert.c" /* Shift-drag conversion ring; real OLE drop target */
+#include "ai_file_ask.c" /* «прочитай / переведи файл» в чате: Tesseract и исполнитель конвертера — после convert.c */
 #include "tools.c" /* после нардов: автообновление смотрит, не открыты ли они */
 
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -5466,6 +5467,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
     if (argv && argc >= 3 && !wcscmp(argv[1], L"--idlefight")) if_test_shots(argv[2]);
     if (argv && argc >= 3 && !wcscmp(argv[1], L"--xptest")) export_test(argv[2]);
     if (argv && argc >= 4 && !wcscmp(argv[1], L"--drawrec")) dr_test(argc, argv);
+    if (argv && argc >= 4 && !wcscmp(argv[1], L"--fqread")) fq_test(argc, argv);
     if (argv && argc >= 3 && !wcscmp(argv[1], L"--avatarshot")) ac_avatar_shot(argv[2]);
     if (argv && argc >= 4 && !wcscmp(argv[1], L"--drawui")) dr_ui_test(argc, argv);
     if (argv && argc >= 4 && !wcscmp(argv[1], L"--techno")) dr_techno_test(argc, argv);
