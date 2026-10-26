@@ -3439,7 +3439,7 @@ static void draw_set_label(HDC hdc, const wchar_t *text, RECT r, int clientBotto
    прячет clip_settings_children, как и всё, что ушло под шапку при прокрутке. */
 static const wchar_t *const kSecNames[SEC_COUNT] = {L"Курсор", L"Эффект", L"Вид", L"Поиск", L"Ещё", L"ИИ"};
 #define SET_SEC_H 28
-static int g_setContentH = 480; /* высота содержимого: по самой длинной вкладке */
+static int g_setContentH = 480; /* высота содержимого: по открытой вкладке (settings_fit_height подгоняет окно) */
 static BOOL g_layOpen;          /* раскладывается открытая вкладка */
 
 static void set_place(HWND h, int x, int y, int w, int hh) {
@@ -3751,7 +3751,7 @@ static void layout_settings(void) {
       break;
     }
     }
-    if (g_sy > yEnd) yEnd = g_sy;
+    if (sec == g_tab) yEnd = g_sy; /* высота — по открытой вкладке (до 2026.10.26 — по самой длинной) */
   }
   if (g_setMeasure) ReleaseDC(g_setHwnd, g_setMeasure);
   g_setMeasure = NULL;
@@ -4209,10 +4209,11 @@ static void place_settings(void) {
 
 static void refresh_search_cue(void) {
   if (!g_searchEdit) return;
+  /* подсказка короче поля: «обозначение, название или вопрос» обрезалось на «во…» */
   const wchar_t *c = g_engineForce == 4   ? L"найти в PLM"
                      : g_engineForce == 5 ? L"имя файла"
                      : g_engineForce == 3 ? L"спросить мини-ИИ"
-                                          : L"обозначение, название или вопрос";
+                                          : L"обозначение, имя, вопрос";
   SendMessageW(g_searchEdit, 0x1501, TRUE, (LPARAM)c);
 }
 
