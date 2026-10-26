@@ -1,7 +1,10 @@
-2026102605
-2026.10.26.5
-sha256 e363a7abe837b00446c18c0a984ed0509097f0b77d6bcab5a910916d7ace5976
-== 0 signature-rsa-sha256 dGPgwVrbH3K6aQw2Ja85Zd21iM53ZlG9oG8bxsDCnEtBIs/Deu0ziCnq0r4GEASOiN/pGPT08kRw9AU5QH0o4/5GpfzSHfQ7Ko5C2ltLKsgDSkNbN2vdAT5uFFrH98lRVt8JOjZgT4TQFXMTrPDBG4ANXy8NgE2tHaSlpiD8snuyna6Usy0UaKt5NxIl12Lrf3ahKY2UlwI5CKo/Rd6yO8zN1H+uH1rdVwI6sUZjmqUK5QiU/S7QR2ykmkK+r+5vlU8QkR9fIfpsvLVzg8iQRL2LReVakn4SNHRmQhRFfZzvDvdxaIAYNEzxTQzeVL23ONkL6gcX52p0drMamf6+uLrCuiFQFyzwEWrOY7u0x+JtvyBkucnriLsxuLYYsJ5Q/yOkZDiaebBKTdH23n/pzc/S2GACLW/dgucUspKHnjRl/qu2N4iV4dFztMqdS5GGgDvtDK2inmL0f+WtMPC6q+/lkML8dD8Q06JHDTLuIy54XygHu7C1wTf2Q/UCc7Oj
+2026102606
+2026.10.26.6
+sha256 aa22e03d759a9261ee4aeadec880ff91082a4a813afaa11ce5c8efc05e0b5706
+== 0 signature-rsa-sha256 w2Q5XXVQYBEpt73WW9haHu2bn9umuHbTydbFapsr9cv1UbdSPkbKbnryubXuGQqPT+2E2jda3iJGnmHqu92F9T4lvaDhBohhg1lxokCaATOGvDyHv9g06U0AwHnn3TA55qppsjvdXLn8dtoxlcAJnH3yIgq3ZaHYvNdzctQ3fexP+V0u3jLRVrXvYb5rU0WoeRfq5l/N4RzqYIHnStzc78XG1D10gRuBcUBF0BqdxaIZ7f1oC2n77Ghgtvg2C+mOhAQ9oEB/hC6yw3rHqJyE68QG5+ZJy3otIIE8iOuO5CV71b361mVbchDF12MDwT/dHGF6uW0JulpeStgfWCtkxUQJ7s7/OF5zHqQ8c8OplIm0qNWV6bb+kgeTZ7uyBBP4fg1OJRXGdW+4Y97oA2qupLRtySKufzVnqLqx0KRAYLdQIOCkjLhzhM38LVdT2ec5xRBUhCmTe5l4k2rzqQxMCZY25BEM0EDClsHeT22cJd45R5CHG3CIN1CNA2zqorlN
+== 2026.10.26.6
+«Ссылка» в кольце Shift переделана: вместо текста на тысячи знаков с файлом внутри теперь обычная ссылка на файл. Потяните файл с зажатым Shift и задержите мышь на плитке «Ссылка» — кольцо разделится на два полукруга. «Включая файл» кладёт в буфер ссылку: вставьте её в письмо Outlook или документ Word, и щелчок по ней сразу откроет файл. «До файла» кладёт только путь текстом. Отпустить прямо на «Ссылке» — то же, что «Включая файл». Для файла на сетевом диске берётся сетевой путь (\\сервер\папка\…), чтобы ссылка открылась и у коллеги; файл с вашего диска C: у коллеги не откроется — CursorPad об этом предупредит. Пункт «Ещё → Сохранить файл из ссылки» убран.
+
 == 2026.10.26.5
 Файл можно отдать ссылкой. Потяните один файл любого формата с зажатым Shift и отпустите на плитке «Ссылка» в кольце — в буфере обмена окажется ссылка «cursorpad:f1.…», внутри которой сам файл (до 10 МБ; текст и таблицы сжимаются). Вставьте её в письмо или сообщение. Когда получатель скопирует ссылку, его CursorPad покажет у часов «Скопирована ссылка с файлом»: щелчок — «Сохранить как» в «Загрузки», и файл выделится в проводнике. То же — «Ещё → Сохранить файл из ссылки». Если мессенджер обрезал длинную ссылку, CursorPad скажет, сколько знаков пришло, — тогда лучше отправить письмом.
 
