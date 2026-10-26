@@ -2021,7 +2021,8 @@ static BOOL ac_review_start(const wchar_t *web, const wchar_t *note) {
     turn.png = g_acTurns[i].png; turn.pngLen = g_acTurns[i].pngLen; break;
   }
   ac_web_foot(web, note);
-  ai_out_cap(900); char *body = ai_body_chat(sys, &turn, 1, FALSE); ai_out_cap(0);
+  /* самопроверка черновика — JSON по схеме, без размышления */
+  ai_out_cap(900); char *body = ai_body_chat(sys, &turn, 1, FALSE, TRUE); ai_out_cap(0);
   if (body) {
     const char *schema = ",\"response_format\":{\"type\":\"json_schema\",\"json_schema\":{\"name\":\"drawing_review\",\"strict\":true,\"schema\":{\"type\":\"object\",\"properties\":{\"material\":{\"type\":\"string\",\"maxLength\":80},\"requirements\":{\"type\":\"string\",\"maxLength\":250},\"operations\":{\"type\":\"array\",\"maxItems\":8,\"items\":{\"type\":\"string\",\"maxLength\":160}},\"unknown\":{\"type\":\"string\",\"maxLength\":350}},\"required\":[\"material\",\"requirements\",\"operations\",\"unknown\"],\"additionalProperties\":false}}}}";
     size_t len = strlen(body); char *structured = (char *)malloc(len + strlen(schema) + 1);
@@ -2759,7 +2760,7 @@ static void ac_send(void) {
         t[i].pngLen = g_acTurns[i].pngLen;
       }
       ai_out_cap(192);
-      id = ai_ask_chat_async(ac_cmd_instruction(), t + g_acN - 1, 1, 180000, g_acWnd, WM_AI_CHAT, NULL);
+      id = ai_ask_chat_plain_async(ac_cmd_instruction(), t + g_acN - 1, 1, 180000, g_acWnd, WM_AI_CHAT, NULL);
       ai_out_cap(0);
       free(t);
     }

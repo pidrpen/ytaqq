@@ -62,6 +62,10 @@ typedef struct AiTurn {
    реплика — вопрос; больше ai_chat_budget — возвращает 0. */
 int ai_ask_chat_async(const wchar_t *instruction, const AiTurn *turns, int n, DWORD timeoutMs, HWND notify,
                       UINT msg, void *user);
+/* то же без размышления модели: ответ по уже собранным данным инструментов или выбор
+   команды — там размышление только тратит время и может съесть весь лимит ответа */
+int ai_ask_chat_plain_async(const wchar_t *instruction, const AiTurn *turns, int n, DWORD timeoutMs, HWND notify,
+                            UINT msg, void *user);
 int ai_ask_files_async(const wchar_t *instruction, const AiTurn *turns, int n, HWND notify, UINT msg,
                        LONG task, const wchar_t *goal, const wchar_t *plan,
                        const wchar_t *observation, int observationState, int planCount);

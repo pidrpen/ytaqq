@@ -90,7 +90,8 @@ static char *ac_route_body(const wchar_t *q) {
     swprintf(input + wcslen(input), room - wcslen(input), L"%ls: %ls\n", g_acTurns[i].assistant ? L"Ассистент" : L"Пользователь", g_acTurns[i].text);
   swprintf(input + wcslen(input), room - wcslen(input), L"\nПОСЛЕДНЯЯ РЕПЛИКА ДЛЯ КЛАССИФИКАЦИИ:\n%ls", q);
   AiTurn turn = {0}; turn.text = input;
-  ai_out_cap(160); char *body = ai_body_chat(sys, &turn, 1, FALSE); ai_out_cap(0); free(input);
+  /* выбор обработчика — без размышления: это классификатор на 160 токенов */
+  ai_out_cap(160); char *body = ai_body_chat(sys, &turn, 1, FALSE, TRUE); ai_out_cap(0); free(input);
   if (!body) return NULL;
   size_t len = strlen(body); char *structured = (char *)malloc(len + sizeof(kAcRouteSchema));
   if (structured) { memcpy(structured, body, len - 1); strcpy(structured + len - 1, kAcRouteSchema); }
