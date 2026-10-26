@@ -1,7 +1,10 @@
-2026102604
-2026.10.26.4
-sha256 8497a1a4a2c53547ba16abdde9e6afc31d374263838ed496a29d653e6cc3761f
-== 0 signature-rsa-sha256 dlwEL2DT0ycm283Yb4gvd59RF7AzIWyJKvowRJWyaHRMqYIJsjWaAVtaWn24CXL506EX5GsP8ObkR/lk07p0vJZIXKCdBwH+VGGsU4YZSsqxim0akFacBA6xMBBdT6oZXM6V9vw1POJACdKx2ivwg/8lTqKL6yfs0HODjYICdAXI+evuVQ9VLlvDKEJtoLjsV82IkAlQxajdr4uUIIWS5UaBNaB9IDvAiYVAjRz5OHtjeDFhdVdlOaaLYOGMN1LDcnk0+NX/3wGxbytG4f4OLdE6CLgfz+VD/r0Qtl80H9z6aGJfZ1+fbRGaAuDkpkztG8xjybyuKuiLRFYEJ+b1qfgSlVN311i0v1mz1gMT9RMftQi11U7iDewn4DCFKmWS54MEgMlmnp5eLjsTuRT9c/RiidaSCtEl0+LjgZpsz2ef/ZEvzE9+ZFH72pKP8GPbrzaa+2a7hJV5vEHRhJlmYa+3o2HRM7dgKFk5gnHREuErGaUZ3ZktPd73OHJtX4/V
+2026102605
+2026.10.26.5
+sha256 e363a7abe837b00446c18c0a984ed0509097f0b77d6bcab5a910916d7ace5976
+== 0 signature-rsa-sha256 dGPgwVrbH3K6aQw2Ja85Zd21iM53ZlG9oG8bxsDCnEtBIs/Deu0ziCnq0r4GEASOiN/pGPT08kRw9AU5QH0o4/5GpfzSHfQ7Ko5C2ltLKsgDSkNbN2vdAT5uFFrH98lRVt8JOjZgT4TQFXMTrPDBG4ANXy8NgE2tHaSlpiD8snuyna6Usy0UaKt5NxIl12Lrf3ahKY2UlwI5CKo/Rd6yO8zN1H+uH1rdVwI6sUZjmqUK5QiU/S7QR2ykmkK+r+5vlU8QkR9fIfpsvLVzg8iQRL2LReVakn4SNHRmQhRFfZzvDvdxaIAYNEzxTQzeVL23ONkL6gcX52p0drMamf6+uLrCuiFQFyzwEWrOY7u0x+JtvyBkucnriLsxuLYYsJ5Q/yOkZDiaebBKTdH23n/pzc/S2GACLW/dgucUspKHnjRl/qu2N4iV4dFztMqdS5GGgDvtDK2inmL0f+WtMPC6q+/lkML8dD8Q06JHDTLuIy54XygHu7C1wTf2Q/UCc7Oj
+== 2026.10.26.5
+Файл можно отдать ссылкой. Потяните один файл любого формата с зажатым Shift и отпустите на плитке «Ссылка» в кольце — в буфере обмена окажется ссылка «cursorpad:f1.…», внутри которой сам файл (до 10 МБ; текст и таблицы сжимаются). Вставьте её в письмо или сообщение. Когда получатель скопирует ссылку, его CursorPad покажет у часов «Скопирована ссылка с файлом»: щелчок — «Сохранить как» в «Загрузки», и файл выделится в проводнике. То же — «Ещё → Сохранить файл из ссылки». Если мессенджер обрезал длинную ссылку, CursorPad скажет, сколько знаков пришло, — тогда лучше отправить письмом.
+
 == 2026.10.26.4
 Помощник с инструментами (перевод PDF и сканов, чтение файлов) реже сдаётся: локальной модели дано до 500 секунд на один ответ вместо 120, а если инструмент два раза подряд отказал одинаково, помощник сразу объясняет, чем кончился отказ, и не тратит третий шаг. Подсказку «назовите полный путь» он теперь пишет только когда дело в пути. В мини-чате размышление модели показывается свёрнутым блоком, а шаги помощника — над ответом.
 
