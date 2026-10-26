@@ -5,7 +5,9 @@ import importlib.util
 from pathlib import Path
 import sys
 
-spec = importlib.util.spec_from_file_location('coverage_bridge', Path(sys.argv[1]).resolve())
+bridge_path = Path(sys.argv[1]).resolve()
+sys.path.insert(0, str(bridge_path.parent))  # bridge.py импортирует соседей (network_diagnostics); с -I их папки в sys.path нет
+spec = importlib.util.spec_from_file_location('coverage_bridge', bridge_path)
 bridge = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(bridge)
 

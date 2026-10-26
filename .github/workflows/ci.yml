@@ -20,19 +20,30 @@ concurrency:
 jobs:
   build:
     name: Сборка
-    runs-on: ubuntu-latest
+    # не ubuntu-latest: с 19.10.2026 он переезжает на Ubuntu 26, и установка mingw там шла
+    # по 30–45 минут (26.10: прогоны 40325356502, 40357991945) — следующий push отменял сборку
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - name: Компилятор MinGW-w64
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq gcc-mingw-w64-x86-64 binutils-mingw-w64-x86-64
+          sudo apt-get -o Acquire::Retries=3 install -y -qq --no-install-recommends gcc-mingw-w64-x86-64 binutils-mingw-w64-x86-64
       - name: Проверочная сборка (-Wall -Werror)
         run: sh native/build.sh --dev
+      - name: Сборки под флагами (только синтаксис)
+        # код под #ifdef иначе никто не компилирует: стенды README (SET_TEST, QWEN_TEST, CVX_LAB,
+        # VISUAL_TEST) и AGENT_LAB собирают руками и редко
+        working-directory: native
+        run: |
+          set -eu
+          for flag in SET_TEST QWEN_TEST CVX_LAB VISUAL_TEST AGENT_LAB; do
+            x86_64-w64-mingw32-gcc -fsyntax-only -O2 -Wall -Werror -Wno-unknown-pragmas -finput-charset=UTF-8 -municode "-D$flag" cursorpad.c
+          done
 
   tests:
     name: Тесты
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

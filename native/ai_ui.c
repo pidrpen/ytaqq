@@ -391,12 +391,12 @@ static DWORD WINAPI ai_ui_unzip_thread(LPVOID p) {
   wchar_t dir[MAX_PATH], exe[MAX_PATH];
   ai_mkdirs();
   ai_dir(dir, gpu ? L"llama-vk" : L"llama");
-  g_aiSrvExe[0] = 0;
+  /* g_aiSrvExe уже очищен и настройки записаны потоком окна (ai_ui_pick_llama):
+     ai_save отсюда шёл одновременно с тем же ai_save из окна — два потока в один ai.txt */
   BOOL ok = ai_unzip(f, dir) && ai_server_exe(gpu, exe);
   ai_log(L"llama.cpp из %s → %s: %s", f, dir, ok ? L"готово" : L"не вышло");
   ai_dl_say(ok ? L"llama.cpp распакован. Нажмите «Проверить»" : L"Не распаковался архив — в нём нет llama-server.exe?");
   g_aiTestMsg[0] = 0;
-  ai_save();
   InterlockedExchange(&g_aiDl.active, 0);
   if (g_aiDlNotify) PostMessageW(g_aiDlNotify, WM_AI_UI, 0, 0);
   return 0;
@@ -422,6 +422,7 @@ static void ai_ui_pick_llama(HWND hwnd) {
     _snwprintf(g_aiTestMsg, 300, L"llama-server: %s", f);
   } else {
     if (g_aiDl.active) return;
+    g_aiSrvExe[0] = 0; /* распакованный — вместо указанного руками; в ai.txt это уйдёт ниже, из потока окна */
     lstrcpynW(g_aiZipPick, f, MAX_PATH);
     g_aiDlNotify = hwnd;
     g_aiDl.msg[0] = 0;

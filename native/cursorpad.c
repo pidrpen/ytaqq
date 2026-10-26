@@ -146,6 +146,8 @@
 #define TIMER_FILES_PLAN 10 /* раз в минуту: не пора ли полный обход папки */
 #define TIMER_IDLE_FIGHT 40 /* раз в секунду: не пора ли начать бой при бездействии */
 #define ID_FILES_NOTIFY 157
+#define ID_FILES_STAT 138 /* «Индекс: —» и его полоса хода: раньше 136/137, а 136 — это ID_CUR_K7 «Риас» в том же окне */
+#define ID_FILES_BAR 139
 #define ID_WATCH_EDIT 158
 #define ID_WATCH_BROWSE 159
 #define ID_SHARE_EDIT 155
@@ -4506,9 +4508,9 @@ static void create_settings(HWND owner) {
   g_btnIdx = mk_btn(g_setHwnd, L"Обновить JSON", ID_FILES_REFRESH);
   g_filesStat = CreateWindowExW(0, L"STATIC", L"Индекс: —",
                                 WS_CHILD | WS_VISIBLE | SS_LEFT | SS_ENDELLIPSIS, 0, 0, 200, 22, g_setHwnd,
-                                (HMENU)(INT_PTR)136, NULL, NULL);
+                                (HMENU)(INT_PTR)ID_FILES_STAT, NULL, NULL);
   g_filesBar = CreateWindowExW(0, PROGRESS_CLASSW, L"", WS_CHILD | PBS_MARQUEE, 0, 0, 200, 6,
-                               g_setHwnd, (HMENU)(INT_PTR)137, NULL, NULL);
+                               g_setHwnd, (HMENU)(INT_PTR)ID_FILES_BAR, NULL, NULL);
   g_chkNotify = CreateWindowExW(0, L"BUTTON", L"Сообщать о новых и изменённых файлах",
                                 WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 0, 0, 240, 26,
                                 g_setHwnd, (HMENU)(INT_PTR)ID_FILES_NOTIFY, NULL, NULL);
