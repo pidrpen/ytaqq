@@ -19,8 +19,8 @@ enum { CV_T_IMAGE, CV_T_PDF, CV_T_TEXT, CV_T_ZIP, CV_T_MORE };
 /* shell — образец имени для значка из Проводника (кольцо «Создать»); folder — значок папки */
 typedef struct { wchar_t icon; const wchar_t *label, *title, *note; int tint; const wchar_t *shell; BOOL folder; } CvRingItem;
 /* по номерам действий: 0–3 картинки, 4 PDF, 5 TXT, 6 CSV, 7 ZIP, 8–14 окно параметров, 15 «Ещё»,
-   24 — ссылка с файлом (file_link_ui.c) */
-static const CvRingItem kCvRing[25] = {
+   24 — «Ссылка», 25 и 26 — её полукруги: «Включая файл» и «До файла» (file_link_ui.c) */
+static const CvRingItem kCvRing[27] = {
     {0xEB9F, L"PNG", L"В PNG", L"копия рядом с исходником", CV_T_IMAGE},
     {0xEB9F, L"JPG", L"В JPG", L"копия рядом с исходником", CV_T_IMAGE},
     {0xEB9F, L"BMP", L"В BMP", L"копия рядом с исходником", CV_T_IMAGE},
@@ -45,7 +45,9 @@ static const CvRingItem kCvRing[25] = {
     {0xE8A5, L"TXT", L"Текстовый файл", L"отпустите — появится на столе", CV_T_MORE, L"a.txt", FALSE},
     {0xE8A5, L"Word", L"Документ Word", L"отпустите — появится на столе", CV_T_TEXT, L"a.docx", FALSE},
     {0xE80A, L"Excel", L"Книга Excel", L"отпустите — появится на столе", CV_T_TEXT, L"a.xlsx", FALSE},
-    {0xE71B, L"Ссылка", L"Ссылка с файлом", L"в буфер обмена; до 10 МБ", CV_T_ZIP}};
+    {0xE71B, L"Ссылка", L"Ссылка", L"задержите: ссылка или путь", CV_T_ZIP},
+    {0xE8A5, L"Включая файл", L"Включая файл", L"ссылка — щелчок откроет файл", CV_T_ZIP},
+    {0xE71B, L"До файла", L"До файла", L"только путь — в буфер", CV_T_ZIP}};
 static const COLORREF kCvTint[] = {RGB(8, 145, 178), RGB(220, 38, 38), RGB(22, 163, 74), RGB(217, 119, 6),
                                    RGB(100, 116, 139)};
 

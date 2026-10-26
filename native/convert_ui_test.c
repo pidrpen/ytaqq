@@ -99,8 +99,11 @@ static int preview(const wchar_t *dir, int dpi) {
       preview_shot(dir, L"5b-tiffs", t); }
     preview_select(word, 1); g_cvInHub = TRUE; preview_shot(dir, L"6-word-center", t);
     preview_select(other, 1); preview_shot(dir, L"7-other", t);
-    for (int i = 0; i < g_cvCount; i++) if (g_cvFormats[i] == 24) g_cvHover = i, g_cvLevel[i] = 1; /* «Ссылка с файлом» */
+    for (int i = 0; i < g_cvCount; i++) if (g_cvFormats[i] == 24) g_cvHover = i, g_cvLevel[i] = 1; /* «Ссылка» */
     preview_shot(dir, L"7b-other-link", t);
+    g_cvLinkMode = TRUE; g_cvCount = 2; g_cvFormats[0] = 25; g_cvFormats[1] = 26; /* задержались на «Ссылке» — два полукруга */
+    memset(g_cvLevel, 0, sizeof(g_cvLevel)); g_cvHover = 0; g_cvLevel[0] = 1; preview_shot(dir, L"7c-link-file", t);
+    g_cvLevel[0] = 0; g_cvHover = 1; g_cvLevel[1] = 1; preview_shot(dir, L"7d-link-path", t); g_cvLinkMode = FALSE;
     g_cvCreate = TRUE; g_cvCount = 4; for (int i = 0; i < 4; i++) g_cvFormats[i] = 20 + i;
     g_cvHover = -1; memset(g_cvLevel, 0, sizeof(g_cvLevel)); preview_shot(dir, L"11-desktop", t);
     g_cvHover = 2; g_cvLevel[2] = 1; preview_shot(dir, L"12-desktop-word", t); g_cvCreate = FALSE;

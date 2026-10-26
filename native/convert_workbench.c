@@ -376,9 +376,9 @@ static void cvx_show(void) {
   ShowWindow(g_cvxWnd,SW_SHOWNORMAL);SetForegroundWindow(g_cvxWnd);cvx_controls();cvx_hint();if(g_cvxHistoryOpen&&!g_cvBusy)cvx_history(15);
 }
 static BOOL cvx_dispatch(const CvSelection *selection,int action) {
-  if(action==24){ /* ссылка с файлом: читать и сжимать — уже после сброса, проводник не ждёт */
-    wchar_t *path=selection->count==1?_wcsdup(selection->paths[0]):NULL;if(!path)return FALSE;
-    if(!PostMessageW(g_cvWnd,WM_CV_LINK,0,(LPARAM)path)){free(path);return FALSE;}
+  if(action>=24&&action<=26){ /* «Ссылка»: 24, 25 — ссылка, открывающая файл, 26 — только путь; буфер — после сброса */
+    CvSelection *copy=(CvSelection*)malloc(sizeof(*copy));if(!copy)return FALSE;*copy=*selection;
+    if(!PostMessageW(g_cvWnd,WM_CV_LINK,action!=26,(LPARAM)copy)){free(copy);return FALSE;}
     return TRUE;
   }
   if(action==19){ /* один TIFF — в окне объединения: там порядок страниц и «Сохранить как TIFF» */
