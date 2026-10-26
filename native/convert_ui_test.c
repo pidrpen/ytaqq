@@ -55,25 +55,46 @@ static LRESULT CALLBACK test_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
   }
   return DefWindowProcW(hwnd,msg,wp,lp);
 }
-/* кадр кольца (premultiplied) поверх фона окна проводника — в BMP */
-static void capture(const wchar_t *path) {
-  int size = g_cvBmpSize; if (!g_cvPix || !size) return;
-  BITMAPINFOHEADER info = {0}; info.biSize = sizeof(info); info.biWidth = size; info.biHeight = -size; info.biPlanes = 1; info.biBitCount = 32;
-  DWORD bytes = (DWORD)size*size*4; BYTE *pixels = (BYTE *)malloc(bytes); if (!pixels) return;
+/* кадр w×h (premultiplied) поверх фона окна проводника — в BMP */
+static void capture_pix(const wchar_t *path, const BYTE *pix, int w, int h) {
+  if (!pix || w <= 0 || h <= 0) return;
+  BITMAPINFOHEADER info = {0}; info.biSize = sizeof(info); info.biWidth = w; info.biHeight = -h; info.biPlanes = 1; info.biBitCount = 32;
+  DWORD bytes = (DWORD)w*h*4; BYTE *pixels = (BYTE *)malloc(bytes); if (!pixels) return;
   COLORREF back = g_uiTok.surface == RGB(255,255,255) ? RGB(243,243,243) : RGB(25,25,25);
   for (DWORD i = 0; i < bytes; i += 4) {
-    int a = g_cvPix[i+3];
-    pixels[i] = (BYTE)(g_cvPix[i] + GetBValue(back)*(255-a)/255); pixels[i+1] = (BYTE)(g_cvPix[i+1] + GetGValue(back)*(255-a)/255);
-    pixels[i+2] = (BYTE)(g_cvPix[i+2] + GetRValue(back)*(255-a)/255); pixels[i+3] = 255;
+    int a = pix[i+3];
+    pixels[i] = (BYTE)(pix[i] + GetBValue(back)*(255-a)/255); pixels[i+1] = (BYTE)(pix[i+1] + GetGValue(back)*(255-a)/255);
+    pixels[i+2] = (BYTE)(pix[i+2] + GetRValue(back)*(255-a)/255); pixels[i+3] = 255;
   }
   BITMAPFILEHEADER header = {0}; header.bfType=0x4d42; header.bfOffBits=sizeof(header)+sizeof(info); header.bfSize=header.bfOffBits+bytes;
   FILE *file = _wfopen(path,L"wb"); if (file) { fwrite(&header,sizeof(header),1,file); fwrite(&info,sizeof(info),1,file); fwrite(pixels,bytes,1,file); fclose(file); }
   free(pixels);
 }
+static void capture(const wchar_t *path) { capture_pix(path, g_cvPix, g_cvBmpSize, g_cvBmpSize); }
+/* кольцо и окно полукругов «Ссылки» — как стоят на экране, одним кадром */
+static void capture_pair(const wchar_t *path) {
+  int rs = g_cvBmpSize, ss = g_cvSubBmpSize; if (!g_cvPix || !g_cvSubPix || !rs || !ss) return;
+  int x0 = min(g_cvAt.x, g_cvSubAt.x), y0 = min(g_cvAt.y, g_cvSubAt.y);
+  int w = max(g_cvAt.x + rs, g_cvSubAt.x + ss) - x0, h = max(g_cvAt.y + rs, g_cvSubAt.y + ss) - y0;
+  BYTE *canvas = (BYTE *)calloc((size_t)w * h, 4); if (!canvas) return;
+  const BYTE *src[2] = {g_cvPix, g_cvSubPix}; int side[2] = {rs, ss}; POINT at[2] = {g_cvAt, g_cvSubAt};
+  for (int k = 0; k < 2; k++)
+    for (int y = 0; y < side[k]; y++)
+      for (int x = 0; x < side[k]; x++) {
+        const BYTE *p = src[k] + ((size_t)y * side[k] + x) * 4; BYTE *d = canvas + ((size_t)(at[k].y - y0 + y) * w + at[k].x - x0 + x) * 4;
+        for (int c = 0; c < 4; c++) d[c] = (BYTE)(p[c] + d[c] * (255 - p[3]) / 255);
+      }
+  capture_pix(path, canvas, w, h);
+  free(canvas);
+}
 /* --preview папка [dpi]: состояния кольца в светлой и тёмной теме, без окон и OLE */
 static void preview_shot(const wchar_t *dir, const wchar_t *name, int theme) {
   wchar_t path[MAX_PATH]; swprintf(path, MAX_PATH, L"%ls\\%ls-%ls.bmp", dir, name, theme ? L"dark" : L"light");
   g_cvShownAt = 0; cv_paint(); capture(path);
+}
+static void preview_pair(const wchar_t *dir, const wchar_t *name, int theme) {
+  wchar_t path[MAX_PATH]; swprintf(path, MAX_PATH, L"%ls\\%ls-%ls.bmp", dir, name, theme ? L"dark" : L"light");
+  g_cvShownAt = g_cvSubShownAt = 0; cv_paint(); cv_sub_paint(); capture_pair(path);
 }
 static void preview_select(const wchar_t *const *paths, int count) {
   g_cvSelection.count = count; for (int i = 0; i < count; i++) lstrcpynW(g_cvSelection.paths[i], paths[i], MAX_PATH);
@@ -101,9 +122,11 @@ static int preview(const wchar_t *dir, int dpi) {
     preview_select(other, 1); preview_shot(dir, L"7-other", t);
     for (int i = 0; i < g_cvCount; i++) if (g_cvFormats[i] == 24) g_cvHover = i, g_cvLevel[i] = 1; /* «Ссылка» */
     preview_shot(dir, L"7b-other-link", t);
-    g_cvLinkMode = TRUE; g_cvCount = 2; g_cvFormats[0] = 25; g_cvFormats[1] = 26; /* задержались на «Ссылке» — два полукруга */
-    memset(g_cvLevel, 0, sizeof(g_cvLevel)); g_cvHover = 0; g_cvLevel[0] = 1; preview_shot(dir, L"7c-link-file", t);
-    g_cvLevel[0] = 0; g_cvHover = 1; g_cvLevel[1] = 1; preview_shot(dir, L"7d-link-path", t); g_cvLinkMode = FALSE;
+    /* задержались на «Ссылке» — рядом с кольцом её полукруги; мышь на верхнем, потом на нижнем */
+    g_cvAt.x = 300; g_cvAt.y = 150; cv_sub_place(); g_cvHover = -1; memset(g_cvLevel, 0, sizeof(g_cvLevel)); g_cvLevel[g_cvSubTile] = 1;
+    g_cvSubHover = 0; g_cvSubLevel[0] = 1; preview_pair(dir, L"7c-link-file", t);
+    g_cvSubHover = 1; g_cvSubLevel[0] = 0; g_cvSubLevel[1] = 1; preview_pair(dir, L"7d-link-folder", t);
+    g_cvSubOn = FALSE; g_cvSubHover = -1;
     g_cvCreate = TRUE; g_cvCount = 4; for (int i = 0; i < 4; i++) g_cvFormats[i] = 20 + i;
     g_cvHover = -1; memset(g_cvLevel, 0, sizeof(g_cvLevel)); preview_shot(dir, L"11-desktop", t);
     g_cvHover = 2; g_cvLevel[2] = 1; preview_shot(dir, L"12-desktop-word", t); g_cvCreate = FALSE;
@@ -179,7 +202,35 @@ int wmain(int argc, wchar_t **argv) {
   /* отпустили в центре — ничего не создаётся, кольцо уходит само */
   cv_gesture(p0,TRUE,TRUE,FALSE,FALSE,TRUE); cv_gesture(p1,TRUE,TRUE,FALSE,FALSE,FALSE); cv_gesture(p1,FALSE,TRUE,FALSE,FALSE,FALSE);
   if (PeekMessageW(&made,g_cvWnd,WM_CV_CREATE,WM_CV_CREATE,PM_REMOVE) || IsWindowVisible(g_cvWnd)) return 21;
+  /* «Ссылка»: 250 мс на плитке — рядом с кольцом её полукруги, кольцо на месте; центр кольца их убирает;
+     с полукругов назад на «Ссылку» — остаются; отпустили на нижнем — «До файла» (26) */
+  POINT at={450,300}; cv_show(at,FALSE); g_cvDismissed=FALSE;
+  CvGeo lg=cv_geo(g_cvSize,1.0f); POINTL mid={g_cvAt.x+(LONG)lg.c,g_cvAt.y+(LONG)lg.c};
+  effect=DROPEFFECT_COPY|DROPEFFECT_MOVE; cv_enter(&g_cvDrop.iface,&data.iface,MK_SHIFT,mid,&effect);
+  if (g_cvSubTile<0 || g_cvSubTile>=g_cvCount || g_cvFormats[g_cvSubTile]!=24) return 22;
+  float la=-1.5707963f+g_cvSubTile*6.2831853f/g_cvCount, lr=(lg.rin+lg.R)/2;
+  POINTL tile={mid.x+(LONG)(cosf(la)*lr),mid.y+(LONG)(sinf(la)*lr)};
+  effect=DROPEFFECT_COPY|DROPEFFECT_MOVE; cv_over(&g_cvDrop.iface,MK_SHIFT,tile,&effect);
+  if (g_cvHover!=g_cvSubTile || g_cvSubOn) return 23;
+  g_cvLinkSince=(GetTickCount()-300)|1; cv_link_dwell();
+  int ringCount=g_cvCount;
+  if (!g_cvSubOn || !IsWindowVisible(g_cvSub) || !IsWindowVisible(g_cvWnd) || g_cvFormats[g_cvSubTile]!=24) return 24;
+  effect=DROPEFFECT_COPY|DROPEFFECT_MOVE; cv_over(&g_cvDrop.iface,MK_SHIFT,mid,&effect);
+  if (g_cvSubOn || IsWindowVisible(g_cvSub) || !IsWindowVisible(g_cvWnd)) return 25;
+  effect=DROPEFFECT_COPY|DROPEFFECT_MOVE; cv_over(&g_cvDrop.iface,MK_SHIFT,tile,&effect);
+  g_cvLinkSince=(GetTickCount()-300)|1; cv_link_dwell(); if (!g_cvSubOn) return 26;
+  int half=g_cvSubSize/2; POINTL low={g_cvSubAt.x+half,g_cvSubAt.y+half+half/2};
+  cv_leave(&g_cvDrop.iface); effect=DROPEFFECT_COPY|DROPEFFECT_MOVE;
+  g_cvSubDrop.iface.lpVtbl->DragEnter(&g_cvSubDrop.iface,&data.iface,MK_SHIFT,low,&effect);
+  if (g_cvSubHover!=1 || effect!=DROPEFFECT_COPY || !g_cvSubOn) return 27;
+  g_cvSubDrop.iface.lpVtbl->DragLeave(&g_cvSubDrop.iface); effect=DROPEFFECT_COPY|DROPEFFECT_MOVE;
+  cv_enter(&g_cvDrop.iface,&data.iface,MK_SHIFT,tile,&effect);
+  if (!g_cvSubOn || g_cvCount!=ringCount || g_cvHover!=g_cvSubTile) return 28;
+  cv_leave(&g_cvDrop.iface); effect=DROPEFFECT_COPY|DROPEFFECT_MOVE;
+  g_cvSubDrop.iface.lpVtbl->DragEnter(&g_cvSubDrop.iface,&data.iface,MK_SHIFT,low,&effect);
+  effect=DROPEFFECT_COPY|DROPEFFECT_MOVE; g_cvSubDrop.iface.lpVtbl->Drop(&g_cvSubDrop.iface,&data.iface,MK_SHIFT,low,&effect);
+  if (g_cvTestLink!=26 || effect!=DROPEFFECT_COPY || IsWindowVisible(g_cvSub) || IsWindowVisible(g_cvWnd)) return 29;
   cv_shutdown(); DestroyWindow(g_hwnd);
-  puts(ok ? "PASS: OLE registration, delayed CF_HDROP retry without re-click, immediate paint, center cancellation, Shift, multiple-file selection, folder-only selection, Shift-click range kept, desktop create ring, COPY effect, threaded conversion" : "FAIL: conversion");
+  puts(ok ? "PASS: OLE registration, delayed CF_HDROP retry without re-click, immediate paint, center cancellation, Shift, multiple-file selection, folder-only selection, Shift-click range kept, desktop create ring, COPY effect, threaded conversion, link semicircles beside the ring" : "FAIL: conversion");
   return ok ? 0 : 9;
 }

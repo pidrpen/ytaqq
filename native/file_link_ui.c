@@ -1,17 +1,18 @@
-/* ---- «Ссылка» в кольце Shift: ссылка, открывающая файл, или путь до него (с 2026.10.26) ----
+/* ---- «Ссылка» в кольце Shift: путь к файлу или к папке с ним (с 2026.10.26) ----
 
    Shift-перетаскивание файлов (convert.c) → плитка «Ссылка»; задержите на ней
-   мышь — кольцо сменится двумя полукругами:
-     «Включая файл» — ссылка, щелчок по которой сразу открывает файл: в буфер
-       «HTML Format» — <a href="file:///…">имя файла</a> (Outlook, Word, чаты
-       в браузере вставят её кликабельной) и тот же file:///… текстом;
-     «До файла» — только путь текстом, по одному на строку.
-   Отпустить прямо на «Ссылке» — то же, что «Включая файл».
+   мышь — рядом с кольцом выедут два полукруга (кольцо остаётся):
+     «Включая файл» — путь с именем файла: C:\Чертежи\Вал.pdf;
+     «До файла» — папка, где лежит файл: C:\Чертежи (у нескольких файлов из
+       одной папки — одна строка).
+   Отпустить прямо на «Ссылке» — то же, что «Включая файл». В буфер — текст, по
+   пути на строку, и «HTML Format» с тем же путём ссылкой <a href="file:///…">:
+   в письме Outlook и в Word он кликабельный — щелчок откроет файл или папку.
    Файл на подключённом сетевом диске (Z:\…) — путь сетевой, \\сервер\папка\…:
    у коллеги буква диска может быть другой. Переводит mpr.dll
    (WNetGetUniversalNameW), она загружается только здесь.
    В 2026.10.26.5 плитка зашивала содержимое файла в текст на тысячи знаков —
-   убрано: просили путь до файла, а «сам файл» — это ссылка, которая его открывает. */
+   убрано: просили путь до файла. */
 #include <winnetwk.h>
 
 /* Z:\… на подключённом сетевом диске → \\сервер\папка\…; иначе как есть */
@@ -96,13 +97,21 @@ static HGLOBAL flk_html(const wchar_t *frag) {
   return h;
 }
 
-/* «Ссылка»: asLink — ссылки, открывающие файлы («Включая файл»), иначе пути («До файла») */
-static void flk_send(const CvSelection *s, BOOL asLink) {
+/* папка пути: C:\a\b.pdf → C:\a, C:\b.pdf → C:\, \\сервер\папка\b.pdf → \\сервер\папка */
+static void flk_folder(wchar_t *path) {
+  wchar_t *slash = wcsrchr(path, L'\\');
+  if (!slash) return;
+  if (slash == path + 2 && path[1] == L':') slash[1] = 0; /* корень диска — с косой чертой */
+  else *slash = 0;
+}
+
+/* «Ссылка»: пути к файлам или (folder) к их папкам — текстом и кликабельными ссылками */
+static void flk_send(const CvSelection *s, BOOL folder) {
   if (!s || s->count < 1) return;
-  enum { URL_CAP = 3100, FRAG_PER = URL_CAP * 6 + MAX_PATH * 6 + 40 };
-  wchar_t *text = (wchar_t *)calloc((size_t)s->count * (URL_CAP + 2) + 1, sizeof(wchar_t));
-  wchar_t *frag = asLink ? (wchar_t *)calloc((size_t)s->count * FRAG_PER + 1, sizeof(wchar_t)) : NULL;
-  if (!text || (asLink && !frag)) {
+  enum { URL_CAP = 3100, FRAG_PER = URL_CAP * 6 + 1024 * 6 + 40 };
+  wchar_t *text = (wchar_t *)calloc((size_t)s->count * 1026 + 1, sizeof(wchar_t));
+  wchar_t *frag = (wchar_t *)calloc((size_t)s->count * FRAG_PER + 1, sizeof(wchar_t));
+  if (!text || !frag) {
     free(text);
     free(frag);
     return;
@@ -110,37 +119,48 @@ static void flk_send(const CvSelection *s, BOOL asLink) {
   BOOL local = FALSE;
   wchar_t first[1024] = L"";
   size_t tl = 0, fl = 0;
+  int lines = 0;
   for (int i = 0; i < s->count; i++) {
     wchar_t net[1024], url[URL_CAP];
     flk_net_path(s->paths[i], net, 1024);
-    if (!i) lstrcpynW(first, net, 1024);
-    if (net[0] != L'\\') local = TRUE; /* по такому пути у коллеги файл не откроется */
-    if (asLink) flk_url(net, url, URL_CAP);
-    if (i) text[tl++] = L'\r', text[tl++] = L'\n';
-    wcscpy(text + tl, asLink ? url : net);
-    tl += wcslen(text + tl);
-    if (asLink) {
-      const wchar_t *name = wcsrchr(net, L'\\');
-      name = name ? name + 1 : net;
-      if (i) wcscpy(frag + fl, L"<br>\r\n"), fl += 6;
-      wcscpy(frag + fl, L"<a href=\""), fl += 9;
-      fl += flk_html_put(frag + fl, url);
-      wcscpy(frag + fl, L"\">"), fl += 2;
-      fl += flk_html_put(frag + fl, name);
-      wcscpy(frag + fl, L"</a>"), fl += 4;
+    if (folder) {
+      flk_folder(net);
+      BOOL seen = FALSE; /* файлы из одной папки — одна строка */
+      for (const wchar_t *line = text; !seen && line < text + tl;) {
+        const wchar_t *end = wcschr(line, L'\r');
+        size_t len = end ? (size_t)(end - line) : wcslen(line);
+        seen = len == wcslen(net) && !_wcsnicmp(line, net, len);
+        line = end ? end + 2 : text + tl;
+      }
+      if (seen) continue;
     }
+    if (!lines) lstrcpynW(first, net, 1024);
+    if (net[0] != L'\\') local = TRUE; /* по такому пути у коллеги не откроется */
+    flk_url(net, url, URL_CAP);
+    if (lines) {
+      text[tl++] = L'\r', text[tl++] = L'\n';
+      wcscpy(frag + fl, L"<br>\r\n"), fl += 6;
+    }
+    wcscpy(text + tl, net);
+    tl += wcslen(net);
+    wcscpy(frag + fl, L"<a href=\""), fl += 9;
+    fl += flk_html_put(frag + fl, url);
+    wcscpy(frag + fl, L"\">"), fl += 2;
+    fl += flk_html_put(frag + fl, net); /* подпись — тот же путь: вставится как текст, только кликабельный */
+    wcscpy(frag + fl, L"</a>"), fl += 4;
+    lines++;
   }
-  HGLOBAL hText = flk_global(text, (tl + 1) * sizeof(wchar_t)), hHtml = asLink ? flk_html(frag) : NULL;
+  HGLOBAL hText = flk_global(text, (tl + 1) * sizeof(wchar_t)), hHtml = flk_html(frag);
   free(text);
   free(frag);
-  BOOL ok = hText && (!asLink || hHtml) && OpenClipboard(g_hwnd);
+  BOOL ok = hText && OpenClipboard(g_hwnd);
   if (ok) {
     EmptyClipboard();
     g_ownClip = TRUE;
     /* что взял буфер — его; не взял — освобождаем сами */
     if (SetClipboardData(CF_UNICODETEXT, hText)) hText = NULL;
     else ok = FALSE;
-    if (asLink && SetClipboardData(RegisterClipboardFormatW(L"HTML Format"), hHtml)) hHtml = NULL;
+    if (hHtml && SetClipboardData(RegisterClipboardFormatW(L"HTML Format"), hHtml)) hHtml = NULL;
     CloseClipboard();
   }
   if (hText) GlobalFree(hText);
@@ -149,34 +169,31 @@ static void flk_send(const CvSelection *s, BOOL asLink) {
     show_status(L"Буфер обмена занят — попробуйте ещё раз");
     return;
   }
-  ai_log(L"%ls: %d шт., %ls", asLink ? L"Ссылка на файл" : L"Путь до файла", s->count, first);
+  ai_log(L"%ls: %d шт., %ls", folder ? L"Путь к папке" : L"Путь к файлу", lines, first);
   wchar_t shown[140], msg[300];
   if (wcslen(first) < 120) lstrcpynW(shown, first, 140);
   else _snwprintf(shown, 140, L"…%ls", first + wcslen(first) - 110);
   shown[139] = 0;
-  if (s->count > 1) _snwprintf(msg, 300, L"Файлов: %d, первый — %ls", s->count, shown);
+  if (lines > 1) _snwprintf(msg, 300, L"%ls: %d, первый — %ls", folder ? L"Папок" : L"Файлов", lines, shown);
   else lstrcpynW(msg, shown, 300);
   size_t m = wcslen(msg);
-  if (asLink)
-    _snwprintf(msg + m, 300 - m, L"\nВставьте в письмо или чат — щелчок по ссылке откроет файл.%ls",
-               local ? L" Файл на этом ПК: у коллеги не откроется, нужна сетевая папка." : L"");
-  else
-    _snwprintf(msg + m, 300 - m, L"\nCtrl+V вставит путь.%ls",
-               local ? L" Файл на этом ПК: коллега по такому пути его не откроет." : L"");
+  _snwprintf(msg + m, 300 - m, L"\nCtrl+V вставит путь; в Outlook и Word щелчок по нему откроет %ls.%ls",
+             folder ? L"папку" : L"файл", local ? L" Диск этого ПК — у коллеги не откроется." : L"");
   msg[299] = 0;
-  if (asLink) show_status(s->count > 1 ? L"В буфере ссылки на файлы" : L"В буфере ссылка на файл");
-  else show_status(s->count > 1 ? L"В буфере пути до файлов" : L"В буфере путь до файла");
-  upd_balloon(9, asLink ? L"Ссылка на файл скопирована" : L"Путь до файла скопирован", msg);
+  if (folder) show_status(lines > 1 ? L"В буфере пути к папкам" : L"В буфере путь к папке");
+  else show_status(lines > 1 ? L"В буфере пути к файлам" : L"В буфере путь к файлу");
+  upd_balloon(9, folder ? L"Путь к папке скопирован" : L"Путь к файлу скопирован", msg);
 }
 
 #ifdef SET_TEST
-/* --linktest / --pathtest отчёт файл [файл…]: что после «Включая файл» / «До файла» лежит
-   в буфере обмена; строки ссылок переводятся обратно в путь (PathCreateFromUrlW) */
+/* --linktest / --foldertest отчёт файл [файл…]: что после «Включая файл» / «До файла» лежит
+   в буфере обмена; ссылки из HTML переводятся обратно в путь (PathCreateFromUrlW) и
+   сверяются со строками текста */
 static void flk_test(int argc, LPWSTR *argv) {
   static CvSelection s;
   s.count = 0;
   for (int i = 3; i < argc && s.count < CV_FILES; i++) GetFullPathNameW(argv[i], MAX_PATH, s.paths[s.count++], NULL);
-  flk_send(&s, !wcscmp(argv[1], L"--linktest"));
+  flk_send(&s, !wcscmp(argv[1], L"--foldertest"));
   typedef HRESULT(WINAPI * FromUrlFn)(LPCWSTR, LPWSTR, DWORD *, DWORD);
   HMODULE shl = LoadLibraryW(L"shlwapi.dll");
   FromUrlFn fromUrl = shl ? (FromUrlFn)GetProcAddress(shl, "PathCreateFromUrlW") : NULL;
@@ -187,21 +204,6 @@ static void flk_test(int argc, LPWSTR *argv) {
     HANDLE ht = GetClipboardData(CF_UNICODETEXT);
     const wchar_t *t = ht ? (const wchar_t *)GlobalLock(ht) : NULL;
     n += _snwprintf(rep + n, 40000 - n, L"text=[%ls]\r\n", t ? t : L"(нет)");
-    for (const wchar_t *line = t; line && *line && fromUrl;) {
-      const wchar_t *end = wcschr(line, L'\r');
-      size_t len = end ? (size_t)(end - line) : wcslen(line);
-      wchar_t url[3200], back[MAX_PATH] = L"";
-      lstrcpynW(url, line, (int)(len < 3199 ? len + 1 : 3200));
-      DWORD bn = MAX_PATH;
-      if (!wcsncmp(url, L"file:", 5)) {
-        HRESULT hr = fromUrl(url, back, &bn, 0);
-        int same = 0;
-        for (int k = 0; k < s.count; k++) same |= !lstrcmpiW(back, s.paths[k]);
-        n += _snwprintf(rep + n, 40000 - n, L"back=%ls hr=%lx same=%d\r\n", back, (unsigned long)hr, same);
-      }
-      line = end ? end + 2 : NULL;
-    }
-    if (t) GlobalUnlock(ht);
     HANDLE hh = GetClipboardData(RegisterClipboardFormatW(L"HTML Format"));
     const char *h = hh ? (const char *)GlobalLock(hh) : NULL;
     if (h) {
@@ -213,9 +215,31 @@ static void flk_test(int argc, LPWSTR *argv) {
       wchar_t frag[8000] = L"";
       MultiByteToWideChar(CP_UTF8, 0, h + a, b - a, frag, 7999);
       n += _snwprintf(rep + n, 40000 - n, L"html=[%ls] offsets=%d\r\n", frag, okOffsets);
+      /* каждая ссылка — обратно в путь; совпасть должна с той же строкой текста */
+      const wchar_t *line = t;
+      for (const wchar_t *href = wcsstr(frag, L"href=\""); href && fromUrl; href = wcsstr(href, L"href=\"")) {
+        href += 6;
+        const wchar_t *q = wcschr(href, L'"');
+        if (!q) break;
+        wchar_t url[3200] = L"", back[MAX_PATH] = L"";
+        int ul = 0;
+        for (const wchar_t *ch = href; ch < q && ul < 3199; ch++) {
+          url[ul++] = *ch;
+          if (!wcsncmp(ch, L"&amp;", 5)) ch += 4; /* в href сущность бывает только эта: &amp; → & */
+        }
+        url[ul] = 0;
+        DWORD bn = MAX_PATH;
+        HRESULT hr = fromUrl(url, back, &bn, 0);
+        const wchar_t *end = line ? wcschr(line, L'\r') : NULL;
+        size_t len = line ? (end ? (size_t)(end - line) : wcslen(line)) : 0;
+        int same = line && wcslen(back) == len && !wcsncmp(back, line, len);
+        n += _snwprintf(rep + n, 40000 - n, L"back=%ls hr=%lx same=%d\r\n", back, (unsigned long)hr, same);
+        line = end ? end + 2 : NULL;
+      }
       GlobalUnlock(hh);
     } else n += _snwprintf(rep + n, 40000 - n, L"html=(нет)\r\n");
     n += _snwprintf(rep + n, 40000 - n, L"own=%d\r\n", g_ownClip);
+    if (t) GlobalUnlock(ht);
     CloseClipboard();
   }
   char *u = (char *)malloc(120000);

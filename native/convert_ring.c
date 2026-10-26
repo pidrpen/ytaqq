@@ -19,7 +19,7 @@ enum { CV_T_IMAGE, CV_T_PDF, CV_T_TEXT, CV_T_ZIP, CV_T_MORE };
 /* shell — образец имени для значка из Проводника (кольцо «Создать»); folder — значок папки */
 typedef struct { wchar_t icon; const wchar_t *label, *title, *note; int tint; const wchar_t *shell; BOOL folder; } CvRingItem;
 /* по номерам действий: 0–3 картинки, 4 PDF, 5 TXT, 6 CSV, 7 ZIP, 8–14 окно параметров, 15 «Ещё»,
-   24 — «Ссылка», 25 и 26 — её полукруги: «Включая файл» и «До файла» (file_link_ui.c) */
+   24 — «Ссылка», 25 и 26 — её полукруги рядом с кольцом: «Включая файл» и «До файла» (file_link_ui.c) */
 static const CvRingItem kCvRing[27] = {
     {0xEB9F, L"PNG", L"В PNG", L"копия рядом с исходником", CV_T_IMAGE},
     {0xEB9F, L"JPG", L"В JPG", L"копия рядом с исходником", CV_T_IMAGE},
@@ -45,9 +45,9 @@ static const CvRingItem kCvRing[27] = {
     {0xE8A5, L"TXT", L"Текстовый файл", L"отпустите — появится на столе", CV_T_MORE, L"a.txt", FALSE},
     {0xE8A5, L"Word", L"Документ Word", L"отпустите — появится на столе", CV_T_TEXT, L"a.docx", FALSE},
     {0xE80A, L"Excel", L"Книга Excel", L"отпустите — появится на столе", CV_T_TEXT, L"a.xlsx", FALSE},
-    {0xE71B, L"Ссылка", L"Ссылка", L"задержите: ссылка или путь", CV_T_ZIP},
-    {0xE8A5, L"Включая файл", L"Включая файл", L"ссылка — щелчок откроет файл", CV_T_ZIP},
-    {0xE71B, L"До файла", L"До файла", L"только путь — в буфер", CV_T_ZIP}};
+    {0xE71B, L"Ссылка", L"Ссылка", L"задержите: путь к файлу или к папке", CV_T_ZIP},
+    {0xE8A5, L"Включая файл", L"Включая файл", L"путь с именем файла — в буфер", CV_T_ZIP},
+    {0xE8B7, L"До файла", L"До файла", L"папка, где лежит файл, — в буфер", CV_T_ZIP}};
 static const COLORREF kCvTint[] = {RGB(8, 145, 178), RGB(220, 38, 38), RGB(22, 163, 74), RGB(217, 119, 6),
                                    RGB(100, 116, 139)};
 
@@ -56,6 +56,15 @@ static DWORD g_cvShownAt;   /* начало появления: 150 мс от 92
 static float g_cvLevel[16]; /* подсветка плиток 0…1, плавно к цели */
 static BOOL g_cvInHub;      /* курсор в центре — отпускание ничего не делает */
 static POINT g_cvAt;        /* левый верхний угол окна на экране */
+/* полукруги «Ссылки» — своё окно рядом с кольцом (g_cvSub): 0 — «Включая файл» сверху, 1 — «До файла» снизу */
+static BOOL g_cvSubOn;
+static int g_cvSubTile = -1, g_cvSubHover = -1, g_cvSubSize; /* g_cvSubTile — номер плитки «Ссылка» в кольце */
+static float g_cvSubLevel[2];
+static POINT g_cvSubAt;
+static DWORD g_cvSubShownAt;
+static HBITMAP g_cvSubBmp, g_cvSubTextBmp;
+static BYTE *g_cvSubPix, *g_cvSubTextPix;
+static int g_cvSubBmpSize;
 static HBITMAP g_cvBmp, g_cvTextBmp;
 static BYTE *g_cvPix, *g_cvTextPix; /* premultiplied BGRA; второй — под текст */
 static int g_cvBmpSize, g_cvFontSize;
@@ -547,9 +556,10 @@ static void cv_render(BYTE *pix, int size, HDC dc, DWORD now) {
                     g_cvPendingData ? L"держите Shift" : L"не отпускайте мышь и Shift", ink, muted);
   } else if (g_cvCreate)
     cv_hub_create(pix, size, dc, g, ink, muted);
-  else if (g_cvHover >= 0) {
-    const CvRingItem *it = &kCvRing[g_cvFormats[g_cvHover]];
-    BOOL pages = g_cvFormats[g_cvHover] < 4 && !_wcsicmp(cv_extension(g_cvPath), L"pdf"); /* PDF → картинки */
+  else if (g_cvHover >= 0 || g_cvSubOn) { /* мышь на полукруге «Ссылки» — в центре кольца его пояснение */
+    int action = g_cvHover >= 0 ? g_cvFormats[g_cvHover] : g_cvSubHover >= 0 ? 25 + g_cvSubHover : 24;
+    const CvRingItem *it = &kCvRing[action];
+    BOOL pages = action < 4 && !_wcsicmp(cv_extension(g_cvPath), L"pdf"); /* PDF → картинки */
     cv_hub_say(pix, size, dc, g, it->icon, kCvTint[it->tint], it->title, pages ? L"каждая страница, 300 dpi" : it->note, ink, muted);
   } else
     cv_hub_file(pix, size, dc, g, ink, muted);
@@ -560,24 +570,19 @@ static BOOL cv_animating(DWORD now) {
   if (g_cvShownAt && now - g_cvShownAt < 170) return TRUE;
   if (!g_cvCount) return g_cvPendingData && now - g_cvEnteredAt < 1100; /* огонёк — секунду, потом подпись */
   for (int i = 0; i < g_cvCount; i++)
-    if (fabsf(g_cvLevel[i] - (i == g_cvHover ? 1.0f : 0.0f)) > 0.01f) return TRUE;
+    if (fabsf(g_cvLevel[i] - (i == g_cvHover || (g_cvSubOn && i == g_cvSubTile) ? 1.0f : 0.0f)) > 0.01f) return TRUE;
   return FALSE;
 }
 static void cv_step_levels(void) {
   for (int i = 0; i < 16; i++) {
-    float to = i == g_cvHover ? 1.0f : 0.0f;
+    float to = i == g_cvHover || (g_cvSubOn && i == g_cvSubTile) ? 1.0f : 0.0f; /* «Ссылка» горит, пока открыты её полукруги */
     g_cvLevel[i] += (to - g_cvLevel[i]) * 0.5f;
     if (fabsf(to - g_cvLevel[i]) < 0.01f) g_cvLevel[i] = to;
   }
 }
 
-static BOOL cv_buffers(int size) {
-  if (g_cvBmp && g_cvBmpSize == size) return TRUE;
-  if (g_cvBmp) DeleteObject(g_cvBmp);
-  if (g_cvTextBmp) DeleteObject(g_cvTextBmp);
-  g_cvBmp = g_cvTextBmp = NULL;
-  g_cvPix = g_cvTextPix = NULL;
-  g_cvBmpSize = 0;
+/* кадр size×size, BGRA сверху вниз */
+static HBITMAP cv_dib(int size, BYTE **pix) {
   BITMAPINFO info;
   memset(&info, 0, sizeof(info));
   info.bmiHeader.biSize = sizeof(info.bmiHeader);
@@ -586,11 +591,19 @@ static BOOL cv_buffers(int size) {
   info.bmiHeader.biPlanes = 1;
   info.bmiHeader.biBitCount = 32;
   info.bmiHeader.biCompression = BI_RGB;
-  g_cvBmp = CreateDIBSection(NULL, &info, DIB_RGB_COLORS, (void **)&g_cvPix, NULL, 0);
-  g_cvTextBmp = CreateDIBSection(NULL, &info, DIB_RGB_COLORS, (void **)&g_cvTextPix, NULL, 0);
-  if (!g_cvBmp || !g_cvTextBmp || !g_cvPix || !g_cvTextPix) return FALSE;
-  g_cvBmpSize = size;
-  return TRUE;
+  *pix = NULL;
+  HBITMAP bmp = CreateDIBSection(NULL, &info, DIB_RGB_COLORS, (void **)pix, NULL, 0);
+  if (bmp && !*pix) DeleteObject(bmp), bmp = NULL;
+  return bmp;
+}
+static BOOL cv_buffers(int size) {
+  if (g_cvBmp && g_cvBmpSize == size) return TRUE;
+  if (g_cvBmp) DeleteObject(g_cvBmp);
+  if (g_cvTextBmp) DeleteObject(g_cvTextBmp);
+  g_cvBmp = cv_dib(size, &g_cvPix);
+  g_cvTextBmp = cv_dib(size, &g_cvTextPix);
+  g_cvBmpSize = g_cvBmp && g_cvTextBmp ? size : 0;
+  return g_cvBmpSize != 0;
 }
 
 /* отрисовать кадр в g_cvPix; окно (если есть) получает его целиком */
@@ -622,6 +635,111 @@ static void cv_paint(void) {
   ReleaseDC(NULL, screen);
 }
 
+/* ---- полукруги «Ссылки» -----------------------------------------------------
+   Окно со стороной в половину кольца: круг из двух полукруглых окошек с зазором,
+   сверху «Включая файл», снизу «До файла». Ставит его convert.c (cv_sub_show)
+   снаружи кольца у плитки «Ссылка»; само кольцо не меняется. */
+static float cv_sub_radius(int size) { return size * 0.5f - 16.0f * (float)g_cvSize / CV_RING_BASE; }
+/* расстояние до полукруга радиуса r с плоской стороной на y = -gap/2 (выпуклость вверх), углы скруглены на rad */
+static float cv_half_sdf(float dx, float dy, float r, float gap, float rad) {
+  float a = sqrtf(dx * dx + dy * dy) - r + rad, b = dy + gap / 2 + rad;
+  return sqrtf((a > 0 ? a * a : 0) + (b > 0 ? b * b : 0)) + (a > b ? (a < 0 ? a : 0) : (b < 0 ? b : 0)) - rad;
+}
+static void cv_sub_render(BYTE *pix, int size, HDC dc, DWORD now) {
+  memset(pix, 0, (size_t)size * size * 4);
+  float s = (float)g_cvSize / CV_RING_BASE, c = size * 0.5f;
+  float t = g_cvSubShownAt ? cv_clamp01((float)(now - g_cvSubShownAt) / 120.0f) : 1.0f;
+  float rs = cv_sub_radius(size) * (0.85f + 0.15f * (1.0f - (1.0f - t) * (1.0f - t))), gap = 6.0f * s;
+  BOOL dark = cv_dark();
+  COLORREF surface = g_uiTok.surface, ink = g_uiTok.ink, accent = g_uiTok.accent, on = cv_on_accent();
+  COLORREF tile = cv_mix(surface, ink, dark ? 0.12f : 0.06f), line = cv_mix(g_uiTok.line, ink, dark ? 0.25f : 0.12f);
+  for (int y = 0; y < size; y++)
+    for (int x = 0; x < size; x++) {
+      BYTE *p = pix + ((size_t)y * size + x) * 4;
+      float dx = x + 0.5f - c, dy = y + 0.5f - c, shade = 0;
+      /* сначала тени обоих полукругов (чуть ниже), потом сами полукруги — тень нижнего не ложится на верхний */
+      for (int k = 0; k < 2; k++) {
+        float ds = cv_half_sdf(dx, (k ? -1.0f : 1.0f) * (dy - 4.0f * s), rs, gap, 10.0f * s);
+        float a = ds > -3.0f ? (dark ? 0.42f : 0.20f) * expf(-(ds > 0 ? ds : 0) / (8.0f * s)) * cv_clamp01(ds + 3.0f) : 0;
+        if (a > shade) shade = a;
+      }
+      cv_px(p, RGB(0, 0, 0), shade);
+      for (int k = 0; k < 2; k++) {
+        float side = k ? -1.0f : 1.0f, l = g_cvSubLevel[k];
+        float d = cv_half_sdf(dx, side * dy, rs, gap, 10.0f * s);
+        if (d >= 1.0f) continue;
+        cv_px(p, surface, cv_clamp01(0.5f - d) * 0.97f);
+        float b = 1.0f - fabsf(d + 0.5f);
+        if (b > 0) cv_px(p, line, b * 0.9f);
+        float inset = (5.0f - 2.0f * l) * s; /* под мышью — чуть шире, как плитка кольца */
+        float di = cv_half_sdf(dx, side * dy, rs - inset, gap + 2 * inset, 7.0f * s);
+        cv_px(p, cv_mix(tile, accent, l), cv_clamp01(0.5f - di));
+      }
+    }
+  if (!dc) return;
+  for (int k = 0; k < 2; k++) {
+    const CvRingItem *it = &kCvRing[25 + k];
+    float l = g_cvSubLevel[k], cy = c + (k ? 1.0f : -1.0f) * rs * 0.42f;
+    if (g_cvFont[CV_F_ICON])
+      cv_text(pix, size, dc, CV_F_ICON, &it->icon, 1, cv_box(c, cy - 10 * s, 30 * s, 26 * s), DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+              cv_mix(kCvTint[it->tint], on, l), 1.0f);
+    cv_text(pix, size, dc, CV_F_LABEL, it->label, -1, cv_box(c, cy + (g_cvFont[CV_F_ICON] ? 12 : 0) * s, rs * 1.5f, 18 * s),
+            DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS, cv_mix(ink, on, l), 1.0f);
+  }
+}
+static BOOL cv_sub_animating(DWORD now) {
+  if (g_cvSubShownAt && now - g_cvSubShownAt < 140) return TRUE;
+  for (int k = 0; k < 2; k++)
+    if (fabsf(g_cvSubLevel[k] - (k == g_cvSubHover ? 1.0f : 0.0f)) > 0.01f) return TRUE;
+  return FALSE;
+}
+static void cv_sub_step(void) {
+  for (int k = 0; k < 2; k++) {
+    float to = k == g_cvSubHover ? 1.0f : 0.0f;
+    g_cvSubLevel[k] += (to - g_cvSubLevel[k]) * 0.5f;
+    if (fabsf(to - g_cvSubLevel[k]) < 0.01f) g_cvSubLevel[k] = to;
+  }
+}
+/* кадр полукругов в g_cvSubPix; окно (если открыто) получает его целиком */
+static void cv_sub_paint(void) {
+  int size = g_cvSubSize;
+  if (size <= 0) return;
+  if (g_cvSubBmpSize != size) {
+    if (g_cvSubBmp) DeleteObject(g_cvSubBmp);
+    if (g_cvSubTextBmp) DeleteObject(g_cvSubTextBmp);
+    g_cvSubBmp = cv_dib(size, &g_cvSubPix);
+    g_cvSubTextBmp = cv_dib(size, &g_cvSubTextPix);
+    g_cvSubBmpSize = g_cvSubBmp && g_cvSubTextBmp ? size : 0;
+    if (!g_cvSubBmpSize) return;
+  }
+  cv_fonts(g_cvSize); /* шрифты — кольца, того же размера */
+  HDC screen = GetDC(NULL), tdc = CreateCompatibleDC(screen);
+  if (!tdc) { ReleaseDC(NULL, screen); return; }
+  HGDIOBJ oldText = SelectObject(tdc, g_cvSubTextBmp), oldFont = GetCurrentObject(tdc, OBJ_FONT);
+  SetBkMode(tdc, TRANSPARENT);
+  SetTextColor(tdc, RGB(255, 255, 255));
+  BYTE *ringText = g_cvTextPix;
+  g_cvTextPix = g_cvSubTextPix; /* cv_text берёт буфер под текст со стороной size */
+  DWORD now = GetTickCount();
+  cv_sub_render(g_cvSubPix, size, tdc, now);
+  g_cvTextPix = ringText;
+  SelectObject(tdc, oldFont);
+  SelectObject(tdc, oldText);
+  if (g_cvSub && g_cvSubOn) {
+    HDC mem = CreateCompatibleDC(screen);
+    HGDIOBJ old = SelectObject(mem, g_cvSubBmp);
+    float t = g_cvSubShownAt ? cv_clamp01((float)(now - g_cvSubShownAt) / 120.0f) : 1.0f;
+    BLENDFUNCTION blend = {AC_SRC_OVER, 0, (BYTE)(255.0f * (1.0f - (1.0f - t) * (1.0f - t))), AC_SRC_ALPHA};
+    POINT origin = {0, 0};
+    SIZE sz = {size, size};
+    UpdateLayeredWindow(g_cvSub, screen, &g_cvSubAt, &sz, mem, &origin, 0, &blend, ULW_ALPHA);
+    SelectObject(mem, old);
+    DeleteDC(mem);
+  }
+  DeleteDC(tdc);
+  ReleaseDC(NULL, screen);
+}
+
 /* dpi монитора под точкой: кольцо может появиться на другом экране */
 static int cv_monitor_dpi(POINT point) {
   typedef HRESULT(WINAPI * MonitorDpi)(HMONITOR, int, UINT *, UINT *);
@@ -644,6 +762,11 @@ static void cv_ring_free(void) {
   g_cvBmp = g_cvTextBmp = NULL;
   g_cvPix = g_cvTextPix = NULL;
   g_cvBmpSize = g_cvFontSize = 0;
+  if (g_cvSubBmp) DeleteObject(g_cvSubBmp);
+  if (g_cvSubTextBmp) DeleteObject(g_cvSubTextBmp);
+  g_cvSubBmp = g_cvSubTextBmp = NULL;
+  g_cvSubPix = g_cvSubTextPix = NULL;
+  g_cvSubBmpSize = 0;
   if (g_cvIconBmp) DeleteObject(g_cvIconBmp);
   g_cvIconBmp = NULL, g_cvIconPix = NULL, g_cvIconPx = 0;
   cv_thumb_ready(NULL);

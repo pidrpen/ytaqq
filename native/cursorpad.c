@@ -4582,7 +4582,7 @@ static void create_settings(HWND owner) {
 #include "layout_fix.c" /* Pause: «ghbdtn» → «привет» */
 #include "msg.c"        /* исчезающие сообщения коллегам — через ту же папку, что нарды */
 #include "convert.c" /* Shift-drag conversion ring; real OLE drop target */
-#include "file_link_ui.c" /* плитка «Ссылка» кольца Shift: ссылка, открывающая файл, или путь — в буфер */
+#include "file_link_ui.c" /* плитка «Ссылка» кольца Shift: путь к файлу или к папке — в буфер */
 #include "ai_file_ask.c" /* «прочитай / переведи файл» в чате: Tesseract и исполнитель конвертера — после convert.c */
 #include "tools.c" /* после нардов: автообновление смотрит, не открыты ли они */
 
@@ -5470,7 +5470,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
     if (argv && argc >= 3 && !wcscmp(argv[1], L"--xptest")) export_test(argv[2]);
     if (argv && argc >= 4 && !wcscmp(argv[1], L"--drawrec")) dr_test(argc, argv);
     if (argv && argc >= 4 && !wcscmp(argv[1], L"--fqread")) fq_test(argc, argv);
-    if (argv && argc >= 4 && (!wcscmp(argv[1], L"--linktest") || !wcscmp(argv[1], L"--pathtest"))) flk_test(argc, argv);
+    if (argv && argc >= 4 && (!wcscmp(argv[1], L"--linktest") || !wcscmp(argv[1], L"--foldertest"))) flk_test(argc, argv);
     if (argv && argc >= 3 && !wcscmp(argv[1], L"--avatarshot")) ac_avatar_shot(argv[2]);
     if (argv && argc >= 4 && !wcscmp(argv[1], L"--drawui")) dr_ui_test(argc, argv);
     if (argv && argc >= 4 && !wcscmp(argv[1], L"--techno")) dr_techno_test(argc, argv);
