@@ -333,6 +333,22 @@ static DWORD WINAPI ag_tool_thread(LPVOID param) {
   AgToolJob *job = (AgToolJob *)param;
   job->fs.cancel = &job->cancel;
   AgJson app;
+  /* office_read умеет только .xlsx и .docx; на PDF, скан или .txt модель его всё
+     равно зовёт — читаем это как file_read, а не отказываем три раза подряд */
+  if (!job->applying && ag_json(job->json, &app) && !wcscmp(ag_get(&app, L"tool"), L"office_read")) {
+    const wchar_t *in = ag_get(&app, L"path");
+    wchar_t actual[MAX_PATH];
+    if (in[0] && (!ag_path(&job->fs, in, actual) ? !of_excel(in) && !of_docx(in) : !of_excel(actual) && !of_docx(actual))) {
+      wchar_t esc[2 * MAX_PATH];
+      int n = 0;
+      for (const wchar_t *p = in; *p && n < 2 * MAX_PATH - 2; p++) {
+        if (*p == L'\\' || *p == L'"') esc[n++] = L'\\';
+        esc[n++] = *p;
+      }
+      esc[n] = 0;
+      swprintf(job->json, 6000, L"{\"tool\":\"app\",\"name\":\"file_read\",\"path\":\"%ls\"}", esc);
+    }
+  }
   if (!job->applying && ag_json(job->json, &app) && !wcscmp(ag_get(&app, L"tool"), L"app"))
     job->state = ag_data_call(&app, &job->fs, job->observation, 6000, &job->cancel, &job->data, &job->report);
   else

@@ -214,7 +214,7 @@ static BOOL of_read(const wchar_t *path, const wchar_t *sheetName, int offset, i
   OfSession s = {0}; BOOL excel = of_excel(path), ok = FALSE;
   if ((!excel && !of_docx(path)) || offset < 0 || !of_begin(&s, excel, path)) {
     if (excel || of_docx(path)) { swprintf(out, cap, L"Не удалось открыть Office-файл. HRESULT 0x%08lx. Проверьте установку Office, доступ, пароль или окно первого запуска.", (unsigned long)s.hr); of_end(&s); }
-    else lstrcpynW(out, L"office_read поддерживает только .xlsx и .docx.", cap);
+    else lstrcpynW(out, L"office_read поддерживает только .xlsx и .docx. PDF, скан, картинку и .txt читай так: {\"tool\":\"app\",\"name\":\"file_read\",\"path\":\"полный_путь\"}.", cap);
     return FALSE;
   }
   if (!excel) {
