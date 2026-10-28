@@ -312,7 +312,7 @@ static IDropTargetVtbl g_cvVtbl = {cv_query, cv_addref, cv_release, cv_enter, cv
 static CvDrop g_cvDrop = {{&g_cvVtbl}, 1};
 static LRESULT CALLBACK cv_proc(HWND hwnd, UINT message, WPARAM wp, LPARAM lp) {
 #ifndef CV_RING_TEST
-  if(message==WM_CV_CREATE){dc_create((int)wp);return 0;}
+  if(message==WM_CV_CREATE){dc_create((int)wp,g_cvOrigin);return 0;}
   if(message==WM_CV_TIFF_MERGE){ /* уже после сброса: окно с вопросом не держит Проводник */
     CvSelection *s=(CvSelection*)lp;wchar_t name[MAX_PATH];const wchar_t *slash=wcsrchr(s->paths[0],L'\\');
     lstrcpynW(name,slash?slash+1:s->paths[0],MAX_PATH);wchar_t *dot=wcsrchr(name,L'.');if(dot)*dot=0;
