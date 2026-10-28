@@ -2302,7 +2302,7 @@ static void nm_modes_line(const NmResult *res, wchar_t *out, int cap) {
     const wchar_t *const *ps = o->kind == NMK_MILL ? mill : turn;
     int np = o->kind == NMK_DRILL ? 2 : 4;
     wchar_t num[8];
-    _snwprintf(num, 8, L"%03d", (o->idx + 1) * 5);
+    swprintf(num, 8, L"%03d", (o->idx + 1) * 5);
     num[7] = 0;
     if (line[0]) tn_cat(line, 400, L"; ");
     tn_cat(line, 400, num);
