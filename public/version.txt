@@ -1,7 +1,10 @@
-2026102803
-2026.10.28.3
-sha256 13fcffd7481e0745abcbbf878ec6649b79b30cf911bd87156b272341eac8a28d
-== 0 signature-rsa-sha256 wxDxT8U4uvTR5wQs2HkLdvRr/OZ7ZN6nJqZihXWsUmdZtgczWDkvizWey+JrrjhT9UhWy913WcOW98DKslEP3XiAHcCjdLdm4XZTnvWWJqFAC+FJy58sGBDRsJJoKsMhMkwlUI1RTS1IJlhmf4LGaqaV11KNXfLBT1nfTrq5AkuxjwRB5QezX5P97xlt0X8hLw7cSO32LZxEk7fHkuiu7t7JwaRlNptq9z3LquyDquwhV4UmvsiSANCmcFE2MQNOVZL/ReLAvbclwyasDLq6tqQKv1niRnTIc2zXh/TwKNaY+5if+DOw5Z6bJZdmVduHpnQAPE6c45lHO+j8c0RAApAj+/5FtSOettTmKSTCeXf55JXdRXVfFte9mA/nzVB5gVelDtD5EYtEkFp9L1HGctjJ8pSfZOjFz+eAqd9inNUbGG4mKVoHGFRGM7pPfczxuvrWNCFH9pKPTu3U48O00czyYw+lY3i8OXVRGVtyhE+i8+IaxzAi+In1P7cAsCc7
+2026102804
+2026.10.28.4
+sha256 81629f8b81d68aeec10567bff319238f3deae3db99010d4079642e08d1ef0531
+== 0 signature-rsa-sha256 Sdol3z9t9FiQCc97cx7Q2WVre1TQKnC67ZodPCVVg5iwKMfQE5WRlHZS5MsuL5mnDtdenitaSS9zKIQiM42vR5J/7MtPP3OOcA1Jc3j9byEkX7mJ18fvpInxLV+x+hEEKqe/CRpbq5nvRpJ+WsrpnrMFiT0EIid1fOH8q7JBk+nUqfi0Sw9scOcVCPRgVRmdjLKMbnfANk7Fjs9QjV5iPmlWZqVN1m42OJSqmgMzzWdsb26iYuAg3HcjBNM3vvIUkXVAmb+28Gm63jcZZ4po73ISVGq5Hm/ion2YaQ0SUHq3+f8BAARuEYsYl0/fnZrQ0OJINXuiW+6eft33ZribEkxHLRAdIS4reUKR6fSq2ptxZJ1/4fpSj6C/p325D0VREzt96l+0qq4alzCLdjJiMvJq2hvGwC9W1GXNZQY6DQDRNAr/2q7U8/xhg0Pw+D9HDnJiEiCW3SLMiLgzjnmfFhVun0ar1rpI0favFaH1sJTV/YciLSuhABq6pEBxLZGH
+== 2026.10.28.4
+Новый курсор «Тяночка» (Настройки → Курсор): светловолосая аниме-девочка с бантом и красным галстуком — стрелка указывает рукой в левый верхний угол, над ссылками её ладонь с поднятым пальцем; хвостики качаются, она моргает. Все 16 видов курсора — в той же золотисто-красной гамме, размеры 32, 48 и 64. Новый эффект при нажатии «Лепестки»: лепестки сакуры разлетаются из точки щелчка, кружатся и опадают; его можно включить и с другими курсорами.
+
 == 2026.10.28.3
 Бой Годжо и Сукуны при бездействии стал живым. Упоров по здоровью больше нет: каждый удар снимает полоску по-настоящему, и раунд может кончиться нокаутом в любой момент — даже до расширения территорий. На грани нокаута боец иногда, но не всегда, лечится обратной техникой: зелёное свечение, и здоровье подрастает; больше двух раз за раунд не выйдет. Махорага перерисован по аниме: белое тело, тёмно-зелёная юбка до колен с поясом, маска с крыльями и оскалом, ожерелье, бинты на предплечье, длинный меч в руке и золотое колесо над головой. Он встаёт раньше, сразу после второй Пустоты, и дерётся вместе с Сукуной: бьёт снизу вверх, бежит тараном, рубит мечом изгнания, закрывается наручами; Сукуна перепрыгивает через великана, заходит Годжо со спины и добивает тех, кого Махорага сбил с ног. Махораге теперь можно снять здоровье до нуля не только Фиолетовым. Исход по-прежнему примерно пополам. Кольцо «Создать» на рабочем столе: новая папка или файл появляется там, где вызвано кольцо, а не в левом верхнем углу экрана. Бой проверен в Wine по кадрам; на настоящем Windows не прогонялось.
 
