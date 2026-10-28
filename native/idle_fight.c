@@ -98,13 +98,15 @@ static const FKey kAnSFuga[] = {{FP_S_FUGA_A, 10, EZ_SMOOTH}, {FP_S_FUGA_A, 40, 
 static const FKey kAnSSeal[] = {{FP_S_SEAL, 12, EZ_SMOOTH}, {FP_S_SEAL, 70, EZ_LIN}};
 static const FKey kAnSTaunt[] = {{FP_S_TAUNT, 10, EZ_SMOOTH}, {FP_S_TAUNT, 40, EZ_LIN}, {FP_S_IDLE, 10, EZ_SMOOTH}};
 static const FKey kAnSWin[] = {{FP_S_LAUGH, 12, EZ_SMOOTH}, {FP_S_TAUNT, 26, EZ_SMOOTH}, {FP_S_LAUGH, 26, EZ_SMOOTH}};
+static const FKey kAnGRct[] = {{FP_G_RCT, 10, EZ_SMOOTH}, {FP_G_RCT, 50, EZ_LIN}};
+static const FKey kAnSSummon[] = {{FP_S_SUMMON, 10, EZ_SMOOTH}, {FP_S_SUMMON, 60, EZ_LIN}};
 
 enum {
   AN_HURT_H, AN_HURT_M, AN_FLY, AN_DOWN, AN_GETUP, AN_GUARD, AN_STUN, AN_KO, AN_JUMP, AN_LAND,
   AN_G_IDLE, AN_G_WALK, AN_G_BACK, AN_G_DASH, AN_G_RUN, AN_G_JAB, AN_G_PALM, AN_G_KICK, AN_G_HIGH, AN_G_UP,
-  AN_G_FLICK, AN_G_DIVE, AN_G_BLUE, AN_G_RED, AN_G_PURPLE, AN_G_SEAL, AN_G_TELE, AN_G_TAUNT, AN_G_WIN,
+  AN_G_FLICK, AN_G_DIVE, AN_G_BLUE, AN_G_RED, AN_G_PURPLE, AN_G_SEAL, AN_G_TELE, AN_G_TAUNT, AN_G_WIN, AN_G_RCT,
   AN_S_IDLE, AN_S_WALK, AN_S_BACK, AN_S_RUN, AN_S_CLAW, AN_S_SWIPE, AN_S_PUNCH, AN_S_KNEE, AN_S_UPPER,
-  AN_S_KICK, AN_S_SLAM, AN_S_DISM, AN_S_CLEAVE, AN_S_FUGA, AN_S_SEAL, AN_S_TAUNT, AN_S_WIN,
+  AN_S_KICK, AN_S_SLAM, AN_S_DISM, AN_S_CLEAVE, AN_S_FUGA, AN_S_SEAL, AN_S_TAUNT, AN_S_WIN, AN_S_SUMMON,
   AN_COUNT
 };
 #define AN(arr, lp) {arr, (unsigned char)(sizeof(arr) / sizeof(arr[0])), lp}
@@ -114,11 +116,11 @@ static const FAnim kAnims[AN_COUNT] = {
     AN(kAnGIdle, 0), AN(kAnGWalk, 0), AN(kAnGBack, 0), AN(kAnGDash, NOLOOP), AN(kAnGRun, 0), AN(kAnGJab, NOLOOP),
     AN(kAnGPalm, NOLOOP), AN(kAnGKick, NOLOOP), AN(kAnGHigh, NOLOOP), AN(kAnGUp, NOLOOP), AN(kAnGFlick, NOLOOP),
     AN(kAnGDive, NOLOOP), AN(kAnGBlue, NOLOOP), AN(kAnGRed, NOLOOP), AN(kAnGPurple, NOLOOP), AN(kAnGSeal, NOLOOP),
-    AN(kAnGTele, NOLOOP), AN(kAnGTaunt, NOLOOP), AN(kAnGWin, NOLOOP),
+    AN(kAnGTele, NOLOOP), AN(kAnGTaunt, NOLOOP), AN(kAnGWin, NOLOOP), AN(kAnGRct, NOLOOP),
     AN(kAnSIdle, 0), AN(kAnSWalk, 0), AN(kAnSBack, 0), AN(kAnSRun, 0), AN(kAnSClaw, NOLOOP), AN(kAnSSwipe, NOLOOP),
     AN(kAnSPunch, NOLOOP), AN(kAnSKnee, NOLOOP), AN(kAnSUpper, NOLOOP), AN(kAnSKick, NOLOOP), AN(kAnSSlam, NOLOOP),
     AN(kAnSDism, NOLOOP), AN(kAnSCleave, NOLOOP), AN(kAnSFuga, NOLOOP), AN(kAnSSeal, NOLOOP), AN(kAnSTaunt, NOLOOP),
-    AN(kAnSWin, 0),
+    AN(kAnSWin, 0), AN(kAnSSummon, NOLOOP),
 };
 
 static float if_ease(int e, float t) {
@@ -167,9 +169,9 @@ static void if_anim_pose(FPose *out, int a, float t, const FPose *from) {
 
 enum {
   MV_G_JAB, MV_G_PALM, MV_G_KICK, MV_G_HIGH, MV_G_UPKICK, MV_G_FLICK, MV_G_DIVE,
-  MV_G_BLUE, MV_G_RED, MV_G_PURPLE, MV_G_TELE, MV_G_VOID, MV_G_TAUNT, MV_G_REDX, MV_G_LUNGE,
+  MV_G_BLUE, MV_G_RED, MV_G_PURPLE, MV_G_TELE, MV_G_VOID, MV_G_TAUNT, MV_G_REDX, MV_G_LUNGE, MV_G_RCT,
   MV_S_CLAW, MV_S_SWIPE, MV_S_PUNCH, MV_S_KNEE, MV_S_UPPER, MV_S_KICK, MV_S_SLAM,
-  MV_S_DISM, MV_S_CLEAVE, MV_S_FUGA, MV_S_SHRINE, MV_S_TAUNT, MV_S_FAN, MV_S_LUNGE, MV_S_WORLD,
+  MV_S_DISM, MV_S_CLEAVE, MV_S_FUGA, MV_S_SHRINE, MV_S_TAUNT, MV_S_FAN, MV_S_LUNGE, MV_S_WORLD, MV_S_MAHO,
   MV_COUNT
 };
 enum { HK_LIGHT, HK_HEAVY, HK_LAUNCH, HK_KNOCK, HK_BLAST };
@@ -202,6 +204,7 @@ static const FMove kMoves[MV_COUNT] = {
     {AN_G_TAUNT, 74, 0, 0, 0, 0, 0, 0, 0, 900, 99, 0, 0, 0, 0, NULL},
     {AN_G_RED, 67, 0, 0, 0, 0, MVF_TECH, 0, 200, 720, 99, 0, 0, 0, 0, L"Красный: залп"},
     {AN_G_KICK, 27, 8, 12, FJ_FOOT1, HK_HEAVY, MVF_MELEE | MVF_LUNGE, 62, 0, 200, 14, 9, 4.8f, 1.2f, 9.0f, NULL},
+    {AN_G_RCT, 56, 0, 0, 0, 0, 0, 0, 0, 30000, 99, 0, 0, 0, 0, L"Обратная техника"},
     /* Сукуна */
     {AN_S_CLAW, 25, 7, 10, FJ_HAND0, HK_LIGHT, MVF_MELEE, 35, 0, 0, 11, 8, 1.5f, 0, 1.8f, NULL},
     {AN_S_SWIPE, 24, 6, 9, FJ_HAND1, HK_LIGHT, MVF_MELEE, 35, 0, 0, 10, 8, 1.8f, 0, 1.5f, NULL},
@@ -218,6 +221,7 @@ static const FMove kMoves[MV_COUNT] = {
     {AN_S_DISM, 62, 0, 0, 0, 0, MVF_TECH, 0, 220, 780, 99, 0, 0, 0, 0, L"Рассечение: веер"},
     {AN_S_PUNCH, 25, 6, 10, FJ_HAND1, HK_HEAVY, MVF_MELEE | MVF_LUNGE, 55, 0, 200, 12, 7.5f, 4.2f, 0.8f, 10.0f, NULL},
     {AN_S_CLEAVE, 37, 0, 0, 0, 0, MVF_TECH, 0, 450, 1800, 99, 0, 0, 0, 0, L"Разрез мира"},
+    {AN_S_SUMMON, 70, 0, 0, 0, 0, 0, 0, 0, 30000, 99, 0, 0, 0, 0, L"Десять теней: Махорага"},
 };
 
 /* ===================== мир ===================== */
@@ -266,7 +270,7 @@ typedef struct {
 } IfPart;
 
 enum { EF_NONE, EF_SPARK, EF_GUARD, EF_INF, EF_BF, EF_CUTS, EF_CROSS, EF_RING, EF_FLASH, EF_BOOM, EF_REDBOOM,
-       EF_CRACK, EF_AFTER, EF_TELE, EF_HEAL, EF_SCORCH, EF_IMPLODE, EF_CALL, EF_WALL, EF_WCUT };
+       EF_CRACK, EF_AFTER, EF_TELE, EF_HEAL, EF_SCORCH, EF_IMPLODE, EF_CALL, EF_WALL, EF_WCUT, EF_MAHOSLAM };
 typedef struct {
   int kind, owner;
   float x, y, t, life, sz, a, b;
@@ -283,8 +287,27 @@ typedef struct {
 #define IF_CE 1000.0f
 
 enum { RP_INTRO, RP_FIGHT, RP_KO, RP_WIN, RP_RESET };
-enum { DOM_NONE, DOM_VOID, DOM_SHRINE };
-enum { DP_CAST, DP_OPEN, DP_ON, DP_CLOSE };
+enum { DOM_NONE, DOM_VOID, DOM_SHRINE, DOM_CLASH }; /* DOM_CLASH — оба купола разом, граница между ними */
+enum { DP_CAST, DP_OPEN, DP_ON, DP_CLOSE, DP_BREAK };  /* DP_BREAK — купол проигравшего рушится */
+
+/* Сценарий раунда — по канону боя Годжо с Сукуной в Синдзюку («Магическая битва», главы 221–236),
+   в нашем пересказе. Акты идут по порядку, а кто победит, решает монетка в начале раунда (fate):
+   SC_OPEN   — разминка: рукопашная у Бесконечности, Синий и Красный, Рассечение и Разруб;
+   SC_CLASH  — оба раскрывают территории в один миг, купола сталкиваются; Годжо сужает барьер,
+               и Пустота продавливает Святилище (как в каноне): купол Сукуны рушится, Сукуна на миг
+               попадает под Пустоту, потом у обоих техники выгорают;
+   SC_BURN   — чистая рукопашная без техник; Годжо чинит мозг обратной техникой;
+   SC_VOID2  — Пустота во второй раз, уже один: Сукуна застывает — и призывает Махорагу
+               Десятью тенями (чужая техника, она не выгорела); тень рвёт купол;
+   SC_MAHO   — Махорага за спиной Сукуны учится: каждый удар, вставший в Бесконечности, поворачивает
+               колесо; после четырёх удары проходят насквозь;
+   SC_PURPLE — Годжо отходит и собирает Фиолетовый на всю мощь: сносит Махорагу и Сукуну;
+   SC_WORLD  — Сукуна поднимается и режет мир. Монетка: попал — Годжо пополам; нет — Годжо исчез за
+               миг до удара и добивает Чёрной вспышкой;
+   SC_END    — исход решён, добивание. До SC_END никто не падает ниже IF_HPMIN. */
+enum { SC_OPEN, SC_CLASH, SC_BURN, SC_VOID2, SC_MAHO, SC_PURPLE, SC_WORLD, SC_END };
+#define IF_ADAPT 4
+#define IF_HPMIN (IF_HP * 0.12f)
 
 typedef struct IfText IfText;
 
@@ -333,13 +356,23 @@ typedef struct {
   float phT, roundT;
   /* территория */
   int dom, domOwner, domPhase;
-  int domCaster, domDone;                  /* кто в этом раунде расширяет территорию; уже было */
   float domT, domX, domRx, domRy, domOpen; /* domOpen — сколько раскрыто, 0…1 */
-  float domFl;                             /* на каком полу купол */
-  unsigned char *bd;                      /* фон территории, BGRA с альфой */
+  float domFl, domLen, domBurn;            /* на каком полу купол; сколько держится; выгорание хозяину после */
+  unsigned char *bd, *bd2;                /* фон территории, BGRA с альфой; bd2 — Святилище при столкновении (bd — Пустота) */
   int bdX, bdY, bdW, bdH, bdRows, bdKind;
+  /* сценарий раунда (см. SC_*) */
+  int act, step, fate;      /* акт; шаг внутри акта; кто победит в этом раунде: 0 Годжо, 1 Сукуна (монетка) */
+  float actT, waitT;        /* время в акте; сколько ждём, пока сойдутся */
+  int clashWin;             /* чья территория устояла */
+  float clashK, clashV;     /* граница куполов: -1 (у Годжо: Святилище заняло всё) … 1 (у Сукуны), и её ход */
+  int maho, adapt, finish;  /* Махорага призван; шагов адаптации к Бесконечности; добивание взведено */
+  float mahoT, mahoDie, mahoX, mahoFl, mahoF; /* тень: время с призыва, гибель (обратный отсчёт), где, куда смотрит */
+  float mahoAtk, mahoHitT, mahoHitX;          /* до следующего удара тени; кулак в полёте; куда бьёт */
+  float wheel, wheelTo, adaptT;               /* колесо над головой: поворот, куда крутится, вспышка адаптации */
+  float cutX, cutY;         /* где был Годжо, когда Сукуна резал мир: разрез идёт сквозь послеобраз */
+  int purpleMax;            /* следующий Фиолетовый — на всю мощь */
   /* надпись посреди экрана */
-  const wchar_t *ban1, *ban2;
+  const wchar_t *ban1, *ban2, *ban3;
   wchar_t banBuf[48];
   float banT, banLife;
   int banStyle;
@@ -398,7 +431,11 @@ static void if_call(IfScene *s, IfFighter *F, const wchar_t *txt, FCol c, float 
 }
 
 static void if_banner(IfScene *s, const wchar_t *a, const wchar_t *b, int style, float life) {
-  s->ban1 = a, s->ban2 = b, s->banStyle = style, s->banT = 0, s->banLife = life;
+  s->ban1 = a, s->ban2 = b, s->ban3 = NULL, s->banStyle = style, s->banT = 0, s->banLife = life;
+}
+static void if_banner3(IfScene *s, const wchar_t *a, const wchar_t *b, const wchar_t *c3, int style, float life) {
+  if_banner(s, a, b, style, life);
+  s->ban3 = c3;
 }
 
 static IfFighter *if_foe(IfScene *s, IfFighter *F) { return &s->F[F == &s->F[0] ? 1 : 0]; }
@@ -487,17 +524,38 @@ static void if_spark(IfScene *s, float x, float y, int owner, int big) {
   }
 }
 
+/* Махорага: удар встал в Бесконечности — колесо повернулось, тень учится */
+static void if_adapt(IfScene *s) {
+  s->adapt++;
+  s->wheelTo += FA_PI * 0.25f;
+  s->adaptT = 30;
+  if_call(s, &s->F[1], s->adapt >= IF_ADAPT ? L"Адаптация завершена" : L"Адаптация", FC(200, 170, 255), 80);
+}
+
+/* до развязки никто не падает: сценарий сам доводит бой до монетки */
+static void if_hp_floor(const IfScene *s, IfFighter *D) {
+  if (s->act != SC_END && s->phase == RP_FIGHT && D->hp < IF_HPMIN) D->hp = IF_HPMIN;
+}
+
 /* удар дошёл: src 0 — рукой или ногой, 1 — снаряд, 2 — техника вплотную или взрыв */
 static void if_damage(IfScene *s, IfFighter *A, IfFighter *D, float dmg, int kind, float kx, float ky, float cx,
                       float cy, int src) {
+  int fin = s->finish && s->act == SC_END && A->who == s->fate; /* развязка: этим ударом бой кончается */
+  if (fin) {
+    s->finish = 0;
+    D->inv = 0;
+    if (D->st == FS_GUARD || D->st == FS_MOVE || D->st == FS_STUN || D->st == FS_TRAP) D->st = FS_IDLE, D->mv = -1;
+    dmg = D->hp + 1;
+  }
   if (D->st == FS_KO || D->inv > 0 || D->hp <= 0) return;
   float dir = D->x >= A->x ? 1.0f : -1.0f;
   if (src != 1 && fabsf(D->x - A->x) < 1.0f) dir = (float)A->f;
   /* Бесконечность: удар Сукуны застревает в воздухе перед Годжо */
-  if (D->who == 0 && D->ce >= 60 && D->st != FS_HIT && D->st != FS_FLY && D->st != FS_DOWN &&
+  if (D->who == 0 && !fin && D->ce >= 60 && D->st != FS_HIT && D->st != FS_FLY && D->st != FS_DOWN &&
       D->st != FS_STUN && D->st != FS_TRAP && D->burn <= 0) {
     float ch = src == 0 ? 0.4f : (src == 1 ? 0.5f : 0.0f);
     if (A->st == FS_MOVE && A->mv == MV_S_SLAM) ch = 0.3f;
+    if (s->maho && s->adapt >= IF_ADAPT) ch = 0; /* Махорага приспособился: удары проходят сквозь Бесконечность */
     if (if_rf(&s->seed) < ch) {
       D->ce -= 60;
       IfEff *e = if_eff(s, EF_INF, cx, cy, 34, 1);
@@ -511,13 +569,14 @@ static void if_damage(IfScene *s, IfFighter *A, IfFighter *D, float dmg, int kin
         D->infT = (float)s->frame;
         D->tellInf = 1;
       }
+      if (s->maho) if_adapt(s);
       s->statInf++;
       s->hitstop = 3;
       return;
     }
   }
   /* копит Фиолетовый или натягивает лук: удар не сбивает, урон вполовину */
-  if (D->st == FS_MOVE && ((D->mv == MV_G_PURPLE && D->mt < 92) || (D->mv == MV_S_FUGA && D->mt < 97))) {
+  if (!fin && D->st == FS_MOVE && ((D->mv == MV_G_PURPLE && D->mt < 92) || (D->mv == MV_S_FUGA && D->mt < 97))) {
     D->hp -= dmg * 0.5f;
     if (D->hp < 1) D->hp = 1;
     D->ghostT = 30, D->flash = 0.6f;
@@ -527,8 +586,9 @@ static void if_damage(IfScene *s, IfFighter *A, IfFighter *D, float dmg, int kin
     return;
   }
   /* Безграничная пустота: застывший не отлетает, бьют на месте */
-  if (s->dom == DOM_VOID && D->who != s->domOwner && D->st == FS_STUN && D->hp - dmg * 0.7f > 0) {
+  if (!fin && s->dom == DOM_VOID && D->who != s->domOwner && D->st == FS_STUN && D->hp - dmg * 0.7f > 0) {
     D->hp -= dmg * 0.7f;
+    if_hp_floor(s, D);
     D->ghostT = 40, D->flash = 1;
     A->ce += dmg * 0.1f;
     if (A->ce > IF_CE) A->ce = IF_CE;
@@ -550,7 +610,7 @@ static void if_damage(IfScene *s, IfFighter *A, IfFighter *D, float dmg, int kin
     return;
   }
   int bf = 0;
-  if (src == 0 && kind >= HK_HEAVY && if_rf(&s->seed) < (A->who ? 0.14f : 0.10f)) { /* Чёрная вспышка */
+  if (src == 0 && kind >= HK_HEAVY && (fin || if_rf(&s->seed) < (A->who ? 0.14f : 0.10f))) { /* Чёрная вспышка */
     bf = 1;
     dmg *= 2.5f;
     if (kind == HK_HEAVY) kind = HK_KNOCK, kx = 6.5f, ky = 4.5f;
@@ -568,6 +628,7 @@ static void if_damage(IfScene *s, IfFighter *A, IfFighter *D, float dmg, int kin
   }
   D->hp -= dmg;
   if (D->hp < 0) D->hp = 0;
+  if_hp_floor(s, D);
   D->ghostT = 40;
   D->flash = 1;
   A->ce += dmg * 0.3f;
@@ -609,6 +670,8 @@ static FCol if_tech_col(int mv) {
   case MV_G_RED: return FC(255, 70, 60);
   case MV_G_PURPLE: return FC(196, 100, 255);
   case MV_S_FUGA: return FC(255, 150, 40);
+  case MV_G_RCT: return FC(150, 255, 190);
+  case MV_S_MAHO: return FC(190, 160, 255);
   default: return FC(255, 80, 90);
   }
 }
@@ -636,14 +699,17 @@ static void if_start(IfScene *s, IfFighter *F, int mv) {
   F->mvId++;
   s->stat[mv]++;
   if_set_anim(F, m->anim, 1);
-  if (m->name && mv != MV_G_VOID && mv != MV_S_SHRINE) if_call(s, F, m->name, if_tech_col(mv), 90);
+  if (m->name && mv != MV_G_VOID && mv != MV_S_SHRINE)
+    if_call(s, F, mv == MV_G_PURPLE && s->purpleMax ? L"Фиолетовый: на всю мощь" : m->name, if_tech_col(mv), 90);
   if (mv == MV_G_VOID || mv == MV_S_SHRINE) { /* купол — там, где бой: фон начинают строить в этом же кадре */
     const IfFighter *O = if_foe(s, F);
-    s->domX = mv == MV_G_VOID ? (F->x + O->x) * 0.5f : F->x * 0.6f + O->x * 0.4f, s->domFl = F->fl;
+    s->domX = mv == MV_G_VOID || s->act == SC_CLASH ? (F->x + O->x) * 0.5f : F->x * 0.6f + O->x * 0.4f, s->domFl = F->fl;
   }
   if (mv == MV_G_PURPLE || mv == MV_G_VOID) F->inv = mv == MV_G_VOID ? 112 : 0;
   if (mv == MV_S_SHRINE) F->inv = 94, F->power = 1;
-  if (mv == MV_S_FUGA) F->power = 1;
+  if (mv == MV_S_FUGA || mv == MV_S_WORLD || mv == MV_S_MAHO) F->power = 1;
+  if (mv == MV_G_RCT) F->inv = 56; /* чинит мозг — не сбить */
+  if (mv == MV_S_MAHO) F->inv = 70; /* тень встаёт и закрывает собой */
   if (mv == MV_G_PURPLE || mv == MV_S_FUGA || mv == MV_S_WORLD) F->ultUsed = 1;
   if (mv == MV_G_DIVE) F->vy = -3.2f, F->vx = F->f * 4.6f;
   if (mv == MV_S_SLAM) F->vy = 2.5f, F->vx = F->f * 2.0f;
@@ -770,6 +836,15 @@ static void if_aim(IfProj *p, const IfFighter *O, float speed) {
 }
 
 /* что происходит в приёме на кадре t (t0 — предыдущий) */
+/* оба знака сделаны: купола сходятся — один на двоих, с границей посередине */
+static void if_clash_open(IfScene *s) {
+  s->dom = DOM_CLASH, s->domOwner = 0, s->domPhase = DP_CAST, s->domT = 0, s->clashK = 0, s->clashV = 0;
+  s->domLen = 330, s->domBurn = 600;
+  if_banner3(s, L"РАСШИРЕНИЕ ТЕРРИТОРИИ", L"БЕЗГРАНИЧНАЯ ПУСТОТА", L"СВЯТИЛИЩЕ ЗЛОБЫ", 5, 200);
+}
+
+static void if_act(IfScene *s, int act) { s->act = act, s->actT = 0, s->step = 0, s->waitT = 0; }
+
 static void if_move_events(IfScene *s, IfFighter *F, float t0, float t) {
   IfFighter *O = if_foe(s, F);
   float hx, hy;
@@ -819,19 +894,44 @@ static void if_move_events(IfScene *s, IfFighter *F, float t0, float t) {
                 if_rr(&s->seed, 0.2f, 0.9f), if_rr(&s->seed, 14, 24), if_rr(&s->seed, 2, 3.5f), FC(200, 196, 190));
     }
     break;
-  case MV_G_PURPLE:
+  case MV_G_PALM: /* развязка: ладонь в грудь, и в ней — Чёрная вспышка, которой бой кончается */
+    if (AT(8) && s->finish && !F->mvHit) {
+      F->mvHit = 1;
+      if_face(F, O);
+      if_joint(O, FJ_CHEST, &hx, &hy);
+      if_damage(s, F, O, kMoves[MV_G_PALM].dmg, HK_HEAVY, 6.5f, 4.5f, hx, hy, 0);
+    }
+    break;
+  case MV_G_PURPLE: {
+    int mx = s->purpleMax; /* на всю мощь: шире вдвое, надпись на весь экран */
     if (AT(2)) F->blind = 0;
     if (AT(78)) {
       if_joint(F, FJ_HAND1, &hx, &hy);
-      IfEff *e = if_eff(s, EF_FLASH, hx, hy, 18, 2.2f);
+      IfEff *e = if_eff(s, EF_FLASH, hx, hy, 18, mx ? 3.2f : 2.2f);
       if (e) e->c = FC(200, 120, 255);
-      if_shake(s, 8);
+      if_shake(s, mx ? 12 : 8);
+      if (mx) if_banner(s, L"МНИМАЯ ТЕХНИКА", L"ФИОЛЕТОВЫЙ", 6, 150);
     }
     if (AT(90)) {
       if_face(F, O);
       if_joint(F, FJ_HAND1, &hx, &hy);
-      if_proj(s, PJ_PURPLE, F->who, hx + F->f * 10, F->fl + 46, F->f * 5.2f, 21, 400);
-      if_shake(s, 14);
+      IfProj *p = if_proj(s, PJ_PURPLE, F->who, hx + F->f * 10, F->fl + (mx ? 54.0f : 46.0f), F->f * (mx ? 4.4f : 5.2f),
+                          mx ? 36.0f : 21.0f, 400);
+      if (p && mx) p->a = 1;
+      s->purpleMax = 0;
+      if_shake(s, mx ? 22 : 14);
+    }
+    break;
+  }
+  case MV_G_RCT: /* обратная проклятая техника: Годжо чинит выгоревший мозг, техника возвращается */
+    if (AT(6)) {
+      IfEff *e = if_eff(s, EF_HEAL, F->x, F->fl, 60, 1);
+      if (e) e->owner = F->who;
+    }
+    if (AT(34)) {
+      F->burn = 0, F->ce = 760;
+      O->burn = fmaxf(O->burn, 640); /* Сукуне чинить нечем: его техника выгорела надолго */
+      if_call(s, F, L"Техника вернулась", FC(150, 255, 190), 70);
     }
     break;
   case MV_G_TELE:
@@ -850,8 +950,12 @@ static void if_move_events(IfScene *s, IfFighter *F, float t0, float t) {
   case MV_G_VOID:
     if (AT(12)) F->blind = 0;
     if (AT(26) && !s->dom) {
-      s->dom = DOM_VOID, s->domOwner = F->who, s->domPhase = DP_CAST, s->domT = 0, s->domDone = 1;
-      if_banner(s, L"РАСШИРЕНИЕ ТЕРРИТОРИИ", L"БЕЗГРАНИЧНАЯ ПУСТОТА", 1, 170);
+      if (s->act == SC_CLASH) if_clash_open(s);
+      else {
+        s->dom = DOM_VOID, s->domOwner = F->who, s->domPhase = DP_CAST, s->domT = 0;
+        s->domLen = s->act == SC_VOID2 ? 200 : 330, s->domBurn = 600;
+        if_banner(s, L"РАСШИРЕНИЕ ТЕРРИТОРИИ", L"БЕЗГРАНИЧНАЯ ПУСТОТА", 1, 170);
+      }
     }
     break;
   case MV_S_DISM:
@@ -875,18 +979,59 @@ static void if_move_events(IfScene *s, IfFighter *F, float t0, float t) {
       if_shake(s, 2);
     }
     break;
-  case MV_S_WORLD: /* Разрез мира: пространство рассечено насквозь, через весь экран */
+  case MV_S_WORLD: /* Разрез мира: пространство рассечено насквозь, через весь экран. Развязка: монетка */
+    if (AT(8)) {
+      if_joint(O, FJ_CHEST, &s->cutX, &s->cutY);
+      if (s->act == SC_WORLD) {
+        s->act = SC_END, s->actT = 0;
+        if (s->fate == 0) { /* Годжо прочёл удар: исчезает за миг до него, разрез пройдёт сквозь послеобраз */
+          O->y = O->fl, O->vy = 0, O->mv = -1;
+          if_start(s, O, MV_G_TELE);
+        }
+      }
+    }
     if (AT(13)) {
-      if_joint(O, FJ_CHEST, &hx, &hy);
+      hx = s->cutX, hy = s->cutY;
       IfEff *e = if_eff(s, EF_WCUT, hx, hy, 48, 1);
       if (e) e->a = F->f * if_rr(&s->seed, 0.55f, 0.95f);
       if_shake(s, 16);
       s->hitstop = 6;
-      if (fabsf(O->x - F->x) < 900 && O->st != FS_DOWN) {
+      if (s->act == SC_END && s->fate == 1) { /* попал: Годжо пополам */
         IfEff *c = if_eff(s, EF_CROSS, hx, hy, 30, 1.4f);
         if (c) c->a = (float)F->f;
-        if_damage(s, F, O, 150, HK_KNOCK, 6.5f, 5.0f, hx, hy, 2); /* сквозь Бесконечность */
+        s->finish = 1;
+        s->slowT = 46;
+        if_damage(s, F, O, 150, HK_BLAST, 7.5f, 6.0f, hx, hy, 2); /* сквозь Бесконечность */
+      } else if (s->act == SC_END) {
+        if_call(s, O, L"Мимо.", FC(150, 215, 255), 60);
       }
+    }
+    break;
+  case MV_S_MAHO: /* Десять теней: из тени под ногами встаёт Махорага; Пустота о тень трескается */
+    if (AT(8)) {
+      s->maho = 1, s->mahoT = 0, s->mahoDie = 0, s->adapt = 0, s->wheel = s->wheelTo = 0, s->adaptT = 0;
+      s->mahoX = fa_clampf(F->x - F->f * 36, s->xMin + 30, s->xMax - 30), s->mahoFl = F->fl, s->mahoF = (float)F->f;
+      s->mahoAtk = 120, s->mahoHitT = 0;
+      for (int i = 0; i < 30; i++) {
+        float a = if_rr(&s->seed, 0, FA_PI), v = if_rr(&s->seed, 0.4f, 2.2f);
+        if_part(s, PT_SMOKE, s->mahoX + if_rr(&s->seed, -50, 50), s->mahoFl + 2, cosf(a) * v * 0.5f, sinf(a) * v,
+                if_rr(&s->seed, 40, 80), if_rr(&s->seed, 8, 18), FC(20, 12, 34));
+      }
+      if_shake(s, 5);
+    }
+    if (AT(30)) if_banner(s, L"ДЕСЯТЬ ТЕНЕЙ", L"МАХОРАГА", 2, 150);
+    if (AT(40) && s->dom == DOM_VOID && s->domPhase != DP_CLOSE) { /* купол треснул о тень: Годжо снова без техники */
+      s->domPhase = DP_CLOSE, s->domT = 0, s->domBurn = 300;
+      IfEff *e = if_eff(s, EF_FLASH, s->domX, s->domFl + 60, 24, 3.0f);
+      if (e) e->c = FC(220, 230, 255);
+      for (int i = 0; i < 40; i++) {
+        float u = if_rr(&s->seed, -0.9f, 0.9f), v = if_rr(&s->seed, 0.1f, 0.95f) * sqrtf(1 - u * u);
+        IfPart *q = if_part(s, PT_BIT, s->domX + u * s->domRx, s->domFl + v * s->domRy, u * 1.5f, if_rr(&s->seed, -1, 2),
+                            if_rr(&s->seed, 30, 50), if_rr(&s->seed, 1.5f, 3.5f), FC(150, 200, 255));
+        q->g = 0.2f, q->rot = if_rr(&s->seed, 0, 6);
+      }
+      if_shake(s, 16);
+      if_call(s, O, L"Купол треснул", FC(170, 170, 180), 70);
     }
     break;
   case MV_S_CLEAVE:
@@ -907,8 +1052,11 @@ static void if_move_events(IfScene *s, IfFighter *F, float t0, float t) {
     break;
   case MV_S_SHRINE:
     if (AT(14) && !s->dom) {
-      s->dom = DOM_SHRINE, s->domOwner = F->who, s->domPhase = DP_CAST, s->domT = 0, s->domDone = 1;
-      if_banner(s, L"РАСШИРЕНИЕ ТЕРРИТОРИИ", L"СВЯТИЛИЩЕ ЗЛОБЫ", 2, 170);
+      if (s->act == SC_CLASH) if_clash_open(s);
+      else {
+        s->dom = DOM_SHRINE, s->domOwner = F->who, s->domPhase = DP_CAST, s->domT = 0, s->domLen = 330, s->domBurn = 600;
+        if_banner(s, L"РАСШИРЕНИЕ ТЕРРИТОРИИ", L"СВЯТИЛИЩЕ ЗЛОБЫ", 2, 170);
+      }
     }
     break;
   }
@@ -968,12 +1116,23 @@ static void if_move_step(IfScene *s, IfFighter *F, float dt) {
     return;
   }
   if (t >= m->len) {
+    if ((F->mv == MV_G_VOID || F->mv == MV_S_SHRINE) && s->dom == DOM_CLASH) { /* купола сошлись: знак держат, пока не решится */
+      F->mt = t0;
+      return;
+    }
     int mv = F->mv;
     F->mv = -1;
     if_set_state(F, FS_IDLE);
     if (F->chain >= 2 && if_rf(&s->seed) < 0.2f) /* после серии — отскочить: место для техник */
       F->intent = IN_BACK, F->intentT = if_rr(&s->seed, 10, 20);
     F->chain = 0;
+    if (mv == MV_G_TELE && s->act == SC_END && s->fate == 0 && s->phase == RP_FIGHT && O->hp > 0) { /* развязка Годжо */
+      s->finish = 1;
+      if_start(s, F, MV_G_PALM);
+      return;
+    }
+    if (mv == MV_G_RCT) if_act(s, SC_VOID2);
+    if (mv == MV_S_MAHO && s->act == SC_VOID2) if_act(s, SC_MAHO);
     if (mv == MV_G_TELE && s->phase == RP_FIGHT && fabsf(O->x - F->x) < 52 && O->st != FS_DOWN) {
       float r = if_rf(&s->seed);
       if_start(s, F, r < 0.4f ? MV_G_KICK : (r < 0.7f ? MV_G_HIGH : MV_G_PALM));
@@ -992,17 +1151,19 @@ typedef struct {
 
 /* сколько энергии беречь: один в раунде копит на территорию, другой — на свой
    сильнейший удар (Фиолетовый, Разверзнись) */
-static int if_goal(const IfScene *s, const IfFighter *F) {
-  if (F->who == s->domCaster && !s->domDone && s->roundT > 400) return F->who ? MV_S_SHRINE : MV_G_VOID;
-  if (F->who != s->domCaster && !F->ultUsed && s->roundT > 300) return F->who ? MV_S_FUGA : MV_G_PURPLE;
-  return -1;
+/* приёмы сценария начинает только сценарий; Разверзнись против Годжо не бывает (как в каноне) */
+static int if_allowed(const IfScene *s, int mv) {
+  switch (mv) {
+  case MV_G_VOID: case MV_G_PURPLE: case MV_G_RCT:
+  case MV_S_SHRINE: case MV_S_WORLD: case MV_S_MAHO: case MV_S_FUGA:
+    return 0;
+  default:
+    break;
+  }
+  if (s->act == SC_WORLD && (kMoves[mv].flags & MVF_TECH)) return 0; /* перед развязкой — только руки */
+  return 1;
 }
-static int if_afford(const IfScene *s, const IfFighter *F, int mv) {
-  if (!if_can(F, mv)) return 0;
-  int g = if_goal(s, F);
-  if (mv == MV_S_WORLD && g == MV_S_FUGA) return 1; /* Разрез мира — вместо Разверзнись */
-  return g < 0 || g == mv || F->ce - kMoves[mv].ce >= kMoves[g].ce;
-}
+static int if_afford(const IfScene *s, const IfFighter *F, int mv) { return if_can(F, mv) && if_allowed(s, mv); }
 
 static void if_opt(IfScene *s, const IfFighter *F, IfOpt *o, int *n, int act, float w) {
   if (w <= 0) return;
@@ -1139,8 +1300,10 @@ static void if_ai(IfScene *s, IfFighter *F) {
   int n = 0;
   F->think = if_rr(&s->seed, 4, 12);
   if (s->dom && s->domPhase != DP_CLOSE) { /* в территории */
-    if (s->domOwner == F->who && F->who == 0) { /* Годжо бьёт замершего */
-      if (d > 46) if_opt(s, F, o, &n, ACT_NEAR, 10);
+    if (s->dom == DOM_CLASH) return;
+    if (s->domOwner == F->who && F->who == 0) { /* Годжо бьёт замершего; тень встаёт — отходит */
+      if (O->st == FS_MOVE && O->mv == MV_S_MAHO) if_opt(s, F, o, &n, ACT_BACK, 10);
+      else if (d > 46) if_opt(s, F, o, &n, ACT_NEAR, 10);
       else {
         if_opt(s, F, o, &n, MV_G_JAB, 10), if_opt(s, F, o, &n, MV_G_PALM, 8), if_opt(s, F, o, &n, MV_G_KICK, 8);
         if_opt(s, F, o, &n, ACT_WAIT, 6);
@@ -1165,24 +1328,23 @@ static void if_ai(IfScene *s, IfFighter *F) {
       if_opt(s, F, o, &n, MV_G_RED, dy > 0 ? 14 : 24), if_opt(s, F, o, &n, MV_G_REDX, 12);
       if (d > 40) if_opt(s, F, o, &n, MV_G_BLUE, 5);
     } else {
-      if_opt(s, F, o, &n, mv, 34), if_opt(s, F, o, &n, MV_S_FUGA, s->roundT > 600 ? 10 : 0);
+      if_opt(s, F, o, &n, mv, 34);
       if (dy > 0 && dy < 70) if_opt(s, F, o, &n, MV_S_DISM, 12), if_opt(s, F, o, &n, MV_S_FAN, 10);
-      if (s->roundT > 700 && !F->ultUsed) if_opt(s, F, o, &n, MV_S_WORLD, 8);
       if (dy < 0) if_opt(s, F, o, &n, MV_S_TAUNT, 4);
     }
     if_opt(s, F, o, &n, ACT_WAIT, 2);
   } else {
-    int domReady = F->who == s->domCaster && !s->domDone && F->ce >= 700 && s->roundT > 900 && F->burn <= 0 &&
-                   (F->hp < 750 || O->hp < 650 || s->roundT > 1800) && O->st != FS_FLY && fabsf(O->fl - F->fl) < 4;
-    int ult = F->who ? MV_S_FUGA : MV_G_PURPLE;
-    int late = s->roundT > 600 && if_can(F, ult); /* самое сильное — не с первых секунд */
+    int roam = s->act == SC_OPEN && s->actT < 600; /* окна и другие мониторы — пока разминка; потом сходятся */
     float px, py;
-    if (d > 46 && if_perch(s, F, &px, &py)) if_opt(s, F, o, &n, ACT_PERCH, 7);
+    if (roam && d > 46 && if_perch(s, F, &px, &py)) if_opt(s, F, o, &n, ACT_PERCH, 7);
     if (d > 46 && if_on_window(s, F)) if_opt(s, F, o, &n, ACT_DROP, 6); /* бой — больше на земле */
-    if (late && d < 46) if_opt(s, F, o, &n, ACT_BACK, 8); /* для него нужен простор */
-    if (s->nMon > 1 && s->roamT <= 0 && d < 160 && F->hp > 250) if_opt(s, F, o, &n, ACT_ROAM, 9); /* бой — на другой монитор */
-    if (F->who == 0) {
-      if (domReady) if_opt(s, F, o, &n, MV_G_VOID, 80);
+    if (roam && s->nMon > 1 && s->roamT <= 0 && d < 160 && F->hp > 250) if_opt(s, F, o, &n, ACT_ROAM, 9); /* бой — на другой монитор */
+    if (!roam && d > 110) if_opt(s, F, o, &n, ACT_NEAR, 30);
+    if (s->act == SC_CLASH || s->act == SC_WORLD) { /* перед знаками и перед развязкой — сходятся и ждут */
+      if (d > 90) if_opt(s, F, o, &n, ACT_NEAR, 20);
+      else if (d < 60) if_opt(s, F, o, &n, ACT_BACK, 10);
+      if_opt(s, F, o, &n, ACT_WAIT, 10);
+    } else if (F->who == 0) {
       if (O->st == FS_FLY && d < 110) {
         if_opt(s, F, o, &n, MV_G_RED, 18), if_opt(s, F, o, &n, ACT_NEAR, 20), if_opt(s, F, o, &n, MV_G_TELE, 8);
         if_opt(s, F, o, &n, MV_G_REDX, 10), if_opt(s, F, o, &n, MV_G_LUNGE, 10);
@@ -1194,18 +1356,14 @@ static void if_ai(IfScene *s, IfFighter *F) {
       } else if (d < 110) {
         if_opt(s, F, o, &n, ACT_NEAR, 26), if_opt(s, F, o, &n, MV_G_LUNGE, 20), if_opt(s, F, o, &n, MV_G_RED, 14);
         if_opt(s, F, o, &n, MV_G_BLUE, 12), if_opt(s, F, o, &n, MV_G_REDX, 10);
-        if (late) if_opt(s, F, o, &n, MV_G_PURPLE, 26);
         if_opt(s, F, o, &n, MV_G_TELE, 10), if_opt(s, F, o, &n, ACT_JUMP, 6), if_opt(s, F, o, &n, MV_G_TAUNT, 1.5f);
         if_opt(s, F, o, &n, ACT_WAIT, 2);
       } else {
         if_opt(s, F, o, &n, MV_G_RED, 18), if_opt(s, F, o, &n, ACT_NEAR, 26), if_opt(s, F, o, &n, MV_G_BLUE, 8);
         if_opt(s, F, o, &n, MV_G_REDX, 14);
-        if (late) if_opt(s, F, o, &n, MV_G_PURPLE, 34);
         if_opt(s, F, o, &n, MV_G_TELE, d > 220 ? 30 : 9), if_opt(s, F, o, &n, MV_G_TAUNT, 2), if_opt(s, F, o, &n, ACT_WAIT, 1.5f);
       }
     } else {
-      if (domReady) if_opt(s, F, o, &n, MV_S_SHRINE, 80);
-      int world = s->roundT > 700 && !F->ultUsed; /* Разрез мира — вместо Разверзнись, раз за раунд */
       if (O->st == FS_FLY && d < 110) {
         if_opt(s, F, o, &n, MV_S_DISM, 18), if_opt(s, F, o, &n, ACT_NEAR, 20), if_opt(s, F, o, &n, ACT_JUMP, 6);
         if_opt(s, F, o, &n, MV_S_LUNGE, 12);
@@ -1216,14 +1374,10 @@ static void if_ai(IfScene *s, IfFighter *F) {
       } else if (d < 110) {
         if_opt(s, F, o, &n, ACT_NEAR, 30), if_opt(s, F, o, &n, MV_S_LUNGE, 22), if_opt(s, F, o, &n, MV_S_DISM, 16);
         if_opt(s, F, o, &n, MV_S_FAN, 10), if_opt(s, F, o, &n, ACT_JUMP, 10);
-        if (late) if_opt(s, F, o, &n, MV_S_FUGA, 26);
-        if (world) if_opt(s, F, o, &n, MV_S_WORLD, 9);
         if_opt(s, F, o, &n, MV_S_TAUNT, 1.5f), if_opt(s, F, o, &n, ACT_WAIT, 2);
       } else {
         if_opt(s, F, o, &n, MV_S_DISM, 18), if_opt(s, F, o, &n, MV_S_FAN, 14), if_opt(s, F, o, &n, ACT_NEAR, 36);
         if_opt(s, F, o, &n, MV_S_TAUNT, 3);
-        if (late) if_opt(s, F, o, &n, MV_S_FUGA, 34);
-        if (world) if_opt(s, F, o, &n, MV_S_WORLD, 12);
       }
     }
   }
@@ -1301,7 +1455,7 @@ static void if_land_dust(IfScene *s, float x, float y, int n) {
 }
 
 static int if_victim(IfScene *s, const IfFighter *F) {
-  return s->dom && F->who != s->domOwner && (s->domPhase == DP_OPEN || s->domPhase == DP_ON);
+  return s->dom && s->dom != DOM_CLASH && F->who != s->domOwner && (s->domPhase == DP_OPEN || s->domPhase == DP_ON);
 }
 
 static void if_fighter_step(IfScene *s, IfFighter *F, float dt) {
@@ -1639,6 +1793,22 @@ static int if_pj_win(const IfScene *s, const IfProj *p, float ox, float oy, cons
   return 0;
 }
 
+/* Махорага разбит: тень рассыпается осколками */
+static void if_maho_die(IfScene *s) {
+  if (!s->maho) return;
+  s->maho = 0, s->mahoDie = 40;
+  for (int i = 0; i < 70; i++) {
+    float a = if_rr(&s->seed, 0, 2 * FA_PI), v = if_rr(&s->seed, 1, 5);
+    IfPart *q = if_part(s, PT_SHARD, s->mahoX + if_rr(&s->seed, -60, 60), s->mahoFl + if_rr(&s->seed, 0, 240), cosf(a) * v,
+                        sinf(a) * v + 2, if_rr(&s->seed, 30, 60), if_rr(&s->seed, 1.5f, 4), FC(44, 30, 70));
+    q->g = 0.22f, q->rot = if_rr(&s->seed, 0, 6);
+  }
+  IfEff *e = if_eff(s, EF_FLASH, s->mahoX, s->mahoFl + 190, 26, 3.5f);
+  if (e) e->c = FC(210, 150, 255);
+  if_shake(s, 20);
+  if_call(s, &s->F[1], L"Махорага!..", FC(200, 160, 255), 70);
+}
+
 static void if_pj_step(IfScene *s, float dt) {
   for (int i = 0; i < IF_MAXJ; i++) {
     IfProj *p = &s->pj[i];
@@ -1707,11 +1877,13 @@ static void if_pj_step(IfScene *s, float dt) {
         p->kind = PJ_NONE;
       }
       break;
-    case PJ_PURPLE:
+    case PJ_PURPLE: {
+      int mx = p->a > 0.5f; /* на всю мощь: вдвое шире, сносит Махорагу */
       p->x += p->vx * dt;
       float pfl = if_floor(s, p->x, p->y, 0);
-      if (((int)p->t % 3) == 0 && p->y - pfl < 70) if_eff(s, EF_SCORCH, p->x - p->vx * 4, pfl, 110, 1);
-      for (int k = 0; k < 3; k++) {
+      if (((int)p->t % 3) == 0 && p->y - pfl < (mx ? 90 : 70)) if_eff(s, EF_SCORCH, p->x - p->vx * 4, pfl, 110, mx ? 1.8f : 1.0f);
+      if (s->maho && s->mahoDie <= 0 && fabsf(p->x - s->mahoX) < p->r + 24) if_maho_die(s);
+      for (int k = 0; k < (mx ? 5 : 3); k++) {
         float a = if_rr(&s->seed, 0, 2 * FA_PI);
         IfPart *q = if_part(s, PT_SPARK, p->x + cosf(a) * p->r, p->y + sinf(a) * p->r, -p->vx * 0.3f + cosf(a) * 1.5f,
                             sinf(a) * 1.5f, if_rr(&s->seed, 10, 20), if_rr(&s->seed, 0.8f, 1.6f),
@@ -1723,16 +1895,20 @@ static void if_pj_step(IfScene *s, float dt) {
                             if_rr(&s->seed, 2, 6), if_rr(&s->seed, 30, 50), if_rr(&s->seed, 1, 2.5f), FC(90, 80, 100));
         q->g = 0.3f, q->rot = if_rr(&s->seed, 0, 6);
       }
-      if_shake(s, 3);
+      if_shake(s, mx ? 5 : 3);
       if (!p->hit && if_pj_touch(p, D, &cx, &cy)) {
         p->hit = 1;
-        if_damage(s, A, D, 260, HK_BLAST, 12, 7.5f, cx, cy, 2);
-        IfEff *e = if_eff(s, EF_FLASH, cx, cy, 24, 3.0f);
+        if_damage(s, A, D, mx ? 420 : 260, HK_BLAST, mx ? 14 : 12, mx ? 8.5f : 7.5f, cx, cy, 2);
+        IfEff *e = if_eff(s, EF_FLASH, cx, cy, 24, mx ? 4.0f : 3.0f);
         if (e) e->c = FC(210, 130, 255);
-        if_shake(s, 18);
+        if_shake(s, mx ? 24 : 18);
       }
-      if (out) p->kind = PJ_NONE;
+      if (out) {
+        p->kind = PJ_NONE;
+        if (mx && s->act == SC_PURPLE) s->step = 2;
+      }
       break;
+    }
     case PJ_SLASH:
       p->x += p->vx * dt;
       p->y += p->vy * dt;
@@ -1774,6 +1950,7 @@ static void if_pj_step(IfScene *s, float dt) {
 /* территория режет сама: без остановки кадра, чтобы бой не дёргался */
 static void if_dom_cut(IfScene *s, IfFighter *D, float dmg, int flinch) {
   if (D->hp <= 0 || D->st == FS_KO) return;
+  if (s->act != SC_END && dmg > D->hp - IF_HPMIN) dmg = fmaxf(0.0f, D->hp - IF_HPMIN); /* до развязки не добивает */
   IfFighter *A = if_foe(s, D);
   float hx, hy;
   if_joint(D, if_rf(&s->seed) < 0.5f ? FJ_CHEST : FJ_HEAD, &hx, &hy);
@@ -1800,8 +1977,74 @@ static void if_dom_cut(IfScene *s, IfFighter *D, float dmg, int flinch) {
   }
 }
 
+/* граница куполов при столкновении (единицы мира) на высоте v (0 — пол, 1 — верх купола):
+   clashK двигает её к Сукуне (+) или к Годжо (−), сверху волнами */
+static float if_clash_x(const IfScene *s, float v) {
+  float sgn = s->F[0].x < s->F[1].x ? 1.0f : -1.0f;
+  float wob = (sinf(v * 9.0f + s->domT * 0.25f) * 6.0f + sinf(v * 3.1f - s->domT * 0.13f) * 9.0f) * fa_sat(1.3f - v);
+  return s->domX + sgn * s->clashK * s->domRx * 0.8f + wob;
+}
+
+/* купола сошлись: граница ходит туда-сюда и трещит; со 100-го кадра Годжо сужает барьер и граница
+   ползёт к Сукуне, на 160-м Святилище рушится — как в каноне, первое столкновение за Годжо */
+static void if_clash_on(IfScene *s, float t0, float t, float dt) {
+  if ((int)(t / 18) != (int)(t0 / 18)) { /* толчок: кто-то надавил */
+    s->clashV += if_rr(&s->seed, -0.035f, 0.035f);
+    if_shake(s, 4);
+  }
+  s->clashV -= s->clashK * 0.004f * dt; /* к середине тянет */
+  if (t >= 100) {                       /* Годжо сужает барьер: Пустота давит сильнее */
+    s->clashV += 0.0025f * dt;
+    if (t0 < 100) if_call(s, &s->F[0], L"Сузить барьер", FC(150, 215, 255), 70);
+  }
+  s->clashV *= powf(0.94f, dt);
+  s->clashK = fa_clampf(s->clashK + s->clashV * dt, -0.55f, 0.55f);
+  for (int i = 0; i < 2; i++) { /* искры с границы */
+    float v = if_rf(&s->seed) * 0.9f;
+    IfPart *p = if_part(s, PT_SPARK, if_clash_x(s, v), s->domFl + v * s->domRy, if_rr(&s->seed, -2, 2), if_rr(&s->seed, -1, 2),
+                        if_rr(&s->seed, 8, 16), if_rr(&s->seed, 0.7f, 1.3f), i ? FC(255, 80, 90) : FC(160, 220, 255));
+    p->light = 1;
+  }
+  if (t >= 160) {
+    s->clashWin = 0; /* канон: Пустота устояла */
+    s->domPhase = DP_BREAK, s->domT = 0, s->clashV = 0;
+    if_banner(s, L"КУПОЛ РАЗБИТ", s->clashWin ? L"СВЯТИЛИЩЕ ЗЛОБЫ" : L"БЕЗГРАНИЧНАЯ ПУСТОТА", s->clashWin ? 2 : 1, 150);
+    IfEff *e = if_eff(s, EF_FLASH, if_clash_x(s, 0.5f), s->domFl + s->domRy * 0.5f, 22, 3.5f);
+    if (e) e->c = FC(255, 255, 255);
+    if_shake(s, 18);
+    s->hitstop = 5;
+  }
+}
+
+/* купол проигравшего рушится: граница уходит к его краю, с неё летят осколки; дальше — купол победителя */
+static void if_clash_break(IfScene *s, float t, float dt) {
+  float to = s->clashWin == 0 ? 1.3f : -1.3f;
+  s->clashK += (to - s->clashK) * fa_sat(0.16f * dt);
+  FCol col = s->clashWin ? FC(120, 170, 255) : FC(190, 40, 50); /* осколки цвета разбитого купола */
+  for (int i = 0; i < 4; i++) {
+    float v = if_rf(&s->seed) * 0.9f, sgn = s->F[0].x < s->F[1].x ? 1.0f : -1.0f, away = (s->clashWin ? -1.0f : 1.0f) * sgn;
+    IfPart *q = if_part(s, PT_BIT, if_clash_x(s, v), s->domFl + v * s->domRy, away * if_rr(&s->seed, 1, 4), if_rr(&s->seed, -1, 3),
+                        if_rr(&s->seed, 30, 50), if_rr(&s->seed, 1.5f, 3.5f), col);
+    q->g = 0.2f, q->rot = if_rr(&s->seed, 0, 6);
+  }
+  if (t >= 22) {
+    IfFighter *W = &s->F[s->clashWin], *L = &s->F[!s->clashWin];
+    s->dom = s->clashWin ? DOM_SHRINE : DOM_VOID;
+    s->domOwner = s->clashWin, s->domPhase = DP_ON, s->domT = 0, s->domOpen = 1, s->domLen = 210, s->domBurn = 600;
+    if (s->clashWin) free(s->bd), s->bd = s->bd2;
+    else free(s->bd2);
+    s->bd2 = NULL, s->bdKind = s->dom;
+    L->mv = -1, L->burn = 900, L->ce = 0, L->inv = 0;
+    if_set_state(L, FS_IDLE);
+    if_call(s, L, L"Техника выгорела", FC(170, 170, 180), 80);
+    if (W->st == FS_MOVE && W->mv >= 0) W->mt = kMoves[W->mv].len; /* знак кончился: дальше как в своём куполе */
+    W->inv = 0;
+  }
+}
+
 static void if_dom_step(IfScene *s, float dt) {
   if (!s->dom) return;
+  int clash = s->dom == DOM_CLASH;
   IfFighter *C = &s->F[s->domOwner], *V = &s->F[!s->domOwner];
   float t0 = s->domT;
   s->domT += dt;
@@ -1809,15 +2052,19 @@ static void if_dom_step(IfScene *s, float dt) {
   switch (s->domPhase) {
   case DP_CAST: /* знак рукой; фон строится понемногу, чтобы не было рывка */
     s->domOpen = 0;
+    if (clash && t >= 12 && !(V->st == FS_MOVE && V->mv == MV_S_SHRINE)) { /* второй знак запоздал — силой: купола должны сойтись */
+      V->y = V->fl, V->vy = 0, V->mv = -1;
+      if_start(s, V, MV_S_SHRINE);
+    }
     if (t >= 24) {
       s->domPhase = DP_OPEN, s->domT = 0;
-      if (V->st != FS_FLY && V->st != FS_DOWN && V->st != FS_GETUP && V->st != FS_KO && V->hp > 0) {
+      if (!clash && V->st != FS_FLY && V->st != FS_DOWN && V->st != FS_GETUP && V->st != FS_KO && V->hp > 0) {
         V->mv = -1, V->intent = IN_NONE, V->vx = 0;
         if (if_up(V) <= 0.5f) if_set_state(V, FS_IDLE); /* неизбежное попадание: что начал — бросил */
       }
-      IfEff *e = if_eff(s, EF_FLASH, s->domX, s->domFl + 40, 20, 3.0f);
-      if (e) e->c = s->dom == DOM_VOID ? FC(160, 210, 255) : FC(255, 60, 70);
-      if_shake(s, 10);
+      IfEff *e = if_eff(s, EF_FLASH, s->domX, s->domFl + 40, 20, clash ? 3.6f : 3.0f);
+      if (e) e->c = clash ? FC(240, 220, 255) : (s->dom == DOM_VOID ? FC(160, 210, 255) : FC(255, 60, 70));
+      if_shake(s, clash ? 14 : 10);
     }
     break;
   case DP_OPEN:
@@ -1825,19 +2072,32 @@ static void if_dom_step(IfScene *s, float dt) {
     if (t >= 26) s->domPhase = DP_ON, s->domT = 0, s->domOpen = 1;
     break;
   case DP_ON:
+    if (clash) {
+      if_clash_on(s, t0, t, dt);
+      break;
+    }
     if (s->dom == DOM_SHRINE && V->hp > 0 && V->st != FS_FLY && V->st != FS_DOWN && V->st != FS_GETUP) {
       if ((int)(t / 6) != (int)(t0 / 6)) if_dom_cut(s, V, 5, 0);
       if ((int)(t / 50) != (int)(t0 / 50)) if_dom_cut(s, V, 16, 1);
     }
-    if (t >= 330 || V->hp <= 0 || C->hp <= 0 || s->phase != RP_FIGHT) s->domPhase = DP_CLOSE, s->domT = 0;
+    if (s->act == SC_VOID2 && s->dom == DOM_VOID && t >= 110 && !s->maho && V->hp > 0 && s->phase == RP_FIGHT &&
+        !(V->st == FS_MOVE && V->mv == MV_S_MAHO)) { /* Сукуна рвёт Пустоту тенью */
+      V->y = V->fl, V->vy = 0, V->mv = -1;
+      if_start(s, V, MV_S_MAHO);
+    }
+    if (t >= s->domLen || V->hp <= 0 || C->hp <= 0 || s->phase != RP_FIGHT) s->domPhase = DP_CLOSE, s->domT = 0;
+    break;
+  case DP_BREAK:
+    if_clash_break(s, t, dt);
     break;
   case DP_CLOSE:
     s->domOpen = 1.0f - fa_sat(t / 20);
     if (t >= 20) {
-      C->burn = 600; /* техника выгорела: десять секунд без техник */
+      C->burn = s->domBurn; /* техника выгорела: несколько секунд без техник */
       C->ce = 0;
       s->dom = DOM_NONE;
       s->domOpen = 0;
+      if (s->act == SC_CLASH) if_act(s, SC_BURN);
     }
     break;
   }
@@ -1885,10 +2145,9 @@ static void if_round_step(IfScene *s, float dt) {
     if (AT(118)) if_banner(s, NULL, L"БОЙ!", 3, 44);
     if (t >= 150) {
       s->phase = RP_FIGHT, s->phT = 0, s->roundT = 0, s->roamT = if_rr(&s->seed, 420, 720);
-      /* территория — по очереди: кто в прошлом раунде не успел, пробует снова */
-      if (s->round <= 1) s->domCaster = (int)(if_rnd(&s->seed) & 1);
-      else if (s->domDone) s->domCaster = !s->domCaster;
-      s->domDone = 0;
+      if_act(s, SC_OPEN); /* сценарий заново; монетка: кто победит в этом раунде */
+      s->fate = (int)(if_rnd(&s->seed) & 1);
+      s->finish = 0, s->purpleMax = 0, s->maho = 0, s->mahoDie = 0, s->adapt = 0, s->adaptT = 0, s->clashK = 0;
       G->think = if_rr(&s->seed, 4, 20), K->think = if_rr(&s->seed, 4, 20);
     }
     break;
@@ -1930,7 +2189,9 @@ static void if_round_step(IfScene *s, float dt) {
           if_set_anim(W, W->who ? AN_S_WIN : AN_G_WIN, 1);
         }
         if (W->who == 0) W->blind = 0;
-        if_banner(s, W->who ? L"Знай своё место, глупец." : L"Не переживай. Я ведь сильнейший.",
+        int alt = if_rf(&s->seed) < 0.5f; /* слова победителя — из боя в Синдзюку или прежние */
+        if_banner(s, W->who ? (alt ? L"Можешь гордиться. Ты был силён." : L"Знай своё место, глупец.")
+                            : (alt ? L"Не, я бы победил." : L"Не переживай. Я ведь сильнейший."),
                   W->who ? L"ПОБЕДИЛ СУКУНА" : L"ПОБЕДИЛ ГОДЖО", 4, 210);
       } else {
         if_banner(s, NULL, L"НИЧЬЯ", 0, 150);
@@ -1943,6 +2204,7 @@ static void if_round_step(IfScene *s, float dt) {
     break;
   case RP_RESET: /* обратная проклятая техника: оба лечатся и возвращаются */
     if (AT(1)) {
+      if (s->maho) if_maho_die(s);
       if (s->nMon > 1) { /* следующий раунд — на другом мониторе */
         int m = (s->arena + 1 + (int)(if_rf(&s->seed) * (s->nMon - 1))) % s->nMon;
         if_set_arena(s, m);
@@ -1991,6 +2253,165 @@ static void if_round_step(IfScene *s, float dt) {
 #undef AT
 }
 
+/* ===================== сценарий ===================== */
+
+/* оба на ногах, на одном полу, не дальше dmax, купола нет: можно начинать следующий акт */
+static int if_near(const IfScene *s, float dmax) {
+  const IfFighter *G = &s->F[0], *K = &s->F[1];
+  return !s->dom && if_neutral(G) && if_neutral(K) && if_up(G) < 1 && if_up(K) < 1 && fabsf(G->fl - K->fl) < 4 &&
+         fabsf(G->x - K->x) < dmax && G->hp > 0 && K->hp > 0;
+}
+
+static int if_pj_any(const IfScene *s, int kind) {
+  for (int i = 0; i < IF_MAXJ; i++)
+    if (s->pj[i].kind == kind) return 1;
+  return 0;
+}
+
+/* долго не сходятся (разные окна, мониторы): обоим — домой, на пол арены */
+static void if_regroup(IfScene *s) {
+  for (int i = 0; i < 2; i++) {
+    IfFighter *F = &s->F[i];
+    if (!if_neutral(F)) continue;
+    F->home = s->homeX + (i ? 60.0f : -60.0f);
+    F->homeFl = if_ground(s, F->home);
+    F->intent = IN_HOME;
+  }
+}
+
+/* тень Махораги: ходит за Сукуной, бьёт Годжо огромным кулаком (в Бесконечность — тоже наука) */
+static void if_maho_step(IfScene *s, float dt) {
+  IfFighter *G = &s->F[0], *K = &s->F[1];
+  if (!s->maho || s->mahoDie > 0) return;
+  float tx = fa_clampf(K->x - K->f * 40, s->xMin + 30, s->xMax - 30);
+  s->mahoX += (tx - s->mahoX) * fa_sat(0.04f * dt);
+  s->mahoFl += (K->fl - s->mahoFl) * fa_sat(0.1f * dt);
+  s->mahoF = (float)K->f;
+  s->mahoAtk -= dt;
+  if (s->mahoHitT > 0) {
+    s->mahoHitT -= dt;
+    if (s->mahoHitT <= 0) { /* кулак дошёл до земли */
+      float gy = if_ground(s, s->mahoHitX);
+      if (fabsf(G->x - s->mahoHitX) < 30 && if_up(G) < 30 && G->hp > 0 && G->st != FS_KO)
+        if_damage(s, K, G, 85, HK_KNOCK, 7.0f, 5.5f, G->x, G->y + 50, 1);
+      if_eff(s, EF_CRACK, s->mahoHitX, gy, 70, 1.4f);
+      if_land_dust(s, s->mahoHitX, gy, 14);
+      if_shake(s, 12);
+    }
+  } else if (s->mahoAtk <= 0 && s->mahoT > 60 && fabsf(G->x - s->mahoX) < 190 && G->st != FS_DOWN && G->st != FS_KO &&
+             G->st != FS_GETUP && s->act != SC_WORLD && s->act != SC_END && s->phase == RP_FIGHT) {
+    s->mahoAtk = if_rr(&s->seed, 130, 200);
+    s->mahoHitT = 14, s->mahoHitX = fa_clampf(G->x + G->vx * 6, s->xMin, s->xMax);
+    IfEff *e = if_eff(s, EF_MAHOSLAM, s->mahoHitX, if_ground(s, s->mahoHitX), 34, 1);
+    if (e) e->a = s->mahoHitX > s->mahoX ? 1.0f : -1.0f, e->b = s->mahoX;
+  }
+}
+
+/* ход боя по сценарию (см. SC_*): кто что делает дальше, когда оба готовы */
+static void if_script_step(IfScene *s, float dt) {
+  if (s->phase != RP_FIGHT) {
+    if (s->act == SC_END) s->actT += dt; /* развязка: время идёт и после нокаута (снимки) */
+    return;
+  }
+  IfFighter *G = &s->F[0], *K = &s->F[1];
+  float d = fabsf(G->x - K->x);
+  s->actT += dt;
+  float t = s->actT;
+  int wait = 0; /* акт ждёт, пока сойдутся */
+  switch (s->act) {
+  case SC_OPEN: /* разминка: рукопашная у Бесконечности, Синий и Красный, Рассечение; через 15 секунд — к знакам */
+    if (t > 900) {
+      wait = 1;
+      if (if_near(s, 230) && d > 56) if_act(s, SC_CLASH);
+    }
+    break;
+  case SC_CLASH: /* знаки разом: Сукуна начинает на 12 кадров позже, и купола раскрываются в один миг */
+    if (s->step == 0) {
+      wait = 1;
+      if (if_near(s, 230) && d > 56) {
+        if_start(s, G, MV_G_VOID);
+        s->step = 1;
+      }
+    } else if (s->step == 1) {
+      if (G->st == FS_MOVE && G->mv == MV_G_VOID) {
+        if (G->mt >= 12 && K->st != FS_FLY && K->st != FS_DOWN && K->st != FS_GETUP && K->hp > 0) {
+          K->y = K->fl, K->vy = 0, K->mv = -1;
+          if_start(s, K, MV_S_SHRINE);
+          s->step = 2;
+        }
+      } else if (!s->dom) {
+        s->step = 0; /* Годжо сбили до знака — заново */
+      }
+    }
+    break; /* дальше ведёт if_dom_step: столкновение, разбитый купол, купол победителя, выгорание → SC_BURN */
+  case SC_BURN: /* техники выгорели у обоих: чистая рукопашная; Годжо чинит мозг обратной техникой */
+    if (t > 420 && if_neutral(G) && if_up(G) < 1 && G->hp > 0) if_start(s, G, MV_G_RCT); /* → SC_VOID2 в конце приёма */
+    break;
+  case SC_VOID2: /* Пустота — один: Сукуна, без техники, застывает; из тени встаёт Махорага и рвёт купол */
+    if (s->step == 0) {
+      wait = 1;
+      if (if_near(s, 240) && G->burn <= 0) {
+        G->ce = fmaxf(G->ce, 700);
+        if_start(s, G, MV_G_VOID);
+        s->step = 1;
+      }
+    } else if (!s->dom && !(G->st == FS_MOVE && G->mv == MV_G_VOID) && !s->maho) {
+      s->step = 0; /* сорвалось — ещё раз */
+    }
+    break;
+  case SC_MAHO: /* тень за спиной Сукуны учится; как приспособилась (или надоело ждать) — Годжо за Фиолетовый */
+    if (t > 300 && G->burn <= 0 && (s->adapt >= IF_ADAPT || t > 1300)) {
+      if_act(s, SC_PURPLE);
+      G->ce = IF_CE, s->purpleMax = 1;
+    }
+    break;
+  case SC_PURPLE: /* Годжо отходит и собирает Фиолетовый на всю мощь: сносит Махорагу и Сукуну */
+    if (s->step == 0) {
+      wait = 1;
+      if (if_neutral(G) && if_up(G) < 1 && G->burn <= 0 && G->hp > 0) {
+        if (d < 80 && t < 400 && G->intent != IN_BACK) G->intent = IN_BACK, G->intentT = 26;
+        else if (d >= 80 || t >= 400 || G->intent != IN_BACK) {
+          G->ce = fmaxf(G->ce, 600);
+          if_start(s, G, MV_G_PURPLE);
+          s->step = 1;
+        }
+      }
+    } else if (s->step == 1) {
+      if (!(G->st == FS_MOVE && G->mv == MV_G_PURPLE) && !if_pj_any(s, PJ_PURPLE)) s->step = 2;
+    } else if (K->st != FS_FLY && (!s->maho || t > 900)) {
+      if (s->maho) if_maho_die(s); /* тень не попала под удар — всё равно рассеялась: хозяин сам доиграет */
+      if_act(s, SC_WORLD);
+    }
+    break;
+  case SC_WORLD: /* Сукуна поднимается — и режет мир. Монетка решает, попал ли */
+    if (s->step == 0) {
+      wait = 1;
+      if (if_near(s, 260) && d > 40) {
+        K->burn = 0, K->ce = IF_CE;
+        if_start(s, K, MV_S_WORLD);
+        s->step = 1;
+      }
+    }
+    break;
+  case SC_END: /* исход решён; на всякий случай — если добивание сорвалось, довести */
+    if (t > 600 && G->hp > 0 && K->hp > 0 && !s->finish) {
+      IfFighter *A = &s->F[s->fate], *D = &s->F[!s->fate];
+      float hx, hy;
+      if_joint(D, FJ_CHEST, &hx, &hy);
+      s->finish = 1;
+      if_damage(s, A, D, 1, HK_BLAST, 8, 7, hx, hy, 2);
+    }
+    break;
+  }
+  if (wait) {
+    s->waitT += dt;
+    if (s->waitT > 480) if_regroup(s), s->waitT = -300;
+  } else {
+    s->waitT = 0;
+  }
+  if_maho_step(s, dt);
+}
+
 /* ===================== время ===================== */
 
 static void if_age(IfScene *s, float dt) {
@@ -2036,8 +2457,12 @@ static void if_age(IfScene *s, float dt) {
   }
   if (s->ban1 || s->ban2) {
     s->banT += dt;
-    if (s->banT >= s->banLife) s->ban1 = s->ban2 = NULL;
+    if (s->banT >= s->banLife) s->ban1 = s->ban2 = s->ban3 = NULL;
   }
+  if (s->maho) s->mahoT += dt;
+  if (s->mahoDie > 0) s->mahoDie -= dt;
+  if (s->adaptT > 0) s->adaptT -= dt;
+  s->wheel += (s->wheelTo - s->wheel) * fa_sat(0.12f * dt);
   for (int i = 0; i < 2; i++) {
     s->hud[i][0] += (s->F[i].hp - s->hud[i][0]) * fa_sat(0.3f * dt);
     s->hud[i][1] += (s->F[i].ce - s->hud[i][1]) * fa_sat(0.2f * dt);
@@ -2069,6 +2494,7 @@ static void if_step(IfScene *s) {
   if_pj_step(s, dt);
   if_dom_step(s, dt);
   if_round_step(s, dt);
+  if_script_step(s, dt);
   if_age(s, dt);
 }
 
@@ -2396,7 +2822,7 @@ static void if_draw_eff(IfScene *s, IfEff *e, int front) {
   FCv *c = &s->cv;
   float U = s->U, k = e->t / (e->life > 0 ? e->life : 1), X = if_X(s, e->x), Y = if_Y(s, e->y);
   unsigned sd = e->seed;
-  int back = e->kind == EF_SCORCH || e->kind == EF_CRACK || e->kind == EF_AFTER || e->kind == EF_HEAL;
+  int back = e->kind == EF_SCORCH || e->kind == EF_CRACK || e->kind == EF_AFTER || e->kind == EF_HEAL || e->kind == EF_MAHOSLAM;
   if (back == front || e->kind == EF_CALL) return;
   switch (e->kind) {
   case EF_SPARK: { /* звезда удара: острые лучи, белое ядро, кольцо */
@@ -2604,8 +3030,29 @@ static void if_draw_eff(IfScene *s, IfEff *e, int front) {
   }
   case EF_SCORCH: { /* след Фиолетового: выжженная полоса */
     float gy = if_Y(s, e->y);
-    if_soft_ell(c, X, gy, U * 16, U * 2.6f, FC(40, 18, 52), 0.6f * (1 - k));
-    if (k < 0.3f) if_glow(c, X, gy - U * 2, U * 15, FC(200, 120, 255), 0.5f * (0.3f - k) / 0.3f, 1);
+    if_soft_ell(c, X, gy, U * 16 * e->sz, U * 2.6f * e->sz, FC(40, 18, 52), 0.6f * (1 - k));
+    if (k < 0.3f) if_glow(c, X, gy - U * 2, U * 15 * e->sz, FC(200, 120, 255), 0.5f * (0.3f - k) / 0.3f, 1);
+    break;
+  }
+  case EF_MAHOSLAM: { /* тень бьёт: огромная рука из-за спины Сукуны замахивается и падает на Годжо */
+    float M = U * 2.0f, a = (1 - fa_sat((k - 0.6f) / 0.4f)) * 0.74f, gy = if_Y(s, e->y);
+    float sx = if_X(s, e->b), sy = if_Y(s, s->mahoFl) - 80 * M;  /* плечо тени */
+    float kk = fa_smooth(fa_sat((e->t - 3) / 11));             /* замах → удар */
+    float ux = sx + e->a * 26 * M, uy = sy - 64 * M;             /* кулак поднят */
+    float hx = ux + (X - ux) * kk, hy = uy + (gy - 6 * M - uy) * kk;
+    float ex = (sx + hx) * 0.5f + e->a * 10 * M * (1 - kk), ey = (sy + hy) * 0.5f - 26 * M * (1 - kk);
+    FPart q;
+    fp_init(&q, FC(26, 18, 40), FC(14, 9, 24), FC(88, 66, 130), fmaxf(1.2f, U * 0.7f), M * 2.5f);
+    q.alpha = a;
+    fs_cap(fp_add(&q), sx, sy, ex, ey, 7.5f * M, 6.5f * M);
+    fs_cap(fp_add(&q), ex, ey, hx, hy, 6.5f * M, 6.0f * M);
+    fs_ell(fp_add(&q), hx, hy, 9.0f * M, 8.0f * M, 1, 0);
+    fp_draw(c, &q);
+    if (e->t >= 14) {
+      float kk2 = fa_sat((e->t - 14) / 12);
+      if_ground_ring(c, X, gy, U * (10 + 40 * kk2), U * (2 + 7 * kk2), fmaxf(1.2f, U * 1.4f * (1 - kk2)), FC(200, 190, 230),
+                     0.8f * (1 - kk2));
+    }
     break;
   }
   case EF_IMPLODE: { /* Синий схлопнулся */
@@ -2868,6 +3315,21 @@ static void if_draw_charge(IfScene *s, IfFighter *F) {
     if_glow(c, if_X(s, hx), if_Y(s, hy), U * 10, FC(255, 40, 60), 0.7f * a, 1);
     break;
   }
+  case MV_G_RCT: { /* обратная техника: зелёный свет в ладони у виска */
+    float a = fa_sat(t / 10) * (0.7f + 0.3f * sinf(t * 0.35f));
+    if_joint(F, FJ_HAND1, &hx, &hy);
+    if_glow(c, if_X(s, hx), if_Y(s, hy), U * 11, FC(150, 255, 190), 0.75f * a, 1);
+    if_joint(F, FJ_HEAD, &hx, &hy);
+    if_glow(c, if_X(s, hx), if_Y(s, hy), U * 16, FC(120, 255, 170), 0.3f * a, 1);
+    break;
+  }
+  case MV_S_MAHO: { /* знак Десяти теней: тьма стекает с руки */
+    float a = fa_sat(t / 8);
+    if_joint(F, FJ_HAND1, &hx, &hy);
+    if_glow(c, if_X(s, hx), if_Y(s, hy), U * 13, FC(60, 30, 110), 0.8f * a, 0);
+    if_glow(c, if_X(s, hx), if_Y(s, hy), U * 5, FC(200, 160, 255), 0.7f * a, 1);
+    break;
+  }
   }
 }
 
@@ -2904,6 +3366,57 @@ static void if_draw_shadow(IfScene *s, IfFighter *F) {
   float U = s->U, k = fa_sat(1 - if_up(F) / 150), lie = fabsf(sinf(F->pose.v[PV_ROLL] * FA_RAD));
   if_soft_ell(&s->cv, if_X(s, F->x), if_Y(s, F->fl) - 1, U * (20 + 22 * lie) * (0.6f + 0.4f * k), U * 3.2f * (0.6f + 0.4f * k),
               FC(16, 12, 24), 0.34f * k * F->alpha);
+}
+
+/* тень Махораги: тёмный великан вдвое выше бойцов за спиной Сукуны, глаза светятся, над головой —
+   колесо о восьми рукоятях; встаёт из земли при призыве, рассыпается, когда разбит */
+static void if_draw_maho(IfScene *s) {
+  float a = s->maho ? 0.78f : (s->mahoDie > 0 ? 0.78f * fa_sat(s->mahoDie / 40) : 0);
+  if (a <= 0.01f) return;
+  FCv *c = &s->cv;
+  float U = s->U, M = U * 2.0f, f = s->mahoF, rise = fa_smooth(fa_sat(s->mahoT / 40));
+  float X = if_X(s, s->mahoX), GY = if_Y(s, s->mahoFl), lift = (1 - rise) * 130 * M;
+  if (!s->maho) lift = -(1 - fa_sat(s->mahoDie / 40)) * 16 * M; /* разбитый всплывает и тает */
+  int y1 = c->y1;
+  if (rise < 1 && s->maho && (int)GY + 1 < y1) c->y1 = (int)GY + 1; /* из-под земли: ниже пола не видно */
+#define GX(x) (X + (x) * f * M)
+#define GYY(y) (GY - (y) * M + lift)
+  if_soft_ell(c, X, GY, M * 34 * rise, M * 4.5f * rise, FC(10, 6, 20), 0.55f * a / 0.78f); /* лужа тени */
+  FPart p;
+  fp_init(&p, FC(26, 18, 40), FC(14, 9, 24), FC(118, 96, 170), fmaxf(1.2f, U * 0.7f), M * 3.0f);
+  p.alpha = a;
+  fs_cap(fp_add(&p), GX(-9), GYY(46), GX(-14), GYY(3), 7.5f * M, 6.0f * M);  /* ноги */
+  fs_cap(fp_add(&p), GX(10), GYY(46), GX(15), GYY(3), 7.5f * M, 6.0f * M);
+  fs_cap(fp_add(&p), GX(0), GYY(48), GX(0), GYY(80), 16.0f * M, 19.0f * M);  /* туловище */
+  fs_cap(fp_add(&p), GX(-21), GYY(80), GX(21), GYY(80), 9.0f * M, 9.0f * M); /* плечи */
+  fs_cap(fp_add(&p), GX(-23), GYY(78), GX(-35), GYY(52), 6.5f * M, 6.0f * M); /* дальняя рука */
+  fs_cap(fp_add(&p), GX(-35), GYY(52), GX(-29), GYY(26), 6.0f * M, 5.5f * M);
+  fs_ell(fp_add(&p), GX(-28), GYY(22), 7.5f * M, 7.0f * M, 1, 0);
+  fs_cap(fp_add(&p), GX(24), GYY(78), GX(38), GYY(54), 6.5f * M, 6.0f * M);   /* ближняя рука, чуть вперёд */
+  fs_cap(fp_add(&p), GX(38), GYY(54), GX(44), GYY(30), 6.0f * M, 5.5f * M);
+  fs_ell(fp_add(&p), GX(45), GYY(26), 7.5f * M, 7.0f * M, 1, 0);
+  fs_cap(fp_add(&p), GX(1), GYY(84), GX(2), GYY(92), 5.0f * M, 5.0f * M);    /* шея */
+  fs_ell(fp_add(&p), GX(2), GYY(97), 9.5f * M, 10.5f * M, 1, 0);             /* голова */
+  fp_draw(c, &p);
+  if_glow(c, GX(5), GYY(97), 4.0f * M, FC(230, 240, 255), 0.6f * a, 1); /* глаза */
+  fv_disc(c, GX(6.5f), GYY(97.5f), fmaxf(0.8f, 1.5f * M), FC(255, 255, 255), a);
+  fv_disc(c, GX(1.0f), GYY(97.5f), fmaxf(0.8f, 1.5f * M), FC(255, 255, 255), a);
+  /* колесо: кольцо, ступица и восемь рукоятей; поворачивается с каждой адаптацией, вспыхивает */
+  float WX = GX(2), WY = GYY(122), R = 13.0f * M, fl = fa_sat(s->adaptT / 30);
+  if_glow(c, WX, WY, R * 2.2f, FC(200, 170, 255), (0.25f + 0.6f * fl) * a, 1);
+  fv_ring(c, WX, WY, R, fmaxf(1.2f, 1.6f * M), FC(214, 220, 240), 0.95f * a);
+  fv_ring(c, WX, WY, R, fmaxf(0.8f, 0.6f * M), FC(255, 255, 255), 0.6f * a);
+  fv_disc(c, WX, WY, 3.2f * M, FC(214, 220, 240), 0.95f * a);
+  for (int i = 0; i < 8; i++) {
+    float an = s->wheel + i * FA_PI * 0.25f, cx = cosf(an), sy = sinf(an);
+    fv_line(c, WX + cx * R, WY + sy * R, WX + cx * R * 1.45f, WY + sy * R * 1.45f, fmaxf(1.0f, 1.3f * M), fmaxf(0.8f, 1.0f * M),
+            FC(214, 220, 240), 0.95f * a);
+    fv_line(c, WX, WY, WX + cx * R, WY + sy * R, fmaxf(0.7f, 0.5f * M), fmaxf(0.7f, 0.5f * M), FC(190, 196, 220), 0.7f * a);
+  }
+  if (fl > 0) if_glow(c, WX, WY, R * 1.3f, FC(255, 255, 255), fl * a, 1);
+#undef GX
+#undef GYY
+  c->y1 = y1;
 }
 
 /* ===================== территория: картина ===================== */
@@ -2966,11 +3479,11 @@ static FCol if_shrine_px(int x, int y, float u, float v, float rq) {
   return col;
 }
 
-static void if_dom_rows(IfScene *s, int y0, int y1) {
+static void if_dom_rows(IfScene *s, unsigned char *buf, int kind, int y0, int y1) {
   int W = s->bdW, H = s->bdH;
   float rx = W * 0.5f, ry = (float)H, Rm = fminf(rx, ry);
   for (int y = y0; y < y1; y++) {
-    unsigned char *row = s->bd + (size_t)y * W * 4;
+    unsigned char *row = buf + (size_t)y * W * 4;
     float v = (H - (y + 0.5f)) / ry;
     for (int x = 0; x < W; x++) {
       float u = (x + 0.5f - rx) / rx, rq = sqrtf(u * u + v * v), edge = (1.0f - rq) * Rm;
@@ -2980,7 +3493,7 @@ static void if_dom_rows(IfScene *s, int y0, int y1) {
         continue;
       }
       float cov = fa_sat(edge + 0.5f);
-      FCol col = s->bdKind == DOM_VOID ? if_void_px(s, x, y, u, v, rq) : if_shrine_px(x, y, u, v, rq);
+      FCol col = kind == DOM_VOID ? if_void_px(s, x, y, u, v, rq) : if_shrine_px(x, y, u, v, rq);
       d[0] = (unsigned char)(col.b * cov + 0.5f), d[1] = (unsigned char)(col.g * cov + 0.5f);
       d[2] = (unsigned char)(col.r * cov + 0.5f), d[3] = (unsigned char)(255 * cov + 0.5f);
     }
@@ -3020,10 +3533,10 @@ static void if_skull(FCv *bc, float x, float y, float r, float ow, int horns) {
   fv_disc(bc, x + r * 0.38f, y - r * 1.0f, r * 0.26f, FC(30, 6, 10), 1);
   fv_line(bc, x, y - r * 0.72f, x, y - r * 0.55f, r * 0.12f, r * 0.05f, FC(40, 10, 14), 1);
 }
-static void if_shrine_shapes(IfScene *s) {
+static void if_shrine_shapes(IfScene *s, unsigned char *buf) {
   FCv bc;
   memset(&bc, 0, sizeof(bc));
-  bc.px = s->bd, bc.w = s->bdW, bc.h = s->bdH, bc.x1 = s->bdW, bc.y1 = s->bdH;
+  bc.px = buf, bc.w = s->bdW, bc.h = s->bdH, bc.x1 = s->bdW, bc.y1 = s->bdH;
   fv_reset_touch(&bc);
   float W = (float)s->bdW, H = (float)s->bdH, cx = W * 0.5f, gy = H * (1 - 0.06f);
   float SH = H * 0.72f, SW = fminf(W * 0.28f, SH * 0.6f), ow = fmaxf(1.2f, s->U * 0.5f);
@@ -3083,8 +3596,10 @@ static void if_dom_prepare(IfScene *s, int kind) {
   s->domRx = rxU, s->domRy = ryU;
   s->bdW = (int)(rxU * U) * 2, s->bdH = (int)(ryU * U);
   s->bdX = (int)lroundf(s->domX * U) - s->bdW / 2, s->bdY = (int)lroundf(fy) - s->bdH;
-  free(s->bd);
+  free(s->bd), free(s->bd2);
   s->bd = (unsigned char *)malloc((size_t)s->bdW * s->bdH * 4);
+  s->bd2 = kind == DOM_CLASH ? (unsigned char *)malloc((size_t)s->bdW * s->bdH * 4) : NULL;
+  if (kind == DOM_CLASH && !s->bd2) free(s->bd), s->bd = NULL;
   s->bdRows = 0;
   s->bdKind = kind;
 }
@@ -3095,22 +3610,24 @@ static void if_dom_build(IfScene *s) {
   int kind = s->dom;
   for (int i = 0; i < 2 && !kind; i++) {
     const IfFighter *F = &s->F[i];
-    if (F->st == FS_MOVE && F->mv == MV_G_VOID) kind = DOM_VOID;
-    if (F->st == FS_MOVE && F->mv == MV_S_SHRINE) kind = DOM_SHRINE;
+    if (F->st == FS_MOVE && F->mv == MV_G_VOID) kind = s->act == SC_CLASH ? DOM_CLASH : DOM_VOID;
+    if (F->st == FS_MOVE && F->mv == MV_S_SHRINE) kind = s->act == SC_CLASH ? DOM_CLASH : DOM_SHRINE;
   }
   if (!kind) {
-    free(s->bd);
-    s->bd = NULL;
+    free(s->bd), free(s->bd2);
+    s->bd = s->bd2 = NULL;
     return;
   }
   if (!s->bd || s->bdKind != kind) if_dom_prepare(s, kind);
   if (!s->bd || s->bdRows > s->bdH) return;
   int chunk = !s->dom || s->domPhase == DP_CAST ? (s->bdH + 39) / 40 : s->bdH;
   int y1 = s->bdRows + chunk > s->bdH ? s->bdH : s->bdRows + chunk;
-  if_dom_rows(s, s->bdRows, y1);
+  if_dom_rows(s, s->bd, kind == DOM_CLASH ? DOM_VOID : kind, s->bdRows, y1); /* при столкновении bd — Пустота, bd2 — Святилище */
+  if (s->bd2) if_dom_rows(s, s->bd2, DOM_SHRINE, s->bdRows, y1);
   s->bdRows = y1;
   if (s->bdRows >= s->bdH) {
-    if (s->bdKind == DOM_SHRINE) if_shrine_shapes(s);
+    if (s->bdKind == DOM_SHRINE) if_shrine_shapes(s, s->bd);
+    if (s->bd2) if_shrine_shapes(s, s->bd2);
     s->bdRows = s->bdH + 1;
   }
 }
@@ -3121,7 +3638,8 @@ static void if_dom_blit(IfScene *s) {
   FCv *c = &s->cv;
   int ox = s->bdX + (int)lroundf(s->shx), oy = s->bdY + (int)lroundf(s->shy);
   float cx = ox + s->bdW * 0.5f, cy = (float)(oy + s->bdH), rx = s->bdW * 0.5f * s->domOpen, ry = s->bdH * s->domOpen;
-  int X0, Y0, X1, Y1;
+  int X0, Y0, X1, Y1, clash = s->dom == DOM_CLASH && s->bd2;
+  float sgn = s->F[0].x < s->F[1].x ? 1.0f : -1.0f; /* с какой стороны Годжо: там Пустота */
   if (!fv_clip(c, cx - rx, cy - ry, cx + rx, cy, &X0, &Y0, &X1, &Y1)) return;
   for (int y = Y0; y < Y1; y++) {
     float v = (cy - (y + 0.5f)) / ry;
@@ -3131,12 +3649,14 @@ static void if_dom_blit(IfScene *s) {
     if (a < X0) a = X0;
     if (b > X1) b = X1;
     const unsigned char *src = s->bd + (size_t)(y - oy) * s->bdW * 4;
+    const unsigned char *src2 = clash ? s->bd2 + (size_t)(y - oy) * s->bdW * 4 : src;
+    float bx = clash ? if_X(s, if_clash_x(s, (cy - (y + 0.5f)) / s->bdH)) : 0;
     unsigned char *dst = c->px + (size_t)y * c->w * 4;
     for (int x = a; x < b; x++) {
       int sx = x - ox;
       if (sx < 0 || sx >= s->bdW) continue;
       float cov = fa_sat(fminf(x + 1 - xa, xb - x));
-      const unsigned char *p = src + sx * 4;
+      const unsigned char *p = (clash && (x + 0.5f - bx) * sgn > 0 ? src2 : src) + sx * 4;
       unsigned char *d = dst + x * 4;
       if (cov >= 1) {
         memcpy(d, p, 4);
@@ -3147,7 +3667,7 @@ static void if_dom_blit(IfScene *s) {
     }
   }
   if (s->domPhase == DP_OPEN || s->domPhase == DP_CLOSE) { /* кромка раскрытия */
-    FCol col = s->dom == DOM_VOID ? FC(190, 225, 255) : FC(255, 70, 70);
+    FCol col = s->dom == DOM_VOID ? FC(190, 225, 255) : (clash ? FC(240, 230, 255) : FC(255, 70, 70));
     if_arc(c, cx, cy, rx, ry, FA_PI, 2 * FA_PI, fmaxf(1.5f, s->U * 1.2f), col, 0.9f, 0);
   }
 }
@@ -3160,6 +3680,30 @@ static void if_dom_fx(IfScene *s, int front) {
   float cx = s->bdX + s->bdW * 0.5f + s->shx, gy = s->bdY + s->bdH + s->shy, rx = s->bdW * 0.5f * s->domOpen, ry = s->bdH * s->domOpen;
   IfFighter *V = &s->F[!s->domOwner];
   unsigned sd = 99u;
+  if (s->dom == DOM_CLASH) { /* шов между куполами: молния — синяя с одной стороны, алая с другой, белая сердцевина */
+    if (front) return;
+    float sgn = s->F[0].x < s->F[1].x ? 1.0f : -1.0f, RX = s->bdW * 0.5f, RY = (float)s->bdH;
+    float u = (if_X(s, if_clash_x(s, 0)) - cx) / RX, vmax = sqrtf(fa_sat(1 - u * u)) * 0.98f;
+    unsigned fl = (unsigned)(s->frame / 2) * 2654435761u + 17u;
+    float px = if_X(s, if_clash_x(s, 0)), py = gy, w = fmaxf(1.6f, U * 2.2f), amp = U * 5.0f;
+    int n = 7;
+    for (int i = 1; i <= n; i++) {
+      float v = vmax * i / n, X1 = if_X(s, if_clash_x(s, v)), Y1 = gy - v * RY;
+      if (Y1 < gy - ry) break;
+      if_glow(c, (px + X1) * 0.5f, (py + Y1) * 0.5f, U * 22, FC(220, 200, 255), 0.4f * a, 1);
+      if_bolt(c, px - sgn * U * 3, py, X1 - sgn * U * 3, Y1, if_rnd(&fl), 5, amp, w * 2.2f, FC(90, 160, 255), w * 0.8f,
+              FC(170, 220, 255), 0.8f * a);
+      if_bolt(c, px + sgn * U * 3, py, X1 + sgn * U * 3, Y1, if_rnd(&fl), 5, amp, w * 2.2f, FC(255, 60, 70), w * 0.8f,
+              FC(255, 150, 160), 0.8f * a);
+      if_bolt(c, px, py, X1, Y1, if_rnd(&fl), 5, amp * 0.7f, w * 1.4f, FC(255, 255, 255), w * 0.5f, FC(255, 255, 255), a);
+      px = X1, py = Y1;
+    }
+    if (s->domPhase == DP_BREAK) { /* разбитый купол: белая вспышка по шву */
+      float kk = fa_sat(s->domT / 22);
+      if_glow(c, if_X(s, if_clash_x(s, 0.4f)), gy - 0.4f * RY, U * 60 * (0.5f + kk), FC(255, 255, 255), 0.5f * (1 - kk) * a, 1);
+    }
+    return;
+  }
   if (s->dom == DOM_VOID && !front) {
     float vx = cx, vy = gy - ry * 0.45f;
     for (int i = 0; i < 30; i++) { /* свет течёт в глубину */
@@ -3424,6 +3968,37 @@ static void if_draw_banner(IfScene *s) {
       if_text_draw(c, E1, cx, cy - E2->h * 0.5f - E1->h * 0.35f, 1, FC(255, 255, 255), FC(225, 225, 235), FC(20, 16, 30),
                    a * fa_sat(t / 10));
     break;
+  case 5: { /* столкновение территорий: оба имени, синее над алым */
+    IfTxE *E3 = if_text(s->tx, s->ban3, TX_BAN2);
+    float sc = 0.78f;
+    E1 = if_text(s->tx, s->ban1, TX_BAN1);
+    E2 = if_text(s->tx, s->ban2, TX_BAN2);
+    if (E2) {
+      float y2 = cy - E2->h * sc * 0.55f;
+      if_glow(c, cx, y2, E2->w * sc * 0.62f, FC(80, 150, 255), 0.35f * a, 1);
+      if_text_draw(c, E2, cx, y2, pop * sc, FC(255, 255, 255), FC(140, 205, 255), FC(8, 18, 60), a);
+    }
+    if (E3) {
+      float y3 = cy + E3->h * sc * 0.55f;
+      if_glow(c, cx, y3, E3->w * sc * 0.62f, FC(220, 20, 40), 0.35f * a, 1);
+      if_text_draw(c, E3, cx, y3, pop * sc, FC(255, 236, 236), FC(235, 30, 45), FC(26, 0, 4), a);
+    }
+    if (E1 && E2)
+      if_text_draw(c, E1, cx, cy - E2->h * sc * 1.1f - E1->h * 0.4f, 1, FC(255, 255, 255), FC(225, 225, 235), FC(20, 16, 30),
+                   a * fa_sat(t / 10));
+    break;
+  }
+  case 6: /* Фиолетовый на всю мощь */
+    E1 = if_text(s->tx, s->ban1, TX_BAN1);
+    E2 = if_text(s->tx, s->ban2, TX_BAN2);
+    if (E2) {
+      if_glow(c, cx, cy, E2->w * 0.62f, FC(170, 80, 255), 0.4f * a, 1);
+      if_text_draw(c, E2, cx, cy, pop, FC(255, 255, 255), FC(205, 135, 255), FC(30, 8, 62), a);
+    }
+    if (E1 && E2)
+      if_text_draw(c, E1, cx, cy - E2->h * 0.5f - E1->h * 0.35f, 1, FC(255, 255, 255), FC(225, 225, 235), FC(20, 16, 30),
+                   a * fa_sat(t / 10));
+    break;
   case 4: { /* победитель и его слова */
     int g = s->winner == 0;
     E2 = if_text(s->tx, s->ban2, TX_BIG);
@@ -3521,6 +4096,7 @@ static void if_render_world(IfScene *s) {
   fv_reset_touch(c);
   if_dom_build(s);
   if (s->dom) if_dom_blit(s), if_dom_fx(s, 0);
+  if_draw_maho(s);
   for (int i = 0; i < IF_MAXE; i++)
     if (s->ef[i].kind != EF_NONE) if_draw_eff(s, &s->ef[i], 0);
   for (int i = 0; i < 2; i++) if_draw_shadow(s, &s->F[i]);
@@ -3625,7 +4201,7 @@ static void if_scene_free(IfScene *s) {
   if (!s) return;
   if (s->tx) if_text_free(s->tx), free(s->tx);
   free(s->cv.px);
-  free(s->bd);
+  free(s->bd), free(s->bd2);
   free(s);
 }
 
@@ -4072,7 +4648,7 @@ static void idle_fight_watch(int on) {
    всё нарисованное попало в «грязный» прямоугольник. --idledemo (в cursorpad.c) —
    настоящее окно боя, как по кнопке, но ввод его не останавливает: снимать экран
    в Wine. --idlestage папка — два монитора и окна (ниже) */
-enum { SH_MV, SH_EF, SH_DOM, SH_RP };
+enum { SH_MV, SH_EF, SH_DOM, SH_RP, SH_ACT, SH_END, SH_ADAPT, SH_DIE };
 typedef struct {
   int kind, a, b;
   float at;
@@ -4101,12 +4677,7 @@ static const IfShot kIfShots[] = {
     {SH_MV, MV_S_SLAM, 0, 14, "s_slam"},        {SH_EF, EF_CRACK, 0, 6, "s_crack"},
     {SH_MV, MV_S_DISM, 0, 16, "s_dism_1"},      {SH_MV, MV_S_DISM, 0, 26, "s_dism_2"},
     {SH_EF, EF_CUTS, 0, 3, "s_dism_3"},         {SH_MV, MV_S_CLEAVE, 0, 6, "s_cleave_1"},
-    {SH_EF, EF_CROSS, 0, 3, "s_cleave_2"},      {SH_MV, MV_S_FUGA, 0, 30, "s_fuga_1"},
-    {SH_MV, MV_S_FUGA, 0, 60, "s_fuga_2"},      {SH_MV, MV_S_FUGA, 0, 86, "s_fuga_3"},
-    {SH_MV, MV_S_FUGA, 0, 97, "s_fuga_4"},      {SH_EF, EF_BOOM, 0, 5, "s_fuga_5"},
-    {SH_EF, EF_BOOM, 0, 24, "s_fuga_6"},        {SH_MV, MV_S_SHRINE, 0, 10, "s_shrine_seal"},
-    {SH_DOM, DOM_SHRINE, DP_CAST, 12, "shrine_1"}, {SH_DOM, DOM_SHRINE, DP_OPEN, 14, "shrine_2"},
-    {SH_DOM, DOM_SHRINE, DP_ON, 50, "shrine_3"},   {SH_DOM, DOM_SHRINE, DP_ON, 200, "shrine_4"},
+    {SH_EF, EF_CROSS, 0, 3, "s_cleave_2"},      {SH_MV, MV_S_SHRINE, 0, 10, "s_shrine_seal"},
     {SH_EF, EF_GUARD, 0, 2, "guard"},           {SH_EF, EF_WALL, 0, 3, "wall"},
     {SH_MV, MV_G_REDX, 0, 40, "g_redx"},        {SH_MV, MV_G_LUNGE, 0, 6, "g_lunge"},
     {SH_MV, MV_S_FAN, 0, 36, "s_fan"},          {SH_MV, MV_S_LUNGE, 0, 5, "s_lunge"},
@@ -4114,6 +4685,21 @@ static const IfShot kIfShots[] = {
     {SH_MV, MV_G_TAUNT, 0, 40, "g_taunt"},      {SH_MV, MV_S_TAUNT, 0, 30, "s_taunt"},
     {SH_RP, RP_KO, -1, 20, "ko"},               {SH_RP, RP_WIN, -1, 70, "win"},
     {SH_RP, RP_RESET, -1, 40, "heal"},
+    /* сценарий: столкновение куполов, выгорание, обратная техника, Махорага, развязки */
+    {SH_DOM, DOM_CLASH, DP_CAST, 14, "clash_0"},   {SH_DOM, DOM_CLASH, DP_OPEN, 14, "clash_1"},
+    {SH_DOM, DOM_CLASH, DP_ON, 30, "clash_2"},     {SH_DOM, DOM_CLASH, DP_ON, 120, "clash_3"},
+    {SH_DOM, DOM_CLASH, DP_BREAK, 6, "clash_break_1"}, {SH_DOM, DOM_CLASH, DP_BREAK, 20, "clash_break_2"},
+    {SH_ACT, SC_BURN, 0, 150, "burn_brawl"},    {SH_MV, MV_G_RCT, 0, 12, "g_rct_1"},
+    {SH_MV, MV_G_RCT, 0, 40, "g_rct_2"},        {SH_MV, MV_S_MAHO, 0, 20, "s_summon_1"},
+    {SH_MV, MV_S_MAHO, 0, 44, "s_summon_2"},    {SH_ACT, SC_MAHO, 0, 60, "maho_1"},
+    {SH_ACT, SC_MAHO, 0, 420, "maho_2"},        {SH_EF, EF_MAHOSLAM, 0, 9, "maho_slam_1"},
+    {SH_EF, EF_MAHOSLAM, 0, 15, "maho_slam_2"}, {SH_ADAPT, 1, 0, 4, "maho_adapt_1"},
+    {SH_ADAPT, 4, 0, 4, "maho_adapt_4"},        {SH_DIE, 0, 0, 6, "maho_die_1"},
+    {SH_DIE, 0, 0, 24, "maho_die_2"},           {SH_ACT, SC_WORLD, 0, 30, "world_wait"},
+    {SH_END, 0, 0, 3, "end_gojo_1_dodge"},      {SH_END, 0, 0, 6, "end_gojo_2_miss"},
+    {SH_END, 0, 0, 29, "end_gojo_3_palm"},      {SH_END, 0, 0, 40, "end_gojo_4_bf"},
+    {SH_END, 1, 0, 7, "end_sukuna_1_cut"},      {SH_END, 1, 0, 16, "end_sukuna_2"},
+    {SH_END, 1, 0, 60, "end_sukuna_3"},
 };
 #define IF_SHOTS ((int)(sizeof(kIfShots) / sizeof(kIfShots[0])))
 
@@ -4133,6 +4719,14 @@ static int if_shot_on(const IfScene *s, const IfShot *h) {
     return 0;
   case SH_DOM:
     return s->dom == h->a && s->domPhase == h->b && s->domT >= h->at && s->domT < h->at + 2.5f;
+  case SH_ACT:
+    return s->phase == RP_FIGHT && s->act == h->a && s->actT >= h->at && s->actT < h->at + 2.5f;
+  case SH_END:
+    return s->act == SC_END && s->fate == h->a && s->actT >= h->at && s->actT < h->at + 2.5f;
+  case SH_ADAPT:
+    return s->adapt == h->a && s->adaptT > 30 - h->at - 2.5f && s->adaptT <= 30 - h->at;
+  case SH_DIE:
+    return s->mahoDie > 40 - h->at - 2.5f && s->mahoDie <= 40 - h->at;
   default:
     return s->phase == h->a && (h->b < 0 || s->round == h->b) && s->phT >= h->at && s->phT < h->at + 2.5f;
   }

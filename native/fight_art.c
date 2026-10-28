@@ -1254,13 +1254,13 @@ enum {
   FP_G_JAB0, FP_G_JAB, FP_G_PALM0, FP_G_PALM, FP_G_KICK0, FP_G_KICK, FP_G_HIGH0, FP_G_HIGH,
   FP_G_UPKICK0, FP_G_UPKICK, FP_G_FLICK0, FP_G_FLICK, FP_G_DIVE,
   FP_G_BLUE, FP_G_RED0, FP_G_RED, FP_G_PUR_A, FP_G_PUR_B, FP_G_PUR_C, FP_G_SEAL, FP_G_TELE,
-  FP_G_TAUNT, FP_G_WIN, FP_G_UNBLIND,
+  FP_G_TAUNT, FP_G_WIN, FP_G_UNBLIND, FP_G_RCT,
   /* Сукуна */
   FP_S_IDLE, FP_S_IDLE2, FP_S_WALK1, FP_S_WALK2, FP_S_WALK3, FP_S_WALK4, FP_S_RUN1, FP_S_RUN2,
   FP_S_CLAW0, FP_S_CLAW, FP_S_SWIPE0, FP_S_SWIPE, FP_S_PUNCH0, FP_S_PUNCH, FP_S_KNEE,
   FP_S_UPPER0, FP_S_UPPER, FP_S_KICK0, FP_S_KICK, FP_S_SLAM0, FP_S_SLAM,
   FP_S_DISM0, FP_S_DISM, FP_S_CLEAVE, FP_S_FUGA_A, FP_S_FUGA_B, FP_S_FUGA_C, FP_S_SEAL,
-  FP_S_LAUGH, FP_S_TAUNT,
+  FP_S_LAUGH, FP_S_TAUNT, FP_S_SUMMON,
   FP_COUNT
 };
 static const FPose kPoses[FP_COUNT] = {
@@ -1313,6 +1313,7 @@ static const FPose kPoses[FP_COUNT] = {
     FPZ(0, 0, 0, -6, 14, -8, 28, -14, 22, -2, -4, 8, 0, 0, 0, FH_POCKET, FH_POCKET, FE_GRIN, 0),
     FPZ(0, 0, 0, -4, 10, -8, 28, 18, 162, 7, 0, -6, -9, 0, 0, FH_POCKET, FH_PEACE, FE_GRIN, 0),
     FPZ(0, 0, 0, -2, -8, -8, 28, 30, 172, 7, 0, -6, -9, 0, 0, FH_POCKET, FH_OPEN, FE_CALM, 0),
+    FPZ(0, 0, 0, 2, 10, -8, 28, 48, 176, 7, 0, -6, -9, 0, 0, FH_POCKET, FH_OPEN, FE_CALM, 0), /* ладонь у виска: обратная техника */
     /* Сукуна */
     FPZ(0, 0, 0, 14, 6, 34, 78, 6, 52, 30, 8, -26, -14, 0, 0, FH_CLAW, FH_CLAW, FE_GRIN, 0),
     FPZ(0, 0, 0, 16, 4, 36, 82, 8, 56, 30, 8, -26, -15, 0, 0, FH_CLAW, FH_CLAW, FE_GRIN, 0),
@@ -1344,4 +1345,5 @@ static const FPose kPoses[FP_COUNT] = {
     FPZ(0, 0, 0, 2, 6, 38, 152, 32, 158, 26, 8, -22, -16, 0, 0, FH_SEALS, FH_SEALS, FE_GRIN, FPF_FARFRONT),
     FPZ(0, 0, 0, -12, -22, 116, 136, -110, -130, 26, 8, -22, -16, 0, 0, FH_CLAW, FH_CLAW, FE_LAUGH, 0),
     FPZ(0, 0, 0, 6, 8, 70, 150, -30, 60, 28, 8, -24, -15, 0, 0, FH_OPEN, FH_FIST, FE_GRIN, 0),
+    FPZ(0, 0, 0, 8, 4, 24, 46, 86, 4, 26, 8, -22, -16, 0, 0, FH_CLAW, FH_TWO, FE_GRIN, 0), /* знак Десяти теней: рука вперёд */
 };
