@@ -49,7 +49,7 @@
 #define ID_CUR_K7 136 /* «Риас» */
 #define ID_CUR_K8 137 /* «Тяночка» — аниме-девочка, make_anime.py */
 #define ID_FX_BASE 400    /* 400..416: эффект при нажатии в Настройках (до 2026.10.14 — 160…) */
-#define FX_OPTIONS 18    /* сколько вариантов в «Эффект при нажатии» */
+#define FX_OPTIONS 19    /* сколько вариантов в «Эффект при нажатии» */
 #define ID_CHK_TESS 176   /* точное распознавание (Tesseract) */
 #define ID_SEC_BASE 440   /* 440..445: вкладки Настроек */
 #define SEC_COUNT 6
@@ -60,6 +60,16 @@
 #define ST_KNIGHT ST_COUNT  /* рыцарь (Мечник) рисуется кодом, но кнопки стиля у него нет */
 #define ST_SKIN0 7          /* g_skin первого из них; 7…13 */
 #define SKIN_K8 (ST_SKIN0 + ST_COUNT) /* g_skin «Тяночки» (k8): после стилей, 14 */
+#define SKIN_KIT (SKIN_K8 + 1)        /* «Современный» (cursor_kit.c), 15; ключ «m1» в cursor.txt */
+#define ID_CUR_KIT 600      /* кнопка «Современный» на вкладке «Курсор» */
+#define ID_KIT_BASE 601     /* 601..604: стиль набора — карточка «Курсор» на вкладке «Кастомизация» */
+#define ID_KIT_SZ 605       /* 605..607: размер — обычный, крупнее, крупный */
+#define ID_KIT_OUT 608      /* обводка с ореолом */
+#define ID_KIT_SHADOW 609   /* тень */
+#define ID_KIT_ACC 610      /* значки цветом темы */
+#define ID_KIT_ANIM 611     /* ожидание крутится */
+#define ID_KIT_FX 612       /* своя «Волна» при нажатии */
+#define ID_KIT_PREVIEW 613  /* живой просмотр набора */
 #define ID_PREVIEW 470      /* окошко просмотра курсора и эффекта */
 #define ID_IDLE_BASE 480    /* 480..484: бой при бездействии — выкл, 30 с, 1, 2, 5 мин */
 #define IDLE_OPTIONS 5
@@ -339,6 +349,15 @@ static HWND g_btnIdleWatch;           /* режим просмотра */
 static HWND g_btnRing[RING_STYLES], g_btnRingBlur, g_btnRingDots, g_btnRingAnim;
 static int g_ringStyle; /* 0 Матовое стекло, 1 Лепестки, 2 Тёмное стекло, 3 Тонкое кольцо */
 static BOOL g_ringBlur = TRUE, g_ringDots = TRUE, g_ringAnim = TRUE;
+/* «Современный» набор курсоров (cursor_kit.c): кнопка на «Курсоре» и карточка «Курсор» на «Кастомизации» */
+#define KIT_STYLES 4
+#define KIT_SIZES 3
+static HWND g_btnKit, g_btnKitSt[KIT_STYLES], g_btnKitSz[KIT_SIZES], g_btnKitOut, g_btnKitShadow, g_btnKitAcc,
+    g_btnKitAnim, g_btnKitFx;
+static HWND g_kitPreview;
+static int g_kitStyle; /* 0 Светлый, 1 Тёмный, 2 Акцент, 3 Стекло */
+static int g_kitSize;  /* 0 ×1, 1 ×1,25, 2 ×1,5 */
+static BOOL g_kitOutline = TRUE, g_kitShadow = TRUE, g_kitThemeAcc = TRUE, g_kitAnim = TRUE, g_kitFx = TRUE;
 static HWND g_btnSet;
 static HWND g_btnAsk;
 static HWND g_btnNd; /* кнопка «Нарды» в Настройках */
@@ -752,8 +771,15 @@ static void ani_apply(const wchar_t *tag) {
 }
 
 static void style_apply(int st); /* styles.c */
+static void kit_apply(void);     /* cursor_kit.c */
 
 static void apply_scheme_slots(void) {
+  if (g_skin == SKIN_KIT) {
+    kit_apply();
+    g_cursorOn = TRUE;
+    mark_cursor_dirty(TRUE);
+    return;
+  }
   if (g_skin >= ST_SKIN0 && g_skin < ST_SKIN0 + ST_COUNT) {
     style_apply(g_skin - ST_SKIN0);
     g_cursorOn = TRUE;
@@ -1200,11 +1226,14 @@ static void apply_theme(void) {
   ac_retheme();
 }
 
+static void kit_theme_changed(void); /* cursor_kit.c: значки «Современного» — цветом новой темы */
+
 static void set_theme(int t) {
   if (t < 0 || t >= THEME_COUNT) return;
   g_theme = t;
   apply_theme();
   save_cursor_pref();
+  kit_theme_changed();
 }
 
 static void apply_alpha_now(void) {
@@ -1218,9 +1247,9 @@ static void load_cursor_pref(void) {
   HANDLE h = CreateFileW(g_prefPath, GENERIC_READ, FILE_SHARE_READ, NULL,
                          OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
   if (h == INVALID_HANDLE_VALUE) return;
-  char buf[400];
+  char buf[600];
   DWORD n = 0;
-  ReadFile(h, buf, 399, &n, NULL);
+  ReadFile(h, buf, 599, &n, NULL);
   CloseHandle(h);
   buf[n] = 0;
   char skin[16] = {0};
@@ -1241,10 +1270,20 @@ static void load_cursor_pref(void) {
   int idleSz = -1; /* нет в файле — средние бойцы */
   int idleWatch = 0; /* нет в файле — режим просмотра выключен */
   int ringStyle = -1, ringBlur = -1, ringDots = -1, ringAnim = -1; /* панель Shift; нет в файле — стекло, всё включено */
-  sscanf(buf, "%15s %d %d %15s %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d", skin,
+  /* «Современный» набор: стиль, размер, обводка, тень, цвет темы, анимация, эффект; нет в файле — светлый, всё включено */
+  int kSt = -1, kSz = -1, kOut = -1, kSh = -1, kAcc = -1, kAn = -1, kFx = -1;
+  sscanf(buf, "%15s %d %d %15s %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d"
+              " %d %d %d %d %d %d %d", skin,
          &bg, &fg, eng, &autoOn, &theme, &aw, &ah, &cw, &ch, &pt, &keep, &ax, &ay, &cx, &cy, &cpt,
          &ox, &oy, &ow, &oh, &opt, &sparkle, &padMode, &flame, &catFx, &fxPick, &tab, &order, &idle, &idleSz, &idleWatch,
-         &ringStyle, &ringBlur, &ringDots, &ringAnim);
+         &ringStyle, &ringBlur, &ringDots, &ringAnim, &kSt, &kSz, &kOut, &kSh, &kAcc, &kAn, &kFx);
+  if (kSt >= 0 && kSt < KIT_STYLES) g_kitStyle = kSt;
+  if (kSz >= 0 && kSz < KIT_SIZES) g_kitSize = kSz;
+  if (kOut == 0 || kOut == 1) g_kitOutline = kOut == 1;
+  if (kSh == 0 || kSh == 1) g_kitShadow = kSh == 1;
+  if (kAcc == 0 || kAcc == 1) g_kitThemeAcc = kAcc == 1;
+  if (kAn == 0 || kAn == 1) g_kitAnim = kAn == 1;
+  if (kFx == 0 || kFx == 1) g_kitFx = kFx == 1;
   if (ringStyle >= 0 && ringStyle < RING_STYLES) g_ringStyle = ringStyle;
   if (ringBlur == 0 || ringBlur == 1) g_ringBlur = ringBlur == 1;
   if (ringDots == 0 || ringDots == 1) g_ringDots = ringDots == 1;
@@ -1275,7 +1314,7 @@ static void load_cursor_pref(void) {
   g_sparkle = sparkle != 0;
   g_flame = flame != 0;
   g_catFx = catFx == 0 ? 0 : (catFx == 2 ? 2 : 1);
-  g_fxPick = fxPick >= 0 && fxPick <= 16 ? fxPick : -1;
+  g_fxPick = fxPick >= 0 && fxPick <= 17 ? fxPick : -1;
   g_padMode = padMode == 1 ? 1 : 0;
   g_cardX = cx;
   g_cardY = cy;
@@ -1297,7 +1336,8 @@ static void load_cursor_pref(void) {
      t1…t3 — Ворон, Осьминог, Скорпион, t6…t8 — Разрез, Сукуна, Годжо, t9 — Баклажан.
      tb — удалённый курсор, остаётся Баклажан. */
   static const signed char kTSkin[9] = {0, 1, 2, 0, 0, 3, 4, 5, 6};
-  if (skin[0] == 't' && skin[1] == 'b') g_skin = ST_SKIN0 + 6;
+  if (skin[0] == 'm' && skin[1] == '1') g_skin = SKIN_KIT;
+  else if (skin[0] == 't' && skin[1] == 'b') g_skin = ST_SKIN0 + 6;
   else if (skin[0] == 't' && skin[1] >= '1' && skin[1] <= '9') g_skin = ST_SKIN0 + kTSkin[skin[1] - '1'];
   else if (skin[0] == 'k' && skin[1] == '8') g_skin = SKIN_K8;
   else if (skin[0] == 'k' && skin[1] == '7') g_skin = 6;
@@ -1321,20 +1361,23 @@ static void save_cursor_pref(void) {
   static const char *const kSt[ST_COUNT] = {"t1", "t2", "t3", "t6", "t7", "t8", "t9"};
   const char *v = g_skin >= ST_SKIN0 && g_skin < ST_SKIN0 + ST_COUNT ? kSt[g_skin - ST_SKIN0]
                   : g_skin == SKIN_K8 ? "k8"
+                  : g_skin == SKIN_KIT ? "m1"
                   : g_skin == 6 ? "k7"
                   : g_skin == 5 ? "k6"
                   : g_skin == 4 ? "k5"
                   : g_skin == 3 ? "k4" : (g_skin == 2 ? "k3" : (g_skin == 0 ? "system" : "k2"));
   const char *e = g_engine == 4 ? "plm" : (g_engine == 5 ? "files" : "ai");
-  char buf[360];
+  char buf[480];
   int order = 0;
   for (int i = 0; i < SEC_COUNT; i++) order = order * 10 + g_tabOrder[i];
-  snprintf(buf, sizeof(buf), "%s %d %d %s %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d\n",
+  snprintf(buf, sizeof(buf), "%s %d %d %s %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d"
+                             " %d %d %d %d %d %d %d\n",
            v, g_alphaFollow, g_alphaPinned, e, g_autostart ? 1 : 0, g_theme, g_ansW, g_ansH,
            g_cardW, g_cardH, g_ansPt, g_ansKeepPos ? 1 : 0, g_ansX, g_ansY, g_cardX, g_cardY,
            g_cardPt, g_ocrX, g_ocrY, g_ocrW, g_ocrH, g_ocrPt, g_sparkle ? 1 : 0, g_padMode,
            g_flame ? 1 : 0, g_catFx, g_fxPick, g_tab, order, g_idleSec, g_idleSize, g_idleWatch,
-           g_ringStyle, g_ringBlur ? 1 : 0, g_ringDots ? 1 : 0, g_ringAnim ? 1 : 0);
+           g_ringStyle, g_ringBlur ? 1 : 0, g_ringDots ? 1 : 0, g_ringAnim ? 1 : 0, g_kitStyle, g_kitSize,
+           g_kitOutline ? 1 : 0, g_kitShadow ? 1 : 0, g_kitThemeAcc ? 1 : 0, g_kitAnim ? 1 : 0, g_kitFx ? 1 : 0);
   HANDLE h = CreateFileW(g_prefPath, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
                          FILE_ATTRIBUTE_NORMAL, NULL);
   if (h == INVALID_HANDLE_VALUE) return;
@@ -1348,8 +1391,8 @@ static const wchar_t *const kFxNames[FX_OPTIONS] = {L"Как у курсора",
                                                     L"Царапины",      L"Разрез", L"Кольца",    L"Конфетти",
                                                     L"Молния",        L"Сердечки", L"Рассечение", L"Пурпур",
                                                     L"Перья",         L"Чернила",  L"Яд",       L"Бесконечность",
-                                                    L"Пятна",         L"Лепестки"};
-static const int kFxPick[FX_OPTIONS] = {-1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
+                                                    L"Пятна",         L"Лепестки",  L"Волна"};
+static const int kFxPick[FX_OPTIONS] = {-1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17};
 static const wchar_t *const kStyleNames[ST_COUNT] = {L"Ворон", L"Осьминог", L"Скорпион", L"Разрез", L"Сукуна", L"Годжо",
                                                     L"Баклажан"};
 
@@ -1367,6 +1410,7 @@ static const wchar_t *skin_name(int skin) {
   static const wchar_t *const kOld[7] = {L"Windows", L"Мечник", L"Рукавица", L"Фея", L"Дракон", L"Чёрный кот", L"Риас"};
   if (skin >= ST_SKIN0 && skin < ST_SKIN0 + ST_COUNT) return kStyleNames[skin - ST_SKIN0];
   if (skin == SKIN_K8) return L"Тяночка";
+  if (skin == SKIN_KIT) return L"Современный";
   return skin >= 0 && skin < 7 ? kOld[skin] : L"Мечник";
 }
 
@@ -1377,6 +1421,8 @@ static void set_mark(HWND b, BOOL on, const wchar_t *name) {
   SetWindowTextW(b, t);
 }
 
+static void update_kit_buttons(void); /* ниже, у карточки «Курсор» */
+
 static void update_cursor_buttons(void) {
   set_mark(g_btnK2, g_skin == 1, L"Мечник");
   set_mark(g_btnK3, g_skin == 2, L"Рукавица");
@@ -1385,9 +1431,11 @@ static void update_cursor_buttons(void) {
   set_mark(g_btnK6, g_skin == 5, L"Чёрный кот");
   set_mark(g_btnK7, g_skin == 6, L"Риас");
   set_mark(g_btnK8, g_skin == SKIN_K8, L"Тяночка");
+  set_mark(g_btnKit, g_skin == SKIN_KIT, L"Современный");
   for (int i = 0; i < ST_COUNT; i++) set_mark(g_btnSt[i], g_skin == ST_SKIN0 + i, kStyleNames[i]);
   set_mark(g_btnSys, g_skin == 0, L"Курсор Windows");
   update_fx_buttons();
+  update_kit_buttons();
 }
 
 static void set_skin(int skin) {
@@ -1407,11 +1455,11 @@ static void set_skin(int skin) {
 
 /* эффект при нажатии отдельно от курсора: имена для строки состояния */
 static const wchar_t *fx_pick_name(int pick) {
-  static const wchar_t *const kNames[17] = {L"нет",   L"звёздочки", L"пламя",  L"царапины", L"разрез",
+  static const wchar_t *const kNames[18] = {L"нет",   L"звёздочки", L"пламя",  L"царапины", L"разрез",
                                            L"кольца", L"конфетти", L"молния", L"сердечки", L"рассечение",
                                            L"пурпур", L"перья",    L"чернила", L"яд",     L"бесконечность",
-                                           L"пятна",  L"лепестки"};
-  return pick >= 0 && pick < 17 ? kNames[pick] : L"как у курсора";
+                                           L"пятна",  L"лепестки", L"волна"};
+  return pick >= 0 && pick < 18 ? kNames[pick] : L"как у курсора";
 }
 
 /* то же с большой буквы — для окошка просмотра (там всегда сам эффект) */
@@ -1431,7 +1479,7 @@ static void set_fx_pick(int pick) {
 
 static void cycle_skin(void) {
   int next = g_skin + 1;
-  if (next > SKIN_K8) next = 0;
+  if (next > SKIN_KIT) next = 0;
   set_skin(next);
 }
 
@@ -1444,6 +1492,7 @@ static int settings_skin_of_id(int id) {
   if (id == ID_CUR_K6) return 5;
   if (id == ID_CUR_K7) return 6;
   if (id == ID_CUR_K8) return SKIN_K8;
+  if (id == ID_CUR_KIT) return SKIN_KIT;
   if (id == ID_SYS_CUR) return 0;
   if (id >= ID_CUR_ST_BASE && id < ID_CUR_ST_BASE + ST_COUNT) return ST_SKIN0 + id - ID_CUR_ST_BASE;
   return -1;
@@ -1761,6 +1810,7 @@ static void apply_follow_state(void) {
   if (g_btnK6) EnableWindow(g_btnK6, !g_follow);
   if (g_btnK7) EnableWindow(g_btnK7, !g_follow);
   if (g_btnK8) EnableWindow(g_btnK8, !g_follow);
+  if (g_btnKit) EnableWindow(g_btnKit, !g_follow);
   if (g_tbBg) EnableWindow(g_tbBg, !g_follow);
   if (g_tbFg) EnableWindow(g_tbFg, !g_follow);
   if (g_btnSys) EnableWindow(g_btnSys, !g_follow);
@@ -2270,6 +2320,7 @@ static void tool_frame_paint(HWND hwnd, HDC hdc, const wchar_t *title, const wch
 #include "pad_extra.c"
 #include "fairy_fx.c"
 #include "styles.c" /* курсоры, нарисованные кодом, и просмотр в Настройках */
+#include "cursor_kit.c" /* «Современный» набор: стили и переключатели карточки «Курсор» */
 #include "idle_fight.c" /* бой Годжо и Сукуны, пока мышь не трогают */
 
 /* бой при бездействии в Настройках: через сколько, ● у выбранного */
@@ -2288,6 +2339,32 @@ static void update_idle_buttons(void) {
 
 /* панель Shift: стиль и переключатели, ● у выбранного и включённого */
 static const wchar_t *const kRingNames[RING_STYLES] = {L"Матовое стекло", L"Лепестки", L"Тёмное стекло", L"Тонкое кольцо"};
+/* карточка «Курсор»: ● у выбранного стиля и размера и у включённого */
+static void update_kit_buttons(void) {
+  for (int i = 0; i < KIT_STYLES; i++) set_mark(g_btnKitSt[i], g_skin == SKIN_KIT && g_kitStyle == i, kKitNames[i]);
+  for (int i = 0; i < KIT_SIZES; i++) set_mark(g_btnKitSz[i], g_kitSize == i, kKitSzNames[i]);
+  set_mark(g_btnKitOut, g_kitOutline, L"Обводка");
+  set_mark(g_btnKitShadow, g_kitShadow, L"Тень");
+  set_mark(g_btnKitAcc, g_kitThemeAcc, L"Цвет темы");
+  set_mark(g_btnKitAnim, g_kitAnim, L"Анимация");
+  set_mark(g_btnKitFx, g_kitFx, L"Эффект нажатия");
+  if (g_kitPreview) InvalidateRect(g_kitPreview, NULL, FALSE);
+}
+
+/* что-то в карточке сменилось: запомнить и, если набор стоит, поставить заново */
+static void kit_changed(BOOL relayout) {
+  save_cursor_pref();
+  update_kit_buttons();
+  if (g_skin == SKIN_KIT) install_scheme_cursors();
+  fx_sync();
+  if (relayout && g_setHwnd) layout_settings(); /* размер сменился — окошко просмотра выше или ниже */
+}
+
+static void kit_theme_changed(void) {
+  if (g_kitThemeAcc && g_skin == SKIN_KIT) install_scheme_cursors();
+  if (g_kitPreview) InvalidateRect(g_kitPreview, NULL, FALSE);
+}
+
 static void update_ring_buttons(void) {
   for (int i = 0; i < RING_STYLES; i++) set_mark(g_btnRing[i], g_ringStyle == i, kRingNames[i]);
   set_mark(g_btnRingBlur, g_ringBlur, L"Размытие под плитками");
@@ -3690,11 +3767,11 @@ static void layout_settings(void) {
       sd_card_end();
       sd_card_begin();
       if (sec == 0) {
-        HWND sk[8 + ST_COUNT] = {g_btnK2, g_btnK3, g_btnK4, g_btnK5, g_btnK6, g_btnK7, g_btnK8};
-        for (int i = 0; i < ST_COUNT; i++) sk[7 + i] = g_btnSt[i];
-        sk[7 + ST_COUNT] = g_btnSys;
-        y = sd_stack(L"Курсор", L"Персонажи и стили; «Курсор Windows» — обычные стрелки");
-        y += set_grid(sk, 8 + ST_COUNT, 3, x0, y, iw, btnH, gap) - gap;
+        HWND sk[9 + ST_COUNT] = {g_btnKit, g_btnK2, g_btnK3, g_btnK4, g_btnK5, g_btnK6, g_btnK7, g_btnK8};
+        for (int i = 0; i < ST_COUNT; i++) sk[8 + i] = g_btnSt[i];
+        sk[8 + ST_COUNT] = g_btnSys;
+        y = sd_stack(L"Курсор", L"«Современный» настраивается на вкладке «Кастомизация»; «Курсор Windows» — обычные стрелки");
+        y += set_grid(sk, 9 + ST_COUNT, 3, x0, y, iw, btnH, gap) - gap;
       } else {
         y = sd_stack(L"Эффект при нажатии", L"Любой курсор можно сочетать с любым эффектом");
         y += set_grid(g_btnFx, FX_OPTIONS, 3, x0, y, iw, btnH, gap) - gap;
@@ -3709,6 +3786,27 @@ static void layout_settings(void) {
       int y = sd_stack(L"Тема", L"Меняет шрифт, форму кнопок, шапки и углы окон");
       y += set_grid(g_btnTheme, THEME_COUNT, 3, x0, y, iw, btnH, gap) - gap;
       sd_stack_end(y);
+      sd_card_end();
+      sd_group(L"Курсор");
+      sd_card_begin();
+      {
+        int ph = kit_preview_h();
+        y = sd_stack(NULL, NULL);
+        set_place(g_kitPreview, x0, y, iw, ph);
+        sd_stack_end(y + ph);
+      }
+      y = sd_stack(L"Стиль курсора", L"Новый набор, нарисован кодом: чёткий на любом размере, виден на светлом и тёмном");
+      y += set_grid(g_btnKitSt, KIT_STYLES, 2, x0, y, iw, btnH, gap) - gap;
+      sd_stack_end(y);
+      y = sd_stack(L"Размер", NULL);
+      y += set_grid(g_btnKitSz, KIT_SIZES, KIT_SIZES, x0, y, iw, btnH, gap) - gap;
+      sd_stack_end(y);
+      {
+        HWND c[5] = {g_btnKitOut, g_btnKitShadow, g_btnKitAcc, g_btnKitAnim, g_btnKitFx};
+        y = sd_stack(L"Эффекты", L"Двойная кайма, мягкая тень, значки цветом темы, крутится «Ожидание», своя «Волна» при нажатии");
+        y += set_grid(c, 5, 3, x0, y, iw, btnH, gap) - gap;
+        sd_stack_end(y);
+      }
       sd_card_end();
       sd_group(L"Панель Shift");
       sd_card_begin();
@@ -3855,6 +3953,7 @@ static void layout_settings(void) {
   }
   clip_settings_children();
   preview_wake();
+  kit_preview_wake();
 }
 
 /* подписи, карточки и линии страницы (раскладка — layout_settings) */
@@ -4135,6 +4234,28 @@ static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
       else g_ringAnim = !g_ringAnim;
       save_cursor_pref();
       update_ring_buttons();
+    }
+    if (LOWORD(wParam) >= ID_KIT_BASE && LOWORD(wParam) < ID_KIT_BASE + KIT_STYLES) {
+      /* стиль — сразу и набор: выбрать стиль и не поставить его было бы странно */
+      g_kitStyle = LOWORD(wParam) - ID_KIT_BASE;
+      if (g_skin != SKIN_KIT) set_skin(SKIN_KIT);
+      kit_changed(FALSE);
+      wchar_t msg[96];
+      _snwprintf(msg, 96, L"Курсор: Современный · %s", kKitNames[g_kitStyle]);
+      show_status(msg);
+    }
+    if (LOWORD(wParam) >= ID_KIT_SZ && LOWORD(wParam) < ID_KIT_SZ + KIT_SIZES) {
+      g_kitSize = LOWORD(wParam) - ID_KIT_SZ;
+      kit_changed(TRUE);
+    }
+    if (LOWORD(wParam) >= ID_KIT_OUT && LOWORD(wParam) <= ID_KIT_FX) {
+      int id = LOWORD(wParam);
+      if (id == ID_KIT_OUT) g_kitOutline = !g_kitOutline;
+      else if (id == ID_KIT_SHADOW) g_kitShadow = !g_kitShadow;
+      else if (id == ID_KIT_ACC) g_kitThemeAcc = !g_kitThemeAcc;
+      else if (id == ID_KIT_ANIM) g_kitAnim = !g_kitAnim;
+      else g_kitFx = !g_kitFx;
+      kit_changed(FALSE);
     }
     if (LOWORD(wParam) >= ID_IDLE_BASE && LOWORD(wParam) < ID_IDLE_BASE + IDLE_OPTIONS)
       set_idle_sec(kIdleSec[LOWORD(wParam) - ID_IDLE_BASE]);
@@ -4561,6 +4682,7 @@ static void create_settings(HWND owner) {
   g_btnK6 = mk_btn(g_setHwnd, L"Чёрный кот", ID_CUR_K6);
   g_btnK7 = mk_btn(g_setHwnd, L"Риас", ID_CUR_K7);
   g_btnK8 = mk_btn(g_setHwnd, L"Тяночка", ID_CUR_K8);
+  g_btnKit = mk_btn(g_setHwnd, L"Современный", ID_CUR_KIT);
   for (int i = 0; i < ST_COUNT; i++) g_btnSt[i] = mk_btn(g_setHwnd, kStyleNames[i], ID_CUR_ST_BASE + i);
   g_btnSys = mk_btn(g_setHwnd, L"Курсор Windows", ID_SYS_CUR);
   for (int i = 0; i < FX_OPTIONS; i++) g_btnFx[i] = mk_btn(g_setHwnd, kFxNames[i], ID_FX_BASE + i);
@@ -4587,6 +4709,15 @@ static void create_settings(HWND owner) {
   g_btnRingDots = mk_btn(g_setHwnd, L"Точки по контуру", ID_RING_DOTS);
   g_btnRingAnim = mk_btn(g_setHwnd, L"Плавные анимации", ID_RING_ANIM);
   update_ring_buttons();
+  g_kitPreview = kit_preview_create(g_setHwnd, ID_KIT_PREVIEW);
+  for (int i = 0; i < KIT_STYLES; i++) g_btnKitSt[i] = mk_btn(g_setHwnd, kKitNames[i], ID_KIT_BASE + i);
+  for (int i = 0; i < KIT_SIZES; i++) g_btnKitSz[i] = mk_btn(g_setHwnd, kKitSzNames[i], ID_KIT_SZ + i);
+  g_btnKitOut = mk_btn(g_setHwnd, L"Обводка", ID_KIT_OUT);
+  g_btnKitShadow = mk_btn(g_setHwnd, L"Тень", ID_KIT_SHADOW);
+  g_btnKitAcc = mk_btn(g_setHwnd, L"Цвет темы", ID_KIT_ACC);
+  g_btnKitAnim = mk_btn(g_setHwnd, L"Анимация", ID_KIT_ANIM);
+  g_btnKitFx = mk_btn(g_setHwnd, L"Эффект нажатия", ID_KIT_FX);
+  update_kit_buttons();
   g_tbBg = CreateWindowExW(0, TRACKBAR_CLASSW, L"", WS_CHILD | WS_VISIBLE | TBS_NOTICKS | TBS_TOOLTIPS,
                            0, 0, 120, 28, g_setHwnd, (HMENU)(INT_PTR)ID_ALPHA_BG, NULL, NULL);
   g_tbFg = CreateWindowExW(0, TRACKBAR_CLASSW, L"", WS_CHILD | WS_VISIBLE | TBS_NOTICKS | TBS_TOOLTIPS,
@@ -4604,6 +4735,7 @@ static void create_settings(HWND owner) {
   SendMessageW(g_btnK6, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
   SendMessageW(g_btnK7, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
   SendMessageW(g_btnK8, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
+  SendMessageW(g_btnKit, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
   SendMessageW(g_btnSys, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
   SendMessageW(g_ocr, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
   if (g_btnUp) SendMessageW(g_btnUp, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
@@ -5127,7 +5259,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
          — один кадр, поэтому набор ставится без CopyCursor. Сброс курсоров
          самой Windows ловит WM_SETTINGCHANGE — там сразу. */
       static int keepTicks;
-      int slow = g_skin == 6 || g_skin == SKIN_K8;
+      int slow = g_skin == 6 || g_skin == SKIN_K8 || (g_skin == SKIN_KIT && g_kitAnim);
       if (!slow || ++keepTicks % 15 == 0) apply_scheme_slots();
     }
     if (wParam == TIMER_FILES) files_start_index(FALSE);
@@ -5310,6 +5442,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     idle_fight_stop(TRUE);
     fx_shutdown();
     styles_free();
+    kit_free();
+    kpv_free();
     share_stop();
     ai_shutdown();
     save_notes();

@@ -223,6 +223,105 @@ static void dst_settings(int tab, const wchar_t *name) {
   dst_shot(g_setHwnd, name);
 }
 
+/* «Современный» набор (cursor_kit.c): все 16 видов стиля st рядами 32, 48 и 64 точки
+   на светлом и тёмном; плюс 32 точки, увеличенные вчетверо без сглаживания, — видно,
+   чёткий ли край */
+static void dst_kit_gallery(const wchar_t *base) {
+  static const int sizes[3] = {32, 48, 64};
+  const int cell = 80, W = cell * ST_SLOTS, H = cell * 3;
+  BYTE *pm = (BYTE *)calloc((size_t)W * H, 4);
+  BYTE *img = (BYTE *)malloc(64 * 64 * 4);
+  if (!pm || !img) { free(pm); free(img); return; }
+  for (int r = 0; r < 3; r++)
+    for (int i = 0; i < ST_SLOTS; i++) {
+      int N = sizes[r];
+      kit_draw(i, 2, N, img);
+      int ox = i * cell + (cell - N) / 2, oy = r * cell + (cell - N) / 2;
+      for (int y = 0; y < N; y++)
+        for (int x = 0; x < N; x++) {
+          const BYTE *sp = img + ((size_t)y * N + x) * 4;
+          BYTE *d = pm + ((size_t)(oy + y) * W + ox + x) * 4;
+          d[0] = (BYTE)(sp[0] * sp[3] / 255), d[1] = (BYTE)(sp[1] * sp[3] / 255), d[2] = (BYTE)(sp[2] * sp[3] / 255);
+          d[3] = sp[3];
+        }
+    }
+  dst_png_both(base, pm, W, H);
+  free(pm);
+  /* увеличение: 8 видов по 32 точки, ×4 */
+  const int Z = 4, N = 32, zc = N * Z + 8, ZW = zc * 8, ZH = zc;
+  static const int zs[8] = {0, 2, 1, 14, 3, 4, 6, 10};
+  BYTE *zp = (BYTE *)calloc((size_t)ZW * ZH, 4);
+  if (zp) {
+    for (int i = 0; i < 8; i++) {
+      kit_draw(zs[i], 2, N, img);
+      for (int y = 0; y < N * Z; y++)
+        for (int x = 0; x < N * Z; x++) {
+          const BYTE *sp = img + ((size_t)(y / Z) * N + x / Z) * 4;
+          BYTE *d = zp + ((size_t)(4 + y) * ZW + i * zc + 4 + x) * 4;
+          d[0] = (BYTE)(sp[0] * sp[3] / 255), d[1] = (BYTE)(sp[1] * sp[3] / 255), d[2] = (BYTE)(sp[2] * sp[3] / 255);
+          d[3] = sp[3];
+        }
+    }
+    wchar_t name[200];
+    _snwprintf(name, 200, L"%ls-zoom", base);
+    dst_png_both(name, zp, ZW, ZH);
+    free(zp);
+  }
+  free(img);
+}
+
+/* все стили и главные сочетания переключателей; карточка «Курсор» в Настройках */
+static void dst_kit_all(void) {
+  static const wchar_t *const kSt[KIT_STYLES] = {L"svetly", L"temny", L"akcent", L"steklo"};
+  g_kitOutline = g_kitShadow = g_kitThemeAcc = TRUE;
+  for (int s = 0; s < KIT_STYLES; s++) {
+    g_kitStyle = s;
+    wchar_t name[200];
+    _snwprintf(name, 200, L"kit-%ls", kSt[s]);
+    dst_kit_gallery(name);
+  }
+  g_kitStyle = 0;
+  g_kitOutline = FALSE;
+  g_kitShadow = FALSE;
+  dst_kit_gallery(L"kit-svetly-bare"); /* без обводки и тени */
+  g_kitOutline = g_kitShadow = TRUE;
+  g_kitThemeAcc = FALSE;
+  dst_kit_gallery(L"kit-svetly-blue"); /* значки синим, не цветом темы */
+  g_kitThemeAcc = TRUE;
+  { /* «Волна»: четыре момента */
+    static const int frames[4] = {2, 7, 14, 24};
+    dst_fx_strip(17, L"fx-wave", frames, 4);
+  }
+  /* карточка: набор стоит, в нескольких темах */
+  set_skin(SKIN_KIT);
+  { /* крутящиеся виды — из своих .ani: файл записан и Windows его читает */
+    for (int sl = 14; sl <= 15; sl++) {
+      HCURSOR c = kit_ani_load(sl);
+      wchar_t path[MAX_PATH], line[400];
+      kit_ani_path(sl, path);
+      WIN32_FILE_ATTRIBUTE_DATA fa;
+      DWORD sz = GetFileAttributesExW(path, GetFileExInfoStandard, &fa) ? fa.nFileSizeLow : 0;
+      _snwprintf(line, 400, L"%ls kit_%ls.ani: %lu байт, LoadImage %ls", c ? L"ok  " : L"FAIL", kRias[sl].name,
+                 (unsigned long)sz, c ? L"читает" : L"не читает");
+      dst_log(line);
+      if (c) DestroyCursor(c);
+    }
+  }
+  static const int th[5] = {0, 5, 6, 7, 8};
+  static const wchar_t *const thn[5] = {L"obychnaya", L"steklo", L"grafit", L"sinka", L"tseh"};
+  for (int i = 0; i < 5; i++) {
+    set_theme(th[i]);
+    dst_pump(150);
+    wchar_t name[200];
+    _snwprintf(name, 200, L"kit-card-%ls.png", thn[i]);
+    dst_settings(2, name);
+    _snwprintf(name, 200, L"kit-cursortab-%ls.png", thn[i]);
+    dst_settings(0, name);
+  }
+  if (IsWindowVisible(g_setHwnd)) toggle_settings();
+  set_theme(0);
+}
+
 static void dst_chat_fill(void) {
   if (g_acN) return;
   ac_push(0, L"Посмотри чертёж вала и скажи, как его обрабатывать");
@@ -308,7 +407,16 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
   if (g_follow) toggle_follow(); /* закреплено: кнопки живые, как при работе в окне */
   dst_pump(100);
 
-  static const wchar_t *const kThemeFile[THEME_COUNT] = {L"obychnaya", L"bumaga", L"myagkaya", L"chertezh", L"rytsarskaya"};
+  if (argc >= 3 && !wcscmp(argv[2], L"kit")) { /* только «Современный» набор и его карточка */
+    dst_kit_all();
+    char rep[48000];
+    int kk = WideCharToMultiByte(CP_UTF8, 0, g_dstReport, -1, rep, sizeof(rep), NULL, NULL);
+    dst_write(L"report.txt", rep, kk > 0 ? (DWORD)kk - 1 : 0);
+    LocalFree(argv);
+    return 0;
+  }
+  static const wchar_t *const kThemeFile[THEME_COUNT] = {L"obychnaya", L"bumaga", L"myagkaya", L"chertezh", L"rytsarskaya",
+                                                         L"steklo", L"grafit", L"sinka", L"tseh"};
   for (int t = 0; t < THEME_COUNT; t++) {
     if (t && !all) break;
     set_theme(t);
