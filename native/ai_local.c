@@ -70,6 +70,10 @@ static const AiTier kAiTiers[AI_TIERS] = {
 static const AiFile kAiDrawLora = {L"pidrpen/ytaqq", L"9d44727431dc58cd658f25f0c99c2d576ca855c5",
                                    L"models/draw-lora2-qwen3.5-4b.gguf", 42485376ULL,
                                    "447f89880fb966de936b546052ef820440dae4b388d299d6c48203f109cd7bd1"};
+/* Адаптер инструментов агента (native/train/train_tools_lora.py) — так же: качается сам и
+   включается только в шагах агента (ai_ask_files_async). Пустой коммит — не закреплён, не
+   качается; tool-lora*.gguf, положенный рядом с моделью руками, всё равно подключается. */
+static const AiFile kAiToolLora = {L"pidrpen/ytaqq", L"", L"models/tool-lora-qwen3.5-4b.gguf", 0ULL, ""};
 static void ai_lora_kick(const wchar_t *model);
 
 /* --- настройки ------------------------------------------------------------ */
@@ -80,7 +84,8 @@ static BOOL g_aiGpu;                 /* llama.cpp со сборкой Vulkan и 
 static wchar_t g_aiModel[MAX_PATH];  /* своя модель .gguf; пусто — модель уровня */
 static wchar_t g_aiSrvExe[MAX_PATH]; /* llama-server.exe, указанный руками; пусто — скачанный */
 static wchar_t g_aiExtHost[64];      /* свой сервер (Ollama…): адрес; пусто — свой llama-server */
-static BOOL g_aiDrawLora;            /* свой llama-server запущен с адаптером для чертежей (draw-lora*.gguf) */
+/* номера адаптеров у сервера (порядок ключей --lora): чертежи и инструменты агента; -1 — нет */
+static int g_aiDrawLoraId = -1, g_aiToolLoraId = -1;
 static int g_aiExtPort;
 static char g_aiExtModel[64];        /* имя модели для чужого сервера */
 static DWORD g_aiUiThread;           /* поток интерфейса — синхронные вызовы из него запрещены */
@@ -910,18 +915,28 @@ static int ai_server_ensure(DWORD deadline, volatile LONG *cancel, int minimumCo
       n += _snwprintf(cmd + n, AI_CMD_CAP - n, L" --image-min-tokens 1024");
     /* дообучение: адаптер LoRA рядом с моделью подключается сам. lora*.gguf — к своей модели,
        на все ответы (обучена на своих документах); draw-lora*.gguf — к любой, только для
-       чтения чертежей (native/train): в остальных запросах вес адаптера 0, чат прежний */
-    wchar_t lora[MAX_PATH];
-    g_aiDrawLora = FALSE;
+       чтения чертежей, tool-lora*.gguf — только для шагов агента (native/train): в остальных
+       запросах вес адаптеров 0, чат прежний. Номер адаптера — порядок ключей --lora */
+    wchar_t lora[MAX_PATH], tool[MAX_PATH];
+    g_aiDrawLoraId = g_aiToolLoraId = -1;
     if (g_aiModel[0] && n > 0 && ai_find_near(g_aiModel, L"lora*.gguf", lora)) {
       ai_short_path(lora);
       _snwprintf(cmd + n, AI_CMD_CAP - n, L" --lora \"%s\"", lora);
-    } else if (n > 0 && (ai_find_near(model, L"draw-lora3*.gguf", lora) || ai_find_near(model, L"draw-lora2*.gguf", lora) ||
-                         ai_find_near(model, L"draw-lora*.gguf", lora))) {
+    } else if (n > 0) {
+      int ids = 0;
       /* новое поколение — первым: drawrec.c спрашивает по нему (ai_draw_gen) */
-      ai_short_path(lora);
-      _snwprintf(cmd + n, AI_CMD_CAP - n, L" --lora \"%s\" --lora-init-without-apply", lora);
-      g_aiDrawLora = TRUE;
+      if (ai_find_near(model, L"draw-lora3*.gguf", lora) || ai_find_near(model, L"draw-lora2*.gguf", lora) ||
+          ai_find_near(model, L"draw-lora*.gguf", lora)) {
+        ai_short_path(lora);
+        n += _snwprintf(cmd + n, AI_CMD_CAP - n, L" --lora \"%s\"", lora);
+        g_aiDrawLoraId = ids++;
+      }
+      if (n > 0 && ai_find_near(model, L"tool-lora*.gguf", tool)) {
+        ai_short_path(tool);
+        n += _snwprintf(cmd + n, AI_CMD_CAP - n, L" --lora \"%s\"", tool);
+        g_aiToolLoraId = ids++;
+      }
+      if (ids && n > 0) _snwprintf(cmd + n, AI_CMD_CAP - n, L" --lora-init-without-apply");
     }
     cmd[AI_CMD_CAP - 1] = 0;
     SECURITY_ATTRIBUTES sa = {sizeof(sa), NULL, TRUE};
@@ -1009,11 +1024,15 @@ static int ai_server_ensure(DWORD deadline, volatile LONG *cancel, int minimumCo
       }
       if (ai_http(L"GET", port, L"/health", NULL, NULL, 1500, NULL, NULL, NULL) == 200) {
         ai_log(L"llama-server готов, порт %d", port);
-        /* адаптер чертежей: по умолчанию вес 0 (запрос без поля lora берёт общий вес),
-           1 — только в запросах с чертежом (ai_ask_image_sync_ex) */
-        if (g_aiDrawLora &&
-            ai_http(L"POST", port, L"/lora-adapters", "[{\"id\":0,\"scale\":0.0}]", g_aiKey, 5000, NULL, NULL, NULL) != 200)
-          ai_log(L"Адаптер чертежей не отключился для остальных запросов");
+        /* адаптеры: по умолчанию вес 0 (запрос без поля lora берёт общий вес), 1 — только в
+           запросах с чертежом (ai_ask_image_sync_ex) и в шагах агента (ai_body_chat, fileTools) */
+        if ((g_aiDrawLoraId >= 0 || g_aiToolLoraId >= 0) &&
+            ai_http(L"POST", port, L"/lora-adapters",
+                    g_aiDrawLoraId >= 0 && g_aiToolLoraId >= 0 ? "[{\"id\":0,\"scale\":0.0},{\"id\":1,\"scale\":0.0}]"
+                                                               : "[{\"id\":0,\"scale\":0.0}]",
+                    g_aiKey, 5000, NULL, NULL, NULL) != 200)
+          ai_log(L"Адаптеры не отключились для остальных запросов");
+        if (g_aiToolLoraId >= 0) ai_log(L"Адаптер инструментов агента подключён");
         g_aiSlotCtx = ctx / np;
         rc = AI_OK;
         break;
@@ -1453,9 +1472,14 @@ static char *ai_body_chat(const wchar_t *instruction, const AiTurn *t, int n, BO
     for (int i = 0; i < n; i++)
       k += snprintf(b + k, total - k, ",{\"role\":\"%s\",\"content\":%s}", t[i].assistant ? "assistant" : "user",
                     js[i]);
+    /* шаг агента — с адаптером инструментов; bridge.py передаёт поле lora модели как есть, а его
+       вспомогательные вызовы (требования, проверка плана) собирают свой запрос — без адаптера */
+    char toolLora[48] = "";
+    if (fileTools && g_aiToolLoraId >= 0 && !g_aiProvider && !ai_ext())
+      snprintf(toolLora, sizeof(toolLora), ",\"lora\":[{\"id\":%d,\"scale\":1.0}]", g_aiToolLoraId);
     snprintf(b + k, total - k,
-             "],\"temperature\":0.2,\"max_tokens\":%d,\"stream\":true,\"cache_prompt\":true,\"chat_template_kwargs\":{\"enable_thinking\":%s}%s}",
-             g_aiOutCap + (think ? AI_THINK_TOKENS : 0), think ? "true" : "false", fileTools ? kAiAgentSchema : "");
+             "],\"temperature\":0.2,\"max_tokens\":%d,\"stream\":true,\"cache_prompt\":true,\"chat_template_kwargs\":{\"enable_thinking\":%s}%s%s}",
+             g_aiOutCap + (think ? AI_THINK_TOKENS : 0), think ? "true" : "false", toolLora, fileTools ? kAiAgentSchema : "");
   }
   for (int i = 0; i < n; i++) free(js[i]);
   free(js);
@@ -1637,7 +1661,8 @@ int ai_ask_image_sync_ex(const wchar_t *question, const wchar_t *imagePath, cons
                      ai_selected_model(), mime, b64, q, maxTokens);
     if (schema)
       k += snprintf(body + k, n - k, ",\"response_format\":{\"type\":\"json_schema\",\"json_schema\":{\"name\":\"r\",\"strict\":true,\"schema\":%s}}", schema);
-    if (g_aiDrawLora && !ai_ext()) k += snprintf(body + k, n - k, ",\"lora\":[{\"id\":0,\"scale\":1.0}]"); /* картинки — только чертежи */
+    if (g_aiDrawLoraId >= 0 && !ai_ext()) /* картинки — только чертежи */
+      k += snprintf(body + k, n - k, ",\"lora\":[{\"id\":%d,\"scale\":1.0}]", g_aiDrawLoraId);
     snprintf(body + k, n - k, "}");
   }
   free(b64);
@@ -1938,15 +1963,21 @@ static BOOL ai_fetch(HINTERNET ses, const wchar_t *host, const wchar_t *path, co
   return FALSE;
 }
 
-static volatile LONG g_aiLoraTried;
-static wchar_t g_aiLoraDest[MAX_PATH];
+/* закреплённые адаптеры: чертежи и инструменты агента — каждый качается раз за запуск программы */
+typedef struct {
+  const AiFile *file;
+  const wchar_t *what;
+  volatile LONG tried;
+  wchar_t dest[MAX_PATH];
+} AiLoraPin;
+static AiLoraPin g_aiLoraPins[2] = {{&kAiDrawLora, L"Адаптер чертежей"}, {&kAiToolLora, L"Адаптер инструментов агента"}};
 
 static DWORD WINAPI ai_lora_thread(LPVOID p) {
-  (void)p;
-  const AiFile *a = &kAiDrawLora;
+  AiLoraPin *pin = (AiLoraPin *)p;
+  const AiFile *a = pin->file;
   static const wchar_t *kHost[2] = {L"raw.githubusercontent.com", L"github.com"};
   wchar_t part[MAX_PATH + 8], path[400];
-  _snwprintf(part, MAX_PATH + 8, L"%s.part", g_aiLoraDest);
+  _snwprintf(part, MAX_PATH + 8, L"%s.part", pin->dest);
   HINTERNET ses = ai_net_open();
   for (int i = 0; ses && i < 2; i++) {
     _snwprintf(path, 400, i ? L"/%s/raw/%s/%s" : L"/%s/%s/%s", a->repo, a->rev, a->file);
@@ -1958,31 +1989,35 @@ static DWORD WINAPI ai_lora_thread(LPVOID p) {
     InterlockedExchangeAdd64(&g_aiDl.done, -(LONGLONG)got); /* счётчик — только для «Скачать» */
     char sha[65];
     if (st == 200 && got == a->size && ai_sha256(part, sha) && !_stricmp(sha, a->sha) &&
-        MoveFileExW(part, g_aiLoraDest, MOVEFILE_REPLACE_EXISTING)) {
-      ai_log(L"Адаптер чертежей скачан: %s — включится при следующем запуске модели", g_aiLoraDest);
+        MoveFileExW(part, pin->dest, MOVEFILE_REPLACE_EXISTING)) {
+      ai_log(L"%s скачан: %s — включится при следующем запуске модели", pin->what, pin->dest);
       WinHttpCloseHandle(ses);
       return 0;
     }
-    ai_log(L"Адаптер чертежей: https://%s%s — ответ %lu, %llu байт, не подошёл", kHost[i], path, st, got);
+    ai_log(L"%s: https://%s%s — ответ %lu, %llu байт, не подошёл", pin->what, kHost[i], path, st, got);
   }
   DeleteFileW(part);
   if (ses) WinHttpCloseHandle(ses);
   return 0;
 }
 
-/* модель уровня есть, а адаптера чертежей рядом нет — скачать в фоне, раз за запуск программы */
+/* модель уровня есть, а закреплённого адаптера рядом нет — скачать в фоне, раз за запуск программы */
 static void ai_lora_kick(const wchar_t *model) {
-  const wchar_t *name = wcsrchr(kAiDrawLora.file, L'/');
-  wchar_t dest[MAX_PATH];
-  lstrcpynW(dest, model, MAX_PATH);
-  wchar_t *sl = wcsrchr(dest, L'\\');
-  if (!name || !sl || (size_t)(sl - dest) + wcslen(name) + 1 >= MAX_PATH) return;
-  wcscpy(sl + 1, name + 1);
-  /* закреплённого адаптера ещё нет (прежнее поколение рядом не в счёт) — скачать */
-  if (ai_file_size(dest) == kAiDrawLora.size || InterlockedExchange(&g_aiLoraTried, 1)) return;
-  lstrcpynW(g_aiLoraDest, dest, MAX_PATH);
-  HANDLE t = CreateThread(NULL, 0, ai_lora_thread, NULL, 0, NULL);
-  if (t) CloseHandle(t);
+  for (int k = 0; k < 2; k++) {
+    AiLoraPin *pin = &g_aiLoraPins[k];
+    const AiFile *a = pin->file;
+    const wchar_t *name = wcsrchr(a->file, L'/');
+    wchar_t dest[MAX_PATH];
+    lstrcpynW(dest, model, MAX_PATH);
+    wchar_t *sl = wcsrchr(dest, L'\\');
+    if (!a->rev[0] || !a->size || !name || !sl || (size_t)(sl - dest) + wcslen(name) + 1 >= MAX_PATH) continue;
+    wcscpy(sl + 1, name + 1);
+    /* закреплённого адаптера ещё нет (прежнее поколение рядом не в счёт) — скачать */
+    if (ai_file_size(dest) == a->size || InterlockedExchange(&pin->tried, 1)) continue;
+    lstrcpynW(pin->dest, dest, MAX_PATH);
+    HANDLE t = CreateThread(NULL, 0, ai_lora_thread, pin, 0, NULL);
+    if (t) CloseHandle(t);
+  }
 }
 
 /* последний выпуск llama.cpp: ссылка на архив, размер и sha256 из GitHub */
