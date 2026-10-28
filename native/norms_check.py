@@ -6,6 +6,8 @@
 таблицы пишет локальную страницу: слева — картинка страницы книги, справа — таблица,
 как её прочитает CursorPad, сверху — замечания (не число, лишняя или пустая клетка,
 ряд не монотонный — обычно это опечатка переноса). Ничего никуда не отправляет.
+Клетку «0,4–0,5» CursorPad берёт серединой, «-0,9» — отрицательной; у таблиц «поля Cv; x; y; m»
+столбцы значений — поля строки, скачки по ним не ищутся.
 
 Страницы книги — картинками p0001.png… (так их пишет CursorPadOcr.exe --pdf книга.pdf
 папка 150). Номер в книге и номер страницы PDF расходятся на --offset.
@@ -20,7 +22,8 @@ import os
 import re
 import sys
 
-NUM = re.compile(r"^\s*(\d+(?:[.,]\d+)?)\s*\*?\s*$")
+# как nm_val: «0,15», «12*», «-0,9» (показатель степени), «0,4–0,5» — середина диапазона
+NUM = re.compile(r"^\s*(-?)(\d+(?:[.,]\d+)?)(?:\s*[-–—]\s*(\d+(?:[.,]\d+)?))?\s*\*?\s*$")
 RANGE = re.compile(r"^\s*(до|св\.?|свыше|более|больше)?\s*\d+(?:[.,]\d+)?(?:\s*(?:[-–—…]|\.\.)\s*\d+(?:[.,]\d+)?)?"
                    r"(?:\s+до\s+\d+(?:[.,]\d+)?)?(?=\s|$|[*])", re.I)
 DASH = {"", "—", "-", "–", "х", "x"}
@@ -43,7 +46,12 @@ def unq(s):
 
 def num(s):
     m = NUM.match(s)
-    return float(m.group(1).replace(",", ".")) if m else None
+    if not m or (m.group(1) and m.group(3)):
+        return None
+    v = float(m.group(2).replace(",", "."))
+    if m.group(3):
+        v = (v + float(m.group(3).replace(",", "."))) / 2
+    return -v if m.group(1) else v
 
 
 def is_range(s):
@@ -75,12 +83,13 @@ def parse(text):
 def layout(head, cols):
     """Какие столбцы — ключи, «как в книге», значения."""
     records = head.get("вид", "").strip().lower() == "записи"
+    fields = [f.strip().lower() for f in head.get("поля", "").split(";") if f.strip()]
     keys, vals, book = [], [], None
     for j, c in enumerate(cols[1:], 1):
         lc = c.strip().lower()
         if lc in ("как в книге", "в книге", "наименование"):
             book = j
-        elif (records and keys) or lc == "значение" or (not records and is_range(c)):
+        elif (records and keys) or lc == "значение" or (lc in fields if fields else not records and is_range(c)):
             vals.append(j)
         else:
             keys.append(j)
@@ -122,7 +131,8 @@ def check(head, cols, rows):
     records, keys, vals, book = layout(head, cols)
     if not vals:
         out.append((None, None, "нет столбцов значений"))
-    if not records and len(vals) > 1 and not head.get("столбцы"):
+    fields = bool(head.get("поля"))
+    if not records and not fields and len(vals) > 1 and not head.get("столбцы"):
         out.append((None, None, "нет строки «столбцы» — по какому параметру выбирать столбец"))
     if not head.get("ед") and not records:
         out.append((None, None, "нет строки «ед» (мин, %, коэф…)"))
@@ -141,7 +151,7 @@ def check(head, cols, rows):
             if cell.strip() not in DASH and num(cell) is None:
                 out.append((i, j, f"поз. {pos}, «{cols[j]}»: «{cell}» — не число"))
         xs = [num(r[j]) if j < len(r) else None for j in vals]
-        for k in spikes(xs):
+        for k in ([] if fields else spikes(xs)):  # поля строки (Cv, x, y, m) — не ряд
             out.append((i, vals[k], f"поз. {pos}, «{cols[vals[k]]}»: {r[vals[k]]} выбивается из соседних по строке — проверьте"))
     # по столбцу — внутри групп с одинаковым словом-ключом; новая группа и там, где числовые ключи
     # пошли на убыль (у пробок квалитет сменился — размер И начался заново)
@@ -154,7 +164,7 @@ def check(head, cols, rows):
             out_b.append(float("inf") if re.match(r"\s*(св|свыше|более|больше)", cell, re.I) and len(m) == 1 else hi)
         return tuple(out_b)
 
-    for j in vals:
+    for j in ([] if fields else vals):  # коэффициенты формул по столбцу тоже не ряд
         group, prev_key, prev_b = [], None, None
         for i, r in enumerate(rows + [None]):
             key = b = None

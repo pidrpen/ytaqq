@@ -651,8 +651,8 @@ static int ac_log_twips(void) {
 #define AC_NEW_LINE L"———  новая беседа: что выше, ИИ не помнит  ———"
 static const wchar_t *const kAcLogLinks[] = {L"вернуть", L"показать", L"скрыть", L"удалить всю историю"};
 /* под последним ответом-маршрутом — строка-кнопки (ac_route_do); номера WM_AC_LINK — с 10 */
-#define AC_ROUTE_ACTIONS L"Действия:   В Союз   ·   Подробно   ·   Excel"
-static const wchar_t *const kAcRouteLinks[] = {L"В Союз", L"Подробно", L"Excel"};
+#define AC_ROUTE_ACTIONS L"Действия:   В Союз   ·   Подробно   ·   Режимы   ·   Excel"
+static const wchar_t *const kAcRouteLinks[] = {L"В Союз", L"Подробно", L"Режимы", L"Excel"};
 static BOOL g_acShowOld, g_acLogTop; /* показать прежние беседы; ленту — с начала */
 
 static void ac_rtf_new_line(AcRtf *b) {
@@ -2624,6 +2624,9 @@ static BOOL ac_cut_start(const wchar_t *a) {
   return TRUE;
 }
 
+static void nu_open(void); /* окно «Режимы» (norms_ui.c) */
+static BOOL nu_chat_cmd(const wchar_t *a);
+
 static void ac_send(void) {
   SetWindowTextW(g_acTitle, g_aiProvider ? L"Мини-ИИ · Z.ai API" : L"Мини-ИИ · на этом компьютере");
   if (g_acPlanOn) {
@@ -2662,6 +2665,13 @@ static void ac_send(void) {
       free(in);
       return;
     }
+  }
+  /* «режимы» — правка режимов и норм последнего маршрута в своём окне (norms_ui.c); модель не нужна */
+  if (nu_chat_cmd(a)) {
+    SetWindowTextW(g_acIn, L"");
+    nu_open();
+    free(in);
+    return;
   }
   /* «в союз» — последний маршрут беседы в окно «В Союз» (soyuz_ui.c); модель не нужна */
   if (sz_chat_cmd(a)) {
@@ -3358,7 +3368,8 @@ static void ac_log_link_do(WPARAM which) {
   case 3: ac_clear_ask(); break;
   case 10: ac_route_say(L"в союз"); break;
   case 11: ac_route_say(L"норма подробно"); break;
-  case 12: ac_route_excel(); break;
+  case 12: nu_open(); break;
+  case 13: ac_route_excel(); break;
   }
 }
 
