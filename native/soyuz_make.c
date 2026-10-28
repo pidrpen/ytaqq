@@ -76,25 +76,30 @@ static void szm_pref_save(const wchar_t *folder) {
 /* Мост: soyuz_bridge из plm.txt; иначе cp-soyuz.exe рядом с CursorPad.exe; иначе — из самого
    CursorPad.exe (RCDATA 312, native/cp-soyuz.exe; исходник native/cp-soyuz.cs и pidrpen/slack)
    в папку данных, заново — если там другой размер (обновился CursorPad) */
-static BOOL szm_bridge(wchar_t *out, int cap) {
+/* 0 — мост найден (путь в out); 1 — путь из plm.txt не существует; 2 — в этой сборке
+   CursorPad нет ресурса моста; 3 — не удалось положить мост в папку данных (нет места,
+   запрет записи или антивирус тут же удалил файл). Зовётся только по кнопке «Создать». */
+static int szm_bridge(wchar_t *out, int cap) {
   if (g_szBridge[0]) {
     lstrcpynW(out, g_szBridge, cap);
-    return GetFileAttributesW(out) != INVALID_FILE_ATTRIBUTES;
+    return GetFileAttributesW(out) != INVALID_FILE_ATTRIBUTES ? 0 : 1;
   }
   GetModuleFileNameW(NULL, out, (DWORD)cap);
   wchar_t *b = wcsrchr(out, L'\\');
   if (b) b[1] = 0;
   wcsncat(out, L"cp-soyuz.exe", (size_t)cap - wcslen(out) - 1);
-  if (GetFileAttributesW(out) != INVALID_FILE_ATTRIBUTES) return TRUE;
-  if (!g_dataDir[0]) return FALSE;
-  _snwprintf(out, cap, L"%s\\cp-soyuz.exe", g_dataDir);
-  out[cap - 1] = 0;
+  if (GetFileAttributesW(out) != INVALID_FILE_ATTRIBUTES) return 0;
   HRSRC rs = FindResourceW(g_inst, MAKEINTRESOURCEW(312), RT_RCDATA);
   DWORD want = rs ? SizeofResource(g_inst, rs) : 0;
+  if (!want) return 2;
+  if (!g_dataDir[0]) return 3;
+  _snwprintf(out, cap, L"%s\\cp-soyuz.exe", g_dataDir);
+  out[cap - 1] = 0;
   WIN32_FILE_ATTRIBUTE_DATA fa;
-  BOOL have = GetFileAttributesExW(out, GetFileExInfoStandard, &fa) && fa.nFileSizeLow == want && want;
-  if (!have && want) have = extract_rcdata(312, out);
-  return have;
+  BOOL have = GetFileAttributesExW(out, GetFileExInfoStandard, &fa) && fa.nFileSizeLow == want;
+  if (!have) have = extract_rcdata(312, out) && GetFileAttributesExW(out, GetFileExInfoStandard, &fa) &&
+                    fa.nFileSizeLow == want;
+  return have ? 0 : 3;
 }
 
 static void szm_status(const wchar_t *t) {
@@ -366,15 +371,20 @@ static DWORD WINAPI szm_run_thread(LPVOID arg) {
   DWORD outn = 0, code = (DWORD)-1;
   BOOL ok = run_capture(r->cmd, &out, &outn, &code, err, 200);
   wchar_t *text = ok ? utf8_to_alloc(out, outn) : NULL;
-  size_t extra = 600 + (text ? wcslen(text) : 0);
+  size_t extra = 800 + (text ? wcslen(text) : 0);
   wchar_t *rep = (wchar_t *)malloc(extra * sizeof(wchar_t));
   if (rep) {
-    const wchar_t *head = !ok                ? L"Мост cp-soyuz.exe не запустился"
+    const wchar_t *head = !ok                ? L"Мост cp-soyuz.exe не запустился — его мог удалить или заблокировать антивирус"
                           : code == 0        ? L"Готово: функция «Союза» отработала"
                           : code == 1        ? L"«Союз» отказал — см. отчёт"
                           : code == 3        ? L"Клиент «Союза» не найден: запустите его и войдите"
-                                             : L"Мост завершился с ошибкой";
-    _snwprintf(rep, extra, L"%s (код %ld).\r\n%hs%s%s\r\n", head, (long)code, err, err[0] ? L"\r\n" : L"",
+                          : code == 2        ? L"Мост не получил описание (внутренняя ошибка CursorPad)"
+                                             : L"Мост завершился с ошибкой — возможно, в «Союзе» нет пакета «CursorPad — Союз» "
+                                               L"или версия клиента другая";
+    const wchar_t *manual = (!ok || (code != 0 && code != 1 && code != 3))
+                                ? L"Ручной путь: «ЭСИ и ТП» → «Сохранить пакет…», в «Союзе» — «Загрузить ЭСИ из CursorPad».\r\n"
+                                : L"";
+    _snwprintf(rep, extra, L"%s (код %ld).\r\n%hs%s%s%s\r\n", head, (long)code, err, err[0] ? L"\r\n" : L"", manual,
                text ? text : L"");
     rep[extra - 1] = 0;
   }
@@ -435,11 +445,15 @@ static void szm_go(void) {
     return;
   }
   wchar_t bridge[MAX_PATH];
-  if (!szm_bridge(bridge, MAX_PATH)) {
-    wchar_t m[400];
-    _snwprintf(m, 400, L"Нет моста %s — положите cp-soyuz.exe рядом с CursorPad.exe или укажите soyuz_bridge в plm.txt.",
-               bridge);
-    m[399] = 0;
+  int why = szm_bridge(bridge, MAX_PATH);
+  if (why) {
+    wchar_t m[500];
+    _snwprintf(m, 500, L"%s Ручной путь есть: «ЭСИ и ТП» → «Сохранить пакет…», в «Союзе» — «Загрузить ЭСИ из CursorPad».",
+               why == 1 ? L"В plm.txt указан мост soyuz_bridge, но такого файла нет."
+               : why == 2 ? L"В этой сборке CursorPad нет моста cp-soyuz.exe (ресурс не собран)."
+                          : L"Не удалось положить мост cp-soyuz.exe в папку данных — нет места, запрет записи или его "
+                            L"удалил антивирус (добавьте папку данных CursorPad в исключения).");
+    m[499] = 0;
     szm_status(m);
     return;
   }

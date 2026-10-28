@@ -7,7 +7,9 @@
 // путём к описанию — как SDK\Samples\InvokeRunningClient. Пароль не нужен: работает сессия
 // того, кто вошёл в клиент, с его правами. Отчёт функции — в консоль (UTF-8). Коды выхода:
 // 0 — сделано, 1 — функция ответила «ОШИБКА…», 2 — нет аргумента, 3 — клиент не найден.
-// Сборка: build-bridge.ps1 рядом (csc .NET Framework, C# 5). Исходник — домашний plm-create.cs.
+// Сборка: native/build-bridge.ps1 (csc .NET Framework, C# 5, ссылка на PLMClientHelperService.exe
+// клиента); готовый exe лежит в native/ и зашит в CursorPad.exe ресурсом 312, его sha256 — в
+// native/cp-soyuz.sha256 (check_bridge.py, сверяется при сборке). Исходник — soyuz-sqlgent\plm-create.cs.
 using System;
 using System.Collections;
 using System.Diagnostics;

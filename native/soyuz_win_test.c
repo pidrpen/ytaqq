@@ -345,6 +345,17 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
       st_check(g_szmText && wcsstr(g_szmText, L"СОСТАВ\t") && nf >= 5, L"«В Союз…»: окно папки открыто с описанием, папок из базы не меньше 5");
       st_note(L"     папок в списке: %d", nf);
       st_shot_wnd(L"10-soyuz-make.png", g_szmWnd);
+      /* мост — из ресурса CursorPad.exe в папку данных (рядом со стендом его нет) */
+      {
+        wchar_t bp[MAX_PATH];
+        int why = szm_bridge(bp, MAX_PATH);
+        HRSRC rs = FindResourceW(g_inst, MAKEINTRESOURCEW(312), RT_RCDATA);
+        WIN32_FILE_ATTRIBUTE_DATA fa;
+        BOOL sz = GetFileAttributesExW(bp, GetFileExInfoStandard, &fa) && rs && fa.nFileSizeLow == SizeofResource(g_inst, rs);
+        st_check(why == 0 && wcsstr(bp, L"\\data\\cp-soyuz.exe") && sz,
+                 L"мост cp-soyuz.exe достался из ресурса в папку данных, размер как у ресурса");
+        st_note(L"     мост: %ls (%lu байт)", bp, (unsigned long)fa.nFileSizeLow);
+      }
       ShowWindow(g_szmWnd, SW_HIDE);
       ShowWindow(g_pkWnd, SW_HIDE);
       free(g_szmText);
