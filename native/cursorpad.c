@@ -4268,6 +4268,8 @@ static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
       else if (id == ID_KIT_ANIM) g_kitAnim = !g_kitAnim;
       else g_kitFx = !g_kitFx;
       kit_changed(FALSE);
+      if (id == ID_KIT_FX && g_kitFx && g_fxPick >= 0) /* свой выбор во вкладке «Эффект» важнее */
+        show_status(L"«Волна» будет, если во вкладке «Эффект» выбрать «Как у курсора»");
     }
     if (LOWORD(wParam) >= ID_IDLE_BASE && LOWORD(wParam) < ID_IDLE_BASE + IDLE_OPTIONS)
       set_idle_sec(kIdleSec[LOWORD(wParam) - ID_IDLE_BASE]);

@@ -270,6 +270,49 @@ static void dst_kit_gallery(const wchar_t *base) {
   free(img);
 }
 
+/* курсоры «в деле»: стрелка, рука и текст каждого стиля поверх настоящего блокнота
+   в светлой и тёмной теме — строки по стилям, столбцы по темам */
+static void dst_kit_context(const wchar_t *name, int N) {
+  static const int th[2] = {0, 6};
+  BYTE *win[2] = {NULL, NULL};
+  int ww = 0, wh = 0;
+  for (int i = 0; i < 2; i++) {
+    set_theme(th[i]);
+    set_pad_mode(0);
+    dst_pump(200);
+    win[i] = dst_grab(g_hwnd, &ww, &wh);
+  }
+  set_theme(0);
+  if (!win[0] || !win[1]) { free(win[0]); free(win[1]); return; }
+  int W = (ww + 8) * 2, H = (wh + 8) * KIT_STYLES;
+  BYTE *out = (BYTE *)calloc((size_t)W * H, 4);
+  BYTE *img = (BYTE *)malloc((size_t)N * N * 4);
+  int keep = g_kitStyle;
+  if (out && img)
+    for (int st = 0; st < KIT_STYLES; st++)
+      for (int t = 0; t < 2; t++) {
+        int ox = t * (ww + 8), oy = st * (wh + 8);
+        for (int y = 0; y < wh; y++) memcpy(out + ((size_t)(oy + y) * W + ox) * 4, win[t] + (size_t)y * ww * 4, (size_t)ww * 4);
+        g_kitStyle = st;
+        /* стрелка над строкой заметок, рука над кнопкой «Поиск», текст в поле */
+        static const int slot[3] = {0, 2, 1};
+        int px[3] = {ww * 30 / 100, ww * 46 / 100, ww * 62 / 100}, py[3] = {wh * 60 / 100, wh * 22 / 100, wh * 72 / 100};
+        for (int c = 0; c < 3; c++) {
+          kit_draw(slot[c], 2, N, img);
+          kpv_blend(out, W, H, img, N, ox + px[c], oy + py[c]);
+        }
+      }
+  g_kitStyle = keep;
+  if (out) {
+    for (size_t i = 0; i < (size_t)W * H; i++) out[i * 4 + 3] = 255;
+    dst_png(name, out, W, H);
+  }
+  free(out);
+  free(img);
+  free(win[0]);
+  free(win[1]);
+}
+
 /* все стили и главные сочетания переключателей; карточка «Курсор» в Настройках */
 static void dst_kit_all(void) {
   static const wchar_t *const kSt[KIT_STYLES] = {L"svetly", L"temny", L"akcent", L"steklo"};
@@ -318,8 +361,15 @@ static void dst_kit_all(void) {
     _snwprintf(name, 200, L"kit-cursortab-%ls.png", thn[i]);
     dst_settings(0, name);
   }
+  /* крупный размер: карточка с просмотром */
+  set_theme(0);
+  g_kitSize = 2;
+  dst_settings(2, L"kit-card-krupny.png");
+  g_kitSize = 0;
   if (IsWindowVisible(g_setHwnd)) toggle_settings();
   set_theme(0);
+  dst_kit_context(L"kit-context-32.png", 32);
+  dst_kit_context(L"kit-context-48.png", 48);
 }
 
 static void dst_chat_fill(void) {
