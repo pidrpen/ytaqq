@@ -281,23 +281,27 @@ static const PadTheme kThemes[THEME_COUNT] = {
     {RGB(241, 228, 195), RGB(228, 211, 168), RGB(43, 27, 14), RGB(118, 88, 54), KN_CRIMSON,
      L"Рыцарская", L"Palatino Linotype", L"Georgia", L"Old English Text MT",
      L"Palatino Linotype", 2, BTN_KNIGHT, HEAD_BANNER, 1, FALSE, TRUE},
-    /* с 2026.10.26 — четыре темы с вкладки «Кастомизация»: */
-    /* стекло: холодная светлая бумага, крупное скругление, пунктир из точек по контуру кнопок */
-    {RGB(246, 248, 252), RGB(234, 239, 247), RGB(17, 24, 39), RGB(96, 106, 122), RGB(37, 99, 235),
+    /* с 2026.10.26 — четыре темы с вкладки «Кастомизация»; с 2026.10.29 переделаны:
+       спокойные цельные палитры, у тёмных — тёмные полосы прокрутки, без пунктира и узкого шрифта */
+    /* стекло: светлая холодная бумага с лёгкой голубизной, крупное скругление, приглушённый
+       сине-стальной акцент; кнопки — мягкая заливка (пунктир из точек на каждой кнопке убран) */
+    {RGB(246, 248, 251), RGB(235, 239, 245), RGB(26, 32, 44), RGB(90, 100, 118), RGB(62, 104, 178),
      L"Стекло", L"Segoe UI Variable Text", L"Segoe UI", L"Segoe UI Variable Display",
-     L"Segoe UI Variable Small", 10, BTN_DOTS, HEAD_PLAIN, 2, FALSE, FALSE},
-    /* графит: тёмная, не перекраска — свои углы и линии, голубой акцент; заголовок окна тёмный (DWM) */
-    {RGB(27, 30, 36), RGB(36, 40, 48), RGB(232, 234, 240), RGB(154, 163, 178), RGB(138, 180, 248),
+     L"Segoe UI Variable Small", 12, BTN_SOFT, HEAD_PLAIN, 2, FALSE, FALSE},
+    /* графит: нейтральная тёмная, без синевы в сером; акцент — спокойный голубой; заголовок окна тёмный (DWM) */
+    {RGB(32, 33, 36), RGB(41, 43, 47), RGB(228, 230, 233), RGB(150, 155, 163), RGB(122, 162, 224),
      L"Графит", L"Segoe UI Variable Text", L"Segoe UI", L"Segoe UI Variable Display",
      L"Segoe UI Variable Small", 6, BTN_SOFT, HEAD_RULE, 3, FALSE, FALSE},
-    /* синька: чертёж наоборот — белые линии по синей бумаге, прямые углы, прописные */
-    {RGB(14, 42, 76), RGB(18, 52, 89), RGB(234, 244, 255), RGB(156, 192, 230), RGB(125, 211, 252),
+    /* синька: чертёж наоборот — светлые линии по приглушённой синей бумаге (не яркий ультрамарин),
+       прямые углы, прописные; акцент — мягкий голубой вместо кислотного циана */
+    {RGB(27, 42, 62), RGB(34, 51, 74), RGB(226, 234, 243), RGB(150, 170, 194), RGB(132, 186, 222),
      L"Синька", L"Bahnschrift", L"Segoe UI", L"Bahnschrift", L"Bahnschrift", 0, BTN_LINE,
      HEAD_RULE, 1, TRUE, FALSE},
-    /* цех: тёмная сталь и янтарь, узкий технический шрифт, шапка полосой */
-    {RGB(35, 38, 43), RGB(43, 47, 53), RGB(241, 243, 245), RGB(163, 169, 179), RGB(245, 158, 11),
-     L"Цех", L"Bahnschrift SemiCondensed", L"Segoe UI", L"Bahnschrift SemiBold Condensed",
-     L"Bahnschrift SemiCondensed", 4, BTN_SOFT, HEAD_BAND, 3, TRUE, FALSE},
+    /* цех: тёплая тёмная сталь и приглушённый янтарь; шрифт Bahnschrift обычной ширины
+       (узкий SemiCondensed мелко читался), шапка полосой */
+    {RGB(36, 36, 37), RGB(45, 45, 47), RGB(234, 232, 227), RGB(163, 159, 151), RGB(214, 154, 66),
+     L"Цех", L"Bahnschrift", L"Segoe UI", L"Bahnschrift SemiBold", L"Bahnschrift", 4, BTN_SOFT,
+     HEAD_BAND, 3, TRUE, FALSE},
 };
 
 static COLORREF blend_rgb(COLORREF a, COLORREF b, int t) {
@@ -2949,6 +2953,14 @@ static void draw_pad_button(const DRAWITEMSTRUCT *dis) {
       fg = COL_INK;
       bd = COL_LINE;
     }
+  }
+  /* тёмные темы («Графит», «Синька», «Цех»): выбранное и включённое — подкрашенная подложка
+     с каймой акцента, а не сплошная заливка: ряд включённых переключателей на тёмном горел,
+     как вывеска. Главные кнопки («Найти») остаются залитыми — она одна */
+  if (on && !primary && !themeBtn && !disab && ui_theme_dark()) {
+    fill = blend_rgb(COL_PAPER, COL_SAGE, press ? 96 : 66);
+    fg = COL_INK;
+    bd = COL_SAGE;
   }
   int hot = disab ? 0 : ui_hover_level(dis->hwndItem);
   int gl = ui_glyph_of(id);
