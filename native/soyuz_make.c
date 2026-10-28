@@ -33,6 +33,8 @@ typedef struct {
 
 static HWND g_szmWnd, g_szmCombo, g_szmChk, g_szmStatus, g_szmLog;
 static volatile LONG g_szmBusy, g_szmGen;
+static wchar_t *g_szmText;      /* описание из окна пакета (ИЗДЕЛИЕ, СОСТАВ, ТП без ПАПКА); NULL — по маршруту (g_szR) */
+static wchar_t g_szmLabel[240]; /* подпись окна в режиме текста */
 static BOOL log_window(HWND *pw, HWND owner, const wchar_t *title, int w, int h); /* route_ui.c */
 
 static void szm_pref_path(wchar_t *p) { _snwprintf(p, MAX_PATH, L"%s\\soyuz.txt", g_dataDir), p[MAX_PATH - 1] = 0; }
@@ -264,6 +266,82 @@ done:
   return 0;
 }
 
+/* ---- участки и станки из базы — для списков окна пакета (package_ui.c) ------------------ */
+
+typedef struct {
+  HWND notify;
+} SzmDictsJob;
+
+static DWORD WINAPI szm_dicts_thread(LPVOID arg) {
+  SzmDictsJob *jb = (SzmDictsJob *)arg;
+  HWND notify = jb->notify;
+  free(jb);
+  SzmDicts *d = (SzmDicts *)calloc(1, sizeof(SzmDicts));
+  SQLHENV env = SQL_NULL_HENV;
+  SQLHDBC dbc = SQL_NULL_HDBC;
+  wchar_t err[300] = L"";
+  CardRow *rows = (CardRow *)malloc(sizeof(CardRow) * CARD_ROWS);
+  if (!d || !rows) goto done;
+  g_qTimeout = 20;
+  if (!g_szConnect(&env, &dbc, err, 300)) {
+    lstrcpynW(d->err, err, 300);
+    goto done;
+  }
+  /* участок: Code и Name — «31 Механический участок 31»; станок: EquipmentModel и Name — как
+     ToString() объекта в клиенте: «16К20, Токарно-винторезный станок» (так его ищет функция) */
+  static const wchar_t *const kq[2] = {
+      L"SELECT TOP 900 o.InfoObjectId, ISNULL(CAST(cd.ShortText AS NVARCHAR(40)),N''), CAST(o.Name AS NVARCHAR(200)), 0, 0 "
+      L"FROM InfoObjects AS o WITH(NOLOCK) JOIN Templates AS t WITH(NOLOCK) ON t.TemplateId=o.TemplateId AND t.NameKey=N'Area' "
+      L"OUTER APPLY (SELECT TOP 1 c.ShortText FROM InfoObjectAttributes AS c WITH(NOLOCK) JOIN NameKeys AS nk WITH(NOLOCK) "
+      L"ON nk.NameKeyId=c.NameKeyId AND nk.Value=N'Code' WHERE c.OwnerId=o.InfoObjectId AND c.Outdated=0) AS cd "
+      L"WHERE o.Erased=0 ORDER BY cd.ShortText, o.Name",
+      L"SELECT TOP 900 o.InfoObjectId, ISNULL(CAST(md.ShortText AS NVARCHAR(80)),N''), CAST(o.Name AS NVARCHAR(200)), 0, 0 "
+      L"FROM InfoObjects AS o WITH(NOLOCK) JOIN Templates AS t WITH(NOLOCK) ON t.TemplateId=o.TemplateId AND t.NameKey=N'Equipment' "
+      L"OUTER APPLY (SELECT TOP 1 c.ShortText FROM InfoObjectAttributes AS c WITH(NOLOCK) JOIN NameKeys AS nk WITH(NOLOCK) "
+      L"ON nk.NameKeyId=c.NameKeyId AND nk.Value=N'EquipmentModel' WHERE c.OwnerId=o.InfoObjectId AND c.Outdated=0) AS md "
+      L"WHERE o.Erased=0 ORDER BY md.ShortText, o.Name"};
+  for (int q = 0; q < 2; q++) {
+    int n = card_query(dbc, kq[q], rows, CARD_ROWS, err, 300);
+    if (n < 0) {
+      lstrcpynW(d->err, err, 300);
+      break;
+    }
+    wchar_t(*arr)[200] = (wchar_t(*)[200])calloc((size_t)(n > 0 ? n : 1), sizeof(*arr));
+    if (!arr) break;
+    int k = 0;
+    for (int i = 0; i < n; i++) {
+      const wchar_t *a = rows[i].s1, *b = rows[i].s2;
+      /* имя объекта бывает уже с кодом/моделью впереди — не удваивать */
+      if (a[0] && !wcsncmp(b, a, wcslen(a))) lstrcpynW(arr[k], b, 200);
+      else if (a[0]) _snwprintf(arr[k], 200, q ? L"%s, %s" : L"%s %s", a, b), arr[k][199] = 0;
+      else lstrcpynW(arr[k], b, 200);
+      if (arr[k][0]) k++;
+    }
+    if (q == 0) d->area = arr, d->na = k;
+    else d->equip = arr, d->ne = k;
+  }
+  SQLDisconnect(dbc);
+done:
+  if (dbc != SQL_NULL_HDBC) SQLFreeHandle(SQL_HANDLE_DBC, dbc);
+  if (env != SQL_NULL_HENV) SQLFreeHandle(SQL_HANDLE_ENV, env);
+  free(rows);
+  if (d && (!notify || !IsWindow(notify) || !PostMessageW(notify, WM_SZM_DICTS, 0, (LPARAM)d))) {
+    free(d->area);
+    free(d->equip);
+    free(d);
+  }
+  return 0;
+}
+
+static void szm_dicts_start(HWND notify) {
+  SzmDictsJob *jb = (SzmDictsJob *)calloc(1, sizeof(SzmDictsJob));
+  if (!jb) return;
+  jb->notify = notify;
+  HANDLE th = CreateThread(NULL, 0, szm_dicts_thread, jb, 0, NULL);
+  if (th) CloseHandle(th);
+  else free(jb);
+}
+
 /* ---- запуск моста ----------------------------------------------------------------- */
 
 typedef struct {
@@ -296,19 +374,52 @@ static DWORD WINAPI szm_run_thread(LPVOID arg) {
   return 0;
 }
 
+/* описание из окна пакета: ПАПКА (если есть изделия) + его строки */
+static int szm_write_text(const wchar_t *path, const wchar_t *folder) {
+  const wchar_t *t = g_szmText ? g_szmText : L"";
+  size_t cap = wcslen(t) + SZM_PATH + 64;
+  wchar_t *txt = (wchar_t *)malloc(cap * sizeof(wchar_t));
+  if (!txt) return -1;
+  wchar_t fold[SZM_PATH] = L"";
+  szm_tsv(fold, SZM_PATH, folder);
+  _snwprintf(txt, cap, L"# CursorPad → «Союз»: окно «Пакет для загрузки в PLM»\r\n%s%s%s%s", fold[0] ? L"ПАПКА\t" : L"",
+             fold, fold[0] ? L"\r\n" : L"", t);
+  txt[cap - 1] = 0;
+  int n = 0;
+  for (const wchar_t *p = t; (p = wcsstr(p, L"ТП\t")) != NULL; p += 3) n++;
+  int len8 = WideCharToMultiByte(CP_UTF8, 0, txt, -1, NULL, 0, NULL, NULL);
+  char *u = (char *)malloc((size_t)len8);
+  if (!u) {
+    free(txt);
+    return -1;
+  }
+  WideCharToMultiByte(CP_UTF8, 0, txt, -1, u, len8, NULL, NULL);
+  HANDLE h = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+  if (h != INVALID_HANDLE_VALUE) {
+    DWORD wr;
+    WriteFile(h, "\xEF\xBB\xBF", 3, &wr, NULL);
+    WriteFile(h, u, (DWORD)(len8 - 1), &wr, NULL);
+    CloseHandle(h);
+  } else n = -1;
+  free(u);
+  free(txt);
+  return n;
+}
+
 static void szm_go(void) {
-  if (g_szmBusy || !g_szR.n) return;
+  if (g_szmBusy || (!g_szmText && !g_szR.n)) return;
   wchar_t folder[SZM_PATH];
   GetWindowTextW(g_szmCombo, folder, SZM_PATH);
-  BOOL newPart = SendMessageW(g_szmChk, BM_GETCHECK, 0, 0) == BST_CHECKED;
-  if (!g_szR.des[0]) {
+  BOOL textMode = g_szmText != NULL;
+  BOOL newPart = textMode ? wcsstr(g_szmText, L"ИЗДЕЛИЕ\t") != NULL : SendMessageW(g_szmChk, BM_GETCHECK, 0, 0) == BST_CHECKED;
+  if (!textMode && !g_szR.des[0]) {
     szm_status(L"В маршруте нет обозначения детали («Лист: … · обозначение») — создать нечего.");
     return;
   }
   size_t l = wcslen(folder);
   while (l && (folder[l - 1] == L' ' || folder[l - 1] == L'\\')) folder[--l] = 0;
   if (newPart && !folder[0]) {
-    szm_status(L"Укажите папку «Союза», куда создать деталь.");
+    szm_status(textMode ? L"Укажите папку «Союза», куда создать изделия." : L"Укажите папку «Союза», куда создать деталь.");
     return;
   }
   wchar_t bridge[MAX_PATH];
@@ -320,14 +431,14 @@ static void szm_go(void) {
     szm_status(m);
     return;
   }
-  wchar_t spec[MAX_PATH], note[200];
+  wchar_t spec[MAX_PATH], note[200] = L"";
   _snwprintf(spec, MAX_PATH, L"%s\\cursorpad-soyuz.txt", g_dataDir);
-  int n = szm_write_spec(spec, folder, newPart, note, 200);
+  int n = textMode ? szm_write_text(spec, folder) : szm_write_spec(spec, folder, newPart, note, 200);
   if (n < 0) {
     szm_status(L"Не удалось записать описание в папку данных.");
     return;
   }
-  if (n == 0 && !newPart) {
+  if (n == 0 && !newPart && !(textMode && wcsstr(g_szmText, L"СОСТАВ\t"))) {
     szm_status(L"Ни одной операции с кодом справочника — в ТП подать нечего.");
     return;
   }
@@ -378,7 +489,8 @@ static LRESULT CALLBACK SzmProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     SetTextColor(hdc, COL_INK);
     if (g_fontUi) SelectObject(hdc, g_fontUi);
     wchar_t t[300];
-    _snwprintf(t, 300, L"Папка «Союза» для детали %s %s:", g_szR.des, g_szR.name);
+    if (g_szmText) lstrcpynW(t, g_szmLabel[0] ? g_szmLabel : L"Папка «Союза» для новых изделий:", 300);
+    else _snwprintf(t, 300, L"Папка «Союза» для детали %s %s:", g_szR.des, g_szR.name);
     t[299] = 0;
     RECT a = {SZS(16), SZS(12), rc.right - SZS(16), SZS(38)};
     DrawTextW(hdc, t, -1, &a, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
@@ -448,9 +560,26 @@ static LRESULT CALLBACK SzmProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
   return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
-/* кнопка «Создать ТП» окна «В Союз» */
+static void szm_show(void);
+
+/* кнопка «Создать ТП» окна «В Союз» — по маршруту */
 static void szm_open(void) {
   if (!g_szR.n) return;
+  free(g_szmText);
+  g_szmText = NULL;
+  szm_show();
+}
+
+/* «В Союз…» окна «Пакет для загрузки в PLM» — готовые строки ИЗДЕЛИЕ/СОСТАВ/ТП (копируются) */
+static void szm_open_text(const wchar_t *text, const wchar_t *label) {
+  if (!text || !text[0]) return;
+  free(g_szmText);
+  g_szmText = _wcsdup(text);
+  lstrcpynW(g_szmLabel, label ? label : L"", 240);
+  szm_show();
+}
+
+static void szm_show(void) {
   if (!g_szmWnd) {
     WNDCLASSEXW wc;
     memset(&wc, 0, sizeof(wc));
@@ -486,6 +615,8 @@ static void szm_open(void) {
   wchar_t last[SZM_PATH];
   szm_pref_load(last, SZM_PATH);
   SetWindowTextW(g_szmCombo, last);
+  ShowWindow(g_szmChk, g_szmText ? SW_HIDE : SW_SHOW); /* в режиме текста изделия уже перечислены в описании */
+  SetWindowTextW(g_szmWnd, g_szmText ? L"В «Союз» из пакета — CursorPad" : L"Создать в «Союзе» — CursorPad");
   EnableWindow(GetDlgItem(g_szmWnd, ID_SZM_OK), !g_szmBusy);
   InvalidateRect(g_szmWnd, NULL, TRUE);
   ShowWindow(g_szmWnd, SW_SHOWNORMAL);

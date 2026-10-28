@@ -20,8 +20,25 @@
 #define ID_PK_CHECK 308
 #define ID_PK_SAVE 309
 #define ID_PK_CLEAR 310
+#define ID_PK_SOYUZ 311 /* «В Союз…» — сразу в клиент функцией пакета «CursorPad — Союз» (soyuz_make.c) */
 
-static HWND g_pkWnd, g_pkList, g_pkEdit;
+/* Справочники для выпадающих списков листа «Операции» (с 2026.10.28): операции — из 1С
+   (kOps1c, зашиты), участки и станки — из базы «Союза» (soyuz_make.c, szm_dicts_start:
+   поток читает и присылает WM_SZM_DICTS, здесь они остаются до конца работы). */
+#define WM_SZM_DICTS (WM_APP + 97) /* lParam — SzmDicts*, получатель забирает szm_dicts_take */
+typedef struct {
+  int na, ne;
+  wchar_t (*area)[200];  /* «31 Механический участок 31» */
+  wchar_t (*equip)[200]; /* «16К20, Токарно-винторезный станок» */
+  wchar_t err[300];
+} SzmDicts;
+static SzmDicts g_szmDicts;
+static BOOL g_szmDictsAsked;
+static void szm_open_text(const wchar_t *text, const wchar_t *label); /* soyuz_make.c */
+static void szm_dicts_start(HWND notify);                               /* soyuz_make.c */
+
+static HWND g_pkWnd, g_pkList, g_pkEdit, g_pkCombo, g_pkEditCtl; /* правка ячейки: поле или список; какое сейчас */
+static int g_pkComboCol = -1;                                     /* чем заполнен список */
 static XpTable g_pk[PK_NT];
 static int g_pkSheet;             /* какой лист в таблице */
 static int g_pkEditRow = -1, g_pkEditCol = -1;
@@ -201,10 +218,34 @@ static LRESULT CALLBACK PkEditProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
   if (msg == WM_CHAR && (wParam == L'\r' || wParam == L'\t' || wParam == 27)) return 0;
   if (msg == WM_KILLFOCUS) {
     LRESULT res = CallWindowProcW(old, hwnd, msg, wParam, lParam);
+    if (g_pkEditCtl == g_pkCombo && g_pkCombo) { /* ушли в раскрытый список того же поля — правка продолжается */
+      COMBOBOXINFO ci;
+      memset(&ci, 0, sizeof(ci));
+      ci.cbSize = sizeof(ci);
+      if (GetComboBoxInfo(g_pkCombo, &ci) && ((HWND)wParam == ci.hwndList || (HWND)wParam == g_pkCombo)) return res;
+    }
     if (g_pkEditRow >= 0) pk_edit_end(TRUE);
     return res;
   }
   return CallWindowProcW(old, hwnd, msg, wParam, lParam);
+}
+
+/* список для столбца листа «Операции»: 2 — операции 1С, 3 — участки, 4 — станки; иначе -1 */
+static int pk_combo_kind(int sheet, int c) { return sheet == PK_OPS && c >= 2 && c <= 4 ? c : -1; }
+
+static void pk_combo_fill(int kind) {
+  if (g_pkComboCol == kind) return;
+  g_pkComboCol = kind;
+  SendMessageW(g_pkCombo, CB_RESETCONTENT, 0, 0);
+  SendMessageW(g_pkCombo, WM_SETREDRAW, FALSE, 0);
+  if (kind == 2)
+    for (int i = 0; i < OPS_1C_N; i++) SendMessageW(g_pkCombo, CB_ADDSTRING, 0, (LPARAM)kOps1c[i].name);
+  else if (kind == 3)
+    for (int i = 0; i < g_szmDicts.na; i++) SendMessageW(g_pkCombo, CB_ADDSTRING, 0, (LPARAM)g_szmDicts.area[i]);
+  else if (kind == 4)
+    for (int i = 0; i < g_szmDicts.ne; i++) SendMessageW(g_pkCombo, CB_ADDSTRING, 0, (LPARAM)g_szmDicts.equip[i]);
+  SendMessageW(g_pkCombo, WM_SETREDRAW, TRUE, 0);
+  SendMessageW(g_pkCombo, CB_SETDROPPEDWIDTH, (WPARAM)PKS(360), 0);
 }
 
 static void pk_edit_begin(int r, int c) {
@@ -226,28 +267,46 @@ static void pk_edit_begin(int r, int c) {
     SetWindowLongPtrW(g_pkEdit, GWLP_USERDATA,
                       (LONG_PTR)SetWindowLongPtrW(g_pkEdit, GWLP_WNDPROC, (LONG_PTR)PkEditProc));
   }
+  int kind = pk_combo_kind(g_pkSheet, c);
+  if (kind >= 0 && !g_pkCombo) { /* операция, участок, станок — со списком, но вписать можно и своё */
+    g_pkCombo = CreateWindowExW(0, L"COMBOBOX", L"", WS_CHILD | WS_VSCROLL | CBS_DROPDOWN | CBS_AUTOHSCROLL, 0, 0, 10,
+                                PKS(260), g_pkList, NULL, g_inst, NULL);
+    if (g_fontBody) SendMessageW(g_pkCombo, WM_SETFONT, (WPARAM)g_fontBody, FALSE);
+    COMBOBOXINFO ci;
+    memset(&ci, 0, sizeof(ci));
+    ci.cbSize = sizeof(ci);
+    if (GetComboBoxInfo(g_pkCombo, &ci) && ci.hwndItem)
+      SetWindowLongPtrW(ci.hwndItem, GWLP_USERDATA,
+                        (LONG_PTR)SetWindowLongPtrW(ci.hwndItem, GWLP_WNDPROC, (LONG_PTR)PkEditProc));
+  }
+  g_pkEditCtl = kind >= 0 && g_pkCombo ? g_pkCombo : g_pkEdit;
+  if (g_pkEditCtl == g_pkCombo) pk_combo_fill(kind);
   g_pkEditRow = r;
   g_pkEditCol = c;
-  SetWindowTextW(g_pkEdit, xp_cell(t, r, c));
-  MoveWindow(g_pkEdit, rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top + 2, TRUE);
-  ShowWindow(g_pkEdit, SW_SHOW);
-  SetFocus(g_pkEdit);
-  SendMessageW(g_pkEdit, EM_SETSEL, 0, -1);
+  SetWindowTextW(g_pkEditCtl, xp_cell(t, r, c));
+  int h = rc.bottom - rc.top + 2;
+  MoveWindow(g_pkEditCtl, rc.left, rc.top, rc.right - rc.left, g_pkEditCtl == g_pkCombo ? PKS(260) : h, TRUE);
+  ShowWindow(g_pkEditCtl, SW_SHOW);
+  SetFocus(g_pkEditCtl);
+  if (g_pkEditCtl == g_pkCombo) SendMessageW(g_pkCombo, CB_SETEDITSEL, 0, MAKELPARAM(0, -1));
+  else SendMessageW(g_pkEdit, EM_SETSEL, 0, -1);
 }
 
 static void pk_edit_end(BOOL commit) {
   int r = g_pkEditRow, c = g_pkEditCol;
   g_pkEditRow = g_pkEditCol = -1; /* до ShowWindow: уход фокуса не должен сохранить второй раз */
-  if (!g_pkEdit) return;
+  HWND ctl = g_pkEditCtl ? g_pkEditCtl : g_pkEdit;
+  if (!ctl) return;
   if (commit && r >= 0 && r < g_pk[g_pkSheet].n) {
     wchar_t v[600];
-    GetWindowTextW(g_pkEdit, v, 600);
+    GetWindowTextW(ctl, v, 600);
     pk_put(&g_pk[g_pkSheet], r, c, v);
     pk_set_item(r);
     pk_changed();
   }
-  BOOL had = GetFocus() == g_pkEdit; /* ушли щелчком на кнопку — фокус ей, а не таблице */
-  ShowWindow(g_pkEdit, SW_HIDE);
+  HWND focus = GetFocus(); /* ушли щелчком на кнопку — фокус ей, а не таблице */
+  BOOL had = focus == ctl || (focus && GetParent(focus) == ctl);
+  ShowWindow(ctl, SW_HIDE);
   if (had) SetFocus(g_pkList);
 }
 
@@ -478,6 +537,82 @@ static void pk_save(void) {
   pk_status(L"Сохранено: %s — в PLM: «Загрузить ЭСИ из CursorPad»", file);
 }
 
+/* Описание для функции CursorPadCreate из трёх листов (без ПАПКА — её спросит окно
+   «Создать в Союзе»): ИЗДЕЛИЕ, СОСТАВ, ТП. Код операции — число в начале «4110 Токарная»
+   (после «Проверить» названия уже в виде 1С), код участка — число в начале участка.
+   Возвращает число строк ТП; строки без кода — в note. */
+static int pk_soyuz_text(wchar_t **out, wchar_t *note, int ncap) {
+  ShareBuf b;
+  memset(&b, 0, sizeof(b));
+  note[0] = 0;
+  XpTable *it = &g_pk[PK_ITEMS], *ln = &g_pk[PK_LINKS], *op = &g_pk[PK_OPS];
+  for (int r = 0; r < it->n; r++) {
+    if (!xp_cell(it, r, 0)[0]) continue;
+    sb_add(&b, L"ИЗДЕЛИЕ");
+    for (int c = 0; c < 5; c++) sb_field(&b, xp_cell(it, r, c));
+    sb_add(&b, L"\r\n");
+  }
+  for (int r = 0; r < ln->n; r++) {
+    if (!xp_cell(ln, r, 0)[0] || !xp_cell(ln, r, 1)[0]) continue;
+    sb_add(&b, L"СОСТАВ");
+    for (int c = 0; c < 4; c++) sb_field(&b, xp_cell(ln, r, c));
+    sb_add(&b, L"\r\n");
+  }
+  int n = 0, skipped = 0;
+  for (int r = 0; r < op->n; r++) {
+    const wchar_t *des = xp_cell(op, r, 0), *o = xp_cell(op, r, 2), *ar = xp_cell(op, r, 3);
+    if (!des[0]) continue;
+    wchar_t code[8] = L"", area[8] = L"";
+    int k = 0;
+    for (; o[k] >= L'0' && o[k] <= L'9' && k < 7; k++) code[k] = o[k];
+    code[k] = 0;
+    if (k < 2) { /* название без номера: справочник 1С знает код («4110 Токарная») */
+      wchar_t t1c[PLM_COL1];
+      if (op1c_text(NULL, NULL, NULL, o, t1c, PLM_COL1)) lstrcpynW(code, t1c, 5);
+      else code[0] = 0;
+    }
+    if (!code[0]) {
+      skipped++;
+      continue;
+    }
+    k = 0;
+    while (*ar == L' ') ar++;
+    for (; ar[k] >= L'0' && ar[k] <= L'9' && k < 7; k++) area[k] = ar[k];
+    area[k] = 0;
+    sb_add(&b, L"ТП");
+    sb_field(&b, des);
+    sb_field(&b, xp_cell(op, r, 1));
+    sb_field(&b, code);
+    sb_field(&b, area);
+    sb_field(&b, xp_cell(op, r, 4));
+    sb_field(&b, xp_cell(op, r, 5));
+    sb_field(&b, xp_cell(op, r, 6));
+    sb_add(&b, L"\r\n");
+    n++;
+  }
+  if (skipped) _snwprintf(note, ncap, L"операций без кода справочника (пропущены): %d", skipped), note[ncap - 1] = 0;
+  *out = b.w;
+  return n;
+}
+
+static void pk_to_soyuz(void) {
+  if (g_pkEditRow >= 0) pk_edit_end(TRUE);
+  pk_check(TRUE); /* номера «005», названия операций как в 1С — отсюда коды */
+  wchar_t *text = NULL, note[200];
+  int n = pk_soyuz_text(&text, note, 200);
+  if (!text || !text[0]) {
+    free(text);
+    pk_status(L"Нечего отправлять: заполните «Изделия» или «Операции»");
+    return;
+  }
+  wchar_t label[240];
+  _snwprintf(label, 240, L"В «Союз»: изделий %d, строк состава %d, операций %d%s%s", g_pk[PK_ITEMS].n, g_pk[PK_LINKS].n, n,
+             note[0] ? L" · " : L"", note);
+  label[239] = 0;
+  szm_open_text(text, label);
+  free(text);
+}
+
 static void pk_clear(void) {
   if (MessageBoxW(g_pkWnd, L"Очистить все три листа пакета?", L"Пакет для загрузки", MB_YESNO | MB_ICONQUESTION) !=
       IDYES)
@@ -501,10 +636,10 @@ static void pk_layout(void) {
   int ly = PANEL_TITLE_H + PKS(86);
   MoveWindow(g_pkList, pad, ly, rc.right - pad * 2, foot - PKS(26) - ly, TRUE);
   /* подвал (с 2026.10.21): правка строк — слева, главное «Сохранить» — справа */
-  static const int ids[] = {ID_PK_ADD, ID_PK_DEL, ID_PK_PASTE, ID_PK_CHECK, ID_PK_CLEAR};
-  static const int w[] = {100, 100, 150, 100, 100};
+  static const int ids[] = {ID_PK_ADD, ID_PK_DEL, ID_PK_PASTE, ID_PK_CHECK, ID_PK_CLEAR, ID_PK_SOYUZ};
+  static const int w[] = {100, 100, 150, 100, 100, 110};
   int x = PKS(16);
-  for (int i = 0; i < 5; i++) {
+  for (int i = 0; i < 6; i++) {
     MoveWindow(GetDlgItem(g_pkWnd, ids[i]), x, by, PKS(w[i]), PKS(30), TRUE);
     x += PKS(w[i] + 8);
   }
@@ -526,7 +661,7 @@ static void pk_paint(HWND hwnd, HDC hdc) {
   DrawTextW(hdc,
             g_pkStatus[0] ? g_pkStatus
                           : L"Двойной щелчок или F2 — править, Enter — вниз, Tab — вправо, Ctrl+V — строки из Excel, "
-                            L"Delete — удалить. В PLM: «Загрузить ЭСИ из CursorPad».",
+                            L"Delete — удалить. «В Союз…» — сразу в клиент; пакет .xlsx — «Загрузить ЭСИ из CursorPad».",
             -1, &st, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 }
 
@@ -583,7 +718,7 @@ static LRESULT CALLBACK PkProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
     return panel_hittest(hwnd, lParam);
   case WM_GETMINMAXINFO: {
     MINMAXINFO *mm = (MINMAXINFO *)lParam;
-    mm->ptMinTrackSize.x = PKS(820);
+    mm->ptMinTrackSize.x = PKS(940); /* шесть кнопок подвала и «Сохранить» */
     mm->ptMinTrackSize.y = PKS(360);
     return 0;
   }
@@ -612,6 +747,19 @@ static LRESULT CALLBACK PkProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
     if (nh->hwndFrom == g_pkList && nh->code == LVN_BEGINSCROLL && g_pkEditRow >= 0) pk_edit_end(TRUE);
     return 0;
   }
+  case WM_SZM_DICTS: { /* участки и станки из базы — для списков листа «Операции» */
+    SzmDicts *d = (SzmDicts *)lParam;
+    if (d) {
+      free(g_szmDicts.area);
+      free(g_szmDicts.equip);
+      g_szmDicts = *d;
+      free(d);
+      g_pkComboCol = -1; /* список заполнить заново */
+      if (g_szmDicts.err[0]) pk_status(L"Справочники из базы не прочитаны: %s — участки и станки вписывайте руками", g_szmDicts.err);
+      else pk_status(L"Из базы «Союза»: участков %d, станков %d — выбор в столбцах листа «Операции»", g_szmDicts.na, g_szmDicts.ne);
+    }
+    return 0;
+  }
   case WM_COMMAND: {
     int id = LOWORD(wParam);
     if (id == ID_PANEL_MIN) {
@@ -634,6 +782,7 @@ static LRESULT CALLBACK PkProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
     if (id == ID_PK_CHECK) pk_check(FALSE);
     if (id == ID_PK_SAVE) pk_save();
     if (id == ID_PK_CLEAR) pk_clear();
+    if (id == ID_PK_SOYUZ) pk_to_soyuz();
     return 0;
   }
   case WM_KEYDOWN:
@@ -685,6 +834,7 @@ static void package_show(BOOL fill) {
     mk_btn(g_pkWnd, L"Проверить", ID_PK_CHECK);
     mk_btn(g_pkWnd, L"Сохранить пакет…", ID_PK_SAVE);
     mk_btn(g_pkWnd, L"Очистить", ID_PK_CLEAR);
+    mk_btn(g_pkWnd, L"В Союз…", ID_PK_SOYUZ);
     g_pkList = CreateWindowExW(0, WC_LISTVIEWW, L"", WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP | LVS_REPORT |
                                                        LVS_SHOWSELALWAYS | WS_CLIPCHILDREN,
                                0, 0, 10, 10, g_pkWnd, NULL, g_inst, NULL);
@@ -701,5 +851,9 @@ static void package_show(BOOL fill) {
   ShowWindow(g_pkWnd, IsIconic(g_pkWnd) ? SW_RESTORE : SW_SHOWNORMAL);
   SetForegroundWindow(g_pkWnd);
   SetFocus(g_pkList);
+  if (!g_szmDictsAsked && g_sqlUser[0] && g_sqlPass[0]) { /* участки и станки — один раз за работу */
+    g_szmDictsAsked = TRUE;
+    szm_dicts_start(g_pkWnd);
+  }
   if (fill) pk_from_export();
 }

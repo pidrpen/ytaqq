@@ -281,6 +281,42 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
     st_check(t && wcsstr(t, L"ТП\tАБВГ.711141.001\t010\t4110\t31\t16К20, Токарно-винторезный станок\t15\t4\r\n"),
              L"строка ТП токарной: код 4110, участок 31, станок и нормы аналога");
     st_check(t && wcsstr(t, L"\t045\t7300\t\t\t\t\r\n"), L"окрасочная без аналога: код есть, участок и нормы пустые");
+    /* окно «Пакет для загрузки в PLM» → «В Союз…»: три листа — в строки описания (package_ui.c) */
+    {
+      xp_package_free(g_pk);
+      pk_init();
+      wchar_t **w = xp_row(&g_pk[PK_ITEMS]);
+      pk_put(&g_pk[PK_ITEMS], 0, 0, L"ТСТ.120.000");
+      pk_put(&g_pk[PK_ITEMS], 0, 1, L"Узел пробный");
+      pk_put(&g_pk[PK_ITEMS], 0, 2, L"Сборочные единицы");
+      w = xp_row(&g_pk[PK_LINKS]);
+      pk_put(&g_pk[PK_LINKS], 0, 0, L"ТСТ.120.000");
+      pk_put(&g_pk[PK_LINKS], 0, 1, L"ТСТ.110.004");
+      pk_put(&g_pk[PK_LINKS], 0, 2, L"2");
+      w = xp_row(&g_pk[PK_OPS]);
+      pk_put(&g_pk[PK_OPS], 0, 0, L"ТСТ.110.004");
+      pk_put(&g_pk[PK_OPS], 0, 1, L"5");
+      pk_put(&g_pk[PK_OPS], 0, 2, L"Токарная");
+      pk_put(&g_pk[PK_OPS], 0, 3, L"31 Механический участок 31");
+      pk_put(&g_pk[PK_OPS], 0, 4, L"16К20, Токарно-винторезный станок");
+      pk_put(&g_pk[PK_OPS], 0, 5, L"15");
+      pk_put(&g_pk[PK_OPS], 0, 6, L"4");
+      w = xp_row(&g_pk[PK_OPS]);
+      pk_put(&g_pk[PK_OPS], 1, 0, L"ТСТ.110.004");
+      pk_put(&g_pk[PK_OPS], 1, 1, L"010");
+      pk_put(&g_pk[PK_OPS], 1, 2, L"Какая-то неизвестная");
+      (void)w;
+      wchar_t *pt = NULL, pnote[200];
+      int pn = pk_soyuz_text(&pt, pnote, 200);
+      st_check(pn == 1 && pt && wcsstr(pt, L"ИЗДЕЛИЕ\tТСТ.120.000\tУзел пробный\tСборочные единицы\t\t\r\n") &&
+                   wcsstr(pt, L"СОСТАВ\tТСТ.120.000\tТСТ.110.004\t2\t\r\n") &&
+                   wcsstr(pt, L"ТП\tТСТ.110.004\t5\t4110\t31\t16К20, Токарно-винторезный станок\t15\t4\r\n") &&
+                   wcsstr(pnote, L"пропущены): 1"),
+               L"пакет → описание: изделие, состав, код 4110 по названию «Токарная», участок 31; неизвестная — пропущена");
+      if (pt) st_note(L"     %ls", pt);
+      free(pt);
+      xp_package_free(g_pk);
+    }
     if (t) st_note(L"     %ls", t);
     free(t);
   }
