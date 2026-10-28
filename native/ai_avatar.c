@@ -10,6 +10,7 @@
    нарисовано в кадре, поэтому эмоции — сменой кадра, а дыхание, прыжки и
    раскачивание — та же поза, что у робота. */
 #include "ai_avatar_face.h"
+#include "ai_avatar_facts.h" /* факты и анекдоты: список, выбор без повторов, разбор ответа модели */
 #define IDR_AI_AVATAR_ATLAS 380
 #define IDR_AI_AVATAR_CAT 381
 #define AC_CAT_W 135                /* кадр кошки 135×384 — в квадрате 460×460 окна: внизу посередине, */
@@ -86,12 +87,28 @@ static int g_acPerchDx;
 static BOOL g_acFalling;
 static float g_acFallV;
 
+/* «Факты и анекдоты» (меню помощника, ai_avatar.ini Facts): щелчок — сразу рассказывает,
+   сам — раз в 15 минут, когда ИИ свободен, а человек за компьютером и не в чате.
+   Придумывает модель коротким запросом без размышления, но только если она уже
+   поднята и свободна (ai_warm): ради шутки 4B на заводском ПК не грузится.
+   Иначе и при негодном ответе — строка из встроенного списка. */
+#define WM_AC_FACT (WM_APP + 90) /* ответ модели на факт или анекдот: lParam — AiResult* */
+#define AC_FACT_TIMER 0xA173     /* одиночный щелчок ждёт, не окажется ли он двойным */
+#define AC_FACT_EVERY (15 * 60 * 1000)
+#define AC_FACT_AWAY (5 * 60 * 1000) /* дольше без мыши и клавиатуры — человека нет, рассказывать некому */
+static BOOL g_acFacts;
+static FjState g_acFactSt;
+static DWORD g_acFactNext;
+static int g_acFactId, g_acFactKind;  /* запрос к модели в пути и что просили */
+static DWORD g_acLaughAt;             /* анекдот досказан — посмеяться */
+static BOOL g_acBubbleStory;          /* пузырь с фактом: шире, дольше, щелчок только закрывает */
+
 static void ac_emo(int emo, DWORD ms) {
   g_acEmo = emo;
   g_acEmoUntil = (GetTickCount() + ms) | 1;
 }
 
-static wchar_t g_acBubbleText[200];
+static wchar_t g_acBubbleText[FJ_MAX + 8];
 static BOOL g_acBubbleThought;       /* облачко-мысль (ИИ занят) или реплика с хвостиком */
 static BOOL g_acBubbleFading;
 static DWORD g_acBubbleUntil;        /* 0 — держать, пока ИИ занят */
@@ -796,12 +813,14 @@ static void ac_bubble_update(void) {
   if (!dc) { if (screen) ReleaseDC(NULL, screen); return; }
   HGDIOBJ oldFont = SelectObject(dc, g_acBubbleFont);
   int maxW = S * 3 / 2 < 190 ? 190 : S * 3 / 2;
+  if (g_acBubbleStory) maxW = S * 2 < 280 ? 280 : S * 2 > 380 ? 380 : S * 2;
   RECT tr = {0, 0, maxW, 0};
   DrawTextW(dc, g_acBubbleText, -1, &tr, DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX | DT_EDITCONTROL);
   TEXTMETRICW tm;
   GetTextMetricsW(dc, &tm);
   int textW = tr.right > maxW ? maxW : tr.right, textH = tr.bottom;
-  if (textH > tm.tmHeight * 3) textH = tm.tmHeight * 3;
+  int lines = g_acBubbleStory ? 8 : 3;
+  if (textH > tm.tmHeight * lines) textH = tm.tmHeight * lines;
   BOOL dots = g_acAvatarBusy && g_acBubbleThought;
   int pad = fontPx * 3 / 4 + 2, dotsW = dots ? fontPx * 2 : 0;
   int bw = textW + pad * 2 + dotsW, bh = textH + pad * 2;
@@ -916,20 +935,24 @@ static LRESULT CALLBACK AcBubbleProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
   switch (msg) {
   case WM_MOUSEACTIVATE: return MA_NOACTIVATE;
   case WM_SETCURSOR: SetCursor(LoadCursorW(NULL, IDC_HAND)); return TRUE;
-  case WM_LBUTTONUP: ac_bubble_hide(FALSE); aichat_show(); return 0;
+  case WM_LBUTTONUP:
+    ac_bubble_hide(FALSE);
+    if (!g_acBubbleStory) aichat_show(); /* факт или анекдот — просто закрыть */
+    return 0;
   case WM_RBUTTONUP: ac_bubble_hide(FALSE); return 0;
   case WM_PAINT: ValidateRect(hwnd, NULL); return 0;
   }
   return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
-/* Показать реплику рядом с аватаром. ms = 0 — держать, пока ИИ занят. */
-static void ac_avatar_bubble(const wchar_t *text, BOOL thought, DWORD ms) {
-  if (!g_acAvatarBubbles || !g_acAvatar || !IsWindowVisible(g_acAvatar) || g_acAvatarAnim == 2 || !text) return;
+/* Показать реплику рядом с аватаром. ms = 0 — держать, пока ИИ занят.
+   story — факт или анекдот: длиннее, пузырь шире, показывается и без «Мыслей рядом». */
+static void ac_avatar_bubble_ex(const wchar_t *text, BOOL thought, DWORD ms, BOOL story) {
+  if ((!g_acAvatarBubbles && !story) || !g_acAvatar || !IsWindowVisible(g_acAvatar) || g_acAvatarAnim == 2 || !text) return;
   if (ac_mini_open()) return; /* мини-чат открыт рядом — там то же самое */
-  int n = 0;
+  int n = 0, cap = story ? FJ_MAX : 196;
   BOOL space = FALSE;
-  for (const wchar_t *s = text; *s && n < 196; s++) {
+  for (const wchar_t *s = text; *s && n < cap; s++) {
     wchar_t c = *s;
     if (c == L'\r' || c == L'\n' || c == L'\t') c = L' ';
     if (c == L'*' || c == L'#' || c == L'`') continue; /* разметка ответа */
@@ -938,13 +961,14 @@ static void ac_avatar_bubble(const wchar_t *text, BOOL thought, DWORD ms) {
     g_acBubbleText[n++] = c;
   }
   while (n && g_acBubbleText[n - 1] == L' ') n--;
-  if (n > 120) {
+  if (n > 120 && !story) {
     n = 118;
     while (n > 80 && g_acBubbleText[n] != L' ') n--;
     g_acBubbleText[n++] = L'…';
   }
   g_acBubbleText[n] = 0;
   if (!n) return;
+  g_acBubbleStory = story;
   g_acBubbleThought = thought;
   g_acBubbleUntil = ms ? GetTickCount() + ms : 0;
   g_acBubbleFading = FALSE;
@@ -968,6 +992,8 @@ static void ac_avatar_bubble(const wchar_t *text, BOOL thought, DWORD ms) {
   }
   ac_bubble_update();
 }
+
+static void ac_avatar_bubble(const wchar_t *text, BOOL thought, DWORD ms) { ac_avatar_bubble_ex(text, thought, ms, FALSE); }
 
 /* Строка состояния чата (ac_status). Пока ИИ занят — всегда в пузырь; прочие
    сообщения — только если окно чата не перед глазами. Подсказки про «Стоп»
@@ -997,6 +1023,7 @@ static void ac_avatar_say(const wchar_t *text) {
 /* ИИ начал или закончил работу (ac_busy). */
 static void ac_avatar_busy(BOOL on) {
   g_acAvatarBusy = on;
+  if (on && g_acFactId) { ai_cancel(g_acFactId); g_acFactId = 0; } /* человек спросил своё — шутка подождёт */
   ac_mini_refresh();
   if (!on && g_acBubbleThought && !g_acBubbleUntil) g_acBubbleUntil = GetTickCount() + 1500;
 }
@@ -1061,6 +1088,7 @@ static void ac_avatar_save_settings(void) {
   WritePrivateProfileStringW(L"Avatar", L"Wander", g_acAvatarWander ? L"1" : L"0", path);
   WritePrivateProfileStringW(L"Avatar", L"Bubbles", g_acAvatarBubbles ? L"1" : L"0", path);
   WritePrivateProfileStringW(L"Avatar", L"Windows", g_acAvatarWindows ? L"1" : L"0", path);
+  WritePrivateProfileStringW(L"Avatar", L"Facts", g_acFacts ? L"1" : L"0", path);
   WritePrivateProfileStringW(L"Avatar", L"Skin", g_acAvatarSkin == AC_SKIN_CAT ? L"cat" : L"robot", path);
 }
 
@@ -1151,7 +1179,7 @@ static void ac_avatar_hide(void) {
    как пузырь, — шапка с состоянием, чат, ползунок размера, переключатели,
    «Отозвать». Закрывается щелчком мимо и Esc, ходит стрелками. */
 
-enum { ACM_HEAD, ACM_CHAT, ACM_SIZE, ACM_SKIN, ACM_BUBBLES, ACM_WANDER, ACM_WINDOWS, ACM_SEP, ACM_DISMISS, ACM_N };
+enum { ACM_HEAD, ACM_CHAT, ACM_SIZE, ACM_SKIN, ACM_BUBBLES, ACM_FACTS, ACM_WANDER, ACM_WINDOWS, ACM_SEP, ACM_DISMISS, ACM_N };
 #define AC_MENU_TIMER 0xA172
 static HWND g_acMenu;
 static RECT g_acMenuRow[ACM_N];
@@ -1165,8 +1193,8 @@ static HFONT g_acMenuFont, g_acMenuBold, g_acMenuSmall, g_acMenuIcons;
 
 static int ac_mpx(int v) { return v * g_acMenuK / 100; }
 static BOOL ac_menu_pick(int i) {
-  return i == ACM_CHAT || i == ACM_SIZE || i == ACM_SKIN || i == ACM_BUBBLES || i == ACM_WANDER || i == ACM_WINDOWS ||
-         i == ACM_DISMISS;
+  return i == ACM_CHAT || i == ACM_SIZE || i == ACM_SKIN || i == ACM_BUBBLES || i == ACM_FACTS || i == ACM_WANDER ||
+         i == ACM_WINDOWS || i == ACM_DISMISS;
 }
 
 static HFONT ac_menu_font(int px, int weight, const wchar_t *face) {
@@ -1191,7 +1219,7 @@ static void ac_menu_close(void) {
 }
 
 static void ac_menu_layout(void) {
-  static const int kRowH[ACM_N] = {56, 38, 62, 38, 38, 38, 38, 9, 38};
+  static const int kRowH[ACM_N] = {56, 38, 62, 38, 38, 38, 38, 38, 9, 38};
   int m = ac_mpx(14), w = ac_mpx(292), pad = ac_mpx(6), y = m + pad;
   for (int i = 0; i < ACM_N; i++) {
     SetRect(&g_acMenuRow[i], m + pad, y, m + w - pad, y + ac_mpx(kRowH[i]));
@@ -1325,6 +1353,8 @@ static void ac_menu_render(void) {
                ink, cyan, lineH);
   ac_menu_line(pix, W, H, dc, g_acMenuRow[ACM_BUBBLES], 0xE8F2, L"Мысли ИИ рядом", NULL, ink, cyan, lineH);
   ac_menu_switch(pix, W, H, g_acMenuRow[ACM_BUBBLES], g_acAvatarBubbles);
+  ac_menu_line(pix, W, H, dc, g_acMenuRow[ACM_FACTS], 0xE82F, L"Факты и анекдоты", NULL, ink, cyan, lineH);
+  ac_menu_switch(pix, W, H, g_acMenuRow[ACM_FACTS], g_acFacts);
   ac_menu_line(pix, W, H, dc, g_acMenuRow[ACM_WANDER], 0xE805, L"Гулять рядом с местом", NULL, ink, cyan, lineH);
   ac_menu_switch(pix, W, H, g_acMenuRow[ACM_WANDER], g_acAvatarWander);
   ac_menu_line(pix, W, H, dc, g_acMenuRow[ACM_WINDOWS], 0xE737, L"Садиться на окна", NULL, ink, cyan, lineH);
@@ -1376,6 +1406,16 @@ static void ac_menu_activate(int i) {
     if (!g_acAvatarBubbles) ac_bubble_hide(TRUE);
     ac_avatar_save_settings();
     ac_menu_render();
+    break;
+  case ACM_FACTS:
+    g_acFacts = !g_acFacts;
+    g_acFactNext = GetTickCount() + AC_FACT_EVERY;
+    if (!g_acFacts && g_acFactId) { ai_cancel(g_acFactId); g_acFactId = 0; }
+    ac_avatar_save_settings();
+    ac_menu_render();
+    ac_avatar_bubble_ex(g_acFacts ? L"Щёлкните по мне — расскажу факт или анекдот. Сам — раз в 15 минут, если вы не заняты."
+                                  : L"Хорошо, молчу. Вернуть — в этом же меню.",
+                        FALSE, 4200, TRUE);
     break;
   case ACM_WANDER:
     g_acAvatarWander = !g_acAvatarWander;
@@ -1535,8 +1575,8 @@ static void ac_avatar_menu(HWND hwnd) {
   SetTimer(g_acMenu, AC_MENU_TIMER, 16, NULL);
 }
 
-/* щелчок без перетаскивания — робот радуется */
-static void ac_avatar_poke(void) {
+/* щелчок без перетаскивания — робот радуется; say — с подсказкой в пузыре */
+static void ac_avatar_poke_ex(BOOL say) {
   static const wchar_t *kPhrases[] = {
     L"Я тут! Двойной щелчок — открыть чат",
     L"Щекотно!",
@@ -1557,10 +1597,12 @@ static void ac_avatar_poke(void) {
     g_acAvatarAmbient = TRUE;
     g_acAvatarTransientUntil = now + (DWORD)AC_AVATAR_COLS * kAcAvatarFrameMs[AC_AV_WAVE];
   }
-  if (!g_acAvatarBusy)
+  if (!g_acAvatarBusy && say)
     ac_avatar_bubble(kPhrases[ac_avatar_random() % (sizeof(kPhrases) / sizeof(kPhrases[0]))], FALSE, 2600);
   ac_avatar_present();
 }
+
+static void ac_avatar_poke(void) { ac_avatar_poke_ex(TRUE); }
 
 /* ---------- призвать / отозвать: «Ещё», меню аватара, кнопка в чате */
 
@@ -1610,6 +1652,80 @@ static void ac_avatar_dismiss(void) {
   ac_avatar_menu_label();
 }
 
+/* ---------- факты и анекдоты */
+
+/* рассказать: пузырь-реплика, «говорит», после анекдота — смеётся */
+static void ac_fact_say(const wchar_t *text, int joke) {
+  fj_note(&g_acFactSt, text, joke);
+  size_t len = wcslen(text);
+  DWORD ms = (DWORD)len * 62, talk = (DWORD)len * 38;
+  if (ms < 5000) ms = 5000;
+  if (ms > 16000) ms = 16000;
+  ac_avatar_set(AC_AV_TALKING);
+  g_acAvatarTalkUntil = GetTickCount() + (talk < 2500 ? 2500 : talk > 7000 ? 7000 : talk);
+  g_acLaughAt = joke ? g_acAvatarTalkUntil | 1 : 0;
+  ac_avatar_bubble_ex(text, FALSE, ms, TRUE);
+}
+
+static void ac_fact_from_list(int joke) {
+  ac_fact_say(kFjItems[fj_pick(&g_acFactSt, joke, ac_avatar_random())].text, joke);
+}
+
+/* click — просили щелчком. Модель поднята и свободна — придумывает она, иначе список. */
+static void ac_fact_tell(BOOL click) {
+  if (!ac_avatar_here()) return;
+  if (g_acFactId) {
+    if (click) ac_avatar_bubble_ex(L"Секунду, придумываю…", TRUE, 1800, TRUE);
+    return;
+  }
+  int joke = fj_kind(&g_acFactSt, ac_avatar_random());
+  if (!g_acAvatarBusy && ai_warm()) {
+    wchar_t q[300];
+    fj_question(joke, (int)(ac_avatar_random() % FJ_TOPICS), q, 300);
+    AiTurn turn = {0, q, NULL, 0};
+    ai_out_cap(200);
+    int id = ai_ask_chat_plain_async(fj_instruction(), &turn, 1, click ? 25000 : 45000, g_acAvatar, WM_AC_FACT, NULL);
+    ai_out_cap(0);
+    if (id) {
+      g_acFactId = id;
+      g_acFactKind = joke;
+      if (click) {
+        ac_avatar_ambient(AC_AV_THINKING, GetTickCount());
+        ac_avatar_bubble_ex(joke ? L"Сейчас, вспомню анекдот…" : L"Сейчас, вспомню кое-что…", TRUE, 25000, TRUE);
+      }
+      return;
+    }
+  }
+  ac_fact_from_list(joke);
+}
+
+/* ответ модели: годный и не повтор — его, иначе строку из списка; отменённый — ничего */
+static void ac_fact_result(AiResult *r) {
+  if (!r) return;
+  if (r->id == g_acFactId) {
+    g_acFactId = 0;
+    if (r->status == AI_OK && r->text && fj_clean(r->text) && !fj_seen(&g_acFactSt, fj_key(r->text)))
+      ac_fact_say(r->text, g_acFactKind);
+    else if (r->status != AI_CANCELLED && ac_avatar_here())
+      ac_fact_from_list(g_acFactKind);
+  }
+  ai_result_free(r);
+}
+
+/* раз в 15 минут — если ИИ не занят, человек за компьютером и не пишет в чате; нет — через минуту */
+static void ac_fact_auto(DWORD now) {
+  LASTINPUTINFO li = {sizeof(li), 0};
+  BOOL away = GetLastInputInfo(&li) && now - li.dwTime > AC_FACT_AWAY;
+  BOOL chatting = (g_acWnd && GetForegroundWindow() == g_acWnd) || ac_mini_open();
+  BOOL bubble = g_acBubble && IsWindowVisible(g_acBubble);
+  if (away || chatting || bubble || g_acAvatarBusy || g_acFactId || g_acHeld || g_acMenu || g_acAvatarAnim) {
+    g_acFactNext = now + 60000;
+    return;
+  }
+  g_acFactNext = now + AC_FACT_EVERY;
+  ac_fact_tell(FALSE);
+}
+
 static void ac_avatar_toggle(void) {
   if (ac_avatar_here()) ac_avatar_dismiss();
   else ac_avatar_summon();
@@ -1626,7 +1742,11 @@ static LRESULT CALLBACK AcAvatarProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
   case WM_RBUTTONUP: ac_avatar_menu(hwnd); return 0;
   case WM_CONTEXTMENU: ac_avatar_menu(hwnd); return 0;
   case WM_NCLBUTTONDBLCLK:
-  case WM_LBUTTONDBLCLK: aichat_show(); return 0;
+  case WM_LBUTTONDBLCLK:
+    KillTimer(hwnd, AC_FACT_TIMER); /* двойной щелчок — чат, а не факт */
+    aichat_show();
+    return 0;
+  case WM_AC_FACT: ac_fact_result((AiResult *)lParam); return 0;
   case WM_ENTERSIZEMOVE: { /* взяли мышью: висит за точку хвата */
     POINT p;
     GetCursorPos(&p);
@@ -1647,8 +1767,11 @@ static LRESULT CALLBACK AcAvatarProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
     GetWindowRect(hwnd, &rc);
     g_acHeld = FALSE;
     g_acLandAt = GetTickCount() | 1;
-    if (abs(rc.left - g_acAvatarDragFrom.left) + abs(rc.top - g_acAvatarDragFrom.top) < 4) ac_avatar_poke();
-    else {
+    if (abs(rc.left - g_acAvatarDragFrom.left) + abs(rc.top - g_acAvatarDragFrom.top) < 4) {
+      BOOL fact = g_acFacts && !ac_mini_open(); /* щелчок — факт, если не окажется двойным */
+      ac_avatar_poke_ex(!fact);
+      if (fact) SetTimer(hwnd, AC_FACT_TIMER, GetDoubleClickTime(), NULL);
+    } else {
       g_acAvatarHome.x = rc.left;
       g_acAvatarHome.y = rc.top;
       if (fabsf(g_acSwingV) > 0.06f || fabsf(g_acSwing) > 0.3f) ac_emo(AC_EMO_DIZZY, 1400); /* раскачали — кружится голова */
@@ -1664,6 +1787,7 @@ static LRESULT CALLBACK AcAvatarProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
     break;
   case WM_TIMER:
     if (wParam == AC_AVATAR_TIMER) { ac_avatar_tick(); return 0; }
+    if (wParam == AC_FACT_TIMER) { KillTimer(hwnd, AC_FACT_TIMER); ac_fact_tell(TRUE); return 0; }
     break;
   case WM_PAINT: ValidateRect(hwnd, NULL); return 0;
   case WM_CLOSE: ac_avatar_hide(); return 0;
@@ -1705,6 +1829,8 @@ static void ac_avatar_show(void) {
     g_acAvatarWander = GetPrivateProfileIntW(L"Avatar", L"Wander", 1, path) != 0;
     g_acAvatarBubbles = GetPrivateProfileIntW(L"Avatar", L"Bubbles", 1, path) != 0;
     g_acAvatarWindows = GetPrivateProfileIntW(L"Avatar", L"Windows", 0, path) != 0;
+    g_acFacts = GetPrivateProfileIntW(L"Avatar", L"Facts", 0, path) != 0;
+    g_acFactNext = GetTickCount() + AC_FACT_EVERY;
     GetPrivateProfileStringW(L"Avatar", L"Skin", L"robot", value, 32, path);
     g_acAvatarSkin = !_wcsicmp(value, L"cat") ? AC_SKIN_CAT : AC_SKIN_ROBOT;
   }
@@ -2067,6 +2193,13 @@ static void ac_avatar_tick(void) {
     }
     g_acNextAct = now + 9000 + ac_avatar_random() % 12000;
   }
+  if (g_acLaughAt && ac_due(now, g_acLaughAt)) { /* анекдот досказан — смеётся */
+    g_acLaughAt = 0;
+    g_acHopAt = now | 1;
+    g_acAvatarJoyUntil = (now + 1500) | 1;
+    ac_emo((ac_avatar_random() & 1) ? AC_EMO_LOVE : AC_EMO_WINK, 1300);
+  }
+  if (g_acFacts && ac_due(now, g_acFactNext)) ac_fact_auto(now);
   if (g_acAvatarWindows) ac_avatar_windows(now, wr, idle);
   BOOL bubble = g_acBubble && IsWindowVisible(g_acBubble);
   if (idle && g_acAvatarWander && !g_acAvatarMoving && !bubble && !ac_mini_open() && !g_acPerch && !g_acFalling &&
