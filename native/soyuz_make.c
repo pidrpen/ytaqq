@@ -73,16 +73,28 @@ static void szm_pref_save(const wchar_t *folder) {
   CloseHandle(h);
 }
 
-/* мост: soyuz_bridge из plm.txt, иначе cp-soyuz.exe рядом с CursorPad.exe */
+/* Мост: soyuz_bridge из plm.txt; иначе cp-soyuz.exe рядом с CursorPad.exe; иначе — из самого
+   CursorPad.exe (RCDATA 312, native/cp-soyuz.exe; исходник native/cp-soyuz.cs и pidrpen/slack)
+   в папку данных, заново — если там другой размер (обновился CursorPad) */
 static BOOL szm_bridge(wchar_t *out, int cap) {
-  if (g_szBridge[0]) lstrcpynW(out, g_szBridge, cap);
-  else {
-    GetModuleFileNameW(NULL, out, (DWORD)cap);
-    wchar_t *b = wcsrchr(out, L'\\');
-    if (b) b[1] = 0;
-    wcsncat(out, L"cp-soyuz.exe", (size_t)cap - wcslen(out) - 1);
+  if (g_szBridge[0]) {
+    lstrcpynW(out, g_szBridge, cap);
+    return GetFileAttributesW(out) != INVALID_FILE_ATTRIBUTES;
   }
-  return GetFileAttributesW(out) != INVALID_FILE_ATTRIBUTES;
+  GetModuleFileNameW(NULL, out, (DWORD)cap);
+  wchar_t *b = wcsrchr(out, L'\\');
+  if (b) b[1] = 0;
+  wcsncat(out, L"cp-soyuz.exe", (size_t)cap - wcslen(out) - 1);
+  if (GetFileAttributesW(out) != INVALID_FILE_ATTRIBUTES) return TRUE;
+  if (!g_dataDir[0]) return FALSE;
+  _snwprintf(out, cap, L"%s\\cp-soyuz.exe", g_dataDir);
+  out[cap - 1] = 0;
+  HRSRC rs = FindResourceW(g_inst, MAKEINTRESOURCEW(312), RT_RCDATA);
+  DWORD want = rs ? SizeofResource(g_inst, rs) : 0;
+  WIN32_FILE_ATTRIBUTE_DATA fa;
+  BOOL have = GetFileAttributesExW(out, GetFileExInfoStandard, &fa) && fa.nFileSizeLow == want && want;
+  if (!have && want) have = extract_rcdata(312, out);
+  return have;
 }
 
 static void szm_status(const wchar_t *t) {
@@ -590,9 +602,13 @@ static void szm_show(void) {
     wc.hbrBackground = g_paper;
     wc.lpszClassName = L"CursorPadSoyuzMake";
     RegisterClassExW(&wc);
-    int w = SZS(560), h = SZS(230), x = 0, y = 0;
+    int w = SZS(640), h = SZS(230), x = 0, y = 0;
     RECT pr;
-    if (g_szWnd && GetWindowRect(g_szWnd, &pr)) x = pr.left - w - 8 > 0 ? pr.left - w - 8 : pr.left, y = pr.top + SZS(80);
+    HWND beside = g_szWnd && IsWindowVisible(g_szWnd) ? g_szWnd : g_pkWnd; /* у окна «В Союз» или у окна пакета */
+    if (beside && GetWindowRect(beside, &pr)) {
+      x = pr.left - w - 8 > 0 ? pr.left - w - 8 : pr.left + SZS(40);
+      y = pr.top + SZS(80);
+    }
     g_szmWnd = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, L"CursorPadSoyuzMake", L"Создать в «Союзе» — CursorPad",
                                WS_POPUP | WS_CAPTION | WS_SYSMENU, x, y, w, h, g_szWnd, NULL, g_inst, NULL);
     if (!g_szmWnd) return;

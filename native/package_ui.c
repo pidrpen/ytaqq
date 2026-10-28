@@ -590,7 +590,7 @@ static int pk_soyuz_text(wchar_t **out, wchar_t *note, int ncap) {
     sb_add(&b, L"\r\n");
     n++;
   }
-  if (skipped) _snwprintf(note, ncap, L"операций без кода справочника (пропущены): %d", skipped), note[ncap - 1] = 0;
+  if (skipped) _snwprintf(note, ncap, L"без кода справочника: %d", skipped), note[ncap - 1] = 0;
   *out = b.w;
   return n;
 }
@@ -606,7 +606,7 @@ static void pk_to_soyuz(void) {
     return;
   }
   wchar_t label[240];
-  _snwprintf(label, 240, L"В «Союз»: изделий %d, строк состава %d, операций %d%s%s", g_pk[PK_ITEMS].n, g_pk[PK_LINKS].n, n,
+  _snwprintf(label, 240, L"В «Союз»: изделий %d, состав %d, операций %d%s%s", g_pk[PK_ITEMS].n, g_pk[PK_LINKS].n, n,
              note[0] ? L" · " : L"", note);
   label[239] = 0;
   szm_open_text(text, label);

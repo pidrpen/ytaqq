@@ -103,10 +103,12 @@ static BOOL CALLBACK st_print_child(HWND c, LPARAM lp) {
 }
 
 /* окно «В Союз» с кнопками и списком — в PNG */
-static void st_shot(const wchar_t *name) {
+static void st_shot_wnd(const wchar_t *name, HWND wnd);
+static void st_shot(const wchar_t *name) { st_shot_wnd(name, g_szWnd); }
+static void st_shot_wnd(const wchar_t *name, HWND wnd) {
   st_pump(0);
   RECT rc;
-  GetClientRect(g_szWnd, &rc);
+  GetClientRect(wnd, &rc);
   int w = rc.right, h = rc.bottom;
   BITMAPINFO bi;
   memset(&bi, 0, sizeof(bi));
@@ -125,9 +127,13 @@ static void st_shot(const wchar_t *name) {
     return;
   }
   HGDIOBJ old = SelectObject(mem, bmp);
-  SendMessageW(g_szWnd, WM_PRINTCLIENT, (WPARAM)mem, PRF_CLIENT);
-  StPrint p = {mem};
-  EnumChildWindows(g_szWnd, st_print_child, (LPARAM)&p);
+  if (wnd == g_szWnd) {
+    SendMessageW(wnd, WM_PRINTCLIENT, (WPARAM)mem, PRF_CLIENT);
+    StPrint p = {mem};
+    EnumChildWindows(wnd, st_print_child, (LPARAM)&p);
+  } else {
+    PrintWindow(wnd, mem, PW_CLIENTONLY | 2 /* PW_RENDERFULLCONTENT */);
+  }
   GdiFlush();
   SelectObject(mem, old);
   IWICImagingFactory *f = ac_factory();
@@ -311,10 +317,38 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
       st_check(pn == 1 && pt && wcsstr(pt, L"ИЗДЕЛИЕ\tТСТ.120.000\tУзел пробный\tСборочные единицы\t\t\r\n") &&
                    wcsstr(pt, L"СОСТАВ\tТСТ.120.000\tТСТ.110.004\t2\t\r\n") &&
                    wcsstr(pt, L"ТП\tТСТ.110.004\t5\t4110\t31\t16К20, Токарно-винторезный станок\t15\t4\r\n") &&
-                   wcsstr(pnote, L"пропущены): 1"),
+                   wcsstr(pnote, L"без кода справочника: 1"),
                L"пакет → описание: изделие, состав, код 4110 по названию «Токарная», участок 31; неизвестная — пропущена");
       if (pt) st_note(L"     %ls", pt);
       free(pt);
+      /* окно пакета с этими же строками и «В Союз…» → окно папки: справочники и папки — из базы */
+      package_show(FALSE);
+      szm_dicts_start(g_pkWnd);
+      for (int t = 0; t < 100 && !g_szmDicts.na && !g_szmDicts.err[0]; t++) st_pump(100);
+      st_check(g_szmDicts.na == 1 && g_szmDicts.ne == 2 && !wcscmp(g_szmDicts.area[0], L"31 Механический участок 31") &&
+                   !wcscmp(g_szmDicts.equip[0], L"16К20, Токарно-винторезный станок"),
+               L"справочники из базы: участок «31 Механический участок 31», станков 2, первый «16К20, …»");
+      g_pkSheet = PK_OPS;
+      pk_fill(TRUE);
+      pk_edit_begin(0, 2);
+      st_check(g_pkEditCtl == g_pkCombo && SendMessageW(g_pkCombo, CB_GETCOUNT, 0, 0) == OPS_1C_N,
+               L"правка «Операции» — список из справочника 1С");
+      pk_edit_end(FALSE);
+      pk_edit_begin(0, 3);
+      st_check(g_pkEditCtl == g_pkCombo && SendMessageW(g_pkCombo, CB_GETCOUNT, 0, 0) == 1, L"правка «Участка» — список из базы");
+      st_shot_wnd(L"9-package.png", g_pkWnd);
+      pk_edit_end(FALSE);
+      st_check(ListView_GetItemCount(g_pkList) == 2, L"в таблице листа «Операции» две строки");
+      pk_to_soyuz();
+      for (int t = 0; t < 100 && SendMessageW(g_szmCombo, CB_GETCOUNT, 0, 0) == 0; t++) st_pump(100);
+      int nf = (int)SendMessageW(g_szmCombo, CB_GETCOUNT, 0, 0);
+      st_check(g_szmText && wcsstr(g_szmText, L"СОСТАВ\t") && nf >= 5, L"«В Союз…»: окно папки открыто с описанием, папок из базы не меньше 5");
+      st_note(L"     папок в списке: %d", nf);
+      st_shot_wnd(L"10-soyuz-make.png", g_szmWnd);
+      ShowWindow(g_szmWnd, SW_HIDE);
+      ShowWindow(g_pkWnd, SW_HIDE);
+      free(g_szmText);
+      g_szmText = NULL;
       xp_package_free(g_pk);
     }
     if (t) st_note(L"     %ls", t);
