@@ -5570,6 +5570,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
     if (argv && argc >= 4 && !wcscmp(argv[1], L"--drawsort")) drs_test(argc, argv);
     if (argv && argc >= 4 && !wcscmp(argv[1], L"--mttest")) match_test(argv[2], argv[3], argc >= 5 ? argv[4] : NULL);
     if (argv && argc >= 3 && !wcscmp(argv[1], L"--idlebench")) if_test_bench(argv[2]);
+    if (argv && argc >= 3 && !wcscmp(argv[1], L"--idlelog")) if_test_hplog(argv[2]);
     if (argv && argc >= 3 && !wcscmp(argv[1], L"--idlestage")) if_test_stage(argv[2], 0);
     if (argv && argc >= 3 && !wcscmp(argv[1], L"--idlestage3")) if_test_stage(argv[2], 1);
     if (argv && argc >= 3 && !wcscmp(argv[1], L"--figsheet")) if_test_figs(argv[2]);
