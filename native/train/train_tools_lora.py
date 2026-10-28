@@ -41,10 +41,10 @@ def main():
     ap.add_argument('--eval-every', type=int, default=200)
     ap.add_argument('--max-samples', type=int, default=0, help='для пробы: остановиться после N примеров')
     ap.add_argument('--seed', type=int, default=1)
-    ap.add_argument('--vram-gb', type=float, default=6.0,
-                    help='предел видеопамяти: шаг в 5,9 тыс. токенов берёт ~5,75 ГБ; сверх свободной видеопамяти '
-                         'Windows уводит часть в общую, и шаг идёт вдвое-втрое дольше')
-    ap.add_argument('--max-tokens', type=int, default=6000, help='длиннее — пропустить (не влезут в --vram-gb)')
+    ap.add_argument('--vram-gb', type=float, default=5.8,
+                    help='предел видеопамяти: шаг в 5,9 тыс. токенов берёт ~4,8 ГБ (таблица слов на процессоре); '
+                         'сверх свободной видеопамяти Windows уводит часть в общую, и шаг идёт в 2–4 раза дольше')
+    ap.add_argument('--max-tokens', type=int, default=6800, help='длиннее — пропустить (не влезут в --vram-gb)')
     a = ap.parse_args()
 
     from peft import LoraConfig, get_peft_model
@@ -109,7 +109,12 @@ def main():
     model = get_peft_model(model, LoraConfig(r=a.rank, lora_alpha=2 * a.rank, lora_dropout=a.lora_dropout,
                                              target_modules=preset['lora_targets']))
     inner = model.base_model.model
-    head = inner.get_output_embeddings()
+    # таблица слов (вход и выход у Qwen3.5 общие, bf16, 1,3 ГБ) не учится — на процессор: без неё шаг
+    # помещается в ~4,8 ГБ, и Windows не уводит видеопамять в общую. Логиты — только на ответе, там же
+    emb = inner.get_input_embeddings()
+    emb.to('cpu')
+    w32 = emb.weight.detach().float()
+    torch.cuda.empty_cache()
     params = [q for q in model.parameters() if q.requires_grad]
     log(f'учим {sum(q.numel() for q in params) / 1e6:.1f} млн параметров')
     opt = torch.optim.AdamW(params, lr=a.lr, weight_decay=0.0)
@@ -120,11 +125,10 @@ def main():
 
     def loss_of(ex):
         ids, n0, L = encode(ex)
-        ids = ids.to(0)
         # без маски: один пример, без отступов — SDPA берёт причинное ядро без матрицы L×L
-        h = inner.model(input_ids=ids).last_hidden_state[0]
-        pos = torch.arange(n0 - 1, L - 1, device=0)
-        logits = head(h[pos]).float()
+        h = inner.model(inputs_embeds=emb(ids).to(0), use_cache=False).last_hidden_state[0]
+        pos = torch.arange(n0 - 1, L - 1)
+        logits = h[pos.to(0)].float().cpu() @ w32.T
         return torch.nn.functional.cross_entropy(logits, ids[0, pos + 1]), L
 
     def evaluate():
@@ -134,6 +138,10 @@ def main():
             for ex in held:
                 ls.append(loss_of(ex)[0].item())
         model.train()
+        # после замера кэш распределителя занимает видеопамять до предела: вместе с чужими программами
+        # Windows уходит в общую память, и шаг обучения идёт не 7 с, а 30–80 (проба 28.10)
+        gc.collect()
+        torch.cuda.empty_cache()
         return sum(ls) / max(1, len(ls))
 
     best = evaluate() if held else float('inf')
