@@ -513,3 +513,17 @@ static void nu_open(void) {
   ShowWindow(g_nuWnd, SW_SHOWNORMAL);
   SetForegroundWindow(g_nuWnd);
 }
+
+/* «режимы», «режимы резания», «изменить режимы» — открыть окно (команда чата, без модели) */
+static BOOL nu_chat_cmd(const wchar_t *a) {
+  wchar_t *f = tn_fold(a, 0);
+  if (!f) return FALSE;
+  wchar_t *p = f;
+  while (*p == L' ') p++;
+  size_t n = wcslen(p);
+  while (n && (p[n - 1] == L' ' || p[n - 1] == L'.' || p[n - 1] == L'!')) p[--n] = 0;
+  BOOL yes = !wcscmp(p, L"режимы") || !wcscmp(p, L"режимы резания") || !wcscmp(p, L"изменить режимы") ||
+             !wcscmp(p, L"режимы и нормы");
+  free(f);
+  return yes;
+}

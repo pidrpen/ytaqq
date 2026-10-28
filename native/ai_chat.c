@@ -2624,6 +2624,9 @@ static BOOL ac_cut_start(const wchar_t *a) {
   return TRUE;
 }
 
+static void nu_open(void); /* окно «Режимы» (norms_ui.c) */
+static BOOL nu_chat_cmd(const wchar_t *a);
+
 static void ac_send(void) {
   SetWindowTextW(g_acTitle, g_aiProvider ? L"Мини-ИИ · Z.ai API" : L"Мини-ИИ · на этом компьютере");
   if (g_acPlanOn) {
@@ -2662,6 +2665,13 @@ static void ac_send(void) {
       free(in);
       return;
     }
+  }
+  /* «режимы» — правка режимов и норм последнего маршрута в своём окне (norms_ui.c); модель не нужна */
+  if (nu_chat_cmd(a)) {
+    SetWindowTextW(g_acIn, L"");
+    nu_open();
+    free(in);
+    return;
   }
   /* «в союз» — последний маршрут беседы в окно «В Союз» (soyuz_ui.c); модель не нужна */
   if (sz_chat_cmd(a)) {
@@ -3334,7 +3344,6 @@ static void ac_route_say(const wchar_t *cmd) {
 }
 
 static void ac_route_excel(void);
-static void nu_open(void); /* окно «Режимы» (norms_ui.c) */
 
 /* размышление (steps FALSE) или шаги: раскрыть или свернуть — в полном чате и в мини-чате сразу */
 static void ac_show_toggle(BOOL steps) {

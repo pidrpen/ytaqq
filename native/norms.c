@@ -911,6 +911,85 @@ static int nm_req(NmJob *j, const wchar_t *name, const wchar_t *what) {
   return 0;
 }
 
+/* ---- пределы и значения по умолчанию регулируемых параметров (Настройки → «Нормирование») ----
+   Значение вне пределов — заданное, с чертежа, по таблице или по формуле — берётся на границе, в
+   разборе строка «… → … (предел Настроек)». Значение по умолчанию — запасное: там, где своего
+   источника нет (нет строки таблицы, нет партии), а у t и проходов — вместо «весь припуск за один
+   проход». NM_NONE — предела или значения нет. Заводские пределы широкие: обычный расчёт не трогают. */
+typedef struct {
+  const wchar_t *par, *key, *label, *unit; /* параметр расчёта, ключ в norms.ini, подпись, единица */
+  double min, max, def;
+  double min0, max0; /* заводские */
+} NmLim;
+
+#define NM_LIMS 9
+static NmLim g_nmLim[NM_LIMS] = {
+    {L"V", L"V", L"Скорость резания V", L"м/мин", 5, 300, NM_NONE, 5, 300},
+    {L"S", L"S", L"Подача S", L"мм/об", 0.02, 2, NM_NONE, 0.02, 2},
+    {L"Sz", L"Sz", L"Подача на зуб Sz", L"мм/зуб", 0.01, 0.5, NM_NONE, 0.01, 0.5},
+    {L"t", L"t", L"Глубина резания t", L"мм", 0.1, 8, NM_NONE, 0.1, 8},
+    {L"i", L"i", L"Число проходов", L"", 1, 10, NM_NONE, 1, 10},
+    {L"h", L"h", L"Припуск на сторону h", L"мм", 0.1, 20, NM_NONE, 0.1, 20},
+    {L"n", L"n", L"Обороты шпинделя n", L"об/мин", 10, 3000, NM_NONE, 10, 3000},
+    {L"T", L"T", L"Стойкость инструмента T", L"мин", 10, 240, NM_NONE, 10, 240},
+    {L"партия", L"batch", L"Партия", L"шт", 1, 100000, NM_NONE, 1, 100000},
+};
+
+static NmLim *nm_lim(const wchar_t *par) {
+  for (int k = 0; k < NM_LIMS; k++)
+    if (!wcscmp(g_nmLim[k].par, par)) return &g_nmLim[k];
+  return NULL;
+}
+
+/* «от 5 до 300 м/мин» */
+static void nm_lim_text(const NmLim *l, wchar_t *out, int cap) {
+  out[0] = 0;
+  if (!nm_na(l->min)) tn_cat(out, cap, L"от "), tn_catnum(out, cap, l->min);
+  if (!nm_na(l->max)) tn_cat(out, cap, out[0] ? L" до " : L"до "), tn_catnum(out, cap, l->max);
+  if (l->unit[0] && out[0]) tn_cat(out, cap, L" "), tn_cat(out, cap, l->unit);
+}
+
+/* значение в пределах Настроек; вне — граница, строка в разборе и пометка у параметра */
+static double nm_clamp(NmJob *j, const wchar_t *par, double v) {
+  const NmLim *l = nm_lim(par);
+  if (!l || nm_na(v)) return v;
+  double c = v;
+  if (!nm_na(l->min) && c < l->min) c = l->min;
+  if (!nm_na(l->max) && c > l->max) c = l->max;
+  if (c == v) return v;
+  wchar_t s[240], lim[80];
+  nm_lim_text(l, lim, 80);
+  tn_cpy(s, 240, par);
+  tn_cat(s, 240, L" ");
+  tn_catnum(s, 240, v);
+  tn_cat(s, 240, L" → ");
+  tn_catnum(s, 240, c);
+  tn_cat(s, 240, L" (предел Настроек «Нормирование»: ");
+  tn_cat(s, 240, lim);
+  tn_cat(s, 240, L")");
+  nm_line(j, s);
+  NmPar *p = nm_par(&j->c, par);
+  if (p) {
+    p->v = c;
+    tn_numstr(c, p->s, 64);
+    tn_cpy(p->why, 120, L"ограничено пределом Настроек");
+  }
+  return c;
+}
+
+/* значение по умолчанию из Настроек — запасное, когда своего источника нет */
+static int nm_lim_def(NmJob *j, const wchar_t *par, double *v) {
+  const NmLim *l = nm_lim(par);
+  if (!l || nm_na(l->def)) return 0;
+  *v = l->def;
+  nm_putv(&j->c, par, *v, NMO_DEF, L"Настройки → Нормирование");
+  wchar_t s[200];
+  s[0] = 0;
+  nm_from(&j->c, par, NULL, s, 200);
+  nm_line(j, s);
+  return 1;
+}
+
 /* произведение поправок: каждая таблица «<оп>.<what>», что подходит (Kv, периодичность измерений) */
 static double nm_coefs(NmJob *j, const wchar_t *what, const wchar_t *label) {
   wchar_t p[64], s[400];
@@ -1030,16 +1109,18 @@ static int nm_vform(NmJob *j, double D, double S, double *V) {
   wchar_t p[64], s[600];
   double T = nm_v(&j->c, L"T");
   if (nm_na(T)) {
-    if (!nm_look_pref(j, L"стойкость", L"T (стойкость)", 1, &T)) {
+    if (nm_look_pref(j, L"стойкость", L"T (стойкость)", nm_na(nm_lim(L"T")->def), &T)) {
+      nm_putv(&j->c, L"T", T, NMO_TAB, L"таблица стойкости");
+    } else if (!nm_lim_def(j, L"T", &T)) {
       nm_need(j, L"T — стойкость инструмента, мин");
       return 0;
     }
-    nm_putv(&j->c, L"T", T, NMO_TAB, L"таблица стойкости");
   } else {
     s[0] = 0;
     nm_from(&j->c, L"T", L" мин", s, 600);
     nm_line(j, s);
   }
+  T = nm_clamp(j, L"T", T);
   nm_purp(j, L"скорость.ф", p, 64);
   NmHit h;
   if (!nm_find(j->b, p, &j->c, &h)) {
@@ -1125,13 +1206,20 @@ static int nm_speed(NmJob *j, double D, double S, double *V) {
     s[0] = 0;
     nm_from(&j->c, L"V", L" м/мин", s, 300);
     nm_line(j, s);
+    *V = nm_clamp(j, L"V", *V);
     return 1;
   }
   nm_purp(j, L"скорость", pv, 64);
   nm_purp(j, L"скорость.ф", pf, 64);
-  if (!nm_has(j->b, pv) && nm_has(j->b, pf)) return nm_vform(j, D, S, V);
-  if (!nm_look(j, pv, L"V", 1, V)) return 0;
-  *V *= nm_coefs(j, L"скорость.к", L"Kv");
+  int ok;
+  if (!nm_has(j->b, pv) && nm_has(j->b, pf)) {
+    ok = nm_vform(j, D, S, V);
+  } else {
+    ok = nm_look(j, pv, L"V", nm_na(nm_lim(L"V")->def), V);
+    if (ok) *V *= nm_coefs(j, L"скорость.к", L"Kv");
+  }
+  if (!ok) return nm_lim_def(j, L"V", V);
+  *V = nm_clamp(j, L"V", *V);
   return 1;
 }
 
@@ -1145,11 +1233,21 @@ static int nm_mode(NmJob *j, double D, double *S, double *n) {
     s[0] = 0;
     nm_from(&j->c, L"S", L" мм/об", s, 300);
     nm_line(j, s);
+    *S = nm_clamp(j, L"S", *S);
+  } else if (!nm_look_pref(j, L"подача", L"S", nm_na(nm_lim(L"S")->def), S)) {
+    if (!nm_lim_def(j, L"S", S)) return 0;
+    *S = nm_clamp(j, L"S", *S);
   } else {
-    if (!nm_look_pref(j, L"подача", L"S", 1, S)) return 0;
     double ks = nm_coefs(j, L"подача.к", L"Ks");
+    if (ks != 1) {
+      tn_cpy(s, 300, L"S = ");
+      tn_catnum(s, 300, *S), tn_cat(s, 300, L"·"), tn_catnum(s, 300, ks), tn_cat(s, 300, L" = ");
+      *S *= ks;
+      tn_catnum(s, 300, *S);
+      nm_line(j, s);
+    }
+    *S = nm_clamp(j, L"S", *S);
     tn_cpy(s, 300, L"S по станку ");
-    if (ks != 1) tn_catnum(s, 300, *S), tn_cat(s, 300, L"·"), tn_catnum(s, 300, ks), tn_cat(s, 300, L" = "), *S *= ks;
     tn_catnum(s, 300, *S);
     *S = nm_machine_step(j, L"ряд S", L"подач", *S, s, 300);
     nm_putv(&j->c, L"S", *S, NMO_TAB, L"по таблице и станку");
@@ -1164,7 +1262,9 @@ static int nm_mode(NmJob *j, double D, double *S, double *n) {
   tn_cat(s, 300, L") = ");
   tn_catnum(s, 300, k);
   tn_cat(s, 300, L" об/мин");
-  *n = nm_machine_step(j, L"ряд n", L"оборотов", k, s, 300);
+  double kc = nm_clamp(j, L"n", k);
+  if (kc != k) tn_cat(s, 300, L" → "), tn_catnum(s, 300, kc), tn_cat(s, 300, L" (предел Настроек)");
+  *n = nm_machine_step(j, L"ряд n", L"оборотов", kc, s, 300);
   nm_line(j, s);
   return *n > 0 && *S > 0;
 }
@@ -1181,20 +1281,46 @@ static double nm_l1(NmJob *j) {
 /* глубина резания t и проходы i: t задана; заданы проходы — t = h/i; по таблице глубины; иначе весь
    припуск за один проход */
 static long nm_passes(NmJob *j, double h) {
-  double t = nm_v(&j->c, L"t"), ip = nm_v(&j->c, L"i");
-  if (nm_na(t) && !nm_na(ip) && ip >= 1) {
+  double t = nm_v(&j->c, L"t"), ip = nm_v(&j->c, L"i"), d;
+  if (!nm_na(ip)) ip = nm_clamp(j, L"i", ip);
+  if (!nm_na(t)) {
+    t = nm_clamp(j, L"t", t);
+  } else if (!nm_na(ip) && ip >= 1) {
     t = h / (double)nm_ceil(ip);
     nm_putv(&j->c, L"t", t, NMO_CALC, L"припуск h/проходов");
-  } else if (nm_na(t)) {
-    if (nm_look_pref(j, L"глубина", L"t", 0, &t)) {
+  } else {
+    if (nm_lim_def(j, L"i", &d) && d >= 1) { /* проходы по умолчанию из Настроек */
+      t = h / (double)nm_ceil(d);
+      nm_putv(&j->c, L"t", t, NMO_CALC, L"припуск h/проходов");
+    } else if (nm_lim_def(j, L"t", &t)) {
+    } else if (nm_look_pref(j, L"глубина", L"t", 0, &t)) {
       nm_putv(&j->c, L"t", t, NMO_TAB, L"таблица глубины");
     } else {
       t = h;
       nm_putv(&j->c, L"t", t, NMO_DEF, L"весь припуск за один проход");
     }
+    t = nm_clamp(j, L"t", t);
   }
   long i = t > 0 ? nm_ceil(h / t) : 1;
   if (i < 1) i = 1;
+  const NmLim *li = nm_lim(L"i");
+  if (!nm_na(li->max) && i > (long)li->max) { /* проходов больше предела — глубже каждый, и заданная t */
+    wchar_t s[200];
+    tn_cpy(s, 200, L"проходов ");
+    tn_catnum(s, 200, (double)i);
+    i = (long)li->max;
+    tn_cat(s, 200, L" → ");
+    tn_catnum(s, 200, (double)i);
+    tn_cat(s, 200, L" (предел Настроек «Нормирование»), t = h/проходов = ");
+    tn_catnum(s, 200, h / (double)i);
+    nm_line(j, s);
+    NmPar *pt = nm_par(&j->c, L"t");
+    if (pt) {
+      pt->v = h / (double)i;
+      tn_numstr(pt->v, pt->s, 64);
+      tn_cpy(pt->why, 120, L"припуск h/проходов — предел проходов Настроек");
+    }
+  }
   nm_putv(&j->c, L"i", (double)i, NMO_CALC, NULL);
   return i;
 }
@@ -1208,11 +1334,12 @@ static double nm_to_turn(NmJob *j) {
   double D = nm_v(&j->c, L"D"), L = nm_v(&j->c, L"L"), Dz = nm_v(&j->c, L"Dзаг"), h = nm_v(&j->c, L"h");
   if (nm_na(h)) {
     if (fine) {
-      if (!nm_look_pref(j, L"припуск", L"h", 1, &h)) {
+      if (nm_look_pref(j, L"припуск", L"h", nm_na(nm_lim(L"h")->def), &h)) {
+        nm_putv(&j->c, L"h", h, NMO_TAB, L"таблица припусков");
+      } else if (!nm_lim_def(j, L"h", &h)) {
         nm_need(j, L"припуск h под чистовую");
         return NM_NONE;
       }
-      nm_putv(&j->c, L"h", h, NMO_TAB, L"таблица припусков");
     } else if (!nm_na(Dz) && Dz > D) {
       h = (Dz - D) / 2;
       wchar_t w[100];
@@ -1223,11 +1350,12 @@ static double nm_to_turn(NmJob *j) {
       tn_cat(w, 100, L")/2");
       if (wcsstr(j->o->op, L"чернов")) tn_cat(w, 100, L", припуск под чистовую не вычтен");
       nm_putv(&j->c, L"h", h, NMO_CALC, w);
-    } else {
+    } else if (!nm_lim_def(j, L"h", &h)) {
       nm_req(j, L"h", L"припуск h на сторону (или Ø заготовки)");
       return NM_NONE;
     }
   }
+  h = nm_clamp(j, L"h", h);
   if (!(h > 0)) {
     nm_line(j, L"припуск h = 0 — точить нечего");
     return NM_NONE;
@@ -1289,13 +1417,16 @@ static int nm_mill_mode(NmJob *j, double *Sm) {
   nm_from(&j->c, L"z", NULL, s, 300);
   nm_line(j, s);
   if (nm_na(Sz)) {
-    if (!nm_look_pref(j, L"подача.зуб", L"Sz", 1, &Sz)) return 0;
-    nm_putv(&j->c, L"Sz", Sz, NMO_TAB, L"по таблице");
+    if (nm_look_pref(j, L"подача.зуб", L"Sz", nm_na(nm_lim(L"Sz")->def), &Sz))
+      nm_putv(&j->c, L"Sz", Sz, NMO_TAB, L"по таблице");
+    else if (!nm_lim_def(j, L"Sz", &Sz))
+      return 0;
   } else {
     s[0] = 0;
     nm_from(&j->c, L"Sz", L" мм/зуб", s, 300);
     nm_line(j, s);
   }
+  Sz = nm_clamp(j, L"Sz", Sz);
   if (!nm_speed(j, Df, Sz, &V)) return 0;
   k = 1000 * V / (NM_PI * Df);
   tn_cpy(s, 300, L"n = 1000·V/(π·Dф) = 1000·");
@@ -1319,12 +1450,14 @@ static double nm_to_mill(NmJob *j) {
   if (!okL || !okB) return NM_NONE;
   double L = nm_v(&j->c, L"L"), h = nm_v(&j->c, L"h");
   if (nm_na(h)) {
-    if (!nm_look_pref(j, L"припуск", L"h", 1, &h)) {
+    if (nm_look_pref(j, L"припуск", L"h", nm_na(nm_lim(L"h")->def), &h)) {
+      nm_putv(&j->c, L"h", h, NMO_TAB, L"таблица припусков");
+    } else if (!nm_lim_def(j, L"h", &h)) {
       nm_need(j, L"припуск h");
       return NM_NONE;
     }
-    nm_putv(&j->c, L"h", h, NMO_TAB, L"таблица припусков");
   }
+  h = nm_clamp(j, L"h", h);
   long i = nm_passes(j, h);
   s[0] = 0;
   nm_from(&j->c, L"L", L" мм", s, 300), tn_cat(s, 300, L"; ");
@@ -1565,6 +1698,8 @@ static void nm_op_calc(NmJob *j) {
   /* Kтв — по серийности: продолжительность обработки партии в сменах (ОМН, карта 1). Тшт ещё
      нет, поэтому смены — оценкой (То + Тв)·партия/480; без партии Kтв не берётся */
   double ktv = 1, to0 = nm_na(o->to) ? 0 : o->to, q = nm_v(&j->c, L"партия");
+  if (nm_na(q)) nm_lim_def(j, L"партия", &q);
+  q = nm_clamp(j, L"партия", q);
   if (nm_na(nm_v(&j->c, L"смен")) && !nm_na(q) && q > 0) {
     double sm = (to0 + o->tv) * q / 480;
     nm_putv(&j->c, L"смен", sm, NMO_CALC, L"(То + Тв)·партия/480 — оценка");

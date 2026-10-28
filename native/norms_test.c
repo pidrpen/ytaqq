@@ -580,6 +580,11 @@ static const wchar_t *const kForm[][2] = {
                       L"2\t2Н135\tсверлильная\t35\t\t\t\n3\t6Р12\tфрезерная\t1250\t\t\t7,5\n"},
 };
 
+/* заводские пределы, без значений по умолчанию */
+static void lim_factory(void) {
+  for (int k = 0; k < NM_LIMS; k++) g_nmLim[k].min = g_nmLim[k].min0, g_nmLim[k].max = g_nmLim[k].max0, g_nmLim[k].def = NM_NONE;
+}
+
 static void test_formulas(void) {
   NmBase b;
   memset(&b, 0, sizeof(b));
@@ -683,6 +688,51 @@ static void test_formulas(void) {
   ok("без T фрезы То нет", nm_na(res.op[0].to));
   has("нет таблицы стойкости фрез", res.miss, L"фрезерная.стойкость");
   has("уточнить T", res.need, L"T — стойкость инструмента, мин");
+
+  /* пределы и значения по умолчанию (Настройки → «Нормирование») */
+  nm_lim(L"T")->def = 120; /* стойкость по умолчанию — вместо таблицы, которой нет */
+  nm_route(&b, &r, NULL, L"норма: L 200, B 80, h 2, z 8", &res);
+  ok("T по умолчанию — То есть", !nm_na(res.op[0].to));
+  ok("с T по умолчанию нет пропуска таблицы", !wcsstr(res.miss, L"фрезерная.стойкость"));
+  has("T — из Настроек", res.op[0].how, L"T 120 (по умолчанию: Настройки → Нормирование)");
+  lim_factory();
+
+  route_one(&r, L"Токарная");
+  r.cls = TN_ROT;
+  r.s.mat = TNM_STEEL;
+  tn_cpy(r.s.grade, 48, L"45");
+  r.s.dmax = 40;
+  tn_cpy(r.blank, TN_TXT, L"Круг 45 ГОСТ 2590");
+  nm_lim(L"V")->max = 80; /* формула даёт ~104 — берётся 80 */
+  nm_route(&b, &r, NULL, L"норма: L 100", &res);
+  o = &res.op[0];
+  near("V ограничена пределом", nm_v(&o->c, L"V"), 80);
+  has("строка предела V", o->how, L" → 80 (предел Настроек «Нормирование»: от 5 до 80 м/мин)");
+  near("То — с V 80: n = 80000/(π·45) = 565,9 → 500", o->to, 100 / (500 * 0.5));
+  lim_factory();
+  nm_lim(L"i")->def = 2; /* проходов по умолчанию: t = 2,5/2 */
+  nm_lim(L"партия")->def = 20;
+  nm_route(&b, &r, NULL, L"норма: L 100", &res);
+  o = &res.op[0];
+  near("проходы по умолчанию — t = h/2", nm_v(&o->c, L"t"), 1.25);
+  near("партия по умолчанию", nm_v(&o->c, L"партия"), 20);
+  has("партия — из Настроек", o->how, L"партия 20 (по умолчанию: Настройки → Нормирование)");
+  nm_route(&b, &r, NULL, L"норма: L 100, проходов 1, партия 5", &res);
+  near("заданное важнее умолчания: t", nm_v(&res.op[0].c, L"t"), 2.5);
+  near("заданная партия важнее", nm_v(&res.op[0].c, L"партия"), 5);
+  lim_factory();
+  /* припуск больше предела 20; t задана больше предела 8; проходов больше предела 10 — каждый глубже */
+  tn_cpy(r.blank, TN_TXT, L"Круг 100 ГОСТ 2590"); /* h = 30 → 20 */
+  nm_route(&b, &r, NULL, L"норма: L 100, глубина резания 12", &res);
+  o = &res.op[0];
+  near("припуск 30 — в пределе h 20", nm_v(&o->c, L"h"), 20);
+  near("t в пределе 8", nm_v(&o->c, L"t"), 8);
+  near("проходов 20/8 → 3", nm_v(&o->c, L"i"), 3);
+  nm_route(&b, &r, NULL, L"норма: L 100, глубина резания 1", &res);
+  o = &res.op[0];
+  near("проходов не больше 10", nm_v(&o->c, L"i"), 10);
+  near("t = h/10", nm_v(&o->c, L"t"), 2);
+  lim_factory();
   nm_base_free(&b);
 }
 
