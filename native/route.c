@@ -82,6 +82,7 @@ typedef struct {
   BOOL pfShown;   /* поля заготовки — один раз */
   int diagShown;  /* связи изделия без ТП и заготовки: 1 — сборки, 2 — детали */
   BOOL dump;       /* «Выгрузка для проверки»: всё найденное — в подробности */
+  BOOL tpMat;      /* «Материалы из ТП»: материалы операций — строками после детали (с 2026.10.28) */
   int dumpDet, dumpAsm;
   long lastTp, lastTpVer, lastTpVar; /* техпроцесс последней позиции: для выгрузки */
   int kdUsed; /* у скольких сборок состав взят по КД — техсостава нет */
@@ -336,9 +337,18 @@ static BOOL rt_obj(SQLHDBC dbc, long id, RtObj *o, CardRow *rows, RtJob *j) {
 }
 
 /* маршрут: цеха операций основного ТП через «;» */
+/* операция варианта ТП для материалов: строка варианта, её TSOperation, код участка, название */
+typedef struct {
+  long id, ts;
+  wchar_t code[40], name[80];
+} RtOpRef;
+static void rt_tp_mats(SQLHDBC dbc, RtJob *j, const RtOpRef *ops, int nop, CardRow *rows, RtRow **mats, int *nmat);
+
+/* mats/nmat — материалы операций строками (галочка «Материалы из ТП»), NULL — не нужны */
 static void rt_route(SQLHDBC dbc, const RtObj *o, CardRow *rows, RtJob *j, wchar_t *out, int cap,
-                     wchar_t *note, int ncap) {
+                     wchar_t *note, int ncap, RtRow **mats, int *nmat) {
   out[0] = 0;
+  if (mats) *mats = NULL, *nmat = 0;
   wchar_t sql[4600], err[280]; /* запрос операций с участком и номером — около 3600 знаков */
   long tp = 0, ver = 0;
   j->lastTp = j->lastTpVer = j->lastTpVar = 0;
@@ -436,7 +446,7 @@ static void rt_route(SQLHDBC dbc, const RtObj *o, CardRow *rows, RtJob *j, wchar
   /* операции по порядку ТП и участок каждой: Area (с 2026.09.23.49 — прежде
      цеха: в ведомости маршрут по участкам), нет — WorkShop; своё или у TSOperation */
   _snwprintf(sql, 4600,
-             L"SELECT TOP 200 ch.InfoObjectId, ISNULL(ws.V,N''), ch.Name, ISNULL(num.N,0), 0 "
+             L"SELECT TOP 200 ch.InfoObjectId, ISNULL(ws.V,N''), ch.Name, ISNULL(num.N,0), ISNULL(op.L,0) "
              L"FROM InfoObjects AS ch WITH(NOLOCK) "
              L"OUTER APPLY (SELECT TOP 1 ts.Link AS L FROM InfoObjectAttributes AS ts WITH(NOLOCK) "
              L"JOIN NameKeys AS nkt WITH(NOLOCK) ON nkt.NameKeyId=ts.NameKeyId AND nkt.Value=N'TSOperation' "
@@ -462,7 +472,19 @@ static void rt_route(SQLHDBC dbc, const RtObj *o, CardRow *rows, RtJob *j, wchar
   }
   int used = 0, blank = 0;
   wchar_t last[40] = L"";
+  RtOpRef *ops = NULL; /* операции для материалов — пока rows не перезаписаны */
+  int nop = 0;
   for (int i = 0; i < n; i++) {
+    if (mats && j->tpMat && nop < 200) {
+      if (!ops) ops = (RtOpRef *)calloc(200, sizeof(RtOpRef));
+      if (ops) {
+        ops[nop].id = rows[i].n1;
+        ops[nop].ts = rows[i].n3;
+        rt_ws_code(rows[i].s1, ops[nop].code, 40);
+        lstrcpynW(ops[nop].name, rows[i].s2, 80);
+        nop++;
+      }
+    }
     if (!rows[i].s1[0]) {
       blank++;
       continue;
@@ -503,6 +525,10 @@ static void rt_route(SQLHDBC dbc, const RtObj *o, CardRow *rows, RtJob *j, wchar
   }
   if (!used) lstrcpynW(note, n ? L"у операций нет участка" : L"в ТП нет операций", ncap);
   (void)blank;
+  if (ops) {
+    if (nop && !rt_late(j)) rt_tp_mats(dbc, j, ops, nop, rows, mats, nmat);
+    free(ops);
+  }
 }
 
 /* ---- общее чтение полей объектов PLM (и для выгрузки, export.c) ---- */
@@ -602,6 +628,97 @@ static const wchar_t *xp_get(const CardRow *f, int nf, long a, long b, long row,
     }
   }
   return NULL;
+}
+
+/* Материалы операций ТП — строками ведомости (галочка «Материалы из ТП», с 2026.10.28).
+   У операции варианта (или её TSOperation) список SummaryList: Material и составное
+   NormOfExpensesWithUnit → Value, ComputingUnit — тем же путём, что лист «Материалы»
+   выгрузки (export.c). Строка: наименование и «Материал» — материал, вид «Материалы ТП»,
+   норма на деталь (на изделие — по количеству детали, считает rt_mats_emit), единица,
+   маршрут — участок операции, примечание — операция. Память — у вызывающего (free). */
+static void rt_unbrace(wchar_t *s);
+static void rt_full(RtJob *j);
+static void rt_tp_mats(SQLHDBC dbc, RtJob *j, const RtOpRef *ops, int nop, CardRow *rows, RtRow **mats, int *nmat) {
+  int cap = 0;
+  for (int b0 = 0; b0 < nop && !rt_late(j); b0 += 8) { /* по 8 операций: строк полей до 300 */
+    int b1 = b0 + 8 < nop ? b0 + 8 : nop;
+    wchar_t ids[400], err[280];
+    int q = 0;
+    for (int i = b0; i < b1; i++) {
+      q += _snwprintf(ids + q, 400 - q, q ? L",%ld" : L"%ld", ops[i].id);
+      if (ops[i].ts) q += _snwprintf(ids + q, 400 - q, L",%ld", ops[i].ts);
+    }
+    int nf = xp_fields(dbc, ids, L"N'Number'", L"N'SummaryList'", rows, 300, err);
+    if (nf < 0) {
+      rt_log(j, L"    материалы операций: запрос не выполнился — %s\r\n", err);
+      return;
+    }
+    for (int i = b0; i < b1; i++) {
+      for (int pass = 0; pass < 2; pass++) { /* у строки варианта, иначе у TSOperation */
+        long own = pass ? ops[i].ts : ops[i].id;
+        if (!own) continue;
+        long seen[60];
+        int ns = 0;
+        for (int k = 0; k < nf; k++) {
+          if (rows[k].n1 != own || !rows[k].n2 || _wcsnicmp(rows[k].s1, L"SummaryList|", 12)) continue;
+          int sIdx = 0;
+          while (sIdx < ns && seen[sIdx] != rows[k].n2) sIdx++;
+          if (sIdx < ns || ns >= 60) continue;
+          seen[ns++] = rows[k].n2;
+          long row = rows[k].n2;
+          const wchar_t *mat = xp_get(rows, nf, own, 0, row, L"SummaryList|Material");
+          if (!mat) continue;
+          if (*nmat >= cap) {
+            int nc = cap ? cap * 2 : 8;
+            RtRow *nw = (RtRow *)realloc(*mats, (size_t)nc * sizeof(RtRow));
+            if (!nw) return;
+            *mats = nw;
+            cap = nc;
+          }
+          RtRow *r = &(*mats)[(*nmat)++];
+          memset(r, 0, sizeof(*r));
+          r->light = TRUE;
+          lstrcpynW(r->f[RC_NAME], mat, 200);
+          lstrcpynW(r->f[RC_MAT], mat, 200);
+          rt_unbrace(r->f[RC_NAME]);
+          rt_unbrace(r->f[RC_MAT]);
+          lstrcpynW(r->f[RC_KIND], L"Материалы ТП", 200);
+          const wchar_t *nv = xp_get(rows, nf, own, 0, row, L"SummaryList|NormOfExpensesWithUnit|Value");
+          double v;
+          if (nv && rt_num(nv, &v)) {
+            r->norm1 = v;
+            r->hasNorm = TRUE;
+            rt_fmt(v, 3, r->f[RC_NORM1], 200);
+          }
+          const wchar_t *un = xp_get(rows, nf, own, 0, row, L"SummaryList|NormOfExpensesWithUnit|ComputingUnit");
+          if (un) lstrcpynW(r->f[RC_UNIT], un, 200);
+          lstrcpynW(r->f[RC_ROUTE], ops[i].code, 200);
+          _snwprintf(r->f[RC_NOTE], 200, L"операция %s", ops[i].name);
+          r->f[RC_NOTE][199] = 0;
+        }
+        if (ns) break;
+      }
+    }
+  }
+  if (*nmat) rt_log(j, L"    материалов операций ТП: %d\r\n", *nmat);
+}
+
+/* строки материалов операций — в ведомость вслед за позицией: уровень глубже,
+   норма на изделие — по количеству позиции на изделие; mats освобождается */
+static void rt_mats_emit(RtJob *j, RtRow *mats, int nmat, int level, const wchar_t *parentDes, double tot) {
+  for (int m = 0; m < nmat; m++) {
+    RtRow *x = rt_row_add(j);
+    if (!x) {
+      rt_full(j);
+      break;
+    }
+    *x = mats[m];
+    x->level = level + 1;
+    x->qtyTot = tot;
+    lstrcpynW(x->f[RC_PARENT], parentDes, 200);
+    if (x->hasNorm) rt_fmt(floor(x->norm1 * 1000 + 0.5) / 1000 * tot, 3, x->f[RC_NORMTOT], 200);
+  }
+  free(mats);
 }
 
 /* заготовка: материал, сортамент, припуск, норма (масса заготовки) */
@@ -1675,7 +1792,9 @@ static void rt_walk(SQLHDBC dbc, long id, int level, const wchar_t *parentDes, d
     rt_diag(dbc, &o, rows, j);
   }
   wchar_t notes[2][200] = {L"", L""}; /* своё у позиции: маршрут, заготовка */
-  rt_route(dbc, &o, rows, j, r->f[RC_ROUTE], 200, notes[0], 60);
+  RtRow *mats = NULL;
+  int nmat = 0;
+  rt_route(dbc, &o, rows, j, r->f[RC_ROUTE], 200, notes[0], 60, &mats, &nmat);
   r->tp = j->lastTp;
   r->tpVer = j->lastTpVer;
   r->tpVar = j->lastTpVar;
@@ -1721,13 +1840,14 @@ static void rt_walk(SQLHDBC dbc, long id, int level, const wchar_t *parentDes, d
   lstrcpynW(r->f[RC_NOTE], own, 200);
   rt_src_notes(level, qtyFound, src, r);
   if (RT_MEMO) lstrcpynW(RT_MEMO->note, own, 200);
+  double tot = r->qtyTot; /* дальше r может переехать: строки материалов растят массив */
+  rt_mats_emit(j, mats, nmat, level, o.des, tot);
   if (level >= RT_DEPTH) {
     if (ne > 0) rt_log(j, L"    !!! глубже %d уровней не спускаюсь — состав «%s» не собран\r\n", RT_DEPTH, o.des);
     free(el);
     if (RT_MEMO) RT_MEMO->row0 = myRow, RT_MEMO->row1 = j->n;
     return;
   }
-  double tot = r->qtyTot;
   wchar_t myDes[200];
   lstrcpynW(myDes, o.des, 200);
   for (int i = 0; i < ne && !rt_late(j); i++)
@@ -2178,6 +2298,8 @@ typedef struct {
   wchar_t kdNote[200];
   RtRow row;          /* поля позиции; место в дереве (уровень, кол-во, «входит в») — у вхождения */
   wchar_t own[200];   /* свои пометки: маршрут, заготовка, КД */
+  RtRow *mats;        /* материалы операций ТП — строки после позиции (галочка «Материалы из ТП») */
+  int nmat;
   RtEl *kids;         /* строки её состава */
   int nk;
   wchar_t *log;       /* что выписал её сбор — в «Подробности» у первого вхождения */
@@ -2310,6 +2432,7 @@ static void rt_flags_in(RtPool *p, RtJob *w) {
   w->pfShown = j->pfShown;
   w->diagShown = j->diagShown;
   w->tcDiag = j->tcDiag;
+  w->tpMat = j->tpMat;
   ReleaseSRWLockExclusive(&p->lock);
 }
 
@@ -2500,7 +2623,7 @@ static void rt_item_eval_b(RtPool *p, SQLHDBC dbc, RtJob *w, CardRow *rows, RtIt
   }
   wchar_t notes[2][200] = {L"", L""};
   t = GetTickCount64();
-  rt_route(dbc, o, rows, w, r->f[RC_ROUTE], 200, notes[0], 60);
+  rt_route(dbc, o, rows, w, r->f[RC_ROUTE], 200, notes[0], 60, &it->mats, &it->nmat);
   ms[1] += GetTickCount64() - t;
   r->tp = w->lastTp;
   r->tpVer = w->lastTpVer;
@@ -2724,6 +2847,13 @@ static void rt_pool_out(RtPool *p, RtJob *j, int ni, const wchar_t *parentDes) {
            r->f[RC_DES]);
   wchar_t des[200];
   lstrcpynW(des, r->f[RC_DES], 200); /* r дальше может переехать (строки растут) */
+  if (it->nmat) { /* материалы операций — копией: позиция может входить не раз */
+    RtRow *cp = (RtRow *)malloc((size_t)it->nmat * sizeof(RtRow));
+    if (cp) {
+      memcpy(cp, it->mats, (size_t)it->nmat * sizeof(RtRow));
+      rt_mats_emit(j, cp, it->nmat, nd->level, des, nd->tot);
+    }
+  }
   for (int k = 0; k < nd->nk; k++) rt_pool_out(p, j, nd->kids[k], des);
 }
 
@@ -2788,6 +2918,7 @@ static void rt_walk_pool(SQLHDBC dbc, RtJob *j, CardRow *rows, long root) {
   for (int i = 0; i < p->ni; i++) {
     free(p->items[i]->kids);
     free(p->items[i]->log);
+    free(p->items[i]->mats);
     free(p->items[i]->wait);
     free(p->items[i]);
   }

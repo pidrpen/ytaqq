@@ -107,6 +107,7 @@
 #define ID_RT_COPY 222
 #define ID_RT_LOG 223
 #define ID_RT_DUMP 224 /* «Выгрузка для проверки» */
+#define ID_RT_TPMAT 225 /* галочка «Материалы из ТП» */
 #define ID_SH_LIST 230 /* шашки, см. shashki.c */
 #define ID_SH_INVITE 231
 #define ID_SH_ACCEPT 232
