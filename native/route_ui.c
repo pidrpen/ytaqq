@@ -34,7 +34,8 @@ static void rt_prefs_save(void) {
     if (*c == L'\t' || *c == L'\r' || *c == L'\n') *c = L' ';
   for (wchar_t *c = n; *c; c++)
     if (*c == L'\t' || *c == L'\r' || *c == L'\n') *c = L' ';
-  _snwprintf(buf, 300, L"order\t%s\nnum\t%s\n", o, n);
+  _snwprintf(buf, 300, L"order\t%s\nnum\t%s\ntpmat\t%d\n", o, n,
+             SendMessageW(GetDlgItem(g_rtWnd, ID_RT_TPMAT), BM_GETCHECK, 0, 0) == BST_CHECKED ? 1 : 0);
   buf[299] = 0;
   rt_prefs_path(p);
   share_write_ex(p, buf, TRUE);
@@ -52,6 +53,8 @@ static void rt_prefs_load(void) {
     int n = share_split(line, f, 4);
     if (n >= 2 && !wcscmp(f[0], L"order")) SetWindowTextW(g_rtOrder, f[1]);
     if (n >= 2 && !wcscmp(f[0], L"num")) SetWindowTextW(g_rtNum, f[1]);
+    if (n >= 2 && !wcscmp(f[0], L"tpmat"))
+      SendMessageW(GetDlgItem(g_rtWnd, ID_RT_TPMAT), BM_SETCHECK, f[1][0] == L'1' ? BST_CHECKED : BST_UNCHECKED, 0);
   }
   free(t);
 }
@@ -109,6 +112,7 @@ static void rt_start_ex(BOOL dump) {
   }
   if (g_rtPickId && !_wcsicmp(j->des, g_rtPickDes)) j->rootId = g_rtPickId;
   j->dump = dump;
+  j->tpMat = SendMessageW(GetDlgItem(g_rtWnd, ID_RT_TPMAT), BM_GETCHECK, 0, 0) == BST_CHECKED;
   g_rtCancel = 0;
   j->cancel = &g_rtCancel;
   j->notify = g_rtWnd;
@@ -381,6 +385,7 @@ static void rt_layout(void) {
   MoveWindow(GetDlgItem(g_rtWnd, ID_RT_COPY), RS(16), by, RS(120), RS(30), TRUE);
   MoveWindow(GetDlgItem(g_rtWnd, ID_RT_LOG), RS(16) + RS(128), by, RS(120), RS(30), TRUE);
   MoveWindow(GetDlgItem(g_rtWnd, ID_RT_DUMP), RS(16) + RS(256), by, RS(200), RS(30), TRUE);
+  MoveWindow(GetDlgItem(g_rtWnd, ID_RT_TPMAT), RS(16) + RS(468), by, RS(170), RS(30), TRUE);
   MoveWindow(GetDlgItem(g_rtWnd, ID_RT_SAVE), rc.right - RS(16) - RS(180), by, RS(180), RS(30), TRUE);
   InvalidateRect(g_rtWnd, NULL, FALSE); /* карточка и подвал — по новому размеру */
 }
@@ -467,6 +472,12 @@ static LRESULT CALLBACK RtProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
   case WM_CTLCOLOREDIT: {
     HDC hdc = (HDC)wParam;
     SetBkColor(hdc, COL_PAPER);
+    SetTextColor(hdc, COL_INK);
+    return (LRESULT)g_paper;
+  }
+  case WM_CTLCOLORSTATIC: { /* галочка «Материалы из ТП» — на бумаге подвала */
+    HDC hdc = (HDC)wParam;
+    SetBkMode(hdc, TRANSPARENT);
     SetTextColor(hdc, COL_INK);
     return (LRESULT)g_paper;
   }
@@ -569,6 +580,10 @@ static void route_show(void) {
     mk_btn(g_rtWnd, L"Копировать", ID_RT_COPY);
     mk_btn(g_rtWnd, L"Подробности", ID_RT_LOG);
     mk_btn(g_rtWnd, L"Выгрузка для проверки", ID_RT_DUMP);
+    /* материалы операций ТП строками после каждой детали — ведомость норм материалов */
+    HWND chk = CreateWindowExW(0, L"BUTTON", L"Материалы из ТП", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 0, 0, 10, 10,
+                               g_rtWnd, (HMENU)(INT_PTR)ID_RT_TPMAT, g_inst, NULL);
+    if (g_fontBody) SendMessageW(chk, WM_SETFONT, (WPARAM)g_fontBody, FALSE);
     g_rtList = CreateWindowExW(0, WC_LISTVIEWW, L"", WS_CHILD | WS_VISIBLE | WS_BORDER | LVS_REPORT | LVS_SHOWSELALWAYS,
                                0, 0, 10, 10, g_rtWnd, NULL, g_inst, NULL);
     SendMessageW(g_rtList, LVM_SETEXTENDEDLISTVIEWSTYLE, 0, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);

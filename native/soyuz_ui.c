@@ -31,6 +31,7 @@
 #define ID_SZ_LIST 4845
 #define ID_SZ_PUT 4846  /* «В буфер» — вернуть операцию в буфер */
 #define ID_SZ_AUTO 4847 /* «Вставить сам» — автоввод (soyuz_auto.c) */
+#define ID_SZ_MAKE 4848 /* «Создать ТП» — функцией пакета «CursorPad — Союз» (soyuz_make.c) */
 #define ID_SZ_COPY 4850 /* + поле SZF_… */
 #define TIMER_SZ_PASTE 4860
 #define TIMER_SZ_CLIP 4861
@@ -60,6 +61,7 @@ static float g_szS = 1.0f;
 static volatile LONG g_szAutoBusy, g_szAutoAbort; /* автоввод идёт; Esc — прервать */
 static BOOL g_szAutoWait;                         /* пункт нажат — ждём операцию в базе */
 static void sz_auto_start(void);                  /* soyuz_auto.c */
+static void szm_open(void);                       /* soyuz_make.c */
 
 static int SZS(int v) { return (int)(v * g_szS + 0.5f); }
 
@@ -666,9 +668,9 @@ static void sz_layout(void) {
   y += SZS(34); /* строка аналога — рисуется */
   int foot = rc.bottom - SZS(TOOL_FOOT_H), by = foot + (SZS(TOOL_FOOT_H) - SZS(30)) / 2;
   MoveWindow(g_szList, pad, y, rc.right - pad * 2, foot - SZS(54) - y, TRUE);
-  int x = SZS(12), w = (rc.right - SZS(24) - SZS(5) * 5) / 6;
-  int ids[6] = {ID_SZ_PREV, ID_SZ_SKIP, ID_SZ_MODE, ID_SZ_PUT, ID_SZ_AUTO, ID_SZ_NEXT};
-  for (int i = 0; i < 6; i++, x += w + SZS(5)) MoveWindow(GetDlgItem(g_szWnd, ids[i]), x, by, w, SZS(30), TRUE);
+  int x = SZS(12), w = (rc.right - SZS(24) - SZS(5) * 6) / 7;
+  int ids[7] = {ID_SZ_PREV, ID_SZ_SKIP, ID_SZ_MODE, ID_SZ_PUT, ID_SZ_AUTO, ID_SZ_MAKE, ID_SZ_NEXT};
+  for (int i = 0; i < 7; i++, x += w + SZS(5)) MoveWindow(GetDlgItem(g_szWnd, ids[i]), x, by, w, SZS(30), TRUE);
   InvalidateRect(g_szWnd, NULL, FALSE);
 }
 
@@ -787,6 +789,9 @@ static void sz_command(int id) {
   case ID_SZ_AUTO:
     sz_auto_start();
     break;
+  case ID_SZ_MAKE: /* деталь и ТП целиком — функцией пакета в клиенте (soyuz_make.c) */
+    szm_open();
+    break;
   case ID_SZ_NEXT: /* эта строка сделана — следующая */
     if (!it) break;
     it->pasted = 1;
@@ -853,7 +858,7 @@ static LRESULT CALLBACK SzProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
     return panel_hittest(hwnd, lParam);
   case WM_GETMINMAXINFO: {
     MINMAXINFO *mm = (MINMAXINFO *)lParam;
-    mm->ptMinTrackSize.x = SZS(460);
+    mm->ptMinTrackSize.x = SZS(540); /* семь кнопок подвала */
     mm->ptMinTrackSize.y = SZS(520);
     return 0;
   }
@@ -1026,7 +1031,7 @@ static void sz_window(void) {
   wc.hbrBackground = g_paper;
   wc.lpszClassName = L"CursorPadSoyuz";
   RegisterClassExW(&wc);
-  int w = SZS(500), h = SZS(700), x, y;
+  int w = SZS(560), h = SZS(700), x, y;
   sz_place(w, h, &x, &y);
   /* WS_EX_NOACTIVATE: «Копировать» и «Дальше» жмутся, а ввод остаётся в «Союзе» */
   g_szWnd = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, L"CursorPadSoyuz",
@@ -1042,6 +1047,7 @@ static void sz_window(void) {
   mk_btn(g_szWnd, L"Аналог", ID_SZ_MODE);
   mk_btn(g_szWnd, L"В буфер", ID_SZ_PUT);
   mk_btn(g_szWnd, L"Вставить", ID_SZ_AUTO);
+  mk_btn(g_szWnd, L"Создать ТП", ID_SZ_MAKE);
   mk_btn(g_szWnd, L"Дальше", ID_SZ_NEXT);
   g_szList = CreateWindowExW(0, L"LISTBOX", L"", WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT,
                              0, 0, 10, 10, g_szWnd, (HMENU)(INT_PTR)ID_SZ_LIST, g_inst, NULL);

@@ -109,6 +109,7 @@
 #define ID_RT_COPY 222
 #define ID_RT_LOG 223
 #define ID_RT_DUMP 224 /* «Выгрузка для проверки» */
+#define ID_RT_TPMAT 225 /* галочка «Материалы из ТП» */
 #define ID_SH_LIST 230 /* шашки, см. shashki.c */
 #define ID_SH_INVITE 231
 #define ID_SH_ACCEPT 232
@@ -484,6 +485,7 @@ static wchar_t g_plmPort[16] = L"4450";
 static wchar_t g_plmDatabase[96] = L"";
 static wchar_t g_sqlUser[96] = L"";
 static wchar_t g_sqlPass[128] = L"";
+static wchar_t g_szBridge[MAX_PATH]; /* plm.txt: soyuz_bridge — мост cp-soyuz.exe (soyuz_make.c) */
 /* общая папка отдела: через неё коллеги без логина получают PLM (share.c) */
 static wchar_t g_shareRoot[MAX_PATH];
 static BOOL g_shareServe; /* раздавать PLM коллегам через этот компьютер */
@@ -4672,6 +4674,7 @@ static void create_settings(HWND owner) {
 #include "soyuz_ops.c"  /* маршрут → операции ТП «Союза»: разбор, коды справочника, сверка */
 #include "soyuz_ui.c"   /* окно «В Союз»: буфер по операции, аналоги и слежение в базе */
 #include "soyuz_auto.c" /* «Вставить сам»: пункт меню клиента через UI Automation */
+#include "soyuz_make.c" /* «Создать ТП»: деталь и ТП функцией пакета «CursorPad — Союз» через мост */
 #include "drawrec_ui.c" /* окно «Распознать чертёж» */
 #include "drawrec_sort.c" /* «Разложить по папкам»: имена по штампу, копия, журнал, отмена */
 #include "ai_chat.c" /* «Спросить ИИ»: чат с локальной моделью, после окон чертежа */

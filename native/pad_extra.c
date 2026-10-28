@@ -1575,6 +1575,8 @@ static void load_plm_pref(void) {
           MultiByteToWideChar(CP_UTF8, 0, val, -1, g_plmDatabase, 96);
         else if (!strcmp(line, "user") && val[0])
           MultiByteToWideChar(CP_UTF8, 0, val, -1, g_sqlUser, 96);
+        else if (!strcmp(line, "soyuz_bridge") && val[0]) /* мост cp-soyuz.exe (soyuz_make.c) */
+          MultiByteToWideChar(CP_UTF8, 0, val, -1, g_szBridge, MAX_PATH);
         else if (!strcmp(line, "share") && val[0])
           MultiByteToWideChar(CP_UTF8, 0, val, -1, g_shareRoot, MAX_PATH);
         else if (!strcmp(line, "serve"))
@@ -2291,21 +2293,29 @@ static void card_probe_time(SQLHDBC dbc, const wchar_t *ids, CardOut *c, CardRow
    так и здесь: целое, если номер целый, иначе текст, дополненный нулями слева,
    чтобы «5» не встало после «10». num.N — номер для показа, num.K — ключ
    порядка (нет номера — в конец). После макроса — WHERE. */
-#define OP_NUM_APPLY(own)                                                                   \
+/* Номер операции: у строки варианта (own) или у её TSOperation (ts) — с 2026.10.28:
+   в ТП «Союза» Number лежит на TSOperation, а у строки варианта его нет, и без
+   этого операции шли по id (010, 015, 005). Нет нигде — ведущее число названия
+   («010 Токарная»). */
+#define OP_NUM_APPLY(own, ts, name)                                                                   \
   L"OUTER APPLY (SELECT TOP 1 CASE WHEN nn.DataType=13 THEN nn.IntegerNumber END AS I, "     \
   L"CASE WHEN nn.DataType=2 THEN LTRIM(RTRIM(CAST(nn.ShortText AS NVARCHAR(40)))) END AS S " \
   L"FROM InfoObjectAttributes AS nn WITH(NOLOCK) "                                           \
   L"JOIN NameKeys AS nkn WITH(NOLOCK) ON nkn.NameKeyId=nn.NameKeyId "                        \
-  L"WHERE nn.OwnerId=" own L" AND nn.Outdated=0 "                                           \
+  L"WHERE nn.OwnerId IN (" own L", ISNULL(" ts L",0)) AND nn.Outdated=0 "                     \
   L"AND nkn.Value IN (N'Number',N'OperationNumber',N'LocalId') "                             \
   L"AND ((nn.DataType=13 AND nn.IntegerNumber IS NOT NULL) OR (nn.DataType=2 "              \
   L"AND NULLIF(LTRIM(RTRIM(CAST(nn.ShortText AS NVARCHAR(40)))),N'') IS NOT NULL)) "         \
-  L"ORDER BY CASE nkn.Value WHEN N'Number' THEN 0 WHEN N'OperationNumber' THEN 1 ELSE 2 END) AS nr0 " \
+  L"ORDER BY CASE WHEN nn.OwnerId=" own L" THEN 0 ELSE 1 END, "                              \
+  L"CASE nkn.Value WHEN N'Number' THEN 0 WHEN N'OperationNumber' THEN 1 ELSE 2 END) AS nr0 " \
+  L"CROSS APPLY (SELECT LEFT(nm0.T, PATINDEX(N'%%[^0-9]%%', nm0.T + N' ') - 1) AS S "        \
+  L"FROM (SELECT LTRIM(CAST(" name L" AS NVARCHAR(40))) AS T) AS nm0) AS nm "                 \
   L"CROSS APPLY (SELECT CASE WHEN nr0.I IS NOT NULL THEN nr0.I "                              \
   L"WHEN LEN(nr0.S) BETWEEN 1 AND 9 AND nr0.S NOT LIKE N'%%[^0-9]%%' THEN CAST(nr0.S AS INT) " \
-  L"ELSE 0 END AS N, "                                                                       \
+  L"WHEN nr0.S IS NULL AND LEN(nm.S) BETWEEN 2 AND 4 THEN CAST(nm.S AS INT) ELSE 0 END AS N, " \
   L"CASE WHEN nr0.I IS NOT NULL THEN RIGHT(N'0000000000' + CONVERT(NVARCHAR(12), nr0.I), 10) " \
-  L"WHEN nr0.S IS NOT NULL THEN RIGHT(N'0000000000' + nr0.S, 10) END AS K) AS num "
+  L"WHEN nr0.S IS NOT NULL THEN RIGHT(N'0000000000' + nr0.S, 10) "                            \
+  L"WHEN LEN(nm.S) BETWEEN 2 AND 4 THEN RIGHT(N'0000000000' + nm.S, 10) END AS K) AS num "
 #define OP_NUM_ORDER L"CASE WHEN num.K IS NULL THEN 1 ELSE 0 END, num.K"
 
 /* Справочник операций у каждой операции ТП: ссылка Operation — на самой
@@ -2384,7 +2394,7 @@ static void card_operations(SQLHDBC dbc, long tpId, long verId, CardOut *c, Card
              L"AND nkt.Value=N'TSOperation' "
              L"JOIN InfoObjects AS o2 WITH(NOLOCK) ON o2.InfoObjectId=ts.Link "
              L"WHERE ts.OwnerId=ch.InfoObjectId AND ts.Outdated=0) AS op "
-             OP_NUM_APPLY(L"ch.InfoObjectId")
+             OP_NUM_APPLY(L"ch.InfoObjectId", L"op.OID", L"ch.Name")
              L"WHERE ch.ParentId=%ld AND ch.Erased=0 "
              L"ORDER BY " OP_NUM_ORDER L", ch.InfoObjectId",
              parent);

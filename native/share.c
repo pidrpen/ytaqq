@@ -282,7 +282,7 @@ static int share_serve_child(const wchar_t *reqPath, const wchar_t *ansPath) {
   if (!req) return 1;
   wchar_t kind[16] = L"", q[400] = L"", from[200] = L"", idl[1400] = L"", rdes[200] = L"", rorder[120] = L"";
   long id = 0, rid = 0;
-  BOOL rdump = FALSE;
+  BOOL rdump = FALSE, rtpmat = FALSE;
   unsigned rwhat = 0; /* выгрузка: какие листы */
   BOOL verbose = FALSE;
   /* сверка: ядра обозначений, по строке «d» на каждое */
@@ -306,6 +306,7 @@ static int share_serve_child(const wchar_t *reqPath, const wchar_t *ansPath) {
     else if (!wcscmp(f[0], L"order")) lstrcpynW(rorder, f[1], 120);
     else if (!wcscmp(f[0], L"rid")) rid = wcstol(f[1], NULL, 10);
     else if (!wcscmp(f[0], L"dump")) rdump = f[1][0] == L'1';
+    else if (!wcscmp(f[0], L"tpmat")) rtpmat = f[1][0] == L'1';
     else if (!wcscmp(f[0], L"what")) rwhat = (unsigned)wcstoul(f[1], NULL, 10);
   }
   free(req);
@@ -439,6 +440,7 @@ static int share_serve_child(const wchar_t *reqPath, const wchar_t *ansPath) {
       lstrcpynW(j->order, rorder, 120);
       j->rootId = rid;
       j->dump = rdump;
+      j->tpMat = rtpmat;
       j->deadline = GetTickCount64() + 80000; /* исполнителя снимают через 90 с */
       rt_log(j, L"Маршрутная ведомость: %s (сбор у коллеги)\r\n", rdes);
       rt_build(j);
@@ -900,7 +902,8 @@ static void share_route(RtJob *j) {
     if (*c == L'\t' || *c == L'\r' || *c == L'\n') *c = L' ';
   for (wchar_t *c = o; *c; c++)
     if (*c == L'\t' || *c == L'\r' || *c == L'\n') *c = L' ';
-  _snwprintf(body, 400, L"kind\troute\ndes\t%s\norder\t%s\nrid\t%ld\ndump\t%d", d, o, j->rootId, j->dump ? 1 : 0);
+  _snwprintf(body, 400, L"kind\troute\ndes\t%s\norder\t%s\nrid\t%ld\ndump\t%d\ntpmat\t%d", d, o, j->rootId,
+             j->dump ? 1 : 0, j->tpMat ? 1 : 0);
   body[399] = 0;
   wchar_t out[600];
   wchar_t *a = share_ask(body, L"-rt", 100, out, 600);
