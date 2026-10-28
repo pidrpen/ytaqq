@@ -344,7 +344,9 @@ static void al_robot(void) {
   ac_avatar_set(AC_AV_THINKING); /* рисует сразу — с этого мгновения прежний кадр тает */
   DWORD now = GetTickCount();
   unsigned mid = ac_fade_mix(now + 100);
-  _snwprintf(line, 400, L"робот: смена состояния — прежний кадр тает (доля %u из 256 через 100 мс), через 300 мс перехода нет", mid);
+  _snwprintf(line, 400, L"робот: смена состояния — прежний кадр тает (доля %u из 256 через 100 мс), через 300 мс перехода нет"
+             L" [fadeAt %+ld мс, показано %d, состояние %d]", mid, g_acFadeAt ? (long)(g_acFadeAt - now) : 99999L,
+             g_acShownState, g_acAvatarState);
   al_check(mid > 20 && mid < 240 && ac_fade_mix(now + 300) == 0, line);
   /* факт — «кстати», анекдот — потом смеётся, потом обратно в покой */
   g_acAvatarBusy = FALSE;

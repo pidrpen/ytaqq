@@ -156,6 +156,9 @@ static void ac_menu_close(void);
 
 /* GetTickCount переполняется раз в 49,7 суток: сравниваем разность, а не значения */
 static BOOL ac_due(DWORD now, DWORD at) { return (LONG)(now - at) >= 0; }
+/* сколько мс прошло с at; метки ставятся как now | 1 и при чётном now на 1 мс «впереди» —
+   беззнаковая разность тогда огромна, и прыжок или переход кончались, не начавшись */
+static DWORD ac_since(DWORD now, DWORD at) { LONG d = (LONG)(now - at); return d > 0 ? (DWORD)d : 0; }
 
 /* PNG из ресурса id — в 32-битный DIB с premultiplied alpha, ровно w×h */
 static BOOL ac_png_resource(int id, UINT w, UINT h, HBITMAP *outBitmap, BYTE **outPixels) {
@@ -382,13 +385,13 @@ static void ac_avatar_fade(DWORD now) {
   }
   g_acShownState = g_acAvatarState;
   g_acShownCol = g_acAvatarMix < 128 ? g_acAvatarFrame : g_acAvatarNext;
-  if (g_acFadeAt && (now - g_acFadeAt >= AC_FADE_MS || g_acFadeState != g_acAvatarState)) g_acFadeAt = 0;
+  if (g_acFadeAt && (ac_since(now, g_acFadeAt) >= AC_FADE_MS || g_acFadeState != g_acAvatarState)) g_acFadeAt = 0;
 }
 
 /* доля прежнего кадра, 0..256 */
 static unsigned ac_fade_mix(DWORD now) {
   if (!g_acFadeAt) return 0;
-  float t = (float)(now - g_acFadeAt) / AC_FADE_MS;
+  float t = (float)ac_since(now, g_acFadeAt) / AC_FADE_MS;
   return t >= 1.0f ? 0u : (unsigned)(256.0f * (1.0f - t * t * (3.0f - 2.0f * t)));
 }
 
@@ -423,7 +426,7 @@ static void ac_avatar_pose(DWORD now, float zoom, AcXf *x) {
   sx *= 1.0f - br * 0.6f;
   if (!g_acHeld) ang += 0.024f * sinf(now / 1750.0f) + g_acAvatarLookX * 0.04f; /* покачивание, тянется к курсору */
   if (g_acHopAt) { /* присел — оттолкнулся — прыжок */
-    float pre = (now - g_acHopAt) / (float)AC_HOP_CROUCH, t = (now - g_acHopAt - AC_HOP_CROUCH) / 420.0f;
+    float pre = ac_since(now, g_acHopAt) / (float)AC_HOP_CROUCH, t = ((float)ac_since(now, g_acHopAt) - AC_HOP_CROUCH) / 420.0f;
     if (pre < 1.0f) {
       float a = sinf(pre * 1.5707963f);
       sy *= 1.0f - 0.07f * a;
@@ -439,7 +442,7 @@ static void ac_avatar_pose(DWORD now, float zoom, AcXf *x) {
     }
   }
   if (g_acLandAt) { /* сжатие с затухающим отскоком */
-    float t = (float)(now - g_acLandAt);
+    float t = (float)ac_since(now, g_acLandAt);
     if (t < 650.0f) {
       float a = 0.13f * expf(-t / 150.0f) * cosf(t / 55.0f);
       sy *= 1.0f - a;
@@ -447,7 +450,7 @@ static void ac_avatar_pose(DWORD now, float zoom, AcXf *x) {
     } else g_acLandAt = 0;
   }
   if (g_acAvatarMoving && g_acMoveAt && !g_acHeld) { /* идёт: наклон по ходу, у кошек — шаги */
-    float ramp = (now - g_acMoveAt) / 450.0f;
+    float ramp = ac_since(now, g_acMoveAt) / 450.0f;
     if (ramp > 1.0f) ramp = 1.0f;
     ang += g_acMoveDir * 0.075f * ramp;
     if (g_acAvatarSkin == AC_SKIN_ROBOT) oy -= S * 0.012f * ramp * sinf(now / 210.0f);
@@ -507,7 +510,7 @@ static void ac_avatar_face(DWORD now, const AcXf *xf) {
   float glowR = d * 0.10f + 0.6f, w = d * 0.27f, h = d * 0.50f, line = d * 0.065f + 0.45f;
   BOOL joy = g_acAvatarJoyUntil || state == AC_AV_SUCCESS || state == AC_AV_WAVE || state == AC_AV_LAUGH;
   /* потягивается: глаза открываются не сразу */
-  float wake = state == AC_AV_WAKE ? (now - g_acAvatarStateAt) / (float)(AC_AVATAR_COLS * kAcAvatarFrameMs[AC_AV_WAKE]) : 1.0f;
+  float wake = state == AC_AV_WAKE ? ac_since(now, g_acAvatarStateAt) / (float)(AC_AVATAR_COLS * kAcAvatarFrameMs[AC_AV_WAKE]) : 1.0f;
   float pts[64];
   for (int side = -1; side <= 1; side += 2) {
     float c0[2];
@@ -583,7 +586,7 @@ static void ac_avatar_face(DWORD now, const AcXf *xf) {
         ac_paint_stroke(g_acAvatarFramePixels, S, S, blush, 1, w * 0.3f, RGB(255, 130, 170), RGB(255, 90, 150), w * 0.3f, 0.4f);
       }
     } else {
-      DWORD blink = now - g_acAvatarBlinkAt;
+      DWORD blink = ac_since(now, g_acAvatarBlinkAt);
       float open = !g_acAvatarBlinkAt ? 1.0f : blink < 80 ? 0.0f : blink < 150 ? 0.5f : 1.0f;
       if (state == AC_AV_THINKING && side < 0) open *= 0.62f;
       if (state == AC_AV_WAKE) open *= wake < 0.6f ? 0.5f : 1.0f;      /* ещё сонный */
@@ -748,7 +751,7 @@ static int ac_cat_face(DWORD now) {
   if (state == AC_AV_ERROR) return AC_CAT_SAD;
   if (state == AC_AV_SUCCESS || state == AC_AV_LAUGH || g_acAvatarJoyUntil) return AC_CAT_HAPPY;
   if (state == AC_AV_TALKING || state == AC_AV_TELL) return (now / 130) & 1 ? AC_CAT_TALK : AC_CAT_IDLE;
-  if (g_acAvatarBlinkAt && now - g_acAvatarBlinkAt < 150) return AC_CAT_BLINK;
+  if (g_acAvatarBlinkAt && ac_since(now, g_acAvatarBlinkAt) < 150) return AC_CAT_BLINK;
   return AC_CAT_IDLE;
 }
 
@@ -2145,7 +2148,7 @@ static void ac_avatar_move(void) {
   DWORD now = GetTickCount();
   if (!g_acMoveAt) g_acMoveAt = now | 1;
   g_acMoveDir = dx > 0 ? 1.0f : dx < 0 ? -1.0f : 0.0f;
-  double ramp = (now - g_acMoveAt) / 450.0; /* трогается плавно, а не сразу на полной скорости */
+  double ramp = ac_since(now, g_acMoveAt) / 450.0; /* трогается плавно, а не сразу на полной скорости */
   if (ramp > 1.0) ramp = 1.0;
   double speed = (distance < 40.0 ? 1.0 + distance / 40.0 : 2.0) * (0.25 + 0.75 * ramp); /* ~60 px/с, к концу пути замедляется */
   int stepX = (int)(dx * speed / distance), stepY = (int)(dy * speed / distance);

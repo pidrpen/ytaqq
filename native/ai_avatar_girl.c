@@ -184,7 +184,7 @@ static DWORD ac_girl_state_ms(int state) { return (DWORD)(kAgaDur[kAgFromState[s
 /* какое действие сейчас: разовое, иначе по состоянию и эмоции */
 static int ac_girl_action(DWORD now, int emo, float *t) {
   if (g_agShot >= 0) {
-    float s = (now - g_agShotAt) / 1000.0f;
+    float s = ac_since(now, g_agShotAt) / 1000.0f;
     if (s < kAgaDur[g_agShot]) {
       *t = s;
       return g_agShot;
@@ -193,7 +193,7 @@ static int ac_girl_action(DWORD now, int emo, float *t) {
   }
   int act = kAgFromState[g_acAvatarState];
   if (act == AGA_IDLE && emo == AC_EMO_SAD) act = AGA_SAD;
-  *t = (now - g_acAvatarStateAt) / 1000.0f;
+  *t = ac_since(now, g_acAvatarStateAt) / 1000.0f;
   return act;
 }
 
@@ -335,12 +335,12 @@ static void ac_girl_render(DWORD now, const AcXf *xf) {
   if (emo == AC_EMO_SURPRISED) { p.earL += 0.12f; p.earR -= 0.12f; p.blink = 0.0f; }
   if (emo == AC_EMO_ANGRY) { p.earL -= 0.2f; p.earR += 0.2f; p.head += 0.05f; p.tail += 0.25f * sinf(now / 90.0f); }
   if (emo == AC_EMO_DIZZY) { p.head += 0.12f * sinf(now / 120.0f); p.blink = 1.0f; }
-  if (g_acAvatarBlinkAt && now - g_acAvatarBlinkAt < 170) { /* моргает в случайные моменты, как робот; иногда — и ушком */
-    float b = (now - g_acAvatarBlinkAt) / 170.0f;
+  if (g_acAvatarBlinkAt && ac_since(now, g_acAvatarBlinkAt) < 170) { /* моргает в случайные моменты, как робот; иногда — и ушком */
+    float b = ac_since(now, g_acAvatarBlinkAt) / 170.0f;
     p.blink = fmaxf(p.blink, b < 0.35f ? b / 0.35f : b < 0.55f ? 1.0f : (1.0f - b) / 0.45f);
   }
-  if (g_acAvatarBlinkAt && (g_acAvatarBlinkAt >> 3) % 3 == 0 && now - g_acAvatarBlinkAt < 300)
-    p.earR -= 0.09f * sinf(3.14159265f * (now - g_acAvatarBlinkAt) / 300.0f);
+  if (g_acAvatarBlinkAt && (g_acAvatarBlinkAt >> 3) % 3 == 0 && ac_since(now, g_acAvatarBlinkAt) < 300)
+    p.earR -= 0.09f * sinf(3.14159265f * ac_since(now, g_acAvatarBlinkAt) / 300.0f);
   if ((g_acAvatarState == AC_AV_TALKING || g_acAvatarState == AC_AV_TELL) && act == AGA_TALK && !emo) p.mouth = 0.94f;
   if (g_acHeld) { /* держат: правая рука тянется к курсору, левая отведена */
     AgM inv = ag_canvas();
@@ -352,7 +352,7 @@ static void ac_girl_render(DWORD now, const AcXf *xf) {
     p.leftB = -0.5f;
   }
   if (g_agBlendAt) {
-    float k = ag_smooth((now - g_agBlendAt) / 280.0f);
+    float k = ag_smooth(ac_since(now, g_agBlendAt) / 280.0f);
     if (k >= 1.0f) g_agBlendAt = 0;
     else {
       float *a = (float *)&g_agFrom, *b = (float *)&p;
