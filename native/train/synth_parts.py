@@ -329,10 +329,10 @@ def shaft(r):
         tops.append(0)
     # чаще то, что важно для маршрута и часто на чертежах: шпоночные пазы, лыски, резьбы, отверстия
     # отверстия: поперёк оси (сверлильная), по оси с торцов и центровые (токарная), в торце не по оси
-    pool = ['key'] * 4 + ['flat'] * 3 + ['thr'] * 2 + ['thrin'] * 2 + ['cross'] * 3 + ['groove'] * 2 + \
-        ['axial'] * 2 + ['center', 'endhole', 'knurl', 'spline', 'gear', 'hex']
+    pool = ['key'] * 2 + ['flat'] * 3 + ['thr'] * 2 + ['thrin'] * 2 + ['cross'] * 2 + ['groove'] * 2 + \
+        ['axial'] * 1 + ['center', 'endhole', 'knurl', 'spline', 'gear', 'hex']
     feats = []
-    for _ in range(r.choice([0, 1, 1, 2, 2, 2, 3, 3, 4])):
+    for _ in range(r.choice([0, 0, 1, 1, 1, 2, 2, 3])):
         f = r.choice(pool)
         if f not in feats:
             feats.append(f)
@@ -490,7 +490,7 @@ def shaft(r):
             sx += 2 * Rs + 40
         elif f == 'groove' and i < n - 1 and ds[i + 1] != ds[i]:
             xg = xb - 2.5
-            w = 2.0
+            w = 3.0 if r.random() < 0.3 else 2.0  # ширина на выносном элементе: чаще «2», иногда «3» (не путать со шпонкой)
             for sgn in (-1, 1):
                 sh.line([(xg - w / 2, cy + sgn * R), (xg - w / 2, cy + sgn * (R - 1.2))], thin=False)
                 sh.line([(xg - w / 2, cy + sgn * (R - 1.2)), (xg + w / 2, cy + sgn * (R - 1.2))], thin=False)
@@ -503,7 +503,7 @@ def shaft(r):
                 sh.line([(gx - 12, gy + 6), (gx - 3, gy + 6), (gx - 3, gy + 12)])
                 sh.arc(gx + 1, gy + 12, 4, 0, 180, thin=False)
                 sh.line([(gx + 5, gy + 12), (gx + 5, gy), (gx + 16, gy)])
-                sh.text(gx + 7, gy + 14, r.choice(['R0,5', 'R1', '2', 'R0,3']))
+                sh.text(gx + 7, gy + 14, '3' if w == 3.0 else r.choice(['R0,5', 'R1', '2', 'R0,3']))
                 sx += 40
             sh.el('канавка', '', 1)
         elif f == 'knurl':
@@ -690,7 +690,10 @@ def plate(r, body=False):
     # отверстия
     kinds = r.sample(['hole', 'hole', 'thr', 'slot'], r.choice([1, 2, 2, 3]))
     rows = r.sample([0.18, 0.4, 0.62, 0.84], 4)  # у каждого вида элементов — свой ряд, чтобы не налезали
-    for kind in kinds:
+    # иногда одна группа круглых отверстий нарисована без подписи размера: в ответе size пустой, в holes её нет
+    bare_c = [q for q, kd in enumerate(kinds) if kd in ('hole', 'thr')]
+    bare = r.choice(bare_c) if bare_c and r.random() < 0.25 else -1
+    for qi, kind in enumerate(kinds):
         if not rows:
             break
         row = rows.pop()
@@ -709,9 +712,12 @@ def plate(r, body=False):
             cnt = nx * len(ys)
             size = 'Ø' + num(dh) + r.choice(['', '', 'H7', 'H12'])
             txt = r.choice([f'{cnt} отв. {size}', f'{size} {cnt} отв.', f'{cnt}отв. {size}']) if cnt > 1 else size
-            sh.leader(xs_[-1] + dh / 2 * k * 0.7, ys[0] - dh / 2 * k * 0.7, txt, 12, -10)
-            if 'отв' in txt:
-                sh.holes.append(txt)
+            if qi == bare:  # группа без подписи: выноски нет, размера в ответе нет
+                size = ''
+            else:
+                sh.leader(xs_[-1] + dh / 2 * k * 0.7, ys[0] - dh / 2 * k * 0.7, txt, 12, -10)
+                if 'отв' in txt:
+                    sh.holes.append(txt)
             sh.el('отверстие', size, cnt)
         elif kind == 'thr':
             dt = r.choice([4, 5, 6, 8, 10, 12, 16])
@@ -724,8 +730,11 @@ def plate(r, body=False):
                 sh.arc(xx, yy, dt / 2 * k, 0, 270)
             size = f'M{dt}' + r.choice(['-7H', '-6H', ''])
             txt = r.choice([f'{cnt} отв. {size}', f'{cnt}отв {size}'])
-            sh.leader(xs_[0] + dt / 2 * k * 0.7, yy - dt / 2 * k * 0.7, txt, -12, -12)
-            sh.holes.append(txt)
+            if qi == bare:  # группа без подписи
+                size = ''
+            else:
+                sh.leader(xs_[0] + dt / 2 * k * 0.7, yy - dt / 2 * k * 0.7, txt, -12, -12)
+                sh.holes.append(txt)
             sh.el('резьбовое отверстие', size, cnt)
         elif kind == 'slot':
             w = r.choice([6, 8, 10, 12, 14, 18])
@@ -905,6 +914,9 @@ def plate_milled(r):
         sh.dim(xs_, fy0, xs_ + ws, fy0, size, 10)
         sh.dim(xs_ + ws, fy0, xs_ + ws, fy0 + hs, num(round(hs / k)), -5)
         sh.el('паз', size, 1)
+    # иногда одна группа отверстий нарисована без подписи размера: в ответе size пустой, в holes её нет
+    bare_c = [q for q, ff in enumerate(feats) if ff in ('hole', 'thr')]
+    bare = r.choice(bare_c) if bare_c and r.random() < 0.25 else -1
     for i, f in enumerate(feats):
         bx0, bx1 = left + band * i, left + band * (i + 1)
         if f == 'pocket':
@@ -947,9 +959,12 @@ def plate_milled(r):
             size = ('Ø' + num(dh) + r.choice(['', '', 'H7', 'H12'])) if f == 'hole' else f'M{int(dh)}' + r.choice(['-7H', '-6H', ''])
             txt = (r.choice([f'{cnt} отв. {size}', f'{size} {cnt} отв.', f'{cnt}отв. {size}']) if cnt > 1 else size) + \
                 r.choice(['', '', ' насквозь'] if f == 'hole' else ['', f', глуб. {int(dh * 2)}'])
-            sh.leader(xs_[-1] + dh / 2 * k * 0.7, ys_[0] - dh / 2 * k * 0.7, txt, 10, -9)
-            if 'отв' in txt:
-                sh.holes.append(txt)
+            if i == bare:  # группа без подписи: выноски нет, размера в ответе нет
+                size = ''
+            else:
+                sh.leader(xs_[-1] + dh / 2 * k * 0.7, ys_[0] - dh / 2 * k * 0.7, txt, 10, -9)
+                if 'отв' in txt:
+                    sh.holes.append(txt)
             sh.el('отверстие' if f == 'hole' else 'резьбовое отверстие', size, cnt)
     return sh
 

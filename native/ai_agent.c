@@ -183,9 +183,11 @@ static BOOL ag_request(void) {
   if (!g_agFs.count && ag_stamp_task(g_agFs.goal)) {
     wchar_t base[MAX_PATH * 2];
     ag_stamp_base(g_agFs.goal, base, MAX_PATH * 2);
+    /* поля JSON грамматика llama.cpp пускает только в порядке схемы: после name — не path,
+       поэтому папка идёт в text (так модель и пишет) */
     swprintf(prompt + wcslen(prompt), cap - wcslen(prompt),
              L"Подсказка: это переименование чертежей по штампу — первый вызов {\"tool\":\"app\",\"name\":\"rename_by_stamp\","
-             L"\"path\":\"%ls\",\"pattern\":\"*.tif\"}. В path — папка или файл из задачи%ls; не rename, не list, не file_read. "
+             L"\"text\":\"%ls\"}. В text — папка или файл из задачи%ls; не rename, не list, не file_read. "
              L"После его результата — done.\n",
              base, base[0] == L'@' ? L" (если в задаче названа подпапка или файл — допиши их: @desktop\\\\Имя)" : L"");
   }

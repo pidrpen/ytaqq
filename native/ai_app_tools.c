@@ -25,7 +25,7 @@ static const AgDataTool kAgDataTools[] = {
   {L"cut_calc", L"расход на резку листа по нормам резки завода: скорость, время, газы и расходники по технологиям (лазер, плазма, газ); text — марка, толщина, длина реза одной детали и количество: «ст3 10 мм рез 2400 мм ×20»; ответ — готовый расчёт"},
   {L"std_find", L"справочник стандартов на этом компьютере: размеры крепежа, сортамент и масса 1 м (с L= — масса заготовки), марки сталей, аналоги DIN/ISO↔ГОСТ; text — «болт М12 ГОСТ 7798», «круг 50 L=120», «40Х»; ответ — строки таблиц с источником"},
   {L"file_read", L"прочитать текст файла на этом компьютере: скан, картинка или PDF — распознаёт Tesseract (до 30 страниц), Word и Excel (первый лист) — через Office, TXT/CSV — как есть; path — файл; text «чертёж» — лист как чертёж: графы штампа и спецификация; ответ — текст файла"},
-  {L"rename_by_stamp", L"переименовать чертежи по штампу в «ОБОЗНАЧЕНИЕ.ext»: path — папка с чертежами (TIF, PNG, JPG, BMP; без подпапок) или один файл, pattern — маска (без неё все картинки), text=«с наименованием» — имя «ОБОЗНАЧЕНИЕ Наименование.ext»; графу штампа читает локальная модель, переименования встают в план до «Применить», нечитаемые штампы перечисляются"},
+  {L"rename_by_stamp", L"переименовать чертежи по штампу в «ОБОЗНАЧЕНИЕ.ext»: text — папка с чертежами (TIF, PNG, JPG, BMP; без подпапок) или один файл, «с наименованием» в конце text — имя «ОБОЗНАЧЕНИЕ Наименование.ext»; графу штампа читает локальная модель, переименования встают в план до «Применить», нечитаемые штампы перечисляются"},
 };
 /* чтение файла — ai_file_ask.c (подключён позже, после конвертера) */
 static wchar_t *fq_read_text(const wchar_t *path, BOOL drawing, volatile LONG *cancel, void (*cb)(int, int, void *),
@@ -554,13 +554,22 @@ static void rs_add(wchar_t *buf, size_t cap, const wchar_t *line) { /* стро�
 static int ag_rename_by_stamp(const AgJson *j, AgFs *fs, wchar_t *out, int cap, volatile LONG *cancel) {
   const wchar_t *in = ag_get(j, L"path"), *pat = ag_get(j, L"pattern"), *mode = ag_get(j, L"text");
   if (!in[0]) in = ag_get(j, L"src");
-  wchar_t lowMode[80];
-  lstrcpynW(lowMode, mode, 80);
-  CharLowerBuffW(lowMode, (DWORD)wcslen(lowMode));
-  if (!in[0] && mode[0] && !wcsstr(lowMode, L"наимен")) { /* 4B кладёт папку в text (стенд 28.10: 5 из 5) */
-    in = mode;
-    mode = L"";
+  /* грамматика JSON пускает поля только в порядке схемы: после name — не path, поэтому папка
+     приходит в text; «с наименованием» в его конце — имя с наименованием */
+  wchar_t arg[MAX_PATH + 40];
+  lstrcpynW(arg, mode, MAX_PATH + 40);
+  wchar_t lowArg[MAX_PATH + 40];
+  lstrcpynW(lowArg, arg, MAX_PATH + 40);
+  CharLowerBuffW(lowArg, (DWORD)wcslen(lowArg));
+  const wchar_t *hit = wcsstr(lowArg, L"наимен");
+  BOOL withName = hit != NULL;
+  if (hit) { /* срезать «[;] с наименованием» с конца; остаток — путь */
+    size_t at = (size_t)(hit - lowArg);
+    if (at >= 2 && lowArg[at - 1] == L' ' && lowArg[at - 2] == L'с' && (at == 2 || wcschr(L" ;,", lowArg[at - 3]))) at -= 2;
+    arg[at] = 0;
+    while (at && wcschr(L" ;,", arg[at - 1])) arg[--at] = 0;
   }
+  if (!in[0] && arg[0]) in = arg; /* 4B кладёт папку в text (стенд 28.10: 5 из 5) */
   if (!in[0]) {
     lstrcpynW(out, L"rename_by_stamp: нужен path — папка с чертежами или один файл, например path=@desktop\\\\Чертежи.", cap);
     return -1;
@@ -616,11 +625,7 @@ static int ag_rename_by_stamp(const AgJson *j, AgFs *fs, wchar_t *out, int cap, 
     free(files);
     return 0;
   }
-  /* имя — только обозначение (так хотят на заводе); text=«с наименованием» — ещё и наименование */
-  wchar_t low[80];
-  lstrcpynW(low, mode, 80);
-  CharLowerBuffW(low, (DWORD)wcslen(low));
-  BOOL withName = wcsstr(low, L"наимен") != NULL;
+  /* имя — только обозначение (так хотят на заводе); «с наименованием» — ещё и наименование */
   if (!dr_vl_ok()) { /* без модели обозначения читает только Tesseract — для имён файлов ненадёжно */
     swprintf(out, cap, L"rename_by_stamp: локальная модель с картинками выключена, а один Tesseract читает обозначения ненадёжно "
                        L"(путает буквы, теряет хвост) — переименовывать по нему нельзя. В %ls найдено %d чертежей; включите локальный ИИ "
@@ -989,7 +994,7 @@ static int ag_app_call(const AgJson *j, wchar_t *out, int cap) {
     for (size_t i = 0; i < sizeof(kAgDataTools) / sizeof(kAgDataTools[0]); i++)
       swprintf(out + wcslen(out), cap - wcslen(out), L"app name=%ls %ls — %ls: %ls.\r\n", kAgDataTools[i].name,
                !wcscmp(kAgDataTools[i].name, L"file_read") ? L"path=полный_путь" :
-               !wcscmp(kAgDataTools[i].name, L"rename_by_stamp") ? L"path=папка pattern=маска" :
+               !wcscmp(kAgDataTools[i].name, L"rename_by_stamp") ? L"text=папка" :
                !wcscmp(kAgDataTools[i].name, L"plm_check") ? L"text=… или path=полный_путь" : L"text=…",
                !wcscmp(kAgDataTools[i].name, L"rename_by_stamp") ? L"в план, файлы меняются после «Применить»" : L"только чтение",
                kAgDataTools[i].description);
