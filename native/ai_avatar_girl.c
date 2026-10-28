@@ -174,15 +174,15 @@ static void ac_girl_shot(int act) {
   g_agShotAt = GetTickCount();
 }
 
+/* состояние ИИ (AC_AV_…) → действие: рассказывает факт — говорит, смеётся — радуется */
+static const BYTE kAgFromState[AC_AVATAR_ROWS] = {AGA_IDLE, AGA_LISTEN, AGA_THINK, AGA_READ, AGA_WAVE, AGA_HAPPY,
+                                                  AGA_SAD,  AGA_TALK,   AGA_SLEEP, AGA_TALK, AGA_HAPPY, AGA_WAKE};
+
 /* сколько мс длится «петля» состояния у нынешнего вида: девочке нужно больше, чем 24 кадра робота */
-static DWORD ac_girl_state_ms(int state) {
-  static const BYTE kAct[] = {AGA_IDLE, AGA_LISTEN, AGA_THINK, AGA_READ, AGA_WAVE, AGA_HAPPY, AGA_SAD, AGA_TALK, AGA_SLEEP};
-  return (DWORD)(kAgaDur[kAct[state]] * 1000.0f);
-}
+static DWORD ac_girl_state_ms(int state) { return (DWORD)(kAgaDur[kAgFromState[state]] * 1000.0f); }
 
 /* какое действие сейчас: разовое, иначе по состоянию и эмоции */
 static int ac_girl_action(DWORD now, int emo, float *t) {
-  static const BYTE kAct[] = {AGA_IDLE, AGA_LISTEN, AGA_THINK, AGA_READ, AGA_WAVE, AGA_HAPPY, AGA_SAD, AGA_TALK, AGA_SLEEP};
   if (g_agShot >= 0) {
     float s = (now - g_agShotAt) / 1000.0f;
     if (s < kAgaDur[g_agShot]) {
@@ -191,7 +191,7 @@ static int ac_girl_action(DWORD now, int emo, float *t) {
     }
     g_agShot = -1;
   }
-  int act = kAct[g_acAvatarState];
+  int act = kAgFromState[g_acAvatarState];
   if (act == AGA_IDLE && emo == AC_EMO_SAD) act = AGA_SAD;
   *t = (now - g_acAvatarStateAt) / 1000.0f;
   return act;
@@ -335,7 +335,7 @@ static void ac_girl_render(DWORD now, const AcXf *xf) {
   if (emo == AC_EMO_SURPRISED) { p.earL += 0.12f; p.earR -= 0.12f; p.blink = 0.0f; }
   if (emo == AC_EMO_ANGRY) { p.earL -= 0.2f; p.earR += 0.2f; p.head += 0.05f; p.tail += 0.25f * sinf(now / 90.0f); }
   if (emo == AC_EMO_DIZZY) { p.head += 0.12f * sinf(now / 120.0f); p.blink = 1.0f; }
-  if (g_acAvatarState == AC_AV_TALKING && act == AGA_TALK && !emo) p.mouth = 0.94f;
+  if ((g_acAvatarState == AC_AV_TALKING || g_acAvatarState == AC_AV_TELL) && act == AGA_TALK && !emo) p.mouth = 0.94f;
   if (g_acHeld) { /* держат: правая рука тянется к курсору, левая отведена */
     AgM inv = ag_canvas();
     float gx = (g_acGrip.x - inv.e) / inv.a, gy = (g_acGrip.y - inv.f) / inv.d;

@@ -3,6 +3,7 @@
 # Запуск (Blender 4.2+ / 5.x):
 #   blender -b --factory-startup --python-exit-code 1 -P native/avatar/make_avatar.py -- --out <папка кадров>
 # Необязательно: --states idle,thinking  --frames 0,6  --no-blend
+#   --cpu [--samples 24] — Cycles на процессоре (видеокарта занята обучением; Eevee рисует на ней)
 #
 # Персонаж: парящий робот-компаньон. Тело и голова — суперэллипсоиды из
 # перламутрового пластика, лицо — тёмный стеклянный экран. Глаза и рот на
@@ -17,13 +18,15 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 FRAME = 192      # размер кадра в атласе
 SS = 2           # рендер вдвое крупнее, pack_avatar.py уменьшает
 COLS = 24        # кадров на состояние: плавность при 25–30 к/с
-STATES = ["idle", "listening", "thinking", "files", "wave", "success", "error", "talking", "sleep"]
-ONE_SHOT = {"success", "error"}
+STATES = ["idle", "listening", "thinking", "files", "wave", "success", "error", "talking", "sleep",
+          "tell", "laugh", "wake"]
+ONE_SHOT = {"success", "error", "wake"}
 
 # цвет «настроения» на каждое состояние: антенна, ядро, кольца, глаза в программе
 STATE_COLOR = {
     "idle": "38E1FF", "listening": "A98BFF", "thinking": "FFC857", "files": "38E1FF", "wave": "38E1FF",
     "success": "5CFFA8", "error": "FF5C7A", "talking": "38E1FF", "sleep": "2A9FB8",
+    "tell": "FFC857", "laugh": "5CFFA8", "wake": "38E1FF",
 }
 
 argv = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else []
@@ -33,6 +36,7 @@ OUT = os.path.abspath(arg("--out", os.path.join(HERE, "frames")))
 ONLY_STATES = arg("--states").split(",") if arg("--states") else STATES
 ONLY_FRAMES = [int(f) for f in arg("--frames").split(",")] if arg("--frames") else list(range(COLS))
 SAVE_BLEND = "--no-blend" not in argv
+CYCLES = "--cpu" in argv
 
 
 def lin(hexcolor):
@@ -68,6 +72,18 @@ scene.eevee.taa_render_samples = 64
 for attr, value in (("use_raytracing", True), ("use_shadows", True)):
     if hasattr(scene.eevee, attr):
         setattr(scene.eevee, attr, value)
+if CYCLES:
+    scene.render.engine = "CYCLES"
+    scene.cycles.device = "CPU"
+    scene.cycles.samples = int(arg("--samples", "24"))
+    scene.cycles.use_adaptive_sampling = True
+    scene.cycles.use_denoising = True
+    for attr, value in (("denoiser", "OPENIMAGEDENOISE"), ("max_bounces", 6), ("transparent_max_bounces", 12),
+                        ("glossy_bounces", 3), ("diffuse_bounces", 2)):
+        try:
+            setattr(scene.cycles, attr, value)
+        except (AttributeError, TypeError):
+            pass
 scene.render.resolution_x = scene.render.resolution_y = FRAME * SS
 scene.render.resolution_percentage = 100
 scene.render.film_transparent = True
@@ -421,13 +437,19 @@ face_empties = {}
 for key, (x, z) in FACE_POINTS.items():
     face_empties[key] = empty("Face_" + key, head_pivot, loc=(x, head_front_y(x, z - HEAD_Z) - 0.02, z))
 
-# руки: парящие ладошки с фиолетовыми манжетами
+# руки: парящие перчатки — купол ладони над фиолетовым браслетом и большой палец
+# к телу (раньше браслет сидел на самом верху шара, и кисть читалась пустым стаканчиком)
 HAND_REST = {-1: Vector((-0.80, -0.06, -0.30)), 1: Vector((0.80, -0.06, -0.30))}
 hands = {}
 for side in (-1, 1):
-    pivot = empty("Hand" + ("L" if side < 0 else "R"), root, loc=HAND_REST[side])
-    bm_object("Mitt" + ("L" if side < 0 else "R"), sphere(1.0), pivot, scale=(0.16, 0.13, 0.18), mat=M_PEARL)
-    bm_object("Cuff" + ("L" if side < 0 else "R"), torus(0.105, 0.032), pivot, loc=(0, 0, 0.13), mat=M_VIOLET)
+    tag = "L" if side < 0 else "R"
+    pivot = empty("Hand" + tag, root, loc=HAND_REST[side])
+    bm_object("Mitt" + tag, sphere(1.0), pivot, loc=(0, 0, -0.01), scale=(0.155, 0.125, 0.175), mat=M_PEARL)
+    bm_object("Thumb" + tag, sphere(1.0, 24, 14), pivot, loc=(-side * 0.115, -0.045, 0.01), rot=(0, side * 0.5, 0),
+              scale=(0.055, 0.05, 0.075), mat=M_PEARL)
+    bm_object("Cuff" + tag, torus(0.135, 0.03), pivot, loc=(0, 0, 0.085), scale=(1, 0.82, 1), mat=M_VIOLET)
+    bm_object("CuffGlow" + tag, torus(0.135, 0.009, sides=8), pivot, loc=(0, -0.005, 0.085), scale=(1.05, 0.86, 1),
+              mat=M_RING)
     hands[side] = pivot
 
 # эффекты состояний
@@ -469,6 +491,7 @@ def aim(ob, target):
 
 def area(name, loc, size, energy, color):
     data = bpy.data.lights.new(name, "AREA")
+    data.shape = "DISK"
     data.size = size
     data.energy = energy
     data.color = color
@@ -639,6 +662,39 @@ def pose(state, i):
             z.rotation_euler = deg(90, 0, -12 + 18 * p)
         ground.scale = (1.0, 1.0, 1)
         pulse = 0.45 + 0.15 * math.sin(w)
+    elif state == "tell":
+        # «Кстати!» — поднял ладонь у головы, покачивает ей, антенна светится ярче
+        root.location.z = 0.04 * math.sin(w)
+        root.rotation_euler = deg(0, 0, -5)
+        head_pivot.rotation_euler = deg(-4 + 2 * math.sin(2 * w), -7, 5 * math.sin(w))
+        wag = math.sin(2 * w)
+        set_hand(1, 0.86, -0.32, 0.95 + 0.04 * wag, (0, -18 + 10 * wag, 0))
+        set_hand(-1, -0.72, -0.20, -0.18 + 0.04 * math.sin(w + 1), (0, -14, 0))
+        antenna.rotation_euler = deg(0, 12 + 9 * wag, 0)
+        pulse = 1.25 + 0.25 * (0.5 + 0.5 * math.sin(2 * w))
+    elif state == "laugh":
+        # смеётся: подпрыгивает мелко, голова запрокинута, руки у живота
+        shake = abs(math.sin(3 * w))
+        root.location.z = 0.03 + 0.07 * shake
+        root.rotation_euler = deg(0, 4 * math.sin(3 * w), 0)
+        head_pivot.rotation_euler = deg(-14 - 4 * shake, 0, 6 * math.sin(w))
+        for side in (-1, 1):
+            set_hand(side, side * 0.50, -0.62, -0.42 + 0.05 * shake, (25, side * 30, 0))
+        antenna.rotation_euler = deg(0, 12 + 16 * math.sin(3 * w), 0)
+        pulse = 1.1 + 0.3 * shake
+    elif state == "wake":
+        # потягивается после сна: из позы сна вверх, руки над головой, и обратно
+        stretch = math.sin(math.pi * min(1.0, u * 1.15))
+        settle = smooth(u * 1.6)
+        root.location.z = -0.12 * (1 - settle) + 0.10 * stretch
+        root.rotation_euler = deg(4 * (1 - settle), 0, 0)
+        head_pivot.rotation_euler = deg(15 * (1 - settle) - 12 * stretch, 8 * (1 - settle), 0)
+        for side in (-1, 1):
+            r = HAND_REST[side]
+            set_hand(side, r.x * (1 + 0.12 * stretch), r.y - 0.30 * stretch, r.z + 2.0 * stretch,
+                     (0, side * -25 * stretch, 0))
+        antenna.rotation_euler = deg(0, 38 * (1 - settle) + 12 * settle - 10 * stretch, 0)
+        pulse = 0.45 + 0.75 * settle
     # тень-свечение под ним тускнеет, когда он выше
     GROUND_ALPHA.inputs[1].default_value = 0.55 * (1 - 0.9 * max(0.0, root.location.z))
     mood(state, pulse)

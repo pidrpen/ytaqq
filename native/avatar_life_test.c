@@ -181,7 +181,7 @@ static void al_facts(void) {
   _snwprintf(line, 400, L"факты: 40 щелчков — %d фактов, %d анекдотов, повторов среди последних %d: %d, подряд одного рода не больше %d",
              kinds[0], kinds[1], FJ_RECENT, repeats, maxRun);
   al_check(nSeen == 40 && !repeats && maxRun <= 2 && kinds[0] && kinds[1], line);
-  al_check(g_acAvatarState == AC_AV_TALKING, L"факты: помощник «рассказывает»");
+  al_check(g_acAvatarState == AC_AV_TELL, L"факты: помощник «рассказывает» («кстати!»)");
   /* длинный анекдот — снимок пузыря целиком */
   for (int i = 0; i < FJ_N; i++)
     if (kFjItems[i].joke && wcslen(kFjItems[i].text) > 150) {
@@ -318,7 +318,8 @@ static void al_skins(void) {
     g_alCursor.y = wr.top + 10;
   }
   ac_avatar_tick();
-  al_check(g_agShot == AGA_WAKE && g_acAvatarState != AC_AV_SLEEP, L"кошко-девочка: курсор рядом — проснулась и потягивается");
+  al_check(g_acAvatarState == AC_AV_WAKE && kAgFromState[AC_AV_WAKE] == AGA_WAKE,
+           L"кошко-девочка: курсор рядом — проснулась и потягивается");
   g_alCursor.x = g_alCursor.y = 5;
   /* пузырь над головой, а не сбоку */
   ac_avatar_bubble(L"Привет! Я теперь кошко-девочка.", FALSE, 5000);
@@ -330,6 +331,65 @@ static void al_skins(void) {
              ar.left, ar.right, br.bottom, ar.top);
   al_check(br.bottom <= ar.top + g_acAvatarSize / 4 && br.left < (ar.left + ar.right) / 2 && br.right > (ar.left + ar.right) / 2, line);
   ac_bubble_hide(TRUE);
+}
+
+/* робот: переход между строками атласа, новые действия, ходьба */
+static void al_robot(void) {
+  wchar_t line[400];
+  ac_avatar_set_skin(AC_SKIN_ROBOT);
+  ac_avatar_apply_scale(AC_AVATAR_DEFAULT_SIZE);
+  g_acHopAt = g_acLandAt = 0;
+  ac_avatar_set(AC_AV_IDLE);
+  ac_avatar_present();
+  ac_avatar_set(AC_AV_THINKING); /* рисует сразу — с этого мгновения прежний кадр тает */
+  DWORD now = GetTickCount();
+  unsigned mid = ac_fade_mix(now + 100);
+  _snwprintf(line, 400, L"робот: смена состояния — прежний кадр тает (доля %u из 256 через 100 мс), через 300 мс перехода нет", mid);
+  al_check(mid > 20 && mid < 240 && ac_fade_mix(now + 300) == 0, line);
+  /* факт — «кстати», анекдот — потом смеётся, потом обратно в покой */
+  g_acAvatarBusy = FALSE;
+  for (int i = 0; i < FJ_N; i++)
+    if (kFjItems[i].joke) { ac_fact_say(kFjItems[i].text, 1); break; }
+  al_check(g_acAvatarState == AC_AV_TELL && g_acLaughAt, L"робот: рассказывает анекдот — «кстати», смех назначен");
+  g_acAvatarTalkUntil = g_acLaughAt = GetTickCount();
+  ac_avatar_tick();
+  al_check(g_acAvatarState == AC_AV_LAUGH, L"робот: анекдот досказан — смеётся");
+  ac_avatar_present();
+  if (g_acAvatarFramePixels) al_png(L"robot-laugh.png", g_acAvatarFramePixels, g_acAvatarSize, g_acAvatarSize, RGB(242, 242, 242));
+  g_acLaughUntil = GetTickCount();
+  ac_avatar_tick();
+  al_check(g_acAvatarState == AC_AV_IDLE, L"робот: отсмеялся — покой");
+  ac_bubble_hide(TRUE);
+  /* спал — курсор рядом — потягивается один раз и в покой */
+  g_acAvatarState = AC_AV_SLEEP;
+  RECT wr;
+  GetWindowRect(g_acAvatar, &wr);
+  g_alCursor.x = (wr.left + wr.right) / 2;
+  g_alCursor.y = wr.top + 10;
+  ac_avatar_tick();
+  al_check(g_acAvatarState == AC_AV_WAKE, L"робот: курсор рядом — проснулся и потягивается");
+  g_acAvatarStateAt = GetTickCount() - ac_state_ms(AC_AV_WAKE) - 50;
+  ac_avatar_tick();
+  al_check(g_acAvatarState == AC_AV_IDLE, L"робот: потянулся — покой");
+  g_alCursor.x = g_alCursor.y = 5;
+  ac_bubble_hide(TRUE);
+  /* идёт вправо: разгон с места и наклон по ходу */
+  g_acAvatarTarget.x = wr.left + 120;
+  g_acAvatarTarget.y = wr.top;
+  g_acAvatarMoving = TRUE;
+  g_acMoveAt = 0;
+  ac_avatar_move();
+  GetWindowRect(g_acAvatar, &wr);
+  int first = wr.left;
+  g_acMoveAt = GetTickCount() - 1000;
+  ac_avatar_move();
+  GetWindowRect(g_acAvatar, &wr);
+  AcXf xf;
+  ac_avatar_pose(GetTickCount(), 1.0f, &xf);
+  _snwprintf(line, 400, L"робот: идёт вправо — шаг с места %d px, разогнавшись %d px, наклон %.3f",
+             first - (int)(g_acAvatarTarget.x - 120), wr.left - first, atan2f(xf.s, xf.c));
+  al_check(g_acMoveDir > 0 && wr.left - first >= first - (int)(g_acAvatarTarget.x - 120) && atan2f(xf.s, xf.c) > 0.02f, line);
+  g_acAvatarMoving = FALSE;
 }
 
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
@@ -392,6 +452,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
   al_check(ac_avatar_here(), L"помощник призван");
   al_facts();
   al_skins();
+  al_robot();
 
   char out[96000];
   int k = WideCharToMultiByte(CP_UTF8, 0, g_alReport, -1, out, sizeof(out), NULL, NULL);
