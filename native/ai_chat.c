@@ -651,8 +651,8 @@ static int ac_log_twips(void) {
 #define AC_NEW_LINE L"———  новая беседа: что выше, ИИ не помнит  ———"
 static const wchar_t *const kAcLogLinks[] = {L"вернуть", L"показать", L"скрыть", L"удалить всю историю"};
 /* под последним ответом-маршрутом — строка-кнопки (ac_route_do); номера WM_AC_LINK — с 10 */
-#define AC_ROUTE_ACTIONS L"Действия:   В Союз   ·   Подробно   ·   Excel"
-static const wchar_t *const kAcRouteLinks[] = {L"В Союз", L"Подробно", L"Excel"};
+#define AC_ROUTE_ACTIONS L"Действия:   В Союз   ·   Подробно   ·   Режимы   ·   Excel"
+static const wchar_t *const kAcRouteLinks[] = {L"В Союз", L"Подробно", L"Режимы", L"Excel"};
 static BOOL g_acShowOld, g_acLogTop; /* показать прежние беседы; ленту — с начала */
 
 static void ac_rtf_new_line(AcRtf *b) {
@@ -3334,6 +3334,7 @@ static void ac_route_say(const wchar_t *cmd) {
 }
 
 static void ac_route_excel(void);
+static void nu_open(void); /* окно «Режимы» (norms_ui.c) */
 
 /* размышление (steps FALSE) или шаги: раскрыть или свернуть — в полном чате и в мини-чате сразу */
 static void ac_show_toggle(BOOL steps) {
@@ -3358,7 +3359,8 @@ static void ac_log_link_do(WPARAM which) {
   case 3: ac_clear_ask(); break;
   case 10: ac_route_say(L"в союз"); break;
   case 11: ac_route_say(L"норма подробно"); break;
-  case 12: ac_route_excel(); break;
+  case 12: nu_open(); break;
+  case 13: ac_route_excel(); break;
   }
 }
 

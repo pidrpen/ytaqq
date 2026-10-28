@@ -2216,8 +2216,14 @@ static void nm_text_brief(const NmBase *b, const NmResult *res, const wchar_t *d
 #ifdef _WINDOWS_
 
 /* Документы\CursorPad\Нормативы — вне AppData: туда кладут и правят руками, в Excel */
+static const wchar_t *g_nmDirFix; /* стенд окна «Режимы»: своя папка таблиц, без раскладки встроенных */
+
 static void nm_dir(wchar_t *out) {
   out[0] = 0;
+  if (g_nmDirFix) {
+    lstrcpynW(out, g_nmDirFix, MAX_PATH);
+    return;
+  }
 #ifdef SET_TEST
   const wchar_t *test = _wgetenv(L"CP_NORMS"); /* проверочная сборка — своя папка, не Документы */
   if (test && test[0]) {
@@ -2263,10 +2269,10 @@ static BOOL nm_base_load(NmBase *b, wchar_t *dir) {
   memset(b, 0, sizeof(*b));
   nm_dir(dir);
 #ifdef TABLES_SEED_ONCE /* встроенные таблицы ОМН — в папку, раз за запуск; проверочную CP_NORMS не трогаем */
-  BOOL own = TRUE;
+  BOOL own = !g_nmDirFix;
 #ifdef SET_TEST
   const wchar_t *test = _wgetenv(L"CP_NORMS");
-  own = !(test && test[0]);
+  own = own && !(test && test[0]);
 #endif
   if (dir[0] && own) tables_seed_once(0, L"norms", dir);
 #endif
