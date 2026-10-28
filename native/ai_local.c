@@ -73,7 +73,9 @@ static const AiFile kAiDrawLora = {L"pidrpen/ytaqq", L"9d44727431dc58cd658f25f0c
 /* Адаптер инструментов агента (native/train/train_tools_lora.py) — так же: качается сам и
    включается только в шагах агента (ai_ask_files_async). Пустой коммит — не закреплён, не
    качается; tool-lora*.gguf, положенный рядом с моделью руками, всё равно подключается. */
-static const AiFile kAiToolLora = {L"pidrpen/ytaqq", L"", L"models/tool-lora-qwen3.5-4b.gguf", 0ULL, ""};
+static const AiFile kAiToolLora = {L"pidrpen/ytaqq", L"4bf9d1ba243789ef2d484011903f750f48d03fb2",
+                                   L"models/tool-lora-qwen3.5-4b.gguf", 42485376ULL,
+                                   "00898bb3cdcd3db81300ee63b72275e909e66a0fa68cc199237489fc9905ddbf"};
 static void ai_lora_kick(const wchar_t *model);
 
 /* --- настройки ------------------------------------------------------------ */
