@@ -1435,6 +1435,17 @@ int ai_draw_gen(void) {
   return ai_find_near(m, L"draw-lora3*.gguf", f) ? 3 : ai_find_near(m, L"draw-lora2*.gguf", f) ? 2 : 0;
 }
 
+/* модель уже загружена и ничем не занята: короткий запрос «между делом» (факты помощника)
+   её не будит и никого не ждёт. Z.ai не считается — это чужая квота */
+BOOL ai_warm(void) {
+  if (!g_aiOn || g_aiProvider || g_aiActive > 0) return FALSE;
+  if (ai_ext()) return TRUE;
+  AcquireSRWLockShared(&g_aiSrvLock);
+  BOOL alive = g_aiProc && WaitForSingleObject(g_aiProc, 0) == WAIT_TIMEOUT && g_aiPort && !g_aiSrvWaiters;
+  ReleaseSRWLockShared(&g_aiSrvLock);
+  return alive;
+}
+
 BOOL ai_vision_ready(void) {
   if (g_aiProvider) return ai_zai_vision();
   if (ai_ext()) return TRUE;

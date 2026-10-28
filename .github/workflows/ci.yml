@@ -56,7 +56,7 @@ jobs:
         working-directory: native
         run: |
           set -eu
-          for t in search_route_test plm_check_test techno_test soyuz_ops_test store_text_test shahmaty_test norms_test std_test cut_ask_test file_ask_test ai_think_test stamp_name_test; do
+          for t in search_route_test plm_check_test techno_test soyuz_ops_test store_text_test shahmaty_test norms_test std_test cut_ask_test file_ask_test ai_think_test stamp_name_test avatar_facts_test; do
             gcc -O2 -Wall -Werror -o "$RUNNER_TEMP/$t" "$t.c" -lm
             "$RUNNER_TEMP/$t"
           done

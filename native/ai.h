@@ -73,6 +73,7 @@ void ai_out_cap(int n); /* сколько токенов просить в от�
 int ai_chat_budget(void); /* символов истории и вопроса, которые уйдут модели */
 int ai_agent_budget(void); /* agent automatically requests a 16384-token slot */
 int ai_ctx_size(void);    /* окно контекста модели, токенов (вкладка «ИИ») */
+BOOL ai_warm(void);         /* модель уже поднята и свободна — короткий запрос её не будит */
 BOOL ai_vision_ready(void); /* у выбранной модели есть проектор или используется свой сервер */
 int ai_draw_gen(void); /* поколение адаптера чертежей рядом с моделью: 3 — и габариты, 2 — элементы, 0 — нет */
 void ai_cancel(int id); /* ответ всё равно придёт — со статусом AI_CANCELLED */
