@@ -971,7 +971,7 @@ static BOOL g_pvFxOn;
 static int g_pvTick;
 static int g_pvSkin = -1, g_pvPick = -2; /* что показано; -2 — ещё ничего */
 static BOOL g_pvHover;   /* показан вариант под мышью, а не выбранный */
-static HCURSOR g_pvRias[3];
+static HCURSOR g_pvAni[2][3]; /* «Риас» и «Тяночка»: стрелка, рука, текст из .ani */
 static HCURSOR g_pvWin[3];
 
 /* для просмотра: стрелка, рука и текст набора skin */
@@ -989,22 +989,24 @@ static HCURSOR pv_cursor(int skin, int which) {
     int s = skin - 1;
     return which == 0 ? g_staticCur[s] : which == 1 ? g_handCur[s] : g_ibeamCur[s];
   }
-  if (skin == 6) {
-    if (!g_pvRias[which]) {
+  if (skin == 6 || skin == SKIN_K8) { /* наборы из .ani: «Риас» и «Тяночка» */
+    int a = skin == SKIN_K8;
+    const wchar_t *tag = a ? L"k8" : L"k7";
+    if (!g_pvAni[a][which]) {
       static const wchar_t *const nm[3] = {L"static", L"hand", L"ibeam"};
       wchar_t path[MAX_PATH], dir[MAX_PATH];
       int sz = GetSystemMetrics(SM_CXCURSOR);
       if (g_dataDir[0]) {
-        _snwprintf(path, MAX_PATH, L"%s\\k7_%s.ani", g_dataDir, nm[which]);
-        g_pvRias[which] = (HCURSOR)LoadImageW(NULL, path, IMAGE_CURSOR, sz, sz, LR_LOADFROMFILE);
+        _snwprintf(path, MAX_PATH, L"%s\\%s_%s.ani", g_dataDir, tag, nm[which]);
+        g_pvAni[a][which] = (HCURSOR)LoadImageW(NULL, path, IMAGE_CURSOR, sz, sz, LR_LOADFROMFILE);
       }
-      if (!g_pvRias[which]) {
+      if (!g_pvAni[a][which]) {
         exe_dir(dir, MAX_PATH);
-        _snwprintf(path, MAX_PATH, L"%s\\cursors\\k7_%s.ani", dir, nm[which]);
-        g_pvRias[which] = (HCURSOR)LoadImageW(NULL, path, IMAGE_CURSOR, sz, sz, LR_LOADFROMFILE);
+        _snwprintf(path, MAX_PATH, L"%s\\cursors\\%s_%s.ani", dir, tag, nm[which]);
+        g_pvAni[a][which] = (HCURSOR)LoadImageW(NULL, path, IMAGE_CURSOR, sz, sz, LR_LOADFROMFILE);
       }
     }
-    return g_pvRias[which];
+    return g_pvAni[a][which];
   }
   /* Windows: из папки Cursors — системные сейчас могут быть подменены нашими */
   if (!g_pvWin[which]) {

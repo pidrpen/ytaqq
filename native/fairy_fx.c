@@ -92,6 +92,8 @@
 #define FX_CAVIAR_FRAMES 52
 #define FX_INF_DUST 16   /* «Бесконечность» Годжо: пылинки, застывающие у барьера */
 #define FX_INF_FRAMES 52
+#define FX_PETALS 12     /* «Лепестки» Тяночки: лепестки сакуры */
+#define FX_PETAL_FRAMES 50
 #define FX_MAXP 16      /* больше всех частиц у конфетти */
 
 typedef struct {
@@ -721,6 +723,39 @@ static void fx_heart_part(FxWin *f, const FxPart *p, int age) {
     }
 }
 
+/* «Лепестки» «Тяночки» (с 2026.10.28): розовые лепестки сакуры вылетают из точки
+   нажатия, кружатся и, покачиваясь, опадают; гаснут меньше чем за секунду.
+   Лепесток — повёрнутый эллипс с выемкой на кончике, к середине светлее */
+static void fx_petal_part(FxWin *f, const FxPart *p, int age) {
+  if (age < 0 || age >= p->life) return;
+  float t = (float)age / p->life;
+  float a = t < 0.6f ? 0.95f : 0.95f * (1.0f - (t - 0.6f) / 0.4f);
+  float pop = age < 3 ? (age + 1) / 3.0f : 1.0f;
+  float ra = p->sz * g_fxScale * pop, rb = ra * 0.55f;
+  if (ra < 1.0f) return;
+  float cs = cosf(p->tw), sn = sinf(p->tw);
+  int span = (int)(ra + 2.0f);
+  for (int y = (int)p->y - span; y <= (int)p->y + span; y++)
+    for (int x = (int)p->x - span; x <= (int)p->x + span; x++) {
+      int in = 0;
+      float core = 0.0f;
+      for (int sy = 0; sy < 2; sy++)
+        for (int sx = 0; sx < 2; sx++) {
+          float ox = x + (sx + 0.5f) / 2.0f - p->x, oy = y + (sy + 0.5f) / 2.0f - p->y;
+          float u = (ox * cs + oy * sn) / ra, v = (-ox * sn + oy * cs) / rb;
+          float d = u * u + v * v;
+          if (u > 0.55f && fabsf(v) < (u - 0.55f) * 1.2f) continue; /* раздвоенный кончик */
+          if (d <= 1.0f) {
+            in++;
+            core += 1.0f - d;
+          }
+        }
+      if (!in) continue;
+      float cov = in / 4.0f, k = core / in;
+      fx_put(f, x, y, 255.0f, fx_mix(130.0f, 205.0f, k), fx_mix(170.0f, 220.0f, k), a * cov);
+    }
+}
+
 /* ---- свои эффекты «Сукуны» и «Годжо» (с 2026.10.14.12) ----------------- */
 
 /* «Рассечение»: тонкие прямые надрезы крест-накрест вокруг нажатия, сеткой,
@@ -1116,6 +1151,25 @@ static void fx_seed_new(FxWin *f, int kind, int S) {
       p->delay = (int)(fx_rand() * 4);
       p->life = FX_CAVIAR_FRAMES - p->delay;
     }
+  } else if (kind == 16) { /* лепестки: вверх и в стороны, потом опадают, кружась */
+    f->n = FX_PETALS;
+    f->frames = FX_PETAL_FRAMES;
+    for (int i = 0; i < FX_PETALS; i++) {
+      FxPart *p = &f->p[i];
+      memset(p, 0, sizeof(*p));
+      float ang = fx_rand() * 6.2832f;
+      float v = (1.2f + fx_rand() * 2.2f) * g_fxScale;
+      p->x = c + (fx_rand() - 0.5f) * 4.0f * g_fxScale;
+      p->y = c + (fx_rand() - 0.5f) * 4.0f * g_fxScale;
+      p->vx = cosf(ang) * v;
+      p->vy = sinf(ang) * v - 1.6f * g_fxScale;
+      p->sz = 4.5f + fx_rand() * 3.0f;
+      p->tw = fx_rand() * 6.2832f;
+      p->rev = (fx_rand() - 0.5f) * 0.25f;
+      p->spr = (int)(fx_rand() * 1000);
+      p->delay = (int)(fx_rand() * 5);
+      p->life = FX_PETAL_FRAMES - p->delay;
+    }
   } else { /* сердечки всплывают, покачиваясь */
     static const BYTE pal[][3] = {{255, 77, 130}, {255, 120, 170}, {230, 30, 80}, {255, 150, 190}, {244, 63, 94}};
     f->n = FX_HEARTS;
@@ -1176,6 +1230,7 @@ static void fx_paint_new(FxWin *f) {
     else if (f->kind == 7) fx_bolt_part(f, p, age);
     else if (f->kind == 9) fx_cut_part(f, p, age);
     else if (f->kind == 11) fx_feather_part(f, p, age);
+    else if (f->kind == 16) fx_petal_part(f, p, age);
     else fx_heart_part(f, p, age);
   }
 }
@@ -1213,6 +1268,12 @@ static void fx_step_new(FxWin *f) {
       p->y += p->vy;
       p->vx *= 0.72f;
       p->vy *= 0.72f;
+    } else if (f->kind == 16) {
+      p->x += p->vx + sinf(age * 0.14f + p->spr) * 0.5f * g_fxScale;
+      p->y += p->vy;
+      p->vx *= 0.92f;
+      p->vy = p->vy * 0.90f + 0.12f * g_fxScale;
+      p->tw += p->rev;
     } else if (f->kind == 8) {
       p->x += sinf(age * 0.18f + p->tw) * 0.7f * g_fxScale;
       p->y += p->vy;
@@ -1449,6 +1510,7 @@ static int fx_kind_for(int skin, int pick) {
   if (skin == 11) return 9;  /* Сукуна — своё «Рассечение» */
   if (skin == 12) return 14; /* Годжо — своя «Бесконечность» */
   if (skin == 13) return 15; /* Баклажан — белые пятна */
+  if (skin == SKIN_K8) return 16; /* Тяночка — лепестки сакуры */
   return 0;
 }
 

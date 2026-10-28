@@ -47,8 +47,9 @@
 #define ID_CUR_K5 120 /* «Дракон» */
 #define ID_CUR_K6 121 /* «Чёрный кот» */
 #define ID_CUR_K7 136 /* «Риас» */
+#define ID_CUR_K8 137 /* «Тяночка» — аниме-девочка, make_anime.py */
 #define ID_FX_BASE 400    /* 400..416: эффект при нажатии в Настройках (до 2026.10.14 — 160…) */
-#define FX_OPTIONS 17    /* сколько вариантов в «Эффект при нажатии» */
+#define FX_OPTIONS 18    /* сколько вариантов в «Эффект при нажатии» */
 #define ID_CHK_TESS 176   /* точное распознавание (Tesseract) */
 #define ID_SEC_BASE 440   /* 440..445: вкладки Настроек */
 #define SEC_COUNT 6
@@ -58,6 +59,7 @@
 #define ST_RAZREZ 3         /* «Разрез» — клинок вместо стрелки */
 #define ST_KNIGHT ST_COUNT  /* рыцарь (Мечник) рисуется кодом, но кнопки стиля у него нет */
 #define ST_SKIN0 7          /* g_skin первого из них; 7…13 */
+#define SKIN_K8 (ST_SKIN0 + ST_COUNT) /* g_skin «Тяночки» (k8): после стилей, 14 */
 #define ID_PREVIEW 470      /* окошко просмотра курсора и эффекта */
 #define ID_IDLE_BASE 480    /* 480..484: бой при бездействии — выкл, 30 с, 1, 2, 5 мин */
 #define IDLE_OPTIONS 5
@@ -312,6 +314,7 @@ static HWND g_btnK4;
 static HWND g_btnK5;
 static HWND g_btnK6;
 static HWND g_btnK7;
+static HWND g_btnK8;
 static HWND g_btnFx[FX_OPTIONS]; /* эффект при нажатии: как у курсора, нет, звёздочки, пламя, царапины, разрез */
 static HWND g_btnSt[ST_COUNT];       /* стили, нарисованные кодом */
 static HWND g_btnSec[SEC_COUNT];     /* вкладки Настроек; индекс — что на вкладке, не место */
@@ -706,6 +709,8 @@ static void extract_payloads(void) {
   for (int i = 0; i < RIAS_SLOTS; i++) {
     _snwprintf(path, MAX_PATH, L"%s\\k7_%s.ani", g_dataDir, kRias[i].name);
     extract_rcdata(360 + i, path);
+    _snwprintf(path, MAX_PATH, L"%s\\k8_%s.ani", g_dataDir, kRias[i].name); /* «Тяночка» — те же виды, RCDATA 390… */
+    extract_rcdata(390 + i, path);
   }
 }
 
@@ -722,10 +727,10 @@ static HCURSOR load_res_or_file(HINSTANCE inst, int id, const wchar_t *rel) {
   return c;
 }
 
-/* Каждый вид «Риас» — прямо из .ani, нужного размера (32 / 48 / 64 по
-   настройке указателя). Без CopyCursor, как у остальных наборов: копия
-   анимированного курсора остаётся одним неподвижным кадром. */
-static void rias_apply(void) {
+/* Каждый вид «Риас» (tag k7) и «Тяночки» (k8) — прямо из .ani, нужного размера
+   (32 / 48 / 64 по настройке указателя). Без CopyCursor, как у остальных наборов:
+   копия анимированного курсора остаётся одним неподвижным кадром. */
+static void ani_apply(const wchar_t *tag) {
   int sz = GetSystemMetrics(SM_CXCURSOR);
   if (sz < 32) sz = 32;
   wchar_t dir[MAX_PATH], path[MAX_PATH];
@@ -733,11 +738,11 @@ static void rias_apply(void) {
   for (int i = 0; i < RIAS_SLOTS; i++) {
     HCURSOR c = NULL;
     if (g_dataDir[0]) {
-      _snwprintf(path, MAX_PATH, L"%s\\k7_%s.ani", g_dataDir, kRias[i].name);
+      _snwprintf(path, MAX_PATH, L"%s\\%s_%s.ani", g_dataDir, tag, kRias[i].name);
       c = (HCURSOR)LoadImageW(NULL, path, IMAGE_CURSOR, sz, sz, LR_LOADFROMFILE);
     }
     if (!c) {
-      _snwprintf(path, MAX_PATH, L"%s\\cursors\\k7_%s.ani", dir, kRias[i].name);
+      _snwprintf(path, MAX_PATH, L"%s\\cursors\\%s_%s.ani", dir, tag, kRias[i].name);
       c = (HCURSOR)LoadImageW(NULL, path, IMAGE_CURSOR, sz, sz, LR_LOADFROMFILE);
     }
     if (c) SetSystemCursor(c, kRias[i].ocr);
@@ -759,8 +764,8 @@ static void apply_scheme_slots(void) {
     mark_cursor_dirty(TRUE);
     return;
   }
-  if (g_skin == 6) {
-    rias_apply();
+  if (g_skin == 6 || g_skin == SKIN_K8) {
+    ani_apply(g_skin == SKIN_K8 ? L"k8" : L"k7");
     g_cursorOn = TRUE;
     mark_cursor_dirty(TRUE);
     return;
@@ -1268,7 +1273,7 @@ static void load_cursor_pref(void) {
   g_sparkle = sparkle != 0;
   g_flame = flame != 0;
   g_catFx = catFx == 0 ? 0 : (catFx == 2 ? 2 : 1);
-  g_fxPick = fxPick >= 0 && fxPick <= 15 ? fxPick : -1;
+  g_fxPick = fxPick >= 0 && fxPick <= 16 ? fxPick : -1;
   g_padMode = padMode == 1 ? 1 : 0;
   g_cardX = cx;
   g_cardY = cy;
@@ -1292,6 +1297,7 @@ static void load_cursor_pref(void) {
   static const signed char kTSkin[9] = {0, 1, 2, 0, 0, 3, 4, 5, 6};
   if (skin[0] == 't' && skin[1] == 'b') g_skin = ST_SKIN0 + 6;
   else if (skin[0] == 't' && skin[1] >= '1' && skin[1] <= '9') g_skin = ST_SKIN0 + kTSkin[skin[1] - '1'];
+  else if (skin[0] == 'k' && skin[1] == '8') g_skin = SKIN_K8;
   else if (skin[0] == 'k' && skin[1] == '7') g_skin = 6;
   else if (skin[0] == 'k' && skin[1] == '6') g_skin = 5;
   else if (skin[0] == 'k' && skin[1] == '5') g_skin = 4;
@@ -1312,6 +1318,7 @@ static void load_cursor_pref(void) {
 static void save_cursor_pref(void) {
   static const char *const kSt[ST_COUNT] = {"t1", "t2", "t3", "t6", "t7", "t8", "t9"};
   const char *v = g_skin >= ST_SKIN0 && g_skin < ST_SKIN0 + ST_COUNT ? kSt[g_skin - ST_SKIN0]
+                  : g_skin == SKIN_K8 ? "k8"
                   : g_skin == 6 ? "k7"
                   : g_skin == 5 ? "k6"
                   : g_skin == 4 ? "k5"
@@ -1339,8 +1346,8 @@ static const wchar_t *const kFxNames[FX_OPTIONS] = {L"Как у курсора",
                                                     L"Царапины",      L"Разрез", L"Кольца",    L"Конфетти",
                                                     L"Молния",        L"Сердечки", L"Рассечение", L"Пурпур",
                                                     L"Перья",         L"Чернила",  L"Яд",       L"Бесконечность",
-                                                    L"Пятна"};
-static const int kFxPick[FX_OPTIONS] = {-1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
+                                                    L"Пятна",         L"Лепестки"};
+static const int kFxPick[FX_OPTIONS] = {-1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
 static const wchar_t *const kStyleNames[ST_COUNT] = {L"Ворон", L"Осьминог", L"Скорпион", L"Разрез", L"Сукуна", L"Годжо",
                                                     L"Баклажан"};
 
@@ -1357,6 +1364,7 @@ static void update_fx_buttons(void) {
 static const wchar_t *skin_name(int skin) {
   static const wchar_t *const kOld[7] = {L"Windows", L"Мечник", L"Рукавица", L"Фея", L"Дракон", L"Чёрный кот", L"Риас"};
   if (skin >= ST_SKIN0 && skin < ST_SKIN0 + ST_COUNT) return kStyleNames[skin - ST_SKIN0];
+  if (skin == SKIN_K8) return L"Тяночка";
   return skin >= 0 && skin < 7 ? kOld[skin] : L"Мечник";
 }
 
@@ -1374,6 +1382,7 @@ static void update_cursor_buttons(void) {
   set_mark(g_btnK5, g_skin == 4, L"Дракон");
   set_mark(g_btnK6, g_skin == 5, L"Чёрный кот");
   set_mark(g_btnK7, g_skin == 6, L"Риас");
+  set_mark(g_btnK8, g_skin == SKIN_K8, L"Тяночка");
   for (int i = 0; i < ST_COUNT; i++) set_mark(g_btnSt[i], g_skin == ST_SKIN0 + i, kStyleNames[i]);
   set_mark(g_btnSys, g_skin == 0, L"Курсор Windows");
   update_fx_buttons();
@@ -1396,11 +1405,11 @@ static void set_skin(int skin) {
 
 /* эффект при нажатии отдельно от курсора: имена для строки состояния */
 static const wchar_t *fx_pick_name(int pick) {
-  static const wchar_t *const kNames[16] = {L"нет",   L"звёздочки", L"пламя",  L"царапины", L"разрез",
+  static const wchar_t *const kNames[17] = {L"нет",   L"звёздочки", L"пламя",  L"царапины", L"разрез",
                                            L"кольца", L"конфетти", L"молния", L"сердечки", L"рассечение",
                                            L"пурпур", L"перья",    L"чернила", L"яд",     L"бесконечность",
-                                           L"икра"};
-  return pick >= 0 && pick < 16 ? kNames[pick] : L"как у курсора";
+                                           L"пятна",  L"лепестки"};
+  return pick >= 0 && pick < 17 ? kNames[pick] : L"как у курсора";
 }
 
 /* то же с большой буквы — для окошка просмотра (там всегда сам эффект) */
@@ -1420,7 +1429,7 @@ static void set_fx_pick(int pick) {
 
 static void cycle_skin(void) {
   int next = g_skin + 1;
-  if (next >= ST_SKIN0 + ST_COUNT) next = 0;
+  if (next > SKIN_K8) next = 0;
   set_skin(next);
 }
 
@@ -1432,6 +1441,7 @@ static int settings_skin_of_id(int id) {
   if (id == ID_CUR_K5) return 4;
   if (id == ID_CUR_K6) return 5;
   if (id == ID_CUR_K7) return 6;
+  if (id == ID_CUR_K8) return SKIN_K8;
   if (id == ID_SYS_CUR) return 0;
   if (id >= ID_CUR_ST_BASE && id < ID_CUR_ST_BASE + ST_COUNT) return ST_SKIN0 + id - ID_CUR_ST_BASE;
   return -1;
@@ -1748,6 +1758,7 @@ static void apply_follow_state(void) {
   if (g_btnK5) EnableWindow(g_btnK5, !g_follow);
   if (g_btnK6) EnableWindow(g_btnK6, !g_follow);
   if (g_btnK7) EnableWindow(g_btnK7, !g_follow);
+  if (g_btnK8) EnableWindow(g_btnK8, !g_follow);
   if (g_tbBg) EnableWindow(g_tbBg, !g_follow);
   if (g_tbFg) EnableWindow(g_tbFg, !g_follow);
   if (g_btnSys) EnableWindow(g_btnSys, !g_follow);
@@ -3677,11 +3688,11 @@ static void layout_settings(void) {
       sd_card_end();
       sd_card_begin();
       if (sec == 0) {
-        HWND sk[7 + ST_COUNT] = {g_btnK2, g_btnK3, g_btnK4, g_btnK5, g_btnK6, g_btnK7};
-        for (int i = 0; i < ST_COUNT; i++) sk[6 + i] = g_btnSt[i];
-        sk[6 + ST_COUNT] = g_btnSys;
+        HWND sk[8 + ST_COUNT] = {g_btnK2, g_btnK3, g_btnK4, g_btnK5, g_btnK6, g_btnK7, g_btnK8};
+        for (int i = 0; i < ST_COUNT; i++) sk[7 + i] = g_btnSt[i];
+        sk[7 + ST_COUNT] = g_btnSys;
         y = sd_stack(L"Курсор", L"Персонажи и стили; «Курсор Windows» — обычные стрелки");
-        y += set_grid(sk, 7 + ST_COUNT, 3, x0, y, iw, btnH, gap) - gap;
+        y += set_grid(sk, 8 + ST_COUNT, 3, x0, y, iw, btnH, gap) - gap;
       } else {
         y = sd_stack(L"Эффект при нажатии", L"Любой курсор можно сочетать с любым эффектом");
         y += set_grid(g_btnFx, FX_OPTIONS, 3, x0, y, iw, btnH, gap) - gap;
@@ -4547,6 +4558,7 @@ static void create_settings(HWND owner) {
   g_btnK5 = mk_btn(g_setHwnd, L"Дракон", ID_CUR_K5);
   g_btnK6 = mk_btn(g_setHwnd, L"Чёрный кот", ID_CUR_K6);
   g_btnK7 = mk_btn(g_setHwnd, L"Риас", ID_CUR_K7);
+  g_btnK8 = mk_btn(g_setHwnd, L"Тяночка", ID_CUR_K8);
   for (int i = 0; i < ST_COUNT; i++) g_btnSt[i] = mk_btn(g_setHwnd, kStyleNames[i], ID_CUR_ST_BASE + i);
   g_btnSys = mk_btn(g_setHwnd, L"Курсор Windows", ID_SYS_CUR);
   for (int i = 0; i < FX_OPTIONS; i++) g_btnFx[i] = mk_btn(g_setHwnd, kFxNames[i], ID_FX_BASE + i);
@@ -4589,6 +4601,7 @@ static void create_settings(HWND owner) {
   SendMessageW(g_btnK5, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
   SendMessageW(g_btnK6, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
   SendMessageW(g_btnK7, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
+  SendMessageW(g_btnK8, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
   SendMessageW(g_btnSys, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
   SendMessageW(g_ocr, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
   if (g_btnUp) SendMessageW(g_btnUp, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
@@ -5111,7 +5124,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
          — один кадр, поэтому набор ставится без CopyCursor. Сброс курсоров
          самой Windows ловит WM_SETTINGCHANGE — там сразу. */
       static int keepTicks;
-      int slow = g_skin == 6;
+      int slow = g_skin == 6 || g_skin == SKIN_K8;
       if (!slow || ++keepTicks % 15 == 0) apply_scheme_slots();
     }
     if (wParam == TIMER_FILES) files_start_index(FALSE);
