@@ -8,11 +8,15 @@
    Второй вид — «Кошка» (аниме-девушка с ушками и хвостом): 2D-кадры по арту
    пользователя (ComfyUI), ресурс 381 — 9 кадров лица в ряд. Лицо у неё уже
    нарисовано в кадре, поэтому эмоции — сменой кадра, а дыхание, прыжки и
-   раскачивание — та же поза, что у робота. */
+   раскачивание — та же поза, что у робота.
+   Третий вид — «Кошко-девочка»: та же героиня со скелетом из слоёв, ресурс 382,
+   двигает руками, головой, ушами и хвостом (ai_avatar_girl.c). */
 #include "ai_avatar_face.h"
 #include "ai_avatar_facts.h" /* факты и анекдоты: список, выбор без повторов, разбор ответа модели */
 #define IDR_AI_AVATAR_ATLAS 380
 #define IDR_AI_AVATAR_CAT 381
+#define IDR_AI_AVATAR_GIRL 382
+#include "ai_avatar_girl.h" /* слои и скелет кошко-девочки (native/avatar/pack_catgirl.py) */
 #define AC_CAT_W 135                /* кадр кошки 135×384 — в квадрате 460×460 окна: внизу посередине, */
 #define AC_CAT_H 384                /* сверху запас под прыжок и потягивание, чтобы уши не обрезались */
 #define AC_CAT_BOX 460
@@ -20,7 +24,10 @@
 #define AC_CAT_FEET 0.983f          /* подошвы: (72 + 380) / 460 */
 #define AC_CAT_EYE_X 0.49f          /* середина между глаз, доля ширины окна */
 #define AC_CAT_HEAD 0.16f           /* макушка, доля высоты окна */
-enum { AC_SKIN_ROBOT, AC_SKIN_CAT };
+enum { AC_SKIN_ROBOT, AC_SKIN_CAT, AC_SKIN_GIRL, AC_SKIN_N };
+/* подпись в меню и значение Skin в ai_avatar.ini */
+static const wchar_t *const kAcSkinName[AC_SKIN_N] = {L"Робот", L"Кошка", L"Кошко-девочка"};
+static const wchar_t *const kAcSkinKey[AC_SKIN_N] = {L"robot", L"cat", L"catgirl"};
 /* порядок = кадры ai_avatar_cat.png */
 enum { AC_CAT_IDLE, AC_CAT_BLINK, AC_CAT_TALK, AC_CAT_HAPPY, AC_CAT_SURPRISED, AC_CAT_SAD, AC_CAT_ANGRY, AC_CAT_SHY,
        AC_CAT_WAVE, AC_CAT_N };
@@ -44,6 +51,8 @@ static BYTE *g_acAvatarPixels;
 static int g_acAvatarSkin;          /* AC_SKIN_…; в ai_avatar.ini — Skin */
 static HBITMAP g_acCatAtlas;
 static BYTE *g_acCatPixels;
+static HBITMAP g_acGirlAtlas;       /* кошко-девочка: слои скелета (ai_avatar_girl.c) */
+static BYTE *g_acGirlPixels;
 static HBITMAP g_acAvatarFrameBitmap;
 static BYTE *g_acAvatarFramePixels;
 static int g_acAvatarSize = AC_AVATAR_DEFAULT_SIZE;
@@ -128,6 +137,7 @@ static void ac_avatar_tick(void);
 static void ac_bubble_update(void);
 static void ac_avatar_show(void);
 static void ac_avatar_ambient(int state, DWORD now);
+static DWORD ac_state_ms(int state);
 static void ac_avatar_dismiss(void);
 static void ac_avatar_menu_label(void);
 /* мини-чат у помощника (ai_minichat.c): маленькое окно у головы робота, ездит за ним */
@@ -207,6 +217,8 @@ static BOOL ac_png_resource(int id, UINT w, UINT h, HBITMAP *outBitmap, BYTE **o
 static BOOL ac_avatar_load(void) {
   if (g_acAvatarSkin == AC_SKIN_CAT)
     return g_acCatAtlas || ac_png_resource(IDR_AI_AVATAR_CAT, AC_CAT_W * AC_CAT_N, AC_CAT_H, &g_acCatAtlas, &g_acCatPixels);
+  if (g_acAvatarSkin == AC_SKIN_GIRL)
+    return g_acGirlAtlas || ac_png_resource(IDR_AI_AVATAR_GIRL, AC_GIRL_W, AC_GIRL_H, &g_acGirlAtlas, &g_acGirlPixels);
   return g_acAvatarAtlas || ac_png_resource(IDR_AI_AVATAR_ATLAS, AC_AVATAR_FRAME * AC_AVATAR_COLS,
                                             AC_AVATAR_FRAME * AC_AVATAR_ROWS, &g_acAvatarAtlas, &g_acAvatarPixels);
 }
@@ -360,11 +372,18 @@ static void ac_xf(const AcXf *x, float qx, float qy, float *px, float *py) {
   *py = x->pvy + x->oy + dx * x->s + dy * x->c;
 }
 
+#define AC_FEET 0.86f /* где у кадра робота «ноги» (кольцо), доля высоты окна */
+#define AC_GIRL_FEET 0.955f /* подошвы кошко-девочки */
+static float ac_avatar_feet(void) {
+  return g_acAvatarSkin == AC_SKIN_CAT ? AC_CAT_FEET : g_acAvatarSkin == AC_SKIN_GIRL ? AC_GIRL_FEET : 0.84f;
+}
+
 static void ac_avatar_pose(DWORD now, float zoom, AcXf *x) {
   int S = g_acAvatarSize;
   float sx = zoom, sy = zoom, ox = 0.0f, oy = 0.0f, ang = g_acSwing;
-  float pvx = S * 0.5f, pvy = S * (g_acAvatarSkin == AC_SKIN_CAT ? AC_CAT_FEET : 0.84f); /* «ноги» — над кольцом */
-  float br = sinf(now / (g_acAvatarState == AC_AV_SLEEP ? 1150.0f : 640.0f)) * 0.016f; /* дыхание */
+  float pvx = S * 0.5f, pvy = S * ac_avatar_feet();
+  /* дыхание; у кошко-девочки оно своё, в позе скелета */
+  float br = g_acAvatarSkin == AC_SKIN_GIRL ? 0.0f : sinf(now / (g_acAvatarState == AC_AV_SLEEP ? 1150.0f : 640.0f)) * 0.016f;
   sy *= 1.0f + br;
   sx *= 1.0f - br * 0.6f;
   if (!g_acHeld) ang += 0.024f * sinf(now / 1750.0f) + g_acAvatarLookX * 0.04f; /* покачивание, тянется к курсору */
@@ -656,12 +675,18 @@ static int ac_cat_face(DWORD now) {
   return AC_CAT_IDLE;
 }
 
+#include "ai_avatar_girl.c" /* третий вид: кошко-девочка со скелетом */
+
 /* кадр в g_acAvatarFramePixels; alpha — прозрачность призыва и отзыва */
 static void ac_avatar_render(DWORD now, BYTE *alpha) {
   float zoom = ac_avatar_zoom(now, alpha);
   ac_avatar_frame(now);
   AcXf xf;
   ac_avatar_pose(now, zoom, &xf);
+  if (g_acAvatarSkin == AC_SKIN_GIRL) {
+    ac_girl_render(now, &xf);
+    return;
+  }
   if (g_acAvatarSkin == AC_SKIN_CAT) {
     int f = ac_cat_face(now) * AC_CAT_W;
     ac_avatar_sample(g_acCatPixels, AC_CAT_W * AC_CAT_N, AC_CAT_W, AC_CAT_H, AC_CAT_BOX, AC_CAT_TOP, f, 0, f, 0, &xf);
@@ -831,7 +856,11 @@ static void ac_bubble_update(void) {
   RECT ar;
   GetWindowRect(g_acAvatar, &ar);
   int headX = ar.left + (int)(S * AC_CAT_EYE_X), headTop = ar.top + (int)(S * AC_CAT_HEAD); /* кошка */
-  if (g_acAvatarSkin != AC_SKIN_CAT) {
+  if (g_acAvatarSkin == AC_SKIN_GIRL) {
+    ac_girl_head(&headX, &headTop);
+    headX += ar.left;
+    headTop += ar.top;
+  } else if (g_acAvatarSkin != AC_SKIN_CAT) {
     const short *f = kAcAvatarFace[g_acAvatarState][g_acAvatarFrame];
     float k = (float)S / AC_AVATAR_FRAME / 8.0f;
     float eyeD = sqrtf((float)(f[2] - f[0]) * (f[2] - f[0]) + (float)(f[3] - f[1]) * (f[3] - f[1])) * k;
@@ -1089,23 +1118,29 @@ static void ac_avatar_save_settings(void) {
   WritePrivateProfileStringW(L"Avatar", L"Bubbles", g_acAvatarBubbles ? L"1" : L"0", path);
   WritePrivateProfileStringW(L"Avatar", L"Windows", g_acAvatarWindows ? L"1" : L"0", path);
   WritePrivateProfileStringW(L"Avatar", L"Facts", g_acFacts ? L"1" : L"0", path);
-  WritePrivateProfileStringW(L"Avatar", L"Skin", g_acAvatarSkin == AC_SKIN_CAT ? L"cat" : L"robot", path);
+  WritePrivateProfileStringW(L"Avatar", L"Skin", kAcSkinKey[g_acAvatarSkin], path);
 }
 
-/* «Вид: Робот / Кошка» — атлас прежнего вида освобождается, новый грузится при отрисовке */
+/* «Вид: Робот / Кошка / Кошко-девочка» — атласы прежних видов освобождаются, новый грузится при отрисовке */
 static void ac_avatar_set_skin(int skin) {
-  g_acAvatarSkin = skin == AC_SKIN_CAT ? AC_SKIN_CAT : AC_SKIN_ROBOT;
-  if (g_acAvatarSkin == AC_SKIN_CAT && g_acAvatarAtlas) {
+  g_acAvatarSkin = skin >= 0 && skin < AC_SKIN_N ? skin : AC_SKIN_ROBOT;
+  if (g_acAvatarSkin != AC_SKIN_ROBOT && g_acAvatarAtlas) {
     DeleteObject(g_acAvatarAtlas);
     g_acAvatarAtlas = NULL;
     g_acAvatarPixels = NULL;
   }
-  if (g_acAvatarSkin == AC_SKIN_ROBOT && g_acCatAtlas) {
+  if (g_acAvatarSkin != AC_SKIN_CAT && g_acCatAtlas) {
     DeleteObject(g_acCatAtlas);
     g_acCatAtlas = NULL;
     g_acCatPixels = NULL;
   }
+  if (g_acAvatarSkin != AC_SKIN_GIRL && g_acGirlAtlas) {
+    DeleteObject(g_acGirlAtlas);
+    g_acGirlAtlas = NULL;
+    g_acGirlPixels = NULL;
+  }
   g_acHopAt = GetTickCount() | 1; /* переоделся — подпрыгнул */
+  if (g_acAvatarSkin == AC_SKIN_GIRL) ac_girl_shot(AGA_WAVE);
   ac_avatar_present();
   ac_avatar_save_settings();
 }
@@ -1257,7 +1292,7 @@ static void ac_menu_line(BYTE *pix, int W, int H, HDC dc, RECT row, wchar_t icon
   SelectObject(dc, g_acMenuFont);
   ac_text(pix, W, H, dc, label, -1, lr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS, ink);
   if (note) {
-    RECT nr = {row.right - ac_mpx(110), row.top, row.right - ac_mpx(12), row.top + height};
+    RECT nr = {row.right - ac_mpx(150), row.top, row.right - ac_mpx(12), row.top + height};
     SelectObject(dc, g_acMenuSmall);
     ac_text(pix, W, H, dc, note, -1, nr, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX, COL_MUTED);
   }
@@ -1349,8 +1384,9 @@ static void ac_menu_render(void) {
   ac_paint_stroke(pix, W, H, fill, 2, (float)ac_mpx(2), cyan, cyan, (float)ac_mpx(2), 1.0f);
   ac_paint_stroke(pix, W, H, knob, 1, (float)ac_mpx(7), RGB(255, 255, 255), cyan,
                   (float)ac_mpx(g_acMenuDrag ? 5 : 3), 1.0f);
-  ac_menu_line(pix, W, H, dc, g_acMenuRow[ACM_SKIN], 0xE77B, L"Вид", g_acAvatarSkin == AC_SKIN_CAT ? L"Кошка ›" : L"Робот ›",
-               ink, cyan, lineH);
+  wchar_t skin[40];
+  swprintf(skin, 40, L"%ls ›", kAcSkinName[g_acAvatarSkin]);
+  ac_menu_line(pix, W, H, dc, g_acMenuRow[ACM_SKIN], 0xE77B, L"Вид", skin, ink, cyan, lineH);
   ac_menu_line(pix, W, H, dc, g_acMenuRow[ACM_BUBBLES], 0xE8F2, L"Мысли ИИ рядом", NULL, ink, cyan, lineH);
   ac_menu_switch(pix, W, H, g_acMenuRow[ACM_BUBBLES], g_acAvatarBubbles);
   ac_menu_line(pix, W, H, dc, g_acMenuRow[ACM_FACTS], 0xE82F, L"Факты и анекдоты", NULL, ink, cyan, lineH);
@@ -1398,7 +1434,7 @@ static void ac_menu_activate(int i) {
   switch (i) {
   case ACM_CHAT: ac_menu_close(); aichat_show(); break;
   case ACM_SKIN:
-    ac_avatar_set_skin(g_acAvatarSkin == AC_SKIN_CAT ? AC_SKIN_ROBOT : AC_SKIN_CAT);
+    ac_avatar_set_skin((g_acAvatarSkin + 1) % AC_SKIN_N);
     ac_menu_render();
     break;
   case ACM_BUBBLES:
@@ -1488,6 +1524,11 @@ static LRESULT CALLBACK AcMenuProc(HWND h, UINT msg, WPARAM wParam, LPARAM lPara
         if (ac_menu_pick(i)) break;
       }
       g_acMenuHot = i;
+      ac_menu_render();
+      return 0;
+    }
+    if ((k == VK_LEFT || k == VK_RIGHT) && g_acMenuHot == ACM_SKIN) {
+      ac_avatar_set_skin((g_acAvatarSkin + (k == VK_RIGHT ? 1 : AC_SKIN_N - 1)) % AC_SKIN_N);
       ac_menu_render();
       return 0;
     }
@@ -1588,6 +1629,7 @@ static void ac_avatar_poke_ex(BOOL say) {
   DWORD now = GetTickCount();
   g_acAvatarJoyUntil = (now + 1600) | 1; /* 0 — «не радуется» */
   g_acHopAt = now | 1;
+  if (g_acAvatarSkin == AC_SKIN_GIRL) ac_girl_shot(AGA_TAP);
   if (ac_avatar_random() % 3 == 0) ac_emo((ac_avatar_random() & 1) ? AC_EMO_LOVE : AC_EMO_WINK, 1300);
   if (g_acAvatarState == AC_AV_IDLE || g_acAvatarState == AC_AV_SLEEP) {
     ac_avatar_set(AC_AV_IDLE);
@@ -1595,7 +1637,7 @@ static void ac_avatar_poke_ex(BOOL say) {
     g_acAvatarFrame = 0;
     g_acAvatarStateAt = now;
     g_acAvatarAmbient = TRUE;
-    g_acAvatarTransientUntil = now + (DWORD)AC_AVATAR_COLS * kAcAvatarFrameMs[AC_AV_WAVE];
+    g_acAvatarTransientUntil = now + ac_state_ms(AC_AV_WAVE);
   }
   if (!g_acAvatarBusy && say)
     ac_avatar_bubble(kPhrases[ac_avatar_random() % (sizeof(kPhrases) / sizeof(kPhrases[0]))], FALSE, 2600);
@@ -1832,7 +1874,9 @@ static void ac_avatar_show(void) {
     g_acFacts = GetPrivateProfileIntW(L"Avatar", L"Facts", 0, path) != 0;
     g_acFactNext = GetTickCount() + AC_FACT_EVERY;
     GetPrivateProfileStringW(L"Avatar", L"Skin", L"robot", value, 32, path);
-    g_acAvatarSkin = !_wcsicmp(value, L"cat") ? AC_SKIN_CAT : AC_SKIN_ROBOT;
+    g_acAvatarSkin = AC_SKIN_ROBOT;
+    for (int i = 0; i < AC_SKIN_N; i++)
+      if (!_wcsicmp(value, kAcSkinKey[i])) g_acAvatarSkin = i;
   }
   /* сохранённое место — если оно на каком-нибудь мониторе */
   RECT saved = {g_acAvatarX, g_acAvatarY, g_acAvatarX + g_acAvatarSize, g_acAvatarY + g_acAvatarSize};
@@ -1870,16 +1914,27 @@ static void ac_avatar_startup(void) {
 
 #ifdef SET_TEST
 /* проверочная сборка: --avatarshot выход.bmp — кадры помощника полосой на светлом фоне, без окон:
-   робот, затем кошка в покое, говорит, рада, удивлена, ошибка, смущена, злится, машет, в прыжке и на курсоре */
+   робот, затем кошка в покое, говорит, рада, удивлена, ошибка, смущена, злится, машет, в прыжке и на курсоре,
+   затем кошко-девочка: покой, говорит, думает, читает, машет, радость, огорчение, сон, слушает,
+   потягивается, гладят, касание, на курсоре */
 static void ac_avatar_shot(const wchar_t *out) {
   CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
-  /* вид, состояние, эмоция; 1 — в прыжке, 2 — держат мышью */
-  static const int kShot[][4] = {{AC_SKIN_ROBOT, AC_AV_IDLE, AC_EMO_NONE, 0},    {AC_SKIN_CAT, AC_AV_IDLE, AC_EMO_NONE, 0},
-                                 {AC_SKIN_CAT, AC_AV_TALKING, AC_EMO_NONE, 0},   {AC_SKIN_CAT, AC_AV_SUCCESS, AC_EMO_NONE, 0},
-                                 {AC_SKIN_CAT, AC_AV_IDLE, AC_EMO_SURPRISED, 0}, {AC_SKIN_CAT, AC_AV_ERROR, AC_EMO_NONE, 0},
-                                 {AC_SKIN_CAT, AC_AV_IDLE, AC_EMO_SHY, 0},       {AC_SKIN_CAT, AC_AV_IDLE, AC_EMO_ANGRY, 0},
-                                 {AC_SKIN_CAT, AC_AV_WAVE, AC_EMO_NONE, 0},      {AC_SKIN_CAT, AC_AV_IDLE, AC_EMO_NONE, 1},
-                                 {AC_SKIN_CAT, AC_AV_IDLE, AC_EMO_NONE, 2}};
+  /* вид, состояние, эмоция; 1 — в прыжке, 2 — держат мышью; мс от начала состояния (0 — 400);
+     разовое действие кошко-девочки (−1 — нет) */
+  static const int kShot[][6] = {
+      {AC_SKIN_ROBOT, AC_AV_IDLE, AC_EMO_NONE, 0, 0, -1},        {AC_SKIN_CAT, AC_AV_IDLE, AC_EMO_NONE, 0, 0, -1},
+      {AC_SKIN_CAT, AC_AV_TALKING, AC_EMO_NONE, 0, 0, -1},       {AC_SKIN_CAT, AC_AV_SUCCESS, AC_EMO_NONE, 0, 0, -1},
+      {AC_SKIN_CAT, AC_AV_IDLE, AC_EMO_SURPRISED, 0, 0, -1},     {AC_SKIN_CAT, AC_AV_ERROR, AC_EMO_NONE, 0, 0, -1},
+      {AC_SKIN_CAT, AC_AV_IDLE, AC_EMO_SHY, 0, 0, -1},           {AC_SKIN_CAT, AC_AV_IDLE, AC_EMO_ANGRY, 0, 0, -1},
+      {AC_SKIN_CAT, AC_AV_WAVE, AC_EMO_NONE, 0, 0, -1},          {AC_SKIN_CAT, AC_AV_IDLE, AC_EMO_NONE, 1, 0, -1},
+      {AC_SKIN_CAT, AC_AV_IDLE, AC_EMO_NONE, 2, 0, -1},
+      {AC_SKIN_GIRL, AC_AV_IDLE, AC_EMO_NONE, 0, 0, -1},         {AC_SKIN_GIRL, AC_AV_TALKING, AC_EMO_NONE, 0, 1100, -1},
+      {AC_SKIN_GIRL, AC_AV_THINKING, AC_EMO_NONE, 0, 1200, -1},  {AC_SKIN_GIRL, AC_AV_FILES, AC_EMO_NONE, 0, 1200, -1},
+      {AC_SKIN_GIRL, AC_AV_WAVE, AC_EMO_NONE, 0, 1300, -1},      {AC_SKIN_GIRL, AC_AV_SUCCESS, AC_EMO_NONE, 0, 850, -1},
+      {AC_SKIN_GIRL, AC_AV_ERROR, AC_EMO_NONE, 0, 1400, -1},     {AC_SKIN_GIRL, AC_AV_SLEEP, AC_EMO_NONE, 0, 1000, -1},
+      {AC_SKIN_GIRL, AC_AV_LISTENING, AC_EMO_NONE, 0, 1000, -1}, {AC_SKIN_GIRL, AC_AV_IDLE, AC_EMO_NONE, 0, 1300, AGA_WAKE},
+      {AC_SKIN_GIRL, AC_AV_IDLE, AC_EMO_NONE, 0, 1300, AGA_PET}, {AC_SKIN_GIRL, AC_AV_IDLE, AC_EMO_NONE, 0, 450, AGA_TAP},
+      {AC_SKIN_GIRL, AC_AV_IDLE, AC_EMO_NONE, 2, 0, -1}};
   int n = (int)(sizeof(kShot) / sizeof(kShot[0])), S = g_acAvatarSize = 240, W = S * n, stride = (W * 3 + 3) & ~3;
   BITMAPINFO info;
   memset(&info, 0, sizeof(info));
@@ -1897,7 +1952,10 @@ static void ac_avatar_shot(const wchar_t *out) {
     g_acAvatarSkin = kShot[i][0];
     if (!ac_avatar_load()) ExitProcess(2);
     g_acAvatarState = kShot[i][1];
-    g_acAvatarStateAt = now - 400;
+    DWORD ms = kShot[i][4] ? (DWORD)kShot[i][4] : 400;
+    g_acAvatarStateAt = now - ms;
+    g_agShot = kShot[i][5];
+    g_agShotAt = now - ms;
     g_acEmo = kShot[i][2];
     g_acEmoUntil = g_acEmo ? now + 10000 : 0;
     g_acHopAt = kShot[i][3] == 1 ? (now - 210) | 1 : 0; /* верх прыжка */
@@ -1908,6 +1966,10 @@ static void ac_avatar_shot(const wchar_t *out) {
     g_acSwing = g_acHeld ? 0.35f : 0.0f;
     BYTE alpha;
     ac_avatar_render(now, &alpha);
+    if (g_agBlendAt) { /* без смешивания с прежним кадром полосы */
+      g_agBlendAt = 0;
+      ac_avatar_render(now, &alpha);
+    }
     for (int y = 0; y < S; y++)
       for (int x = 0; x < S; x++) {
         const BYTE *s = g_acAvatarFramePixels + ((size_t)y * S + x) * 4;
@@ -1946,6 +2008,7 @@ static void ac_avatar_destroy(void) {
   if (g_acAvatarFrameBitmap) { DeleteObject(g_acAvatarFrameBitmap); g_acAvatarFrameBitmap = NULL; }
   if (g_acAvatarAtlas) { DeleteObject(g_acAvatarAtlas); g_acAvatarAtlas = NULL; g_acAvatarPixels = NULL; }
   if (g_acCatAtlas) { DeleteObject(g_acCatAtlas); g_acCatAtlas = NULL; g_acCatPixels = NULL; }
+  if (g_acGirlAtlas) { DeleteObject(g_acGirlAtlas); g_acGirlAtlas = NULL; g_acGirlPixels = NULL; }
 }
 
 static DWORD ac_avatar_random(void) {
@@ -1954,12 +2017,18 @@ static DWORD ac_avatar_random(void) {
   return g_acAvatarRng >> 8;
 }
 
+/* сколько длится петля состояния у нынешнего вида */
+static DWORD ac_state_ms(int state) {
+  if (g_acAvatarSkin == AC_SKIN_GIRL) return ac_girl_state_ms(state);
+  return (DWORD)AC_AVATAR_COLS * kAcAvatarFrameMs[state];
+}
+
 static void ac_avatar_ambient(int state, DWORD now) {
   g_acAvatarState = state;
   g_acAvatarFrame = 0;
   g_acAvatarStateAt = now;
   g_acAvatarAmbient = TRUE;
-  g_acAvatarTransientUntil = now + (DWORD)AC_AVATAR_COLS * kAcAvatarFrameMs[state] * (state == AC_AV_THINKING ? 2 : 1); /* целые петли */
+  g_acAvatarTransientUntil = now + ac_state_ms(state) * (state == AC_AV_THINKING ? 2 : 1); /* целые петли */
 }
 
 static void ac_avatar_move(void) {
@@ -2015,12 +2084,11 @@ static HWND ac_window_below(int x, int y) {
   return ac_perch_ok(h) ? h : NULL;
 }
 
-#define AC_FEET 0.86f /* где у кадра «ноги» (кольцо), доля высоты окна */
 
 /* Окна: едет на своём окне, падает, если опоры нет, иногда перебирается
    на активное окно. Только при включённом «Садиться на окна». */
 static void ac_avatar_windows(DWORD now, RECT wr, BOOL idle) {
-  int S = g_acAvatarSize, feet = (int)(S * (g_acAvatarSkin == AC_SKIN_CAT ? AC_CAT_FEET : AC_FEET));
+  int S = g_acAvatarSize, feet = (int)(S * (g_acAvatarSkin == AC_SKIN_ROBOT ? AC_FEET : ac_avatar_feet()));
   if (g_acHeld) return;
   if (g_acPerch) {
     if (!ac_perch_ok(g_acPerch)) { g_acPerch = NULL; g_acFalling = TRUE; g_acFallV = 0.0f; ac_emo(AC_EMO_SURPRISED, 800); }
@@ -2107,6 +2175,7 @@ static void ac_avatar_tick(void) {
     if (g_acAvatarState == AC_AV_SLEEP) {
       ac_avatar_set(AC_AV_IDLE);
       ac_avatar_ambient(AC_AV_WAVE, now);
+      if (g_acAvatarSkin == AC_SKIN_GIRL) ac_girl_shot(AGA_WAKE); /* проснулась — потягивается */
       ac_avatar_bubble(L"Ой! Я не спал, я думал", FALSE, 2400);
     }
     g_acAvatarActiveAt = now;
@@ -2130,6 +2199,7 @@ static void ac_avatar_tick(void) {
   if (g_acHover && !g_acHoverShy && now - g_acHoverAt > 2600 && !g_acEmo) {
     g_acHoverShy = TRUE;
     ac_emo(AC_EMO_SHY, 1800);
+    if (g_acAvatarSkin == AC_SKIN_GIRL) ac_girl_shot(AGA_PET); /* «гладят» — жмурится, прижимает ушки */
   }
 
   /* раскачивание: держат — тянет за курсором и отстаёт, отпустили — успокаивается */
@@ -2156,9 +2226,10 @@ static void ac_avatar_tick(void) {
     g_acAvatarNextBlink = now + ((ac_avatar_random() % 5) ? 2300 + ac_avatar_random() % 4200 : 330);
   }
 
-  if (g_acAvatarState == AC_AV_SUCCESS && now - g_acAvatarStateAt > 1300) {
+  BOOL girl = g_acAvatarSkin == AC_SKIN_GIRL; /* у неё радость и огорчение длиннее */
+  if (g_acAvatarState == AC_AV_SUCCESS && now - g_acAvatarStateAt > (girl ? 2200u : 1300u)) {
     ac_avatar_set(AC_AV_IDLE);
-  } else if (g_acAvatarState == AC_AV_ERROR && now - g_acAvatarStateAt > 1800) {
+  } else if (g_acAvatarState == AC_AV_ERROR && now - g_acAvatarStateAt > (girl ? 2800u : 1800u)) {
     ac_avatar_set(AC_AV_IDLE);
     ac_emo(AC_EMO_SAD, 1600); /* после ошибки ещё погрустит */
   } else if (g_acAvatarState == AC_AV_TALKING && ac_due(now, g_acAvatarTalkUntil)) {

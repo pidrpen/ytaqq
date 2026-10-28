@@ -43,6 +43,13 @@ static BOOL WINAPI al_lastinput(PLASTINPUTINFO li) {
 #define SystemParametersInfoW(a, b, c, d) al_spi(a, b, c, d)
 #define SHGetFolderPathW(h, c, t, f, o) al_folder(h, c, t, f, o)
 #define GetLastInputInfo(li) al_lastinput(li)
+/* курсор стенда: на невидимом рабочем столе SetCursorPos не действует */
+static POINT g_alCursor = {5, 5};
+static BOOL WINAPI al_cursor(LPPOINT p) {
+  *p = g_alCursor;
+  return TRUE;
+}
+#define GetCursorPos(p) al_cursor(p)
 #define wWinMain cursorpad_wWinMain
 #include "cursorpad.c"
 #undef wWinMain
@@ -258,6 +265,73 @@ static void al_facts(void) {
   ac_bubble_hide(TRUE);
 }
 
+/* облики: перебор в меню по кругу, запись в ai_avatar.ini, кадр в окне, время кадра */
+static void al_skins(void) {
+  wchar_t ini[MAX_PATH], line[400], value[32];
+  _snwprintf(ini, MAX_PATH, L"%ls\\ai_avatar.ini", g_dataDir);
+  ac_avatar_menu(g_acAvatar);
+  al_pump(150);
+  int start = g_acAvatarSkin;
+  for (int k = 0; k < AC_SKIN_N; k++) {
+    ac_menu_activate(ACM_SKIN);
+    al_pump(120);
+    GetPrivateProfileStringW(L"Avatar", L"Skin", L"", value, 32, ini);
+    _snwprintf(line, 400, L"облик: «%ls», в ai_avatar.ini Skin=%ls", kAcSkinName[g_acAvatarSkin], value);
+    al_check(g_acAvatarSkin == (start + k + 1) % AC_SKIN_N && !wcscmp(value, kAcSkinKey[g_acAvatarSkin]), line);
+    if (g_acAvatarSkin == AC_SKIN_GIRL && g_acMenuPix)
+      al_png(L"menu-catgirl.png", g_acMenuPix, g_acMenuBmpW, g_acMenuBmpH, RGB(242, 242, 242));
+  }
+  ac_menu_close();
+  /* кошко-девочка в окне: машет после переодевания, потом покой; крупная и обычная */
+  ac_avatar_set_skin(AC_SKIN_GIRL);
+  al_check(g_agShot == AGA_WAVE, L"кошко-девочка: переоделась — машет");
+  al_pump(600);
+  ac_avatar_present();
+  if (g_acAvatarFramePixels) al_png(L"window-catgirl-wave.png", g_acAvatarFramePixels, g_acAvatarSize, g_acAvatarSize, RGB(242, 242, 242));
+  int sizes[2] = {AC_AVATAR_MAX, AC_AVATAR_DEFAULT_SIZE};
+  for (int k = 0; k < 2; k++) {
+    ac_avatar_apply_scale(sizes[k]);
+    g_agShot = -1;
+    al_pump(400);
+    LARGE_INTEGER f, t0, t1;
+    QueryPerformanceFrequency(&f);
+    QueryPerformanceCounter(&t0);
+    BYTE alpha;
+    for (int i = 0; i < 60; i++) ac_avatar_render(GetTickCount() + i * 33, &alpha);
+    QueryPerformanceCounter(&t1);
+    double ms = (t1.QuadPart - t0.QuadPart) * 1000.0 / f.QuadPart / 60.0;
+    _snwprintf(line, 400, L"кошко-девочка %d px: уровень атласа %d, кадр %.2f мс", sizes[k], g_acGirlLevel, ms);
+    al_check(ms < 12.0 && g_acGirlLevel == (k ? 1 : 0), line);
+    ac_avatar_present();
+    _snwprintf(line, 400, L"window-catgirl-%d.png", sizes[k]);
+    if (g_acAvatarFramePixels) al_png(line, g_acAvatarFramePixels, g_acAvatarSize, g_acAvatarSize, RGB(34, 36, 42));
+  }
+  /* щелчок — касание; разбудили — потягивается */
+  ac_avatar_poke_ex(FALSE);
+  al_check(g_agShot == AGA_TAP, L"кошко-девочка: щелчок — касание");
+  g_acAvatarState = AC_AV_SLEEP;
+  g_acAvatarActiveAt = GetTickCount();
+  {
+    RECT wr;
+    GetWindowRect(g_acAvatar, &wr);
+    g_alCursor.x = (wr.left + wr.right) / 2;
+    g_alCursor.y = wr.top + 10;
+  }
+  ac_avatar_tick();
+  al_check(g_agShot == AGA_WAKE && g_acAvatarState != AC_AV_SLEEP, L"кошко-девочка: курсор рядом — проснулась и потягивается");
+  g_alCursor.x = g_alCursor.y = 5;
+  /* пузырь над головой, а не сбоку */
+  ac_avatar_bubble(L"Привет! Я теперь кошко-девочка.", FALSE, 5000);
+  al_pump(100);
+  RECT br, ar;
+  GetWindowRect(g_acBubble, &br);
+  GetWindowRect(g_acAvatar, &ar);
+  _snwprintf(line, 400, L"кошко-девочка: пузырь %ld..%ld над головой окна %ld..%ld (низ пузыря %ld, верх окна %ld)", br.left, br.right,
+             ar.left, ar.right, br.bottom, ar.top);
+  al_check(br.bottom <= ar.top + g_acAvatarSize / 4 && br.left < (ar.left + ar.right) / 2 && br.right > (ar.left + ar.right) / 2, line);
+  ac_bubble_hide(TRUE);
+}
+
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
   (void)prev;
   (void)cmd;
@@ -304,7 +378,6 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
   wc.hbrBackground = CreateSolidBrush(COL_PAPER);
   wc.lpszClassName = L"CursorPadWindow";
   if (!RegisterClassExW(&wc)) return 1;
-  SetCursorPos(200, 200);
   HWND hwnd = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED, L"CursorPadWindow", L"CursorPad",
                               WS_POPUP | WS_CLIPCHILDREN, 320, 330, WND_W, WND_H, NULL, NULL, inst, NULL);
   if (!hwnd) return 1;
@@ -318,6 +391,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
   al_pump(900);
   al_check(ac_avatar_here(), L"помощник призван");
   al_facts();
+  al_skins();
 
   char out[96000];
   int k = WideCharToMultiByte(CP_UTF8, 0, g_alReport, -1, out, sizeof(out), NULL, NULL);

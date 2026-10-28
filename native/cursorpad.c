@@ -5442,6 +5442,10 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
       LocalFree(argv);
       return rc;
     }
+#ifdef SET_TEST /* кадры помощника полосой — без окон, поэтому до проверки «уже запущено»:
+                   иначе проверочная сборка будит уже работающий CursorPad */
+    if (argv && argc >= 3 && !wcscmp(argv[1], L"--avatarshot")) ac_avatar_shot(argv[2]);
+#endif
 #ifdef TESS_SELFTEST /* только проверочная сборка: пакет и чтение Tesseract без окна */
     if (argv && argc >= 6 && wcscmp(argv[1], L"--tess-selftest") == 0) {
       /* <папка данных> <общая папка> <картинка.bmp> <отчёт.txt> */
@@ -5579,7 +5583,6 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
     if (argv && argc >= 4 && !wcscmp(argv[1], L"--rename-by-stamp")) rs_test(argc, argv);
     if (argv && argc >= 4 && !wcscmp(argv[1], L"--fqread")) fq_test(argc, argv);
     if (argv && argc >= 4 && (!wcscmp(argv[1], L"--linktest") || !wcscmp(argv[1], L"--foldertest"))) flk_test(argc, argv);
-    if (argv && argc >= 3 && !wcscmp(argv[1], L"--avatarshot")) ac_avatar_shot(argv[2]);
     if (argv && argc >= 4 && !wcscmp(argv[1], L"--drawui")) dr_ui_test(argc, argv);
     if (argv && argc >= 4 && !wcscmp(argv[1], L"--techno")) dr_techno_test(argc, argv);
     if (argv && argc >= 4 && !wcscmp(argv[1], L"--tpchat")) ac_tp_test(argv[2], argv[3]);
