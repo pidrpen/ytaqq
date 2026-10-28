@@ -2778,7 +2778,7 @@ static void draw_pad_button(const DRAWITEMSTRUCT *dis) {
                  id == 4703 || /* и «Отправить» там же */
                  id == 4722 || id == 4725 || /* «Сохранить…» в «Что помнит ИИ» (ai_memory.c) */
                  id == 4842 ||               /* «Дальше» в окне «В Союз» (soyuz_ui.c) */
-                 id == 4882 ||               /* «В чат» в окне «Режимы» (norms_ui.c) */
+                 id == 4882 ||               /* «Применить» в окне «Режимы» (norms_ui.c) */
                  id == ID_XP_SAVE || id == ID_PK_SAVE; /* главное действие в подвале окон PLM */
   BOOL quiet = id == ID_CLOSE || id == ID_MIN || id == ID_PANEL_CLOSE || id == ID_PANEL_MIN;
   COLORREF fill, fg, bd;

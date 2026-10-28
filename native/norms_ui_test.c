@@ -221,6 +221,30 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
   nut_check(nm_na(nu_op(0)->to) && !g_nuBatch[0], L"«Сбросить правки» — как до правок");
   nut_shot(L"5-reset.png");
 
+  /* «Применить»: нормы в ответе беседы — на месте, без новых сообщений; правки — в вопрос беседы */
+  ac_push(0, L"Маршрут по чертежу вала");
+  ac_push(1, L"Маршрут обработки — черновик по правилам, проверяет технолог\n010 Токарная.\n015 Сверлильная."
+             L"\n\nНормы времени (ОМН; проверяет технолог):\n010 Токарная: Тпз 14 мин · Тшт ≥ 1 мин без машинного То"
+             L"\nРежимы: 010 не посчитаны; 015 не посчитаны — изменить · подробно\n\nПосле норм — своё.");
+  nut_type(0, L"L", L"120");
+  nut_type(0, L"S", L"0,3");
+  nut_type(1, L"l", L"12");
+  nut_type(1, L"партия", L"50");
+  int turns = g_acN;
+  SendMessageW(g_nuWnd, WM_COMMAND, MAKEWPARAM(ID_NU_CHAT, BN_CLICKED), 0);
+  const wchar_t *ans = g_acN ? g_acTurns[g_acN - 1].text : L"";
+  nut_check(g_acN == turns, L"«Применить» — без новых сообщений в ленте");
+  nut_check(wcsstr(ans, L"Маршрут обработки — черновик") == ans && wcsstr(ans, L"\n015 Сверлильная.\n\nНормы времени (ОМН") &&
+                wcsstr(ans, L"\n\nПосле норм — своё.") && !wcsstr(ans, L"не посчитаны"),
+            L"нормы в ответе заменены на месте, маршрут и хвост целы");
+  nut_check(wcsstr(ans, L"\nРежимы: 010 V ") && wcsstr(ans, L"015 V ") && wcsstr(ans, L" — изменить · подробно"),
+            L"в ответе — строка режимов обеих операций");
+  nut_check(wcsstr(g_nmLast->ask, L"010: L 120") && wcsstr(g_nmLast->ask, L"015: глубина 12") && !g_nuBatch[0],
+            L"правки — в вопросе беседы, в окне сброшены");
+  nut_check(!nm_na(nu_op(0)->to) && nut_near(nut_v(1, L"партия"), 50), L"окно после «Применить» считает то же");
+  _snwprintf(txt, 400, L"   ответ: %ls\r\n", wcsstr(ans, L"Режимы:") ? wcsstr(ans, L"Режимы:") : L"?");
+  wcscat(g_nutReport, txt);
+
   DestroyWindow(g_nuWnd);
   nut_pump();
   nut_check(!g_nuWnd, L"окно закрыто");

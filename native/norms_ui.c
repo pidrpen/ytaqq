@@ -1,16 +1,17 @@
 /* ---- окно «Режимы»: параметры норм по операциям маршрута, правка с пересчётом (с 2026.10.28) ----
 
-   Под маршрутом в чате — «Режимы». Слева операции маршрута с Тшт, справа параметры
+   Под маршрутом в чате — «Режимы», под нормами в ответе — «изменить» в строке «Режимы: …». Слева операции маршрута с Тшт, справа параметры
    выбранной: значение (правится) и откуда оно — с чертежа, по таблице, расчёт, по
    умолчанию, задано. Под ними То, Тв, Тшт, Тпз, Тшк и чего не хватило для То. Правка —
    пересчёт через полсекунды или по Enter: nm_route с вопросом «010: L 120, подача 0,3»
-   после прежнего вопроса беседы; стёртое поле — снова как считает CursorPad. «В чат» —
-   правки беседе одной строкой «норма: …», там их видно и дальше досчитывается.
+   после прежнего вопроса беседы; стёртое поле — снова как считает CursorPad. «Применить» —
+   нормы в ответе беседы обновляются на месте (без новых сообщений), правки запоминает вопрос
+   беседы — «норма: …» в чате дальше считает с ними.
    Расчёт и формулы — norms.c; таблицы читаются один раз при открытии окна. */
 
 #define ID_NU_LIST 4880
 #define ID_NU_RESET 4881
-#define ID_NU_CHAT 4882 /* главная кнопка подвала — синяя (cursorpad.c, draw_pad_button) */
+#define ID_NU_CHAT 4882 /* «Применить» — главная кнопка подвала, синяя (cursorpad.c, draw_pad_button) */
 #define ID_NU_EDIT 4890 /* + строка */
 #define TIMER_NU_CALC 4885
 #define NU_ROWS 14
@@ -314,15 +315,67 @@ static void nu_paint(HWND hwnd, HDC hdc) {
     _snwprintf(t, 600, L"Для машинного То нужно: %s", o->toNeed);
   } else {
     SetTextColor(hdc, COL_MUTED);
-    lstrcpynW(t, L"Сотрите значение — CursorPad посчитает его сам. Разбор каждой цифры — «норма подробно» в чате.", 600);
+    lstrcpynW(t, L"Сотрите значение — CursorPad посчитает его сам. «Применить» — нормы в ответе чата обновятся на месте.", 600);
   }
   t[599] = 0;
   RECT h = {x0, y, right, foot - NUS(12)};
   DrawTextW(hdc, t, -1, &h, DT_LEFT | DT_WORDBREAK | DT_END_ELLIPSIS | DT_NOPREFIX | DT_EDITCONTROL);
 }
 
-/* «норма: …» с правками окна — в чат: там считается то же и запоминается для следующих вопросов */
+/* нормы в последнем ответе беседы — на месте: от «Нормы времени (ОМН…» до строки «Режимы: …»
+   включительно встаёт короткий текст норм с правками окна; новых сообщений в ленте нет. Правки —
+   в вопрос беседы (g_nmLast), чтобы и «норма: …» дальше считала с ними. FALSE — ответа с нормами нет */
+static BOOL nu_apply(void) {
+  if (!g_nuRes || !g_nmLast || !g_nuBaseOk) return FALSE;
+  int at = -1;
+  wchar_t *p = NULL;
+  for (int i = g_acN - 1; i >= 0 && at < 0; i--)
+    if (g_acTurns[i].assistant && g_acTurns[i].text && (p = wcsstr(g_acTurns[i].text, L"\n\nНормы времени (ОМН")))
+      at = i;
+  if (at < 0) return FALSE;
+  wchar_t *old = g_acTurns[at].text, *end = old + wcslen(old), *m = wcsstr(p, L"\n" NM_MODES_HEAD);
+  if (m) {
+    wchar_t *nl = wcschr(m + 1, L'\n');
+    if (nl) end = nl;
+  }
+  wchar_t *nm = (wchar_t *)malloc(sizeof(wchar_t) * NM_OUT);
+  if (!nm) return FALSE;
+  nm[0] = 0;
+  nm_text_brief(&g_nuBase, g_nuRes, g_nuDir, nm, NM_OUT);
+  size_t a = (size_t)(p - old), n = wcslen(nm), z = wcslen(end);
+  wchar_t *t = (wchar_t *)malloc((a + n + z + 1) * sizeof(wchar_t));
+  if (!t) {
+    free(nm);
+    return FALSE;
+  }
+  memcpy(t, old, a * sizeof(wchar_t));
+  memcpy(t + a, nm, n * sizeof(wchar_t));
+  memcpy(t + a + n, end, (z + 1) * sizeof(wchar_t));
+  free(nm);
+  free(old);
+  g_acTurns[at].text = t;
+  /* правки — в вопрос беседы; длинно — старое отрезаем, как nm_follow_text */
+  wchar_t ov[1500], ask[2200];
+  nu_overrides(ov, 1500, FALSE);
+  if (ov[0]) {
+    _snwprintf(ask, 2200, L"%s\n%s", g_nmLast->ask, ov);
+    ask[2199] = 0;
+    size_t len = wcslen(ask);
+    lstrcpynW(g_nmLast->ask, ask + (len > 599 ? len - 599 : 0), 600);
+  }
+  nu_reset_all();
+  g_acRendered = 0;
+  if (g_acWnd) ac_redraw();
+  ac_hist_save();
+  return TRUE;
+}
+
+/* «Применить»: нормы в ответе беседы — на месте; ответа с нормами нет — «норма: …» в чат или в буфер */
 static void nu_to_chat(void) {
+  if (nu_apply()) {
+    nu_calc();
+    return;
+  }
   wchar_t ov[1500], q[1600];
   nu_overrides(ov, 1500, TRUE);
   _snwprintf(q, 1600, L"норма%s%s", ov[0] ? L": " : L"", ov);
@@ -497,7 +550,7 @@ static void nu_open(void) {
   mk_btn(g_nuWnd, L"×", ID_PANEL_CLOSE);
   tool_frame_init(g_nuWnd);
   mk_btn(g_nuWnd, L"Сбросить правки", ID_NU_RESET);
-  mk_btn(g_nuWnd, L"В чат", ID_NU_CHAT);
+  mk_btn(g_nuWnd, L"Применить", ID_NU_CHAT);
   g_nuList = CreateWindowExW(0, L"LISTBOX", L"", WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT,
                              0, 0, 10, 10, g_nuWnd, (HMENU)(INT_PTR)ID_NU_LIST, g_inst, NULL);
   if (g_fontBody) SendMessageW(g_nuList, WM_SETFONT, (WPARAM)g_fontBody, FALSE);

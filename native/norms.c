@@ -2287,6 +2287,43 @@ static int nm_want_full(const wchar_t *ask) {
   return yes;
 }
 
+/* «Режимы: 010 V 125 · S 0,45 · t 2,5 · i 1; 015 V 20 · S 0,22 — изменить · подробно» — одна строка
+   под нормами: режимы, по которым То; слова «изменить» (окно «Режимы») и «подробно» (разбор) чат
+   делает ссылками (ai_chat.c). Нет станочных операций — строки нет */
+#define NM_MODES_HEAD L"Режимы: "
+#define NM_MODES_TAIL L" — изменить · подробно"
+static void nm_modes_line(const NmResult *res, wchar_t *out, int cap) {
+  wchar_t line[400];
+  line[0] = 0;
+  for (int i = 0; i < res->n; i++) {
+    const NmOp *o = &res->op[i];
+    if (o->kind == NMK_CUT) continue;
+    static const wchar_t *const turn[] = {L"V", L"S", L"t", L"i"}, *const mill[] = {L"V", L"Sz", L"t", L"i"};
+    const wchar_t *const *ps = o->kind == NMK_MILL ? mill : turn;
+    int np = o->kind == NMK_DRILL ? 2 : 4;
+    wchar_t num[8];
+    _snwprintf(num, 8, L"%03d", (o->idx + 1) * 5);
+    num[7] = 0;
+    if (line[0]) tn_cat(line, 400, L"; ");
+    tn_cat(line, 400, num);
+    int any = 0;
+    for (int k = 0; k < np; k++) {
+      double v = nm_v(&o->c, ps[k]);
+      if (nm_na(v)) continue;
+      tn_cat(line, 400, any ? L" · " : L" ");
+      tn_cat(line, 400, ps[k]);
+      tn_cat(line, 400, L" ");
+      tn_catnum(line, 400, !wcscmp(ps[k], L"V") ? (double)(long)(v + 0.5) : v);
+      any = 1;
+    }
+    if (!any) tn_cat(line, 400, L" не посчитаны");
+  }
+  if (!line[0]) return;
+  tn_cat(out, cap, L"\n" NM_MODES_HEAD);
+  tn_cat(out, cap, line);
+  tn_cat(out, cap, NM_MODES_TAIL);
+}
+
 /* коротко к маршруту: строка на операцию; разбор каждой цифры и источники — nm_text */
 static void nm_text_brief(const NmBase *b, const NmResult *res, const wchar_t *dir, wchar_t *out, int cap) {
   if (!b->n || !res->n) { /* таблиц нет или нормировать нечего — как в полном тексте, он короткий */
@@ -2294,7 +2331,7 @@ static void nm_text_brief(const NmBase *b, const NmResult *res, const wchar_t *d
     return;
   }
   tn_cat(out, cap, L"\n\nНормы времени (ОМН; проверяет технолог):");
-  int noTo = 0;
+
   for (int i = 0; i < res->n; i++) {
     const NmOp *o = &res->op[i];
     wchar_t num[8];
@@ -2319,7 +2356,7 @@ static void nm_text_brief(const NmBase *b, const NmResult *res, const wchar_t *d
       nm_catmin(out, cap, o->tsht);
       if (!nm_na(o->tshk)) tn_cat(out, cap, L" · Тшк "), nm_catmin(out, cap, o->tshk);
     } else if (nm_na(o->to)) {
-      noTo = 1;
+
       if (o->tsht > 0) tn_cat(out, cap, L"≥ "), nm_catmin(out, cap, o->tsht), tn_cat(out, cap, L" без машинного То");
       else tn_cat(out, cap, L"— нет машинного То");
       if (o->toNeed[0]) tn_cat(out, cap, L" (нужно: "), tn_cat(out, cap, o->toNeed), tn_cat(out, cap, L")");
@@ -2328,23 +2365,10 @@ static void nm_text_brief(const NmBase *b, const NmResult *res, const wchar_t *d
       nm_catmin(out, cap, o->tsht);
       tn_cat(out, cap, L" (неполная)");
     }
-    /* режим, по которому То: подача и скорость — заданы, по таблице или по формуле */
-    double S = nm_v(&o->c, o->kind == NMK_MILL ? L"Sz" : L"S"), V = nm_v(&o->c, L"V");
-    if (!nm_na(o->to) && o->kind != NMK_CUT && !nm_na(S) && !nm_na(V)) {
-      tn_cat(out, cap, o->kind == NMK_MILL ? L" (Sz " : L" (S ");
-      tn_catnum(out, cap, S);
-      tn_cat(out, cap, L", V ");
-      tn_catnum(out, cap, (double)(long)(V + 0.5));
-      tn_cat(out, cap, L" м/мин)");
-    }
   }
   if (res->skip[0]) tn_cat(out, cap, L"\nПока не нормируются: "), tn_cat(out, cap, res->skip);
   if (b->err[0]) tn_cat(out, cap, L"\nНе прочитаны таблицы: "), tn_cat(out, cap, b->err);
-  if (noTo) {
-    tn_cat(out, cap, L"\nРежимы резания считаются по формулам, своё — по операции: «норма: 010: L 120, подача 0,3, "
-                     L"скорость 120» или «норма: То 2,5»; общее для всех — до номеров: «норма: партия 50, 010: L 120».");
-  }
-  tn_cat(out, cap, L"\nРазбор каждой цифры и источники — «норма подробно».");
+  nm_modes_line(res, out, cap);
 }
 
 /* ---- Windows: папка нормативов (только в сборке CursorPad, где подключён windows.h) ---- */
