@@ -450,7 +450,7 @@ static void rt_route(SQLHDBC dbc, const RtObj *o, CardRow *rows, RtJob *j, wchar
              L"ORDER BY CASE WHEN nkw.Value=N'Area' THEN 0 ELSE 1 END, "
              L"CASE WHEN a.OwnerId=ch.InfoObjectId THEN 0 ELSE 1 END) AS ws "
              /* порядок — по номеру операции (строка «005»), как в ТП: OP_NUM_APPLY */
-             OP_NUM_APPLY(L"ch.InfoObjectId")
+             OP_NUM_APPLY(L"ch.InfoObjectId", L"op.L", L"ch.Name")
              L"WHERE ch.ParentId=%ld AND ch.Erased=0 ORDER BY " OP_NUM_ORDER L", ch.InfoObjectId",
              parent);
   sql[4599] = 0;
@@ -1276,6 +1276,21 @@ static BOOL rt_is_doc(const wchar_t *des, const wchar_t *objName) {
    М8-6gx20 ГОСТ 7798-70», «Круг 20 ГОСТ 2590-2006»), вид — раздел строки
    состава. ТП, заготовку и состав у них не ищем. Место в дереве (уровень,
    кол-во, «входит в») заполняет вызывающий. */
+/* фигурные скобки из названий PLM (у стандартных изделий имя бывает «{…}») —
+   долой, с 2026.10.28; двойные пробелы после них — в один */
+static void rt_unbrace(wchar_t *s) {
+  if (!wcschr(s, L'{') && !wcschr(s, L'}')) return;
+  int k = 0;
+  for (int i = 0; s[i]; i++) {
+    wchar_t c = s[i];
+    if (c == L'{' || c == L'}') continue;
+    if (c == L' ' && (k == 0 || s[k - 1] == L' ')) continue;
+    s[k++] = c;
+  }
+  while (k && s[k - 1] == L' ') k--;
+  s[k] = 0;
+}
+
 static void rt_light_row(const RtObj *o, const wchar_t *elSection, RtRow *r) {
   memset(r, 0, sizeof(*r));
   r->light = TRUE;
@@ -1285,6 +1300,8 @@ static void rt_light_row(const RtObj *o, const wchar_t *elSection, RtRow *r) {
   BOOL ownDes = o->desAttr && rt_looks_des(o->des);
   if (ownDes) lstrcpynW(r->f[RC_DES], o->des, 200);
   lstrcpynW(r->f[RC_NAME], ownDes || !o->objName[0] ? o->name : o->objName, 200);
+  rt_unbrace(r->f[RC_DES]);
+  rt_unbrace(r->f[RC_NAME]);
   const wchar_t *kind = elSection && elSection[0] ? elSection : (o->section[0] ? o->section : L"Прочие изделия");
   lstrcpynW(r->f[RC_KIND], kind, 200);
   double v;
@@ -1519,14 +1536,20 @@ static void rt_note_add(wchar_t *note, const wchar_t *nt) {
   note[199] = 0;
 }
 
-/* пометки строки состава (а не позиции): кол-во не найдено, не в штуках, КД */
-static void rt_src_notes(int level, BOOL qtyFound, const RtEl *src, wchar_t *note) {
+/* пометки строки состава (а не позиции): кол-во не найдено, КД. Единица
+   количества не «шт» (кг, м — материалы и прочее в составе) — в столбец «Ед. Изм.»,
+   если он свободен (с 2026.10.28; прежде — в примечание «кол-во в кг») */
+static void rt_src_notes(int level, BOOL qtyFound, const RtEl *src, RtRow *r) {
+  wchar_t *note = r->f[RC_NOTE];
   if (level && !qtyFound) rt_note_add(note, L"кол-во не найдено");
   if (src && src->unit[0] && _wcsnicmp(src->unit, L"шт", 2) && iswalpha(src->unit[0])) {
-    wchar_t u[60];
-    _snwprintf(u, 60, L"кол-во в %s", src->unit);
-    u[59] = 0;
-    rt_note_add(note, u);
+    if (!r->f[RC_UNIT][0]) lstrcpynW(r->f[RC_UNIT], src->unit, 200);
+    else if (_wcsicmp(r->f[RC_UNIT], src->unit)) {
+      wchar_t u[60];
+      _snwprintf(u, 60, L"кол-во в %s", src->unit);
+      u[59] = 0;
+      rt_note_add(note, u);
+    }
   }
   if (src && src->kd[0]) rt_note_add(note, src->kd);
 }
@@ -1553,7 +1576,7 @@ static void rt_memo_copy(RtJob *j, const RtMemo *m, int level, const wchar_t *pa
       lstrcpynW(d->f[RC_PARENT], parentDes, 200);
       rt_fmt(d->qty, 3, d->f[RC_QTY], 200);
       lstrcpynW(d->f[RC_NOTE], m->note, 200);
-      rt_src_notes(level, qtyFound, src, d->f[RC_NOTE]);
+      rt_src_notes(level, qtyFound, src, d);
       rt_log(j, L"%s\r\n", d->f[RC_QTY]);
     } else {
       d->qtyTot *= factor;
@@ -1616,7 +1639,7 @@ static void rt_walk(SQLHDBC dbc, long id, int level, const wchar_t *parentDes, d
     lstrcpynW(r->f[RC_PARENT], parentDes, 200);
     rt_fmt(r->qty, 3, r->f[RC_QTY], 200);
     rt_fmt(r->qtyTot, 3, r->f[RC_QTYTOT], 200);
-    rt_src_notes(level, qtyFound, src, r->f[RC_NOTE]);
+    rt_src_notes(level, qtyFound, src, r);
     rt_log(j, L"%*s%s «%s» (%ld), кол-во %s — %s: строкой, без ТП и заготовки\r\n", level * 2, L"", r->f[RC_DES],
            r->f[RC_NAME], id, r->f[RC_QTY], r->f[RC_KIND]);
     if (j->notify)
@@ -1635,6 +1658,8 @@ static void rt_walk(SQLHDBC dbc, long id, int level, const wchar_t *parentDes, d
   r->qtyTot = qty * parentTot;
   lstrcpynW(r->f[RC_DES], o.des, 200);
   lstrcpynW(r->f[RC_NAME], o.name, 200);
+  rt_unbrace(r->f[RC_DES]);
+  rt_unbrace(r->f[RC_NAME]);
   lstrcpynW(r->f[RC_PARENT], parentDes, 200);
   rt_fmt(r->qty, 3, r->f[RC_QTY], 200);
   rt_fmt(r->qtyTot, 3, r->f[RC_QTYTOT], 200);
@@ -1694,7 +1719,7 @@ static void rt_walk(SQLHDBC dbc, long id, int level, const wchar_t *parentDes, d
   rt_note_add(own, notes[1]);
   rt_note_add(own, kdNote);
   lstrcpynW(r->f[RC_NOTE], own, 200);
-  rt_src_notes(level, qtyFound, src, r->f[RC_NOTE]);
+  rt_src_notes(level, qtyFound, src, r);
   if (RT_MEMO) lstrcpynW(RT_MEMO->note, own, 200);
   if (level >= RT_DEPTH) {
     if (ne > 0) rt_log(j, L"    !!! глубже %d уровней не спускаюсь — состав «%s» не собран\r\n", RT_DEPTH, o.des);
@@ -2346,6 +2371,8 @@ static void rt_item_a2(SQLHDBC dbc, RtJob *w, CardRow *rows, const RtNode *nd, R
   r->id = nd->id;
   lstrcpynW(r->f[RC_DES], o->des, 200);
   lstrcpynW(r->f[RC_NAME], o->name, 200);
+  rt_unbrace(r->f[RC_DES]);
+  rt_unbrace(r->f[RC_NAME]);
   double v;
   if (o->mass[0] && rt_num(o->mass, &v)) rt_fmt(v, 3, r->f[RC_MASS], 200);
   wchar_t q[40];
@@ -2683,7 +2710,7 @@ static void rt_pool_out(RtPool *p, RtJob *j, int ni, const wchar_t *parentDes) {
   rt_fmt(r->qtyTot, 3, r->f[RC_QTYTOT], 200);
   if (r->hasNorm) rt_fmt(floor(r->norm1 * 1000 + 0.5) / 1000 * r->qtyTot, 3, r->f[RC_NORMTOT], 200);
   lstrcpynW(r->f[RC_NOTE], it->own, 200);
-  rt_src_notes(nd->level, nd->qtyFound, nd->hasSrc ? &nd->src : NULL, r->f[RC_NOTE]);
+  rt_src_notes(nd->level, nd->qtyFound, nd->hasSrc ? &nd->src : NULL, r);
   if (it->first != ni)
     rt_log(j, L"%*s%s %s — повтор: из уже собранного, кол-во %s\r\n", nd->level * 2, L"", r->f[RC_DES],
            r->f[RC_NAME], r->f[RC_QTY]);

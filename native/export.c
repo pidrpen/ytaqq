@@ -271,7 +271,7 @@ static int xp_ops_of(SQLHDBC dbc, long var, CardRow *rows, XpOp *ops, int max, R
              L"JOIN NameKeys AS nkt WITH(NOLOCK) ON nkt.NameKeyId=ts.NameKeyId AND nkt.Value=N'TSOperation' "
              L"JOIN InfoObjects AS o2 WITH(NOLOCK) ON o2.InfoObjectId=ts.Link "
              L"WHERE ts.OwnerId=ch.InfoObjectId AND ts.Outdated=0) AS op "
-             OP_NUM_APPLY(L"ch.InfoObjectId")
+             OP_NUM_APPLY(L"ch.InfoObjectId", L"op.OID", L"ch.Name")
              L"WHERE ch.ParentId=%ld AND ch.Erased=0 "
              L"ORDER BY " OP_NUM_ORDER L", ch.InfoObjectId",
              var);
