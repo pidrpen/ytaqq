@@ -260,6 +260,12 @@ static void ui_dwm_set(HWND h, DWORD attr, DWORD v) {
 #define UI_DWMWA_CORNER 33   /* DWMWA_WINDOW_CORNER_PREFERENCE */
 #define UI_DWMWA_BACKDROP 38 /* DWMWA_SYSTEMBACKDROP_TYPE */
 
+/* тёмная ли тема — по яркости бумаги */
+static BOOL ui_theme_dark(void) {
+  COLORREF p = kThemes[(g_theme >= 0 && g_theme < THEME_COUNT) ? g_theme : 0].paper;
+  return (GetRValue(p) * 299 + GetGValue(p) * 587 + GetBValue(p) * 114) / 1000 < 128;
+}
+
 /* углы окна — из темы (у «Чертежа» прямые); у окон с системным заголовком
    (расчёты, TIFF) заголовок — Mica, как у приложений Windows 11; у тёмных
    тем он тёмный. */
@@ -269,14 +275,13 @@ static void ui_window_chrome(HWND h) {
   ui_dwm_set(h, UI_DWMWA_CORNER, (DWORD)t->corners);
   if ((GetWindowLongW(h, GWL_STYLE) & WS_CAPTION) == WS_CAPTION) {
     /* тёмные темы («Графит», «Синька», «Цех») — тёмный заголовок, остальные светлый */
-    int luma = (GetRValue(t->paper) * 299 + GetGValue(t->paper) * 587 + GetBValue(t->paper) * 114) / 1000;
-    ui_dwm_set(h, UI_DWMWA_DARK, luma < 128 ? 1 : 0);
+    ui_dwm_set(h, UI_DWMWA_DARK, ui_theme_dark() ? 1 : 0);
     ui_dwm_set(h, UI_DWMWA_BACKDROP, 2); /* DWMSBT_MAINWINDOW — Mica */
   }
 }
 
 typedef HRESULT(WINAPI *UiThemeFn)(HWND, LPCWSTR, LPCWSTR);
-static void ui_explorer_theme(HWND h) {
+static UiThemeFn ui_set_theme_fn(void) {
   static UiThemeFn fn;
   static BOOL tried;
   if (!tried) {
@@ -284,7 +289,32 @@ static void ui_explorer_theme(HWND h) {
     HMODULE m = LoadLibraryW(L"uxtheme.dll");
     if (m) fn = (UiThemeFn)GetProcAddress(m, "SetWindowTheme");
   }
-  if (fn) fn(h, L"Explorer", NULL); /* выделение строк и полосы прокрутки — как в Проводнике */
+  return fn;
+}
+
+/* выделение строк и полосы прокрутки — как в Проводнике; у тёмных тем —
+   тёмные (DarkMode_Explorer): светлая системная полоса на графите резала глаз.
+   Какая стоит — в свойстве CpUiScroll (1 светлая, 2 тёмная) */
+static void ui_explorer_theme(HWND h) {
+  UiThemeFn fn = ui_set_theme_fn();
+  if (!fn) return;
+  BOOL dark = ui_theme_dark();
+  fn(h, dark ? L"DarkMode_Explorer" : L"Explorer", NULL);
+  SetPropW(h, L"CpUiScroll", (HANDLE)(INT_PTR)(dark ? 2 : 1));
+}
+
+/* поле или список под нынешнюю тему: тёмной теме — тёмные полосы прокрутки,
+   светлой — как было (у списков «Проводник», у полей — тема по умолчанию) */
+static void ui_scroll_theme(HWND h, BOOL list) {
+  int want = ui_theme_dark() ? 2 : 1, have = (int)(INT_PTR)GetPropW(h, L"CpUiScroll");
+  if (have == want) return;
+  if (want == 2 || list) {
+    ui_explorer_theme(h);
+  } else if (have == 2) { /* поле было тёмным — вернуть тему по умолчанию */
+    UiThemeFn fn = ui_set_theme_fn();
+    if (fn) fn(h, NULL, NULL);
+    RemovePropW(h, L"CpUiScroll");
+  }
 }
 
 /* ---- шрифт значков --------------------------------------------------------- */
@@ -644,14 +674,15 @@ static LRESULT CALLBACK ui_edit_proc(HWND h, UINT m, WPARAM w, LPARAM l, UINT_PT
 
 static BOOL CALLBACK ui_skin_cb(HWND c, LPARAM lp) {
   (void)lp;
-  if (GetPropW(c, L"CpUiSkin")) return TRUE;
   wchar_t cls[32];
   if (!GetClassNameW(c, cls, 32)) return TRUE;
   BOOL edit = !_wcsicmp(cls, L"Edit") || !_wcsicmp(cls, L"RICHEDIT50W") || !_wcsicmp(cls, L"RichEdit20W");
   BOOL list = !wcscmp(cls, L"SysListView32") || !wcscmp(cls, L"SysTreeView32");
   if (!edit && !list && wcscmp(cls, L"ListBox")) return TRUE;
+  /* полосы прокрутки — при каждой смене темы (светлая ↔ тёмная) */
+  if (list || (GetWindowLongW(c, GWL_STYLE) & (WS_VSCROLL | WS_HSCROLL | ES_MULTILINE))) ui_scroll_theme(c, list);
+  if (GetPropW(c, L"CpUiSkin")) return TRUE;
   SetPropW(c, L"CpUiSkin", (HANDLE)1);
-  if (list) ui_explorer_theme(c);
   if (ui_nc_border(c) > 0 || GetPropW(c, L"CpUiFlat")) {
     SetWindowSubclass(c, ui_edit_proc, 0x5545, 0);
     if ((INT_PTR)GetPropW(c, L"CpUiFlat") == 2) { /* поля сверху и снизу — пересчитать */

@@ -974,9 +974,12 @@ static BOOL g_pvHover;   /* показан вариант под мышью, а 
 static HCURSOR g_pvAni[2][3]; /* «Риас» и «Тяночка»: стрелка, рука, текст из .ani */
 static HCURSOR g_pvWin[3];
 
+static HCURSOR kit_cursor(int slot); /* cursor_kit.c: «Современный» */
+
 /* для просмотра: стрелка, рука и текст набора skin */
 static HCURSOR pv_cursor(int skin, int which) {
   static const int slotOf[3] = {0, 2, 1}; /* в порядке kRias: стрелка, рука, текст */
+  if (skin == SKIN_KIT) return kit_cursor(slotOf[which]);
   if (skin >= ST_SKIN0 && skin < ST_SKIN0 + ST_COUNT) {
     st_ensure(skin - ST_SKIN0);
     return g_stCur[skin - ST_SKIN0][slotOf[which]];

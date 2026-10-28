@@ -651,8 +651,8 @@ static int ac_log_twips(void) {
 #define AC_NEW_LINE L"———  новая беседа: что выше, ИИ не помнит  ———"
 static const wchar_t *const kAcLogLinks[] = {L"вернуть", L"показать", L"скрыть", L"удалить всю историю"};
 /* под последним ответом-маршрутом — строка-кнопки (ac_route_do); номера WM_AC_LINK — с 10 */
-#define AC_ROUTE_ACTIONS L"Действия:   В Союз   ·   Подробно   ·   Excel"
-static const wchar_t *const kAcRouteLinks[] = {L"В Союз", L"Подробно", L"Excel"};
+#define AC_ROUTE_ACTIONS L"Действия:   В Союз   ·   Подробно   ·   Режимы   ·   Excel"
+static const wchar_t *const kAcRouteLinks[] = {L"В Союз", L"Подробно", L"Режимы", L"Excel"};
 static BOOL g_acShowOld, g_acLogTop; /* показать прежние беседы; ленту — с начала */
 
 static void ac_rtf_new_line(AcRtf *b) {
@@ -720,6 +720,37 @@ static void ac_route_links(void) {
   }
 }
 
+/* «изменить» и «подробно» в строках «Режимы: …» под нормами (norms.c, nm_modes_line) — ссылками;
+   строк может быть несколько (маршрут и досчёты), щелчок — к последнему маршруту беседы */
+static void ac_norm_links(void) {
+  LONG len = GetWindowTextLengthW(g_acLog), from = 0;
+  for (int guard = 0; guard < 64; guard++) {
+    FINDTEXTEXW ft;
+    memset(&ft, 0, sizeof(ft));
+    ft.chrg.cpMin = from;
+    ft.chrg.cpMax = len;
+    ft.lpstrText = NM_MODES_HEAD;
+    if (SendMessageW(g_acLog, EM_FINDTEXTEXW, FR_DOWN | FR_MATCHCASE, (LPARAM)&ft) < 0) return;
+    from = ft.chrgText.cpMax;
+    static const wchar_t *const words[] = {L"изменить", L"подробно"};
+    for (int w = 0; w < 2; w++) {
+      FINDTEXTEXW fw;
+      memset(&fw, 0, sizeof(fw));
+      fw.chrg.cpMin = from;
+      fw.chrg.cpMax = from + 420 < len ? from + 420 : len;
+      fw.lpstrText = words[w];
+      if (SendMessageW(g_acLog, EM_FINDTEXTEXW, FR_DOWN | FR_MATCHCASE | FR_WHOLEWORD, (LPARAM)&fw) < 0) continue;
+      SendMessageW(g_acLog, EM_EXSETSEL, 0, (LPARAM)&fw.chrgText);
+      CHARFORMAT2W cf;
+      memset(&cf, 0, sizeof(cf));
+      cf.cbSize = sizeof(cf);
+      cf.dwMask = CFM_LINK;
+      cf.dwEffects = CFE_LINK;
+      SendMessageW(g_acLog, EM_SETCHARFORMAT, SCF_SELECTION, (LPARAM)&cf);
+    }
+  }
+}
+
 static void ac_redraw(void) {
   ac_mini_refresh(); /* мини-чат у помощника показывает ту же беседу */
   int from = g_acShowOld ? 0 : g_acNewAt < g_acN ? g_acNewAt : g_acN;
@@ -758,6 +789,7 @@ static void ac_redraw(void) {
       SendMessageW(g_acLog, EM_STREAMIN, SF_RTF, (LPARAM)&stream);
       if (top) ac_log_links((int)wcslen(top));
       if (route >= 0) ac_route_links();
+      ac_norm_links();
       ac_think_links();
       SendMessageW(g_acLog, WM_SETREDRAW, TRUE, 0);
       if (g_acLogTop) { /* показали прежние беседы — с их начала */
@@ -2624,6 +2656,9 @@ static BOOL ac_cut_start(const wchar_t *a) {
   return TRUE;
 }
 
+static void nu_open(void); /* окно «Режимы» (norms_ui.c) */
+static BOOL nu_chat_cmd(const wchar_t *a);
+
 static void ac_send(void) {
   SetWindowTextW(g_acTitle, g_aiProvider ? L"Мини-ИИ · Z.ai API" : L"Мини-ИИ · на этом компьютере");
   if (g_acPlanOn) {
@@ -2662,6 +2697,13 @@ static void ac_send(void) {
       free(in);
       return;
     }
+  }
+  /* «режимы» — правка режимов и норм последнего маршрута в своём окне (norms_ui.c); модель не нужна */
+  if (nu_chat_cmd(a)) {
+    SetWindowTextW(g_acIn, L"");
+    nu_open();
+    free(in);
+    return;
   }
   /* «в союз» — последний маршрут беседы в окно «В Союз» (soyuz_ui.c); модель не нужна */
   if (sz_chat_cmd(a)) {
@@ -3318,6 +3360,8 @@ static void ac_log_link(const ENLINK *el) {
     if (!wcscmp(t, kAcLogLinks[i])) PostMessageW(g_acWnd, WM_AC_LINK, i, 0);
   for (size_t i = 0; i < sizeof(kAcRouteLinks) / sizeof(kAcRouteLinks[0]); i++)
     if (!wcscmp(t, kAcRouteLinks[i])) PostMessageW(g_acWnd, WM_AC_LINK, 10 + i, 0);
+  if (!wcscmp(t, L"изменить")) PostMessageW(g_acWnd, WM_AC_LINK, 14, 0); /* строка «Режимы: …» под нормами */
+  if (!wcscmp(t, L"подробно")) PostMessageW(g_acWnd, WM_AC_LINK, 15, 0);
   for (size_t i = 0; i < sizeof(kAcThinkLinks) / sizeof(kAcThinkLinks[0]); i++)
     if (!wcscmp(t, kAcThinkLinks[i])) PostMessageW(g_acWnd, WM_AC_LINK, AC_THINK_LINK_NUM + (i < 2 ? 0 : 1), 0);
 }
@@ -3358,7 +3402,10 @@ static void ac_log_link_do(WPARAM which) {
   case 3: ac_clear_ask(); break;
   case 10: ac_route_say(L"в союз"); break;
   case 11: ac_route_say(L"норма подробно"); break;
-  case 12: ac_route_excel(); break;
+  case 12: nu_open(); break;
+  case 13: ac_route_excel(); break;
+  case 14: nu_open(); break;                     /* «изменить» под нормами — окно «Режимы» */
+  case 15: ac_route_say(L"норма подробно"); break; /* «подробно» там же — разбор каждой цифры */
   }
 }
 

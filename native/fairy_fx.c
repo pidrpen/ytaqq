@@ -94,6 +94,7 @@
 #define FX_INF_FRAMES 52
 #define FX_PETALS 12     /* «Лепестки» Тяночки: лепестки сакуры */
 #define FX_PETAL_FRAMES 50
+#define FX_WAVE_FRAMES 30 /* «Волна» «Современного» курсора */
 #define FX_MAXP 16      /* больше всех частиц у конфетти */
 
 typedef struct {
@@ -756,6 +757,33 @@ static void fx_petal_part(FxWin *f, const FxPart *p, int age) {
     }
 }
 
+/* «Волна» «Современного» курсора (с 2026.10.29): из точки нажатия расходится
+   тонкое кольцо цвета акцента, за ним второе, под ними — мягкое пятно.
+   Спокойная, короткая (полсекунды), не мешает работать */
+static COLORREF kit_accent(void); /* cursor_kit.c: акцент темы или синий */
+static void fx_wave_paint(FxWin *f) {
+  COLORREF ac = kit_accent();
+  float cr = GetRValue(ac), cg = GetGValue(ac), cb = GetBValue(ac);
+  float c = f->W / 2.0f, sc = g_fxScale;
+  float t = (float)f->frame / FX_WAVE_FRAMES;
+  float e = 1.0f - (1.0f - t) * (1.0f - t) * (1.0f - t); /* быстро наружу, плавно гаснет */
+  float spot = (5.0f + 22.0f * e) * sc, spotA = 0.20f * (1.0f - t) * (1.0f - t);
+  float r1 = (4.0f + 34.0f * e) * sc, w1 = (2.4f - 1.4f * t) * sc, a1 = 0.85f * (1.0f - t);
+  float t2 = (f->frame - 5.0f) / FX_WAVE_FRAMES, e2 = t2 <= 0 ? 0 : 1.0f - (1.0f - t2) * (1.0f - t2) * (1.0f - t2);
+  float r2 = (3.0f + 24.0f * e2) * sc, w2 = (1.8f - 1.0f * fx_clamp01(t2)) * sc, a2 = t2 <= 0 ? 0 : 0.55f * (1.0f - t2);
+  int span = (int)(r1 + w1 + 3);
+  for (int y = (int)(c - span); y <= (int)(c + span); y++)
+    for (int x = (int)(c - span); x <= (int)(c + span); x++) {
+      float d = hypotf(x + 0.5f - c, y + 0.5f - c);
+      if (spotA > 0.0f && d < spot) {
+        float q = 1.0f - d / spot;
+        fx_put(f, x, y, cr, cg, cb, spotA * q * q);
+      }
+      if (a1 > 0.0f) fx_put(f, x, y, cr, cg, cb, a1 * fx_clamp01(w1 * 0.5f + 0.5f - fabsf(d - r1)));
+      if (a2 > 0.0f) fx_put(f, x, y, cr, cg, cb, a2 * fx_clamp01(w2 * 0.5f + 0.5f - fabsf(d - r2)));
+    }
+}
+
 /* ---- свои эффекты «Сукуны» и «Годжо» (с 2026.10.14.12) ----------------- */
 
 /* «Рассечение»: тонкие прямые надрезы крест-накрест вокруг нажатия, сеткой,
@@ -1151,6 +1179,9 @@ static void fx_seed_new(FxWin *f, int kind, int S) {
       p->delay = (int)(fx_rand() * 4);
       p->life = FX_CAVIAR_FRAMES - p->delay;
     }
+  } else if (kind == 17) { /* «Волна»: частиц нет, кольца считаются по кадру */
+    f->n = 0;
+    f->frames = FX_WAVE_FRAMES;
   } else if (kind == 16) { /* лепестки: вверх и в стороны, потом опадают, кружась */
     f->n = FX_PETALS;
     f->frames = FX_PETAL_FRAMES;
@@ -1212,6 +1243,10 @@ static void fx_paint_new(FxWin *f) {
   }
   if (f->kind == 15) {
     fx_caviar_paint(f);
+    return;
+  }
+  if (f->kind == 17) {
+    fx_wave_paint(f);
     return;
   }
   if (f->kind == 11 && f->frame < 5)
@@ -1498,6 +1533,7 @@ static BOOL fx_prepare_wh(FxWin *f, int W, int H) {
    (pick >= 0), он важнее курсора; иначе — свой у курсора: фея со звёздочками,
    дракон с пламенем, кот с царапинами, у новых стилей (styles.c) — свои,
    у «Баклажана» — белые пятна */
+static int kit_fx_kind(void); /* cursor_kit.c */
 static int fx_kind_for(int skin, int pick) {
   if (pick >= 0) return pick;
   if (skin == 3) return g_sparkle ? 1 : 0;
@@ -1511,6 +1547,7 @@ static int fx_kind_for(int skin, int pick) {
   if (skin == 12) return 14; /* Годжо — своя «Бесконечность» */
   if (skin == 13) return 15; /* Баклажан — белые пятна */
   if (skin == SKIN_K8) return 16; /* Тяночка — лепестки сакуры */
+  if (skin == SKIN_KIT) return kit_fx_kind(); /* «Современный» — «Волна», если включена в карточке */
   return 0;
 }
 
