@@ -32,6 +32,62 @@ static void ag_doc_context(BOOL save) {
 }
 static int g_agSteps, g_agErrors;
 static wchar_t g_agBad[160]; /* начало прошлого отказа инструмента: тот же отказ дважды — модель не исправится */
+
+/* Переименование чертежей по штампу: из длинной подсказки 4B этот инструмент не выбирает
+   (стенд 28.10: на 5 просьбах из 5 брала rename с маской или list), поэтому такой задаче
+   подсказываем инструмент прямо в шаге, а её rename с маской или без имени переводим в
+   rename_by_stamp — как office_read на скане переводится в file_read */
+static BOOL ag_stamp_task(const wchar_t *goal) {
+  wchar_t low[1200];
+  lstrcpynW(low, goal, 1200);
+  CharLowerBuffW(low, (DWORD)wcslen(low));
+  BOOL ren = wcsstr(low, L"переимен") || wcsstr(low, L"назови") || wcsstr(low, L"назва") || wcsstr(low, L"имена файл") ||
+             wcsstr(low, L"имя файл");
+  BOOL stamp = wcsstr(low, L"штамп") || wcsstr(low, L"обознач") || wcsstr(low, L"по чертеж") || wcsstr(low, L"с чертеж");
+  return ren && stamp;
+}
+/* папка для подсказки в шаге: полный путь из задачи (до пробела или кавычки; в JSON — с \\),
+   иначе @downloads / @documents по словам задачи, иначе @desktop. 4B копирует пример
+   буквально, поэтому пример строится из самой задачи */
+static void ag_stamp_base(const wchar_t *goal, wchar_t *out, int cap) {
+  for (const wchar_t *p = goal; *p; p++)
+    if (((*p >= L'A' && *p <= L'Z') || (*p >= L'a' && *p <= L'z')) && p[1] == L':' && p[2] == L'\\') {
+      int k = 0;
+      for (; *p && *p != L' ' && *p != L'"' && *p != L'»' && *p != L'\r' && *p != L'\n' && k < cap - 3; p++) {
+        if (*p == L'\\') out[k++] = L'\\';
+        out[k++] = *p;
+      }
+      out[k] = 0;
+      return;
+    }
+  wchar_t low[1200];
+  lstrcpynW(low, goal, 1200);
+  CharLowerBuffW(low, (DWORD)wcslen(low));
+  lstrcpynW(out, wcsstr(low, L"загрузк") ? L"@downloads" : wcsstr(low, L"документ") ? L"@documents" : L"@desktop", cap);
+}
+static BOOL ag_stamp_rewrite(const AgJson *j, AiResult *r) {
+  const wchar_t *path = ag_get(j, L"path"), *pattern = ag_get(j, L"pattern"), *name = ag_get(j, L"name");
+  wchar_t lowName[80];
+  lstrcpynW(lowName, name, 80);
+  CharLowerBuffW(lowName, (DWORD)wcslen(lowName));
+  if (!path[0] || (!pattern[0] && name[0] && !wcsstr(lowName, L"обознач") && !wcsstr(lowName, L"штамп"))) return FALSE;
+  wchar_t *buf = (wchar_t *)malloc(6000 * sizeof(wchar_t));
+  if (!buf) return FALSE;
+  int n = swprintf(buf, 6000, L"{\"tool\":\"app\",\"name\":\"rename_by_stamp\",\"path\":\"");
+  for (const wchar_t *src = path; *src && n < 5900; src++) { /* \ и " в JSON — с обратным слэшем */
+    if (*src == L'\\' || *src == L'"') buf[n++] = L'\\';
+    buf[n++] = *src;
+  }
+  n += swprintf(buf + n, 6000 - n, L"\",\"pattern\":\"");
+  for (const wchar_t *src = pattern; *src && n < 5990; src++) {
+    if (*src == L'\\' || *src == L'"') buf[n++] = L'\\';
+    buf[n++] = *src;
+  }
+  swprintf(buf + n, 6000 - n, L"\"}");
+  free(r->text);
+  r->text = buf;
+  return TRUE;
+}
 static int g_agLastState;
 static wchar_t g_agNotes[AG_TEXT], g_agObservation[6000];
 static wchar_t g_agReadout[100000];
@@ -124,6 +180,15 @@ static BOOL ag_request(void) {
     L"Задача пользователя: %ls\nПапки: @desktop=%ls; @downloads=%ls; @documents=%ls; @last=%ls; @new=%ls.\n"
     L"Шаг %d из 16. Действий в плане: %d.\n",
     g_agFs.goal, g_agFs.desktop, g_agFs.downloads, g_agFs.documents, g_agFs.last, g_agFs.newDir, g_agSteps, g_agFs.count);
+  if (!g_agFs.count && ag_stamp_task(g_agFs.goal)) {
+    wchar_t base[MAX_PATH * 2];
+    ag_stamp_base(g_agFs.goal, base, MAX_PATH * 2);
+    swprintf(prompt + wcslen(prompt), cap - wcslen(prompt),
+             L"Подсказка: это переименование чертежей по штампу — первый вызов {\"tool\":\"app\",\"name\":\"rename_by_stamp\","
+             L"\"path\":\"%ls\",\"pattern\":\"*.tif\"}. В path — папка или файл из задачи%ls; не rename, не list, не file_read. "
+             L"После его результата — done.\n",
+             base, base[0] == L'@' ? L" (если в задаче названа подпапка или файл — допиши их: @desktop\\\\Имя)" : L"");
+  }
   if (g_agFs.lastDoc[0]) swprintf(prompt + wcslen(prompt), cap - wcslen(prompt), L"Последний созданный/изменённый Word: @document=%ls. Это файл, не папка.\n", g_agFs.lastDoc);
   if (g_agContext[0]) {
     int limit = budget / 4; if (limit > 6000) limit = 6000;
@@ -397,6 +462,8 @@ static void ag_result(AiResult *r) {
   }
   AgJson appJson;
   BOOL parsed = ag_json(r->text, &appJson);
+  if (parsed && !wcscmp(ag_get(&appJson, L"tool"), L"rename") && ag_stamp_task(g_agFs.goal) && ag_stamp_rewrite(&appJson, r))
+    parsed = ag_json(r->text, &appJson);
   if (parsed) { /* аватар показывает, что ИИ сейчас делает */
     const wchar_t *target = ag_get(&appJson, L"path");
     ac_avatar_tool(ag_get(&appJson, L"tool"), target[0] ? target : ag_get(&appJson, L"src"));
@@ -405,6 +472,7 @@ static void ag_result(AiResult *r) {
     ac_status(!wcscmp(ag_get(&appJson, L"name"), L"std_find")   ? L"Ищу в справочнике стандартов — только чтение"
               : !wcscmp(ag_get(&appJson, L"name"), L"cut_calc") ? L"Считаю расход на резку по нормам резки завода"
               : !wcscmp(ag_get(&appJson, L"name"), L"file_read") ? L"Читаю файл — скан распознаёт Tesseract · только чтение"
+              : !wcscmp(ag_get(&appJson, L"name"), L"rename_by_stamp") ? L"Читаю штампы чертежей — Tesseract и локальная модель · Стоп — отменить"
                                                                 : L"Читаю PLM «Союз» и архив — только чтение · Стоп — отменить");
   else if (parsed && !wcscmp(ag_get(&appJson, L"tool"), L"app")) {
     int state = ag_app_call(&appJson, g_agObservation, 6000);

@@ -67,9 +67,11 @@ typedef struct {
   wchar_t *text;      /* весь лист (ТТ, Ra, допуски, резьбы) — для маршрута, techno.c; NULL — не читали */
   /* то же, прочитанное локальной моделью с картинками (drawrec_vl): графы штампа и ТТ */
   wchar_t vlName[DR_CELL], vlMat[DR_CELL];
+  wchar_t vlDes[DR_CELL]; /* обозначение, прочитанное моделью по графе (только vlStamp: rename_by_stamp) */
   wchar_t *vlText;    /* ТТ, «Развертка», «n отв.»; NULL — модель не читала */
   BOOL wantText;      /* прочитать и весь лист (кнопка «Маршрут обработки») */
   BOOL vlLater;       /* модель — вторым проходом (dr_vl_later): черновик по Tesseract сразу */
+  int vlStamp;        /* rename_by_stamp: 1 — модель читает только графу «Обозначение», 2 — и «Наименование»; лист — нет */
   void *vlKeep;       /* лист и штамп для второго прохода (DrVlKeep); NULL — нет */
   double secs;
 } DrPage;
@@ -1607,7 +1609,7 @@ static void dr_page_free(DrPage *pg) {
   pg->text = NULL;
   free(pg->vlText);
   pg->vlText = NULL;
-  pg->vlName[0] = pg->vlMat[0] = 0;
+  pg->vlName[0] = pg->vlMat[0] = pg->vlDes[0] = 0;
 }
 
 /* ---- чтение моделью с картинками (только локальной: чертежи завода не уходят в сеть) ----
@@ -1866,19 +1868,29 @@ static void dr_json_elements(const wchar_t *j, wchar_t *out, int cap) {
   }
 }
 
-static void dr_vl_read(const DrImg *m, const DrStamp *s, DrPage *pg) {
+/* sheet — спросить и весь лист (ТТ, отверстия, элементы, габариты); FALSE — только графы штампа */
+static void dr_vl_read(const DrImg *m, const DrStamp *s, DrPage *pg, BOOL sheet) {
   DrImg im;
   wchar_t *a;
   if (s) { /* графы штампа формы 1: наименование 65…135 × 15…40 мм, материал 65…135 × 40…55 мм от верха */
     int x0 = s->sl + (int)(64 * s->k), x1 = s->sl + (int)(136 * s->k);
-    if (dr_img_part(m, x0, s->by - (int)(41 * s->k), x1, s->by - (int)(14 * s->k), 2, 0, &im)) {
+    /* обозначение 65…185 × 0…15 мм — только для переименования по штампу: Tesseract на этой
+       графе путает буквы (АДЕ → АМЕ) и теряет хвост, а имя файла должно быть точным */
+    if (pg->vlStamp && dr_img_part(m, x0, s->by - (int)(56 * s->k), s->sl + (int)(186 * s->k), s->by - (int)(39 * s->k), 2, 0, &im)) {
+      a = dr_vl_ask(&im, L"des", L"На картинке — графа «Обозначение» основной надписи чертежа. Перепиши обозначение точно, "
+                         L"как написано: буквы, цифры, точки и дефисы, одной строкой. Только текст.", NULL, 40);
+      dr_vl_line(a, pg->vlDes, DR_CELL);
+      free(a);
+      dr_img_free(&im);
+    }
+    if (pg->vlStamp != 1 && dr_img_part(m, x0, s->by - (int)(41 * s->k), x1, s->by - (int)(14 * s->k), 2, 0, &im)) {
       a = dr_vl_ask(&im, L"name", L"На картинке — графа «Наименование» основной надписи чертежа. Перепиши текст точно, как "
                          L"написано, одной строкой. Только текст.", NULL, 80);
       dr_vl_line(a, pg->vlName, DR_CELL);
       free(a);
       dr_img_free(&im);
     }
-    if (dr_img_part(m, x0, s->by - (int)(16 * s->k), x1, s->by + (int)(1 * s->k), 2, 0, &im)) {
+    if (!pg->vlStamp && dr_img_part(m, x0, s->by - (int)(16 * s->k), x1, s->by + (int)(1 * s->k), 2, 0, &im)) { /* материал имени не нужен */
       a = dr_vl_ask(&im, L"mat", L"На картинке — графа «Материал» основной надписи чертежа. Перепиши точно, как написано. Если "
                          L"материал записан дробью — слово слева, потом верх дроби, « / », низ дроби, например «Лист 8 "
                          L"ГОСТ 19903-15 / 20 ГОСТ 1577-93». Только текст одной строкой.", NULL, 80);
@@ -1887,7 +1899,7 @@ static void dr_vl_read(const DrImg *m, const DrStamp *s, DrPage *pg) {
       dr_img_free(&im);
     }
   }
-  if (dr_img_part(m, 0, 0, m->w, m->h, 1, 1600, &im)) {
+  if (sheet && dr_img_part(m, 0, 0, m->w, m->h, 1, 1600, &im)) {
     /* конструктивные элементы и габариты спрашиваем, только если стоит адаптер, обученный их
        называть (draw-lora2… — элементы, draw-lora3… — и габариты): без обучения модель их выдумывает */
     int gen = ai_draw_gen();
@@ -2045,10 +2057,11 @@ static void dr_recognize(IWICImagingFactory *f, DrPage *pg) {
         if (k->hasStamp) k->s = s;
         pg->vlKeep = k;
       } else
-        dr_vl_read(&m, stamp && s.form == 1 ? &s : NULL, pg);
+        dr_vl_read(&m, stamp && s.form == 1 ? &s : NULL, pg, TRUE);
     } else if (dr_vl_want())
-      dr_vl_read(&m, stamp && s.form == 1 ? &s : NULL, pg);
-  }
+      dr_vl_read(&m, stamp && s.form == 1 ? &s : NULL, pg, TRUE);
+  } else if (pg->vlStamp && dr_vl_want() && stamp && s.form == 1 && (pg->type == DRT_DRAW || pg->type == DRT_OTHER))
+    dr_vl_read(&m, &s, pg, FALSE); /* rename_by_stamp: наименование — моделью, без вопросов по листу */
   if (!pg->f[DF_DES][0] && pg->type != DRT_OTHER) pg->doubt[DF_DES] = 1;
   /* формат листа: по масштабу штампа, без него — по dpi файла */
   if (k > 0) {
@@ -2067,7 +2080,7 @@ static BOOL dr_vl_later(DrPage *pg) {
   DrVlKeep *k = (DrVlKeep *)pg->vlKeep;
   if (!k) return FALSE;
   ULONGLONG t0 = GetTickCount64();
-  dr_vl_read(&k->m, k->hasStamp ? &k->s : NULL, pg);
+  dr_vl_read(&k->m, k->hasStamp ? &k->s : NULL, pg, TRUE);
   dr_img_free(&k->m);
   free(k);
   pg->vlKeep = NULL;

@@ -25,6 +25,7 @@ static const AgDataTool kAgDataTools[] = {
   {L"cut_calc", L"расход на резку листа по нормам резки завода: скорость, время, газы и расходники по технологиям (лазер, плазма, газ); text — марка, толщина, длина реза одной детали и количество: «ст3 10 мм рез 2400 мм ×20»; ответ — готовый расчёт"},
   {L"std_find", L"справочник стандартов на этом компьютере: размеры крепежа, сортамент и масса 1 м (с L= — масса заготовки), марки сталей, аналоги DIN/ISO↔ГОСТ; text — «болт М12 ГОСТ 7798», «круг 50 L=120», «40Х»; ответ — строки таблиц с источником"},
   {L"file_read", L"прочитать текст файла на этом компьютере: скан, картинка или PDF — распознаёт Tesseract (до 30 страниц), Word и Excel (первый лист) — через Office, TXT/CSV — как есть; path — файл; text «чертёж» — лист как чертёж: графы штампа и спецификация; ответ — текст файла"},
+  {L"rename_by_stamp", L"переименовать чертежи по штампу в «ОБОЗНАЧЕНИЕ.ext»: path — папка с чертежами (TIF, PNG, JPG, BMP; без подпапок) или один файл, pattern — маска (без неё все картинки), text=«с наименованием» — имя «ОБОЗНАЧЕНИЕ Наименование.ext»; графу штампа читает локальная модель, переименования встают в план до «Применить», нечитаемые штампы перечисляются"},
 };
 /* чтение файла — ai_file_ask.c (подключён позже, после конвертера) */
 static wchar_t *fq_read_text(const wchar_t *path, BOOL drawing, volatile LONG *cancel, void (*cb)(int, int, void *),
@@ -501,6 +502,246 @@ static int ag_pc_drawing(PcList *l, const wchar_t *path, volatile LONG *cancel, 
   return found;
 }
 
+/* ---- Переименование чертежей по штампу (rename_by_stamp) ----------------------------
+   Каждый лист читается как в окне «Распознать чертёж»: обозначение — Tesseract по графе с
+   проверкой по шаблону обозначения, наименование — локальная модель с картинками (если
+   включена, pg->vlStamp — только графы, без вопросов по листу), иначе Tesseract. В план
+   ставится rename «ОБОЗНАЧЕНИЕ Наименование.ext» (stamp_name.h) — файл не трогается до
+   «Применить». Нечитаемый или сомнительный штамп — в отчёт, без переименования: лучше
+   пропустить лист, чем назвать чертёж чужим обозначением. */
+#include "stamp_name.h"
+#define RS_MAX_FILES 60 /* листов за один вызов: ~5 с на лист с моделью */
+typedef struct { const AgFs *fs; const wchar_t *dir; } RsCtx;
+static int rs_taken(const wchar_t *name, void *ctx) { /* имя занято на диске или в плане */
+  const RsCtx *c = (const RsCtx *)ctx;
+  wchar_t p[MAX_PATH];
+  if (wcslen(c->dir) + wcslen(name) + 2 > MAX_PATH) return 1;
+  swprintf(p, MAX_PATH, L"%ls\\%ls", c->dir, name);
+  return ag_used(c->fs, p);
+}
+static int rs_cmp(const void *a, const void *b) { return _wcsicmp((const wchar_t *)a, (const wchar_t *)b); }
+/* наименование листа: модель впереди, Tesseract следом — как dr_tn_route */
+static const wchar_t *rs_name(const DrPage *pg) {
+  wchar_t low[16];
+  lstrcpynW(low, pg->vlName, 16);
+  CharLowerBuffW(low, (DWORD)wcslen(low));
+  return pg->vlName[0] && wcsncmp(low, L"наимен", 6) ? pg->vlName : pg->f[DF_NAME];
+}
+/* обозначение листа — только прочитанное моделью по графе и похожее на обозначение. Tesseract
+   на этой графе путает буквы (АДЕ → АМЕ) и теряет хвост (.00.00.01), а однажды уверенно
+   прочитал чужое обозначение: по нему не переименовываем, лишь показываем в отчёте.
+   note — что сказать в отчёте */
+static void rs_des(const DrPage *pg, wchar_t *des, wchar_t *note, int noteCap) {
+  wchar_t v[DR_CELL] = L"";
+  des[0] = note[0] = 0;
+  if (pg->vlDes[0] && dr_find_des(pg->vlDes, v, DR_CELL) && dr_des_ok(v)) {
+    lstrcpynW(des, v, DR_CELL);
+    if (pg->f[DF_DES][0] && _wcsicmp(pg->f[DF_DES], v)) swprintf(note, noteCap, L"Tesseract прочитал иначе: «%ls»", pg->f[DF_DES]);
+    return;
+  }
+  if (pg->vlDes[0]) swprintf(note, noteCap, L"модель прочитала «%ls» — не похоже на обозначение%ls%ls%ls", pg->vlDes,
+                             pg->f[DF_DES][0] ? L" (Tesseract: «" : L"", pg->f[DF_DES], pg->f[DF_DES][0] ? L"»)" : L"");
+  else if (pg->f[DF_DES][0]) swprintf(note, noteCap, L"модель графу не прочитала; Tesseract: «%ls» — по нему не переименовываем", pg->f[DF_DES]);
+}
+static void rs_add(wchar_t *buf, size_t cap, const wchar_t *line) { /* строка отчёта, с запасом на «…» */
+  size_t at = wcslen(buf), n = wcslen(line);
+  if (at + n + 4 >= cap) {
+    if (at + 4 < cap && !wcsstr(buf, L"…\r\n")) wcscat(buf, L"…\r\n");
+    return;
+  }
+  wcscat(buf, line);
+}
+static int ag_rename_by_stamp(const AgJson *j, AgFs *fs, wchar_t *out, int cap, volatile LONG *cancel) {
+  const wchar_t *in = ag_get(j, L"path"), *pat = ag_get(j, L"pattern"), *mode = ag_get(j, L"text");
+  if (!in[0]) in = ag_get(j, L"src");
+  wchar_t lowMode[80];
+  lstrcpynW(lowMode, mode, 80);
+  CharLowerBuffW(lowMode, (DWORD)wcslen(lowMode));
+  if (!in[0] && mode[0] && !wcsstr(lowMode, L"наимен")) { /* 4B кладёт папку в text (стенд 28.10: 5 из 5) */
+    in = mode;
+    mode = L"";
+  }
+  if (!in[0]) {
+    lstrcpynW(out, L"rename_by_stamp: нужен path — папка с чертежами или один файл, например path=@desktop\\\\Чертежи.", cap);
+    return -1;
+  }
+  wchar_t dir[MAX_PATH];
+  BOOL found = fs && ag_path(fs, in, dir) && GetFileAttributesW(dir) != INVALID_FILE_ATTRIBUTES;
+  if (!found && fs && in[0] != L'@' && !wcschr(in, L':')) { /* голое имя папки — ищем на рабочем столе, в Загрузках, Документах */
+    static const wchar_t *const roots[] = {L"@desktop", L"@downloads", L"@documents"};
+    wchar_t alias[MAX_PATH];
+    for (size_t i = 0; i < 3 && !found; i++) {
+      swprintf(alias, MAX_PATH, L"%ls\\%ls", roots[i], in);
+      found = ag_path(fs, alias, dir) && GetFileAttributesW(dir) != INVALID_FILE_ATTRIBUTES;
+    }
+  }
+  if (!found) {
+    swprintf(out, cap, L"rename_by_stamp: путь %ls не найден или вне разрешённых папок (нужен @desktop\\\\Папка, @downloads, @documents или полный путь с диском). Код проверил диск.", in);
+    return -1;
+  }
+  DWORD at = GetFileAttributesW(dir);
+  wchar_t (*files)[MAX_PATH] = (wchar_t (*)[MAX_PATH])calloc(RS_MAX_FILES, sizeof(*files));
+  if (!files) {
+    lstrcpynW(out, L"rename_by_stamp: не хватило памяти.", cap);
+    return -1;
+  }
+  int n = 0, total = 0;
+  if (!(at & FILE_ATTRIBUTE_DIRECTORY)) { /* один файл: папка — его родитель */
+    lstrcpynW(files[0], dir, MAX_PATH);
+    n = total = 1;
+    wchar_t *s = wcsrchr(dir, L'\\');
+    if (s) *s = 0;
+  } else {
+    wchar_t q[MAX_PATH];
+    WIN32_FIND_DATAW fd;
+    q[0] = 0;
+    if (wcslen(dir) + 3 < MAX_PATH) swprintf(q, MAX_PATH, L"%ls\\*", dir);
+    HANDLE h = q[0] ? FindFirstFileW(q, &fd) : INVALID_HANDLE_VALUE;
+    if (h != INVALID_HANDLE_VALUE) {
+      do {
+        if (fd.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) continue;
+        if (!ag_pc_ext(fd.cFileName, kAgPcImg, (int)(sizeof(kAgPcImg) / sizeof(kAgPcImg[0])))) continue;
+        if (pat[0] && wcscmp(pat, L"*") && !ag_glob(pat, fd.cFileName)) continue;
+        total++;
+        if (n < RS_MAX_FILES && wcslen(dir) + wcslen(fd.cFileName) + 2 <= MAX_PATH)
+          swprintf(files[n++], MAX_PATH, L"%ls\\%ls", dir, fd.cFileName);
+      } while (FindNextFileW(h, &fd));
+      FindClose(h);
+    }
+    qsort(files, (size_t)n, sizeof(*files), rs_cmp);
+  }
+  if (!n) {
+    swprintf(out, cap, L"rename_by_stamp: в %ls нет чертежей-картинок%ls (TIF, PNG, JPG, BMP). PDF этот инструмент не читает — его сначала переводят в TIF. Ничего не запланировано.",
+             dir, pat[0] ? L" по маске" : L"");
+    free(files);
+    return 0;
+  }
+  /* имя — только обозначение (так хотят на заводе); text=«с наименованием» — ещё и наименование */
+  wchar_t low[80];
+  lstrcpynW(low, mode, 80);
+  CharLowerBuffW(low, (DWORD)wcslen(low));
+  BOOL withName = wcsstr(low, L"наимен") != NULL;
+  if (!dr_vl_ok()) { /* без модели обозначения читает только Tesseract — для имён файлов ненадёжно */
+    swprintf(out, cap, L"rename_by_stamp: локальная модель с картинками выключена, а один Tesseract читает обозначения ненадёжно "
+                       L"(путает буквы, теряет хвост) — переименовывать по нему нельзя. В %ls найдено %d чертежей; включите локальный ИИ "
+                       L"(Настройки → ИИ) и повторите. Ничего не запланировано.", dir, total);
+    free(files);
+    return 0;
+  }
+  HRESULT co = CoInitializeEx(NULL, COINIT_MULTITHREADED);
+  IWICImagingFactory *f = NULL;
+  CoCreateInstance(&kTmClsidFactory, NULL, CLSCTX_INPROC_SERVER, &kTmIidFactory, (void **)&f);
+  size_t bcap = (size_t)cap;
+  wchar_t *okb = (wchar_t *)calloc(bcap, sizeof(wchar_t)), *skip = (wchar_t *)calloc(bcap, sizeof(wchar_t));
+  wchar_t *body = (wchar_t *)calloc(bcap * 2 + 64, sizeof(wchar_t));
+  int planned = 0;
+  for (int i = 0; f && okb && skip && body && i < n && !(cancel && *cancel); i++) {
+    const wchar_t *base = wcsrchr(files[i], L'\\');
+    base = base ? base + 1 : files[i];
+    wchar_t why[400] = L"", line[2 * MAX_PATH + 420], target[MAX_PATH], final[MAX_PATH], dst[MAX_PATH];
+    DrPages pages;
+    memset(&pages, 0, sizeof(pages));
+    HRESULT hr = tm_probe(f, files[i], FALSE, dr_pages_cb, &pages);
+    if (FAILED(hr) || !pages.n) {
+      wchar_t w[120];
+      tm_why(hr, w, 120);
+      swprintf(why, 400, L"не открылся: %ls", w);
+    } else {
+      DrPage *pg = &pages.p[0]; /* первая страница: на ней основная надпись */
+      pg->wantText = FALSE;
+      pg->vlLater = FALSE;
+      pg->vlStamp = withName ? 2 : 1;
+      dr_recognize(f, pg);
+      const wchar_t *ext = wcsrchr(base, L'.');
+      if (!ext) ext = L"";
+      wchar_t des[DR_CELL], note[DR_CELL + 80];
+      rs_des(pg, des, note, DR_CELL + 80);
+      if (!des[0]) swprintf(why, 400, L"обозначение не прочитано%ls%ls", note[0] || pg->note[0] ? L": " : L"", note[0] ? note : pg->note);
+      else if (!sn_build(des, withName ? rs_name(pg) : L"", ext, target, MAX_PATH)) lstrcpynW(why, L"имя не составилось", 400);
+      else if (CompareStringOrdinal(target, -1, base, -1, TRUE) == CSTR_EQUAL) lstrcpynW(why, L"уже назван по штампу", 400);
+      else {
+        BOOL inPlan = FALSE;
+        for (int k = 0; k < fs->count; k++) if (!_wcsicmp(fs->plan[k].src, files[i])) inPlan = TRUE;
+        RsCtx c = {fs, dir};
+        if (inPlan) lstrcpynW(why, L"уже есть в плане", 400);
+        else if (!sn_unique(target, rs_taken, &c, final, MAX_PATH) || !ag_name(final) || wcslen(dir) + wcslen(final) + 2 > MAX_PATH)
+          lstrcpynW(why, L"свободного имени не нашлось", 400);
+        else {
+          swprintf(dst, MAX_PATH, L"%ls\\%ls", dir, final);
+          if (!ag_add(fs, AG_RENAME, files[i], dst)) lstrcpynW(why, L"план полон", 400);
+          else {
+            planned++;
+            swprintf(line, 2 * MAX_PATH + 420, L"• %ls → %ls%ls%ls%ls\r\n", base, final, note[0] ? L" (" : L"", note, note[0] ? L")" : L"");
+            rs_add(okb, bcap, line);
+          }
+        }
+      }
+    }
+    for (int k = 0; k < pages.n; k++) dr_page_free(&pages.p[k]);
+    free(pages.p);
+    if (why[0]) {
+      swprintf(line, 2 * MAX_PATH + 420, L"• %ls — %ls\r\n", base, why);
+      rs_add(skip, bcap, line);
+    }
+  }
+  BOOL stopped = cancel && *cancel;
+  if (f) IWICImagingFactory_Release(f);
+  if (SUCCEEDED(co)) CoUninitialize();
+  if (!f || !okb || !skip || !body) {
+    lstrcpynW(out, !f ? L"rename_by_stamp: Windows не открыл картинку (нет WIC)." : L"rename_by_stamp: не хватило памяти.", cap);
+    free(files); free(okb); free(skip); free(body);
+    return -1;
+  }
+  wchar_t head[900];
+  swprintf(head, 900,
+           L"Переименование по штампу, %ls: запланировано %d из %d файлов%ls%ls. Имя — «ОБОЗНАЧЕНИЕ%ls.расширение», как прочитан штамп; "
+           L"файлы не изменены до «Применить».\r\n",
+           dir, planned, n, total > n ? L" (прочитаны первые 60, остальные — следующим вызовом после «Применить»)" : L"",
+           stopped ? L"; остановлено" : L"", withName ? L" Наименование" : L"");
+  if (okb[0]) { wcscat(body, L"Запланировано:\r\n"); wcscat(body, okb); }
+  if (skip[0]) { wcscat(body, L"Не переименованы:\r\n"); wcscat(body, skip); }
+  ag_fit(head, body[0] ? body : L"(ничего)", out, cap);
+  free(files); free(okb); free(skip); free(body);
+  return 0;
+}
+
+#ifdef SET_TEST
+/* проверочная сборка: --rename-by-stamp выход.txt папка [маска] — прогнать инструмент на папке
+   (она же «рабочий стол» и задача) и записать ответ инструмента и план переименований;
+   CP_DRVL=1 — наименование читает и модель (нужен llama-server, как в CursorPad) */
+static void rs_test(int argc, wchar_t **argv) {
+  AgFs *fs = (AgFs *)calloc(1, sizeof(AgFs));
+  wchar_t *out = (wchar_t *)calloc(6000, sizeof(wchar_t));
+  if (!fs || !out) ExitProcess(2);
+  /* «рабочий стол» — родитель папки; CP_RS_BARE=1 — передать инструменту голое имя папки в text,
+     как это делает 4B, и проверить, что он найдёт её сам */
+  lstrcpynW(fs->desktop, argv[3], MAX_PATH);
+  wchar_t *cut = wcsrchr(fs->desktop, L'\\');
+  if (cut && cut > fs->desktop + 3) *cut = 0;
+  lstrcpynW(fs->goal, argv[3], 4000);
+  const wchar_t *leaf = wcsrchr(argv[3], L'\\');
+  leaf = leaf ? leaf + 1 : argv[3];
+  BOOL bare = getenv("CP_RS_BARE") != NULL;
+  AgJson j;
+  memset(&j, 0, sizeof(j));
+  lstrcpynW(j.fields[0].key, L"name", 16); lstrcpynW(j.fields[0].value, L"rename_by_stamp", 2000);
+  lstrcpynW(j.fields[1].key, bare ? L"text" : L"path", 16); lstrcpynW(j.fields[1].value, bare ? leaf : argv[3], 2000);
+  lstrcpynW(j.fields[2].key, L"pattern", 16); lstrcpynW(j.fields[2].value, argc > 4 ? argv[4] : L"", 2000);
+  j.count = 3;
+  LONG cancel = 0;
+  g_aiUiThread = 0; /* здесь всё в одном потоке; в программе инструмент идёт в ag_tool_thread, модель зовут оттуда */
+  ULONGLONG t0 = GetTickCount64();
+  int st = ag_rename_by_stamp(&j, fs, out, 6000, &cancel);
+  ShareBuf b;
+  memset(&b, 0, sizeof(b));
+  sb_add(&b, L"state %d · %.1f с\n%s\n== план (%d):\n", st, (GetTickCount64() - t0) / 1000.0, out, fs->count);
+  for (int i = 0; i < fs->count; i++) sb_add(&b, L"%d %s -> %s\n", (int)fs->plan[i].kind, fs->plan[i].src, fs->plan[i].dst);
+  if (b.w) share_write_ex(argv[2], b.w, TRUE);
+  free(b.w); free(out); free(fs);
+  ExitProcess(st < 0 ? 1 : 0);
+}
+#endif
+
 /* Позиции из файла: таблица Excel, Word, CSV/TXT или скан чертежа. src — подпись
    «откуда» для итога; FALSE — файл не прочитан (в err — почему). */
 static BOOL ag_pc_from_file(PcList *l, const wchar_t *path, volatile LONG *cancel, wchar_t *src, int srcCap,
@@ -670,6 +911,8 @@ static int ag_data_call(const AgJson *j, AgFs *fs, wchar_t *out, int cap, volati
     free(t);
     return 0;
   }
+  if (!wcscmp(name, L"rename_by_stamp")) /* местные файлы и местная модель: и для Z.ai */
+    return ag_rename_by_stamp(j, fs, out, cap, cancel);
   if (g_aiProvider && !g_aiZaiPlm) {
     lstrcpynW(out, L"Данные PLM и архива не передаются в облачный Z.ai: разрешения нет (Настройки → ИИ → «Z.ai может читать PLM «Союз» и архив»). Скажи об этом пользователю; данных нет, не выдумывай их.", cap);
     return 0;
@@ -744,9 +987,12 @@ static int ag_app_call(const AgJson *j, wchar_t *out, int cap) {
     for (size_t i = 0; i < sizeof(kAgCapabilities) / sizeof(kAgCapabilities[0]); i++)
       swprintf(out + wcslen(out), cap - wcslen(out), L"app name=%ls — %ls.\r\n", kAgCapabilities[i].name, kAgCapabilities[i].description);
     for (size_t i = 0; i < sizeof(kAgDataTools) / sizeof(kAgDataTools[0]); i++)
-      swprintf(out + wcslen(out), cap - wcslen(out), L"app name=%ls %ls — только чтение: %ls.\r\n", kAgDataTools[i].name,
+      swprintf(out + wcslen(out), cap - wcslen(out), L"app name=%ls %ls — %ls: %ls.\r\n", kAgDataTools[i].name,
                !wcscmp(kAgDataTools[i].name, L"file_read") ? L"path=полный_путь" :
-               !wcscmp(kAgDataTools[i].name, L"plm_check") ? L"text=… или path=полный_путь" : L"text=…", kAgDataTools[i].description);
+               !wcscmp(kAgDataTools[i].name, L"rename_by_stamp") ? L"path=папка pattern=маска" :
+               !wcscmp(kAgDataTools[i].name, L"plm_check") ? L"text=… или path=полный_путь" : L"text=…",
+               !wcscmp(kAgDataTools[i].name, L"rename_by_stamp") ? L"в план, файлы меняются после «Применить»" : L"только чтение",
+               kAgDataTools[i].description);
     wcscat(out, L"Открытие окна не означает выполнение расчёта или сравнения. Прямой доступ к химическому составу материалов СОЮЗ ещё не настроен.\r\n");
     return 0;
   }
