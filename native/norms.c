@@ -16,13 +16,19 @@
    То — по режимам: n = 1000·V/(π·D), берётся ближайшая меньшая ступень станка;
      точение и сверление То = (L + l1)·i/(n·S), фрезерование То = (L + l1)·i/Sм,
      резка То = периметр/v + пробивок·tпроб (v — нормы резки завода, cutting_norms.h).
+   Режимы, если не заданы: подача — по таблице (поправки «<оп>.подача.к»), скорость — по
+   таблице «<оп>.скорость» или эмпирической формуле (коэффициенты — таблица «<оп>.скорость.ф»):
+     V = Cv·D^q/(T^m·t^x·S^y·B^u·z^p)·Kмv·Kv,  Kмv = Kг·(база/σв)^nv (чугун — база/HB),
+   у точения нет D, у сверления — t; T — стойкость; фрезерование Sм = Sz·z·n.
+   gcc (Linux) — с -lm.
 
    Файл таблицы — текст, столбцы через табуляцию (UTF-8 или «Текст Юникод» из Excel):
      назначение  токарная.установка     что за таблица; несколько — через «;»
      источник    ОМН … 1974             книга
      ссылка      https://…#Par1593      где текст открыт в сети (якорь карты)
-     карта / лист / страница            где в книге
+     карта / лист / страница            где в книге (у справочника — «таблица»)
      столбцы     масса, кг              по какому параметру выбирают столбец
+     поля        Cv; x; y; m            или: столбцы значений — именованные поля строки
      выбор       ближайшее большее | интерполяция
      ед          мин | % | коэф | мм/об | м/мин | мм/мин | мм
      сверено     да 25.10.2026 Иванов   пока не «да», у цифры пометка «не сверено»
@@ -32,8 +38,9 @@
    через «;»; «*» — любой) или диапазон («до 3», «св. 3 до 5», «3–5», «св. 20»).
    Пустая клетка ключа — как в строке выше (объединённая клетка книги). Значение —
    по правилу ОМН «ближайшее большее»: столбец (строка) с наименьшей границей, не
-   меньшей параметра; «—» — значения нет. «вид  записи» — перечень (станки): первый
-   ключ — код, дальше поля по именам.
+   меньшей параметра; «—» — значения нет; «0,4–0,5» — берётся середина (так и пишется в
+   разборе); «-0,9» — отрицательное (показатель степени). «вид  записи» — перечень (станки,
+   материалы): первый ключ — код, дальше поля по именам.
 
    Параметры (имена ключей и «столбцы»): масса, способ, станок, размер станка,
    размерная группа, материал, марка, вид (черновая/чистовая), D, Dзаг, L, h (припуск
@@ -44,17 +51,25 @@
    вид подачи, партия, смен (обработки партии), То, Тв, Топ; приёмы при переходе —
    прием, длина перемещения, смен резца, изменений подачи, изменений оборотов;
    измерения — измеритель, отсчёт, допуск, длина измерения, длина в D, поверхность
-   измерения, способ размера; доп (дополнительное Тпз списком: «резьба; люнет»). Чего нет — подходят
+   измерения, способ размера; доп (дополнительное Тпз списком: «резьба; люнет»); режимы —
+   инструмент (твёрдый сплав / быстрорежущая), сплав (Т15К6, ВК6…), σв, HB, T (стойкость), корка
+   (без корки / прокат / поковка / отливка), r (радиус при вершине), заточка, глубина в d, фреза,
+   Sz, мощность (станка). Чего нет — подходят
    строки со «*» в этом ключе. Таблицы: <оп>.установка, .переход, .измерение, .ктв, .обслуживание,
    .отдых, .пз, .пз.доп (по каждому коду «доп»), .приемы, .измерение.к (периодичность),
-   .подача, .скорость, .скорость.к (поправки), .глубина,
+   .подача, .подача.к (поправки), .подача.зуб (Sz фрезы), .скорость, .скорость.ф (поля Cv q x y
+   u p m), .скорость.nv (поля nv, база, Kг), .скорость.к (поправки Kv), .стойкость, .глубина,
    .припуск, .врезание; резка.пробивка; станки (поля: группа, размер, ряд n,
-   ряд S, ряд Sм). <оп> — токарная, сверлильная, фрезерная, резка; ктв и отдых —
-   и без <оп>. */
+   ряд S, ряд Sм, мощность); материалы (поля: σв, HB). <оп> — токарная, сверлильная, фрезерная,
+   резка; ктв и отдых — и без <оп>. */
+
+#include <math.h>
 
 #define NM_NONE (-1e300) /* нет значения */
 #define NM_INF 1e300
 #define NM_PI 3.14159265358979323846
+#define NM_HOW 7000  /* разбор одной операции */
+#define NM_OUT 48000 /* текст норм маршрута */
 static int nm_na(double v) { return v < -1e299; }
 
 /* ---- строки и числа ------------------------------------------------------------ */
@@ -201,13 +216,27 @@ static int nm_in(const NmRng *r, double v) {
   return v <= r->hi + 1e-9;
 }
 
-/* значение клетки: «0,15», «12*» (сноска); «—», «-», «х», пусто — нет */
-static double nm_val(const wchar_t *s) {
+/* клетка «0,4–0,5»: книга даёт значение «от – до» */
+static int nm_isrange(const wchar_t *s) {
   double v;
   const wchar_t *e;
-  if (!nm_num(s, &v, &e)) return NM_NONE;
+  if (!nm_num(s, &v, &e)) return 0;
+  e = nm_skipsp(e);
+  return (*e == L'-' || *e == L'–' || *e == L'—') && nm_num(e + 1, &v, &e);
+}
+
+/* значение клетки: «0,15», «12*» (сноска), «-0,9» (показатель степени), «0,4–0,5» — середина;
+   «—», «-», «х», пусто — нет */
+static double nm_val(const wchar_t *s) {
+  double v, w;
+  const wchar_t *e;
+  s = nm_skipsp(s);
+  int neg = (*s == L'-' || *s == 0x2212) && tn_isdig(s[1]);
+  if (!nm_num(s + neg, &v, &e)) return NM_NONE;
+  const wchar_t *q = nm_skipsp(e);
+  if (!neg && (*q == L'-' || *q == L'–' || *q == L'—') && nm_num(q + 1, &w, &e)) v = (v + w) / 2;
   while (*e == L'*' || *e == L' ') e++;
-  return *e ? NM_NONE : v;
+  return *e ? NM_NONE : neg ? -v : v;
 }
 
 /* ---- параметры расчёта ------------------------------------------------------------ */
@@ -215,7 +244,7 @@ static double nm_val(const wchar_t *s) {
 enum { NMO_NONE, NMO_DEF, NMO_CALC, NMO_TAB, NMO_DRAW, NMO_ASK }; /* по возрастанию веса */
 static const wchar_t *const kNmOrg[] = {L"", L"по умолчанию", L"расчёт", L"по таблице", L"с чертежа", L"задано"};
 
-#define NM_PARS 56
+#define NM_PARS 80
 typedef struct {
   wchar_t name[24];
   wchar_t s[64];   /* текстом: код («патрон») или число как записано */
@@ -282,6 +311,8 @@ typedef struct {
   wchar_t *buf;     /* текст файла, порезанный на клетки: всё ниже указывает в него */
   wchar_t file[80];
   const wchar_t *purpose, *src, *url, *card, *sheet, *page, *note, *unit, *checked, *colName;
+  const wchar_t *fields; /* «поля Cv; x; y; m» — столбцы значений по именам, строку выбирают ключи */
+  const wchar_t *tabl;   /* «таблица 7» — номер таблицы книги (у справочников и методичек вместо карты) */
   int interp, records, isChecked;
   int nkeys, keyNum[NM_KEYS];
   const wchar_t *keyName[NM_KEYS];
@@ -392,7 +423,8 @@ static int nm_base_add(NmBase *b, wchar_t *text, const wchar_t *file) {
           NmRng r;
           if (nm_eq(cell[j], L"как в книге") || nm_eq(cell[j], L"в книге") || nm_eq(cell[j], L"наименование"))
             bookCol = j;
-          else if ((t->records && t->nkeys) || nm_eq(cell[j], L"значение") || (!t->records && nm_rng(cell[j], &r))) {
+          else if ((t->records && t->nkeys) || nm_eq(cell[j], L"значение") ||
+                   (t->fields ? nm_list_has(t->fields, cell[j]) : !t->records && nm_rng(cell[j], &r))) {
             if (t->ncols >= NM_VCOLS) { bad = L"больше 24 столбцов значений"; break; }
             valCol[t->ncols] = j;
             t->colHead[t->ncols] = cell[j];
@@ -420,6 +452,8 @@ static int nm_base_add(NmBase *b, wchar_t *text, const wchar_t *file) {
       else if (nm_eq(k, L"ед") || nm_eq(k, L"ед.") || nm_eq(k, L"единица")) t->unit = v;
       else if (nm_eq(k, L"сверено")) t->checked = v;
       else if (nm_eq(k, L"столбцы")) t->colName = nm_cut_name(cell[1]);
+      else if (nm_eq(k, L"поля")) t->fields = v;
+      else if (nm_eq(k, L"таблица")) t->tabl = v;
       else if (nm_eq(k, L"выбор")) pick = v;
       else if (nm_eq(k, L"вид")) vid = v, t->records = nm_eq(v, L"записи");
       continue;
@@ -454,7 +488,7 @@ static int nm_base_add(NmBase *b, wchar_t *text, const wchar_t *file) {
   if (!bad && !t->nrows) bad = L"нет строк";
   if (!bad && t->records && !t->nkeys) bad = L"у перечня нет столбца-кода";
   if (!bad && !t->records) {
-    t->axis = !(t->ncols == 1 && t->cr[0].any);
+    t->axis = !t->fields && !(t->ncols == 1 && t->cr[0].any);
     if (t->axis && !t->colName) bad = L"нет строки «столбцы» — по какому параметру выбирать столбец";
     for (int c = 0; c < t->ncols && !bad; c++)
       if (t->cr[c].any && t->axis) bad = L"столбец значений без диапазона в шапке";
@@ -507,7 +541,8 @@ typedef struct {
 /* «к. 2 л. 1 с. 46 поз. 3» */
 static void nm_where(const NmTab *t, const NmRow *r, wchar_t *out, int cap) {
   out[0] = 0;
-  if (t->card && t->card[0]) tn_cat(out, cap, L"к. "), tn_cat(out, cap, t->card);
+  if (t->tabl && t->tabl[0]) tn_cat(out, cap, tn_isdig(t->tabl[0]) ? L"табл. " : L""), tn_cat(out, cap, t->tabl);
+  if (t->card && t->card[0]) tn_cat(out, cap, out[0] ? L" к. " : L"к. "), tn_cat(out, cap, t->card);
   if (t->sheet && t->sheet[0]) tn_cat(out, cap, out[0] ? L" л. " : L"л. "), tn_cat(out, cap, t->sheet);
   if (t->page && t->page[0]) tn_cat(out, cap, out[0] ? L" с. " : L"с. "), tn_cat(out, cap, t->page);
   if (!out[0]) tn_cpy(out, cap, t->file);
@@ -629,7 +664,12 @@ static int nm_try(const NmTab *t, const NmCtx *c, NmHit *h) {
     }
   }
   h->col = col;
-  if (nm_na(v)) {
+  if (!t->fields && nm_isrange(r->cell[col])) {
+    tn_cat(colTxt, 120, L", середина «");
+    tn_cat(colTxt, 120, r->cell[col]);
+    tn_cat(colTxt, 120, L"»");
+  }
+  if (nm_na(v) && !t->fields) {
     tn_cpy(h->why, 360, L"в клетке прочерк: ");
     tn_cat(h->why, 360, where);
     tn_cat(h->why, 360, colTxt);
@@ -675,6 +715,13 @@ static int nm_find(const NmBase *b, const wchar_t *purpose, const NmCtx *c, NmHi
   }
   *h = first;
   return 0;
+}
+
+/* поле найденной строки таблицы «поля …» по имени; нет столбца или «—» — NM_NONE */
+static double nm_field(const NmHit *h, const wchar_t *name) {
+  for (int c = 0; h->t && h->r && c < h->t->ncols; c++)
+    if (nm_eq(h->t->colHead[c], name)) return h->r->v[c];
+  return NM_NONE;
 }
 
 /* перечень (станки): строка с кодом code; поле field — клетка или NULL */
@@ -738,7 +785,9 @@ typedef struct {
   wchar_t op[48];
   double to, tv, top, tsht, tpz, tshk;
   int full;        /* в Тшт есть всё: То, Тв, обслуживание */
-  wchar_t how[4000];
+  wchar_t how[NM_HOW];
+  NmCtx c;         /* параметры после расчёта — что взято и откуда (окно «Режимы») */
+  wchar_t toNeed[200]; /* без чего не посчиталось машинное То */
 } NmOp;
 
 #define NM_USED 48
@@ -759,15 +808,17 @@ typedef struct {
   NmOp *o;
   NmResult *res;
   const wchar_t *pref; /* «токарная» */
+  int inTo;            /* считается То: нехватки — и в toNeed операции */
 } NmJob;
 
 static void nm_line(NmJob *j, const wchar_t *s) {
-  tn_cat(j->o->how, 4000, L"\n   ");
-  tn_cat(j->o->how, 4000, s);
+  tn_cat(j->o->how, NM_HOW, L"\n   ");
+  tn_cat(j->o->how, NM_HOW, s);
 }
 
 static void nm_need(NmJob *j, const wchar_t *what) {
   if (!tn_list_has(j->res->need, what)) tn_item(j->res->need, 800, what);
+  if (j->inTo && !tn_list_has(j->o->toNeed, what)) tn_item(j->o->toNeed, 200, what);
 }
 
 static void nm_use(NmResult *res, const NmTab *t) {
@@ -910,8 +961,182 @@ static double nm_machine_step(NmJob *j, const wchar_t *field, const wchar_t *wha
   return st;
 }
 
+/* «x^y» в строку разбора */
+static void nm_catpow(wchar_t *s, int cap, double x, double y) {
+  tn_catnum(s, cap, x);
+  tn_cat(s, cap, L"^");
+  tn_catnum(s, cap, y);
+}
+
+/* Kмv — поправка на обрабатываемый материал: Kг·(база/σв)^nv, у чугуна (база/HB)^nv; nv, база
+   (750 МПа стали, 190 HB серого чугуна) и Kг — таблица «<оп>.скорость.nv». Нет таблицы — 1 */
+static double nm_kmv(NmJob *j) {
+  wchar_t p[64], s[600];
+  nm_purp(j, L"скорость.nv", p, 64);
+  if (!nm_has(j->b, p)) return 1;
+  const NmPar *mp = nm_parc(&j->c, L"материал");
+  const wchar_t *by = mp && nm_eq(mp->s, L"чугун") ? L"HB" : L"σв";
+  NmHit h;
+  if (!nm_find(j->b, p, &j->c, &h)) {
+    tn_cpy(s, 600, L"Kмv не взят (1): ");
+    tn_cat(s, 600, h.why);
+    nm_line(j, s);
+    if (h.need[0]) nm_need(j, h.need);
+    return 1;
+  }
+  nm_use(j->res, h.t);
+  double nv = nm_field(&h, L"nv"), base = nm_field(&h, L"база"), kg = nm_field(&h, L"Kг"), x = nm_v(&j->c, by);
+  const NmPar *xp = nm_parc(&j->c, by);
+  if (nm_na(nv) || nm_na(base) || nm_na(x) || x <= 0) {
+    tn_cpy(s, 600, L"Kмv не взят (1): нет ");
+    tn_cat(s, 600, nm_na(x) || x <= 0 ? by : L"nv или базы в строке таблицы");
+    nm_line(j, s);
+    return 1;
+  }
+  if (xp && xp->org == NMO_DEF) {
+    tn_cpy(s, 600, by);
+    tn_cat(s, 600, L" материала (для Kмv)");
+    nm_need(j, s);
+  }
+  double k = (nm_na(kg) ? 1 : kg) * pow(base / x, nv);
+  tn_cpy(s, 600, L"Kмv = ");
+  tn_cat(s, 600, nm_na(kg) ? L"(" : L"Kг·(");
+  tn_catnum(s, 600, base);
+  tn_cat(s, 600, L"/");
+  tn_cat(s, 600, by);
+  tn_cat(s, 600, L")^nv = ");
+  if (!nm_na(kg)) tn_catnum(s, 600, kg), tn_cat(s, 600, L"·");
+  tn_cat(s, 600, L"(");
+  tn_catnum(s, 600, base);
+  tn_cat(s, 600, L"/");
+  tn_catnum(s, 600, x);
+  tn_cat(s, 600, L")^");
+  tn_catnum(s, 600, nv);
+  tn_cat(s, 600, L" = ");
+  tn_catnum(s, 600, k);
+  tn_cat(s, 600, L" — ");
+  nm_from(&j->c, by, NULL, s, 600);
+  tn_cat(s, 600, L"; ");
+  tn_cat(s, 600, h.why);
+  if (nm_na(kg)) tn_cat(s, 600, L"; Kг (группа стали) в таблице нет — 1");
+  nm_line(j, s);
+  return k;
+}
+
+/* скорость резания по эмпирической формуле V = Cv·D^q/(T^m·t^x·S^y·B^u·z^p)·Kмv·Kv; коэффициенты —
+   строка таблицы «<оп>.скорость.ф» (поля Cv, q, x, y, u, p, m; нет поля — показателя нет), T —
+   задана или по таблице «<оп>.стойкость». S — подача на оборот (у фрезы — на зуб, Sz) */
+static int nm_vform(NmJob *j, double D, double S, double *V) {
+  wchar_t p[64], s[600];
+  double T = nm_v(&j->c, L"T");
+  if (nm_na(T)) {
+    if (!nm_look_pref(j, L"стойкость", L"T (стойкость)", 1, &T)) {
+      nm_need(j, L"T — стойкость инструмента, мин");
+      return 0;
+    }
+    nm_putv(&j->c, L"T", T, NMO_TAB, L"таблица стойкости");
+  } else {
+    s[0] = 0;
+    nm_from(&j->c, L"T", L" мин", s, 600);
+    nm_line(j, s);
+  }
+  nm_purp(j, L"скорость.ф", p, 64);
+  NmHit h;
+  if (!nm_find(j->b, p, &j->c, &h)) {
+    tn_cpy(s, 600, L"V по формуле не взята: ");
+    tn_cat(s, 600, h.why);
+    nm_line(j, s);
+    if (h.need[0]) nm_need(j, h.need);
+    return 0;
+  }
+  nm_use(j->res, h.t);
+  static const wchar_t *const fn[] = {L"Cv", L"q", L"x", L"y", L"u", L"p", L"m"};
+  static const wchar_t *const par[] = {NULL, NULL, L"t", NULL, L"B", L"z", NULL};
+  static const wchar_t *const what[] = {NULL, NULL, L"глубина резания t", NULL, L"ширина фрезерования B",
+                                        L"число зубьев фрезы z", NULL};
+  double f[7];
+  tn_cpy(s, 600, L"коэффициенты формулы:");
+  for (int i = 0; i < 7; i++) {
+    f[i] = nm_field(&h, fn[i]);
+    if (nm_na(f[i])) {
+      if (i == 0 || i == 6) {
+        tn_cpy(s, 600, L"V по формуле не взята: в строке нет ");
+        tn_cat(s, 600, fn[i]);
+        nm_line(j, s);
+        return 0;
+      }
+      f[i] = 0;
+      continue;
+    }
+    if (i && f[i] == 0) continue;
+    tn_cat(s, 600, i > 0 ? L", " : L" ");
+    tn_cat(s, 600, fn[i]);
+    tn_cat(s, 600, L" ");
+    tn_catnum(s, 600, f[i]);
+  }
+  tn_cat(s, 600, L" — ");
+  tn_cat(s, 600, h.why);
+  nm_line(j, s);
+  double x[7] = {0, D, nm_v(&j->c, L"t"), S, nm_v(&j->c, L"B"), nm_v(&j->c, L"z"), T};
+  int ok = 1;
+  for (int i = 1; i < 6; i++)
+    if (f[i] != 0 && (nm_na(x[i]) || x[i] <= 0)) ok &= par[i] ? nm_req(j, par[i], what[i]) : 0;
+  if (!ok || !(S > 0) || !(T > 0) || (f[1] != 0 && !(D > 0))) return 0;
+  double kmv = nm_kmv(j), kv = nm_coefs(j, L"скорость.к", L"Kv");
+  double num = f[0] * (f[1] != 0 ? pow(D, f[1]) : 1);
+  double den = pow(T, f[6]) * (f[2] != 0 ? pow(x[2], f[2]) : 1) * pow(S, f[3]) * (f[4] != 0 ? pow(x[4], f[4]) : 1) *
+               (f[5] != 0 ? pow(x[5], f[5]) : 1);
+  *V = num / den * kmv * kv;
+  tn_cpy(s, 600, L"V = Cv");
+  if (f[1] != 0) tn_cat(s, 600, L"·D^q");
+  tn_cat(s, 600, L"/(T^m");
+  if (f[2] != 0) tn_cat(s, 600, L"·t^x");
+  tn_cat(s, 600, L"·S^y");
+  if (f[4] != 0) tn_cat(s, 600, L"·B^u");
+  if (f[5] != 0) tn_cat(s, 600, L"·z^p");
+  tn_cat(s, 600, L")·Kмv·Kv = ");
+  tn_catnum(s, 600, f[0]);
+  if (f[1] != 0) tn_cat(s, 600, L"·"), nm_catpow(s, 600, D, f[1]);
+  tn_cat(s, 600, L"/(");
+  nm_catpow(s, 600, T, f[6]);
+  if (f[2] != 0) tn_cat(s, 600, L"·"), nm_catpow(s, 600, x[2], f[2]);
+  tn_cat(s, 600, L"·");
+  nm_catpow(s, 600, S, f[3]);
+  if (f[4] != 0) tn_cat(s, 600, L"·"), nm_catpow(s, 600, x[4], f[4]);
+  if (f[5] != 0) tn_cat(s, 600, L"·"), nm_catpow(s, 600, x[5], f[5]);
+  tn_cat(s, 600, L")·");
+  tn_catnum(s, 600, kmv);
+  tn_cat(s, 600, L"·");
+  tn_catnum(s, 600, kv);
+  tn_cat(s, 600, L" = ");
+  tn_catnum(s, 600, *V);
+  tn_cat(s, 600, L" м/мин");
+  nm_line(j, s);
+  nm_putv(&j->c, L"V", *V, NMO_CALC, L"по формуле");
+  return *V > 0;
+}
+
+/* скорость: задана, по таблице «<оп>.скорость» (с поправками) или по формуле, если есть только
+   коэффициенты формулы; D — диаметр в формуле (сверла, фрезы), S — подача (у фрезы на зуб) */
+static int nm_speed(NmJob *j, double D, double S, double *V) {
+  wchar_t s[300], pv[64], pf[64];
+  *V = nm_v(&j->c, L"V");
+  if (!nm_na(*V)) {
+    s[0] = 0;
+    nm_from(&j->c, L"V", L" м/мин", s, 300);
+    nm_line(j, s);
+    return 1;
+  }
+  nm_purp(j, L"скорость", pv, 64);
+  nm_purp(j, L"скорость.ф", pf, 64);
+  if (!nm_has(j->b, pv) && nm_has(j->b, pf)) return nm_vform(j, D, S, V);
+  if (!nm_look(j, pv, L"V", 1, V)) return 0;
+  *V *= nm_coefs(j, L"скорость.к", L"Kv");
+  return 1;
+}
+
 /* подача S и скорость V → обороты n по диаметру D; FALSE — чего-то нет.
-   Заданную подачу не трогаем, табличную — к ближайшей меньшей ступени станка. */
+   Заданную подачу не трогаем, табличную — с поправками и к ближайшей меньшей ступени станка. */
 static int nm_mode(NmJob *j, double D, double *S, double *n) {
   wchar_t s[300];
   double V = NM_NONE, k;
@@ -922,22 +1147,15 @@ static int nm_mode(NmJob *j, double D, double *S, double *n) {
     nm_line(j, s);
   } else {
     if (!nm_look_pref(j, L"подача", L"S", 1, S)) return 0;
+    double ks = nm_coefs(j, L"подача.к", L"Ks");
     tn_cpy(s, 300, L"S по станку ");
+    if (ks != 1) tn_catnum(s, 300, *S), tn_cat(s, 300, L"·"), tn_catnum(s, 300, ks), tn_cat(s, 300, L" = "), *S *= ks;
     tn_catnum(s, 300, *S);
     *S = nm_machine_step(j, L"ряд S", L"подач", *S, s, 300);
     nm_putv(&j->c, L"S", *S, NMO_TAB, L"по таблице и станку");
     nm_line(j, s);
   }
-  V = nm_v(&j->c, L"V");
-  if (!nm_na(V)) {
-    tn_cpy(s, 300, L"");
-    nm_from(&j->c, L"V", L" м/мин", s, 300);
-    nm_line(j, s);
-  } else if (!nm_look_pref(j, L"скорость", L"V", 1, &V)) {
-    return 0;
-  } else {
-    V *= nm_coefs(j, L"скорость.к", L"Kv");
-  }
+  if (!nm_speed(j, D, *S, &V)) return 0;
   k = 1000 * V / (NM_PI * D);
   tn_cpy(s, 300, L"n = 1000·V/(π·D) = 1000·");
   tn_catnum(s, 300, V);
@@ -958,6 +1176,27 @@ static double nm_l1(NmJob *j) {
   if (nm_look_pref(j, L"врезание", L"l1 (врезание и перебег)", 0, &l1)) return l1;
   nm_line(j, L"l1 (врезание и перебег) не учтено — нет таблицы и не задано");
   return 0;
+}
+
+/* глубина резания t и проходы i: t задана; заданы проходы — t = h/i; по таблице глубины; иначе весь
+   припуск за один проход */
+static long nm_passes(NmJob *j, double h) {
+  double t = nm_v(&j->c, L"t"), ip = nm_v(&j->c, L"i");
+  if (nm_na(t) && !nm_na(ip) && ip >= 1) {
+    t = h / (double)nm_ceil(ip);
+    nm_putv(&j->c, L"t", t, NMO_CALC, L"припуск h/проходов");
+  } else if (nm_na(t)) {
+    if (nm_look_pref(j, L"глубина", L"t", 0, &t)) {
+      nm_putv(&j->c, L"t", t, NMO_TAB, L"таблица глубины");
+    } else {
+      t = h;
+      nm_putv(&j->c, L"t", t, NMO_DEF, L"весь припуск за один проход");
+    }
+  }
+  long i = t > 0 ? nm_ceil(h / t) : 1;
+  if (i < 1) i = 1;
+  nm_putv(&j->c, L"i", (double)i, NMO_CALC, NULL);
+  return i;
 }
 
 static double nm_to_turn(NmJob *j) {
@@ -993,18 +1232,7 @@ static double nm_to_turn(NmJob *j) {
     nm_line(j, L"припуск h = 0 — точить нечего");
     return NM_NONE;
   }
-  double t = nm_v(&j->c, L"t");
-  if (nm_na(t)) {
-    if (nm_look_pref(j, L"глубина", L"t", 0, &t)) {
-      nm_putv(&j->c, L"t", t, NMO_TAB, L"таблица глубины");
-    } else {
-      t = h;
-      nm_putv(&j->c, L"t", t, NMO_DEF, L"весь припуск за один проход");
-    }
-  }
-  long i = t > 0 ? nm_ceil(h / t) : 1;
-  if (i < 1) i = 1;
-  nm_putv(&j->c, L"i", (double)i, NMO_CALC, NULL);
+  long i = nm_passes(j, h);
   s[0] = 0;
   nm_from(&j->c, L"D", L" мм", s, 300), tn_cat(s, 300, L"; ");
   nm_from(&j->c, L"L", L" мм", s, 300), tn_cat(s, 300, L"; ");
@@ -1049,6 +1277,41 @@ static double nm_to_drill(NmJob *j) {
   return to;
 }
 
+/* фрезерование по режимам: Sz (задана или по таблице «.подача.зуб»), V (задана или по формуле
+   с Ø фрезы), n = 1000·V/(π·Dф) к ступени станка, Sм = Sz·z·n к ступени станка */
+static int nm_mill_mode(NmJob *j, double *Sm) {
+  wchar_t s[300];
+  int okD = nm_req(j, L"Dф", L"диаметр фрезы Dф"), okz = nm_req(j, L"z", L"число зубьев фрезы z");
+  if (!okD || !okz) return 0;
+  double Df = nm_v(&j->c, L"Dф"), z = nm_v(&j->c, L"z"), Sz = nm_v(&j->c, L"Sz"), V, k, n;
+  s[0] = 0;
+  nm_from(&j->c, L"Dф", L" мм", s, 300), tn_cat(s, 300, L"; ");
+  nm_from(&j->c, L"z", NULL, s, 300);
+  nm_line(j, s);
+  if (nm_na(Sz)) {
+    if (!nm_look_pref(j, L"подача.зуб", L"Sz", 1, &Sz)) return 0;
+    nm_putv(&j->c, L"Sz", Sz, NMO_TAB, L"по таблице");
+  } else {
+    s[0] = 0;
+    nm_from(&j->c, L"Sz", L" мм/зуб", s, 300);
+    nm_line(j, s);
+  }
+  if (!nm_speed(j, Df, Sz, &V)) return 0;
+  k = 1000 * V / (NM_PI * Df);
+  tn_cpy(s, 300, L"n = 1000·V/(π·Dф) = 1000·");
+  tn_catnum(s, 300, V), tn_cat(s, 300, L"/(π·"), tn_catnum(s, 300, Df), tn_cat(s, 300, L") = ");
+  tn_catnum(s, 300, k), tn_cat(s, 300, L" об/мин");
+  n = nm_machine_step(j, L"ряд n", L"оборотов", k, s, 300);
+  nm_line(j, s);
+  k = Sz * z * n;
+  tn_cpy(s, 300, L"Sм = Sz·z·n = ");
+  tn_catnum(s, 300, Sz), tn_cat(s, 300, L"·"), tn_catnum(s, 300, z), tn_cat(s, 300, L"·"), tn_catnum(s, 300, n);
+  tn_cat(s, 300, L" = "), tn_catnum(s, 300, k), tn_cat(s, 300, L" мм/мин");
+  *Sm = nm_machine_step(j, L"ряд Sм", L"минутных подач", k, s, 300);
+  nm_line(j, s);
+  return *Sm > 0;
+}
+
 static double nm_to_mill(NmJob *j) {
   wchar_t s[300];
   int okL = nm_req(j, L"L", L"длина фрезерования L");
@@ -1062,18 +1325,7 @@ static double nm_to_mill(NmJob *j) {
     }
     nm_putv(&j->c, L"h", h, NMO_TAB, L"таблица припусков");
   }
-  double t = nm_v(&j->c, L"t");
-  if (nm_na(t)) {
-    if (nm_look_pref(j, L"глубина", L"t", 0, &t)) {
-      nm_putv(&j->c, L"t", t, NMO_TAB, L"таблица глубины");
-    } else {
-      t = h;
-      nm_putv(&j->c, L"t", t, NMO_DEF, L"весь припуск за один проход");
-    }
-  }
-  long i = t > 0 ? nm_ceil(h / t) : 1;
-  if (i < 1) i = 1;
-  nm_putv(&j->c, L"i", (double)i, NMO_CALC, NULL);
+  long i = nm_passes(j, h);
   s[0] = 0;
   nm_from(&j->c, L"L", L" мм", s, 300), tn_cat(s, 300, L"; ");
   nm_from(&j->c, L"B", L" мм", s, 300), tn_cat(s, 300, L"; ");
@@ -1087,6 +1339,8 @@ static double nm_to_mill(NmJob *j) {
     s[0] = 0;
     nm_from(&j->c, L"Sм", L" мм/мин", s, 300);
     nm_line(j, s);
+  } else if (!nm_has(j->b, L"фрезерная.подача") && nm_has(j->b, L"фрезерная.подача.зуб")) {
+    if (!nm_mill_mode(j, &Sm)) return NM_NONE;
   } else {
     if (!nm_look_pref(j, L"подача", L"Sм", 1, &Sm)) return NM_NONE;
     tn_cpy(s, 300, L"Sм по станку ");
@@ -1273,11 +1527,13 @@ static void nm_op_calc(NmJob *j) {
     nm_from(&j->c, L"То", L" мин", s, 300);
     nm_line(j, s);
   } else {
+    j->inTo = 1;
     o->to = o->kind == NMK_TURN    ? nm_to_turn(j)
             : o->kind == NMK_DRILL ? nm_to_drill(j)
             : o->kind == NMK_MILL  ? nm_to_mill(j)
                                    : nm_to_cut(j);
     nm_putv(&j->c, L"То", o->to, NMO_CALC, NULL);
+    j->inTo = 0;
   }
   if (!j->b->n) return; /* таблиц нет: у резки — только То по нормам резки завода */
   /* вспомогательное */
@@ -1427,6 +1683,13 @@ static void nm_ask(const wchar_t *text, NmCtx *c) {
     int word, exact; /* word: 1 — значение одним словом, 2 — до запятой; exact — с учётом регистра */
   } k[] = {{L"длина реза", L"периметр", 0, 0}, {L"периметр", L"периметр", 0, 0}, {L"контур", L"периметр", 0, 0},
            {L"минутная подача", L"Sм", 0, 0},  {L"Dзаг", L"Dзаг", 0, 1},      {L"Dф", L"Dф", 0, 1},
+           {L"подача на зуб", L"Sz", 0, 0},    {L"Sz", L"Sz", 0, 1},          {L"диаметр фрезы", L"Dф", 0, 0},
+           {L"число зубьев", L"z", 0, 0},      {L"зубьев", L"z", 0, 0},       {L"стойкость", L"T", 0, 0},
+           {L"σв", L"σв", 0, 1},               {L"предел прочности", L"σв", 0, 0},
+           {L"проход", L"i", 0, 0},
+           {L"твердость", L"HB", 0, 0},        {L"HB", L"HB", 0, 1},          {L"НВ", L"HB", 0, 1},
+           {L"мощность", L"мощность", 0, 0},   {L"радиус", L"r", 0, 0},       {L"фреза", L"фреза", 1, 0},
+           {L"заточка", L"заточка", 1, 0},     {L"сплав", L"сплав", 1, 0},
            {L"длина", L"L", 0, 0},             {L"ширина", L"B", 0, 0},       {L"припуск", L"h", 0, 0},
            {L"глубина резания", L"t", 0, 0},   {L"глубина", L"l", 0, 0},      {L"подача", L"S", 0, 0},
            {L"скорость", L"V", 0, 0},          {L"партия", L"партия", 0, 0},  {L"масса", L"масса", 0, 0},
@@ -1444,7 +1707,8 @@ static void nm_ask(const wchar_t *text, NmCtx *c) {
            {L"L", L"L", 0, 1}, /* «S» не берём: в вопросе «S=6» — толщина листа; подача — словом */
            {L"B", L"B", 0, 1},                 {L"D", L"D", 0, 1},            {L"Ø", L"D", 0, 1},
            {L"d", L"d", 0, 1},                 {L"t", L"t", 0, 1},            {L"h", L"h", 0, 1},
-           {L"z", L"z", 0, 1}};
+           {L"z", L"z", 0, 1},                 {L"T", L"T", 0, 1},            {L"Т", L"T", 0, 1},
+           {L"r", L"r", 0, 1}};
   if (!text) return;
   for (const wchar_t *p = text; *p; p++) {
     if (p > text && (tn_isletter(p[-1]) || tn_isdig(p[-1]))) continue;
@@ -1497,6 +1761,24 @@ static void nm_ask(const wchar_t *text, NmCtx *c) {
       }
     free(f);
   }
+  /* материал режущей части: «Р6М5», «быстрорежущим», «твёрдый сплав», «Т15К6» — и марка сплава */
+  if (!nm_parc(c, L"инструмент")) {
+    static const struct {
+      const wchar_t *w, *tool, *grade;
+    } tools[] = {{L"быстрорез", L"быстрорежущая", NULL}, {L"р6м5", L"быстрорежущая", NULL},
+                 {L"р18", L"быстрорежущая", NULL},       {L"т15к6", L"твёрдый сплав", L"Т15К6"},
+                 {L"т5к10", L"твёрдый сплав", L"Т5К10"}, {L"вк6", L"твёрдый сплав", L"ВК6"},
+                 {L"вк8", L"твёрдый сплав", L"ВК8"},     {L"твердосплав", L"твёрдый сплав", NULL},
+                 {L"твердый сплав", L"твёрдый сплав", NULL}, {L"твердого сплава", L"твёрдый сплав", NULL}};
+    wchar_t *f = tn_fold(text, 0);
+    for (size_t i = 0; f && i < sizeof(tools) / sizeof(tools[0]); i++)
+      if (wcsstr(f, tools[i].w)) {
+        nm_put(c, L"инструмент", tools[i].tool, NM_NONE, NMO_ASK, NULL);
+        if (tools[i].grade && !nm_parc(c, L"сплав")) nm_put(c, L"сплав", tools[i].grade, NM_NONE, NMO_ASK, NULL);
+        break;
+      }
+    free(f);
+  }
 }
 
 static const wchar_t *nm_mat_code(int m) {
@@ -1533,6 +1815,70 @@ static void nm_ctx_sheet(const TnRoute *r, const wchar_t *mass, NmCtx *c) {
   if (s->holeMin) nm_putv(c, L"d", s->holeMin, NMO_DRAW, L"наименьший Ø из «n отв.»");
   if (s->itMin) nm_putv(c, L"квалитет", s->itMin, NMO_DRAW, NULL);
   if (s->raMin) nm_putv(c, L"Ra", s->raMin, NMO_DRAW, NULL);
+}
+
+/* поле перечня материалов по марке — числом; why — откуда (источник перечня) */
+static double nm_mat_field(const NmBase *b, const NmCtx *c, const wchar_t *field, wchar_t *why, int cap) {
+  const NmPar *mk = nm_parc(c, L"марка");
+  const NmTab *t = NULL;
+  const wchar_t *v = mk ? nm_rec(b, L"материалы", mk->s, field, &t) : NULL;
+  double x = v ? nm_val(v) : NM_NONE;
+  if (!nm_na(x) && t) {
+    tn_cpy(why, cap, L"перечень материалов");
+    if (nm_isrange(v)) tn_cat(why, cap, L", середина «"), tn_cat(why, cap, v), tn_cat(why, cap, L"»");
+    tn_cat(why, cap, L": ");
+    tn_cat(why, cap, t->src ? t->src : t->file);
+  }
+  return x;
+}
+
+/* для режимов резания: инструмент, свойства материала, состояние поверхности, фреза */
+static void nm_ctx_modes(const NmBase *b, const TnRoute *r, const NmOp *o, NmCtx *c) {
+  if (o->kind != NMK_TURN && o->kind != NMK_DRILL && o->kind != NMK_MILL) return;
+  const NmPar *mp = nm_parc(c, L"материал");
+  int steel = mp && (nm_eq(mp->s, L"сталь") || nm_eq(mp->s, L"нержавеющая")), iron = mp && nm_eq(mp->s, L"чугун");
+  int drill = o->kind == NMK_DRILL;
+  nm_put(c, L"инструмент", drill ? L"быстрорежущая" : L"твёрдый сплав", NM_NONE, NMO_DEF,
+         drill ? L"сверло Р6М5" : iron ? L"пластины ВК6" : L"пластины Т15К6");
+  const NmPar *ip = nm_parc(c, L"инструмент");
+  if (ip && nm_eq(ip->s, L"твёрдый сплав") && (steel || iron))
+    nm_put(c, L"сплав", iron ? L"ВК6" : L"Т15К6", NM_NONE, NMO_DEF, iron ? L"по чугуну" : L"по стали");
+  wchar_t why[120];
+  double sv = nm_mat_field(b, c, L"σв", why, 120), hb;
+  if (!nm_na(sv)) nm_putv(c, L"σв", sv, NMO_TAB, why);
+  hb = nm_mat_field(b, c, L"HB", why, 120);
+  if (!nm_na(hb)) nm_putv(c, L"HB", hb, NMO_TAB, why);
+  if (steel && nm_na(nm_v(c, L"σв"))) nm_putv(c, L"σв", 750, NMO_DEF, L"марки нет в перечне — базовая прочность формулы");
+  if (steel && nm_na(nm_v(c, L"HB")))
+    nm_putv(c, L"HB", (double)(long)(nm_v(c, L"σв") / 3.4 + 0.5), NMO_CALC, L"оценка: σв ≈ 3,4·HB");
+  if (iron && nm_na(nm_v(c, L"HB"))) nm_putv(c, L"HB", 190, NMO_DEF, L"базовая твёрдость формулы");
+  /* вид: одна операция без «начисто» — снимается весь припуск */
+  if (o->kind == NMK_TURN) nm_put(c, L"вид", L"черновая", NM_NONE, NMO_DEF, L"весь припуск");
+  const NmPar *vp = nm_parc(c, L"вид");
+  int fine = vp && nm_eq(vp->s, L"чистовая");
+  if (o->kind != NMK_DRILL) {
+    const wchar_t *k = fine                              ? L"без корки"
+                       : wcsstr(r->blank, L"Отливка")    ? L"отливка"
+                       : wcsstr(r->blank, L"Поковка") || wcsstr(r->blank, L"Штамповка") ? L"поковка"
+                                                         : L"прокат";
+    nm_put(c, L"корка", k, NM_NONE, fine ? NMO_CALC : NMO_DEF, fine ? L"после черновой" : L"по заготовке");
+  }
+  if (o->kind == NMK_TURN && fine) nm_putv(c, L"r", 0.8, NMO_DEF, L"оценка: радиус при вершине пластины");
+  if (drill) {
+    nm_put(c, L"заточка", L"одинарная", NM_NONE, NMO_DEF, L"стандартное сверло без подточки перемычки");
+    double d = nm_v(c, L"d"), l = nm_v(c, L"l");
+    if (!nm_na(d) && !nm_na(l) && d > 0) nm_putv(c, L"глубина в d", l / d, NMO_CALC, L"l/d");
+  }
+  if (o->kind == NMK_MILL) {
+    nm_put(c, L"фреза", L"торцовая", NM_NONE, NMO_DEF, L"обработка плоскости");
+    const NmPar *fp = nm_parc(c, L"фреза");
+    double B = nm_v(c, L"B");
+    if (fp && nm_eq(fp->s, L"торцовая") && !nm_na(B) && B > 0)
+      nm_putv(c, L"Dф", (double)nm_ceil(1.375 * B), NMO_DEF, L"оценка: (1,25–1,5)·B — середина; впишите свою фрезу");
+    const NmPar *m = nm_parc(c, L"станок");
+    const wchar_t *pw = m ? nm_rec(b, L"станки", m->s, L"мощность", NULL) : NULL;
+    if (pw && !nm_na(nm_val(pw))) nm_putv(c, L"мощность", nm_val(pw), NMO_TAB, L"перечень станков");
+  }
 }
 
 /* то, чего на листе нет, — по умолчанию (в разборе так и написано) */
@@ -1646,6 +1992,43 @@ static void nm_ctx_defaults(const NmBase *b, const TnRoute *r, NmOp *o, NmCtx *c
     nm_put(c, L"способ размера", pp && wcsstr(pp->s, L"на размер") ? L"на размер" : L"лимб", NM_NONE, NMO_CALC,
            L"по виду перехода");
   }
+  nm_ctx_modes(b, r, o, c);
+}
+
+/* вопрос для одной операции: куски «010: подача 0,3» — только операции 010, остальное — всем.
+   «норма: L 120, 010: подача 0,3, 015: подача 0,2» — L всем, подачи по операциям; позднее важнее */
+static void nm_ask_op(const wchar_t *ask, int num, NmCtx *c) {
+  if (!ask) return;
+  size_t n = wcslen(ask);
+  wchar_t *keep = (wchar_t *)malloc((n + 2) * sizeof(wchar_t));
+  if (!keep) return;
+  size_t k = 0;
+  int mine = 1; /* до первой метки строки — всем */
+  for (size_t i = 0; i < n; i++) {
+    wchar_t ch = ask[i];
+    if (ch == L'\n') {
+      mine = 1;
+      keep[k++] = ch;
+      continue;
+    }
+    /* метка «NNN:» — три цифры, перед ними начало, пробел или запятая */
+    if (tn_isdig(ch) && i + 2 < n && tn_isdig(ask[i + 1]) && tn_isdig(ask[i + 2]) &&
+        (i == 0 || ask[i - 1] == L' ' || ask[i - 1] == L',' || ask[i - 1] == L':' || ask[i - 1] == L'\n')) {
+      size_t e = i + 3;
+      while (e < n && ask[e] == L' ') e++;
+      if (e < n && ask[e] == L':' && (i + 3 >= n || !tn_isdig(ask[i + 3]))) {
+        int v = (ch - L'0') * 100 + (ask[i + 1] - L'0') * 10 + (ask[i + 2] - L'0');
+        mine = v == num;
+        if (k) keep[k++] = L','; /* разделить куски: «L 120» не слипнется с «подача 0,3» */
+        i = e;
+        continue;
+      }
+    }
+    if (mine) keep[k++] = ch;
+  }
+  keep[k] = 0;
+  nm_ask(keep, c);
+  free(keep);
 }
 
 /* нормы всех операций маршрута; ask — вопрос пользователя (может быть NULL) */
@@ -1668,10 +2051,11 @@ static void nm_route(const NmBase *b, const TnRoute *r, const wchar_t *mass, con
     j->b = b;
     j->o = o;
     j->res = res;
-    nm_ask(ask, &j->c);
+    nm_ask_op(ask, (i + 1) * 5, &j->c);
     nm_ctx_sheet(r, mass, &j->c);
     nm_ctx_defaults(b, r, o, &j->c);
     nm_op_calc(j);
+    o->c = j->c;
   }
   free(j);
 }
@@ -1803,17 +2187,28 @@ static void nm_text_brief(const NmBase *b, const NmResult *res, const wchar_t *d
       noTo = 1;
       if (o->tsht > 0) tn_cat(out, cap, L"≥ "), nm_catmin(out, cap, o->tsht), tn_cat(out, cap, L" без машинного То");
       else tn_cat(out, cap, L"— нет машинного То");
+      if (o->toNeed[0]) tn_cat(out, cap, L" (нужно: "), tn_cat(out, cap, o->toNeed), tn_cat(out, cap, L")");
     } else {
       tn_cat(out, cap, L"≈ ");
       nm_catmin(out, cap, o->tsht);
       tn_cat(out, cap, L" (неполная)");
     }
+    /* режим, по которому То: подача и скорость — заданы, по таблице или по формуле */
+    double S = nm_v(&o->c, o->kind == NMK_MILL ? L"Sz" : L"S"), V = nm_v(&o->c, L"V");
+    if (!nm_na(o->to) && o->kind != NMK_CUT && !nm_na(S) && !nm_na(V)) {
+      tn_cat(out, cap, o->kind == NMK_MILL ? L" (Sz " : L" (S ");
+      tn_catnum(out, cap, S);
+      tn_cat(out, cap, L", V ");
+      tn_catnum(out, cap, (double)(long)(V + 0.5));
+      tn_cat(out, cap, L" м/мин)");
+    }
   }
   if (res->skip[0]) tn_cat(out, cap, L"\nПока не нормируются: "), tn_cat(out, cap, res->skip);
   if (b->err[0]) tn_cat(out, cap, L"\nНе прочитаны таблицы: "), tn_cat(out, cap, b->err);
-  if (noTo)
-    tn_cat(out, cap, L"\nПолная Тшт — с машинным временем: «норма: То 2,5» или «норма: L 120, подача 0,2, "
-                     L"скорость 120, партия 50».");
+  if (noTo) {
+    tn_cat(out, cap, L"\nРежимы резания считаются по формулам, своё — по операции: «норма: 010: L 120, подача 0,3, "
+                     L"скорость 120» или «норма: То 2,5»; общее для всех — до номеров: «норма: партия 50, 010: L 120».");
+  }
   tn_cat(out, cap, L"\nРазбор каждой цифры и источники — «норма подробно».");
 }
 
@@ -1908,14 +2303,14 @@ static wchar_t *nm_route_text(const TnRoute *r, const wchar_t *mass, const wchar
   wchar_t dir[MAX_PATH];
   if (!nm_base_load(&b, dir)) return NULL;
   NmResult *res = (NmResult *)malloc(sizeof(NmResult));
-  wchar_t *out = (wchar_t *)malloc(sizeof(wchar_t) * 24000);
+  wchar_t *out = (wchar_t *)malloc(sizeof(wchar_t) * NM_OUT);
   if (res && out) {
     out[0] = 0;
     nm_route(&b, r, mass, ask, res);
-    if (nm_want_full(ask)) nm_text(&b, res, dir, out, 24000);
-    else nm_text_brief(&b, res, dir, out, 24000);
+    if (nm_want_full(ask)) nm_text(&b, res, dir, out, NM_OUT);
+    else nm_text_brief(&b, res, dir, out, NM_OUT);
 #ifdef TABLES_SEED_ONCE
-    tables_note_append(0, out, 24000);
+    tables_note_append(0, out, NM_OUT);
 #endif
   } else {
     free(out);

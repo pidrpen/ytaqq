@@ -23,6 +23,12 @@ BAD = ("назначение\tтокарная.переход\nкарта\t2\nс
        "2\tсв. 50\tО,3\t0,1\t0,2\t0,3\t9\n"
        "2\tсв. 100\t0,1\t0,2\t0,3\t0,4\n")
 
+# режимы резания: диапазон «от – до» и таблица коэффициентов формулы с отрицательным показателем
+RNG = ("назначение\tтокарная.подача\nисточник\tМетодичка (выдумано)\nтаблица\t3\nссылка\thttps://example.org/\n"
+       "столбцы\tt\nед\tмм/об\nпоз.\tD\tдо 3\tдо 5\n1\tдо 20\t0,3–0,4\t—\n2\tсв. 20\t0,4–0,5\t0,3-0,4\n")
+FLD = ("назначение\tтокарная.скорость.nv\nисточник\tМетодичка (выдумано)\nссылка\thttps://example.org/\nед\tкоэф\n"
+       "поля\tnv; база\nпоз.\tматериал\tσв\tnv\tбаза\n1\tсталь\tдо 450\t-1,0\t750\n2\tсталь\tсв. 450\t1,75\t750\n")
+
 
 def main():
     fails = 0
@@ -54,6 +60,13 @@ def main():
         ok("повтор позиции", any("поз. 2 повторяется" in t for t in warns))
         ok("скачок в строке", any("поз. 1, «до 100»: 0,8 выбивается из соседних по строке" in t for t in warns))
         ok("скачок в столбце", any("«до 100»: 0,8 выбивается из соседних по столбцу" in t for t in warns))
+        ok("диапазон — середина", norms_check.num("0,4–0,5") == 0.45 and norms_check.num("-0,9") == -0.9)
+        ok("прочерк и мусор — не число", norms_check.num("-") is None and norms_check.num("-0,3-0,4") is None)
+        head, cols, rows = norms_check.parse(RNG)
+        ok("таблица с диапазонами без замечаний", norms_check.check(head, cols, rows) == [])
+        head, cols, rows = norms_check.parse(FLD)
+        ok("таблица полей без замечаний", norms_check.check(head, cols, rows) == [])
+        ok("поля — столбцы значений", norms_check.layout(head, cols)[2] == [3, 4])
 
         ok("запуск", norms_check.main([norms, "--pages", pages, "--offset", "2"]) == 0)
         out = os.path.join(norms, "сверка")
