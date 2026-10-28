@@ -191,6 +191,30 @@ static void dst_shot_alpha(HWND w, const wchar_t *base, int alpha) {
   free(b);
 }
 
+/* эффект при нажатии kind: кадры frames[] полосой на светлом и тёмном (как visual_test.c) */
+static void dst_fx_strip(int kind, const wchar_t *base, const int *frames, int n) {
+  const int S = 170;
+  BYTE *pm = (BYTE *)calloc((size_t)S * n * S, 4);
+  if (!pm) return;
+  for (int k = 0; k < n; k++) {
+    FxWin f;
+    memset(&f, 0, sizeof(f));
+    f.kind = kind;
+    f.W = f.H = S;
+    f.bits = (BYTE *)calloc((size_t)S * S, 4);
+    if (!f.bits) break;
+    g_fxScale = 1.0f;
+    g_fxSeed = 777;
+    fx_seed_new(&f, kind, S);
+    for (f.frame = 0; f.frame < frames[k]; f.frame++) fx_step_new(&f);
+    fx_paint_new(&f);
+    for (int y = 0; y < S; y++) memcpy(pm + ((size_t)y * S * n + (size_t)k * S) * 4, f.bits + (size_t)y * S * 4, (size_t)S * 4);
+    free(f.bits);
+  }
+  dst_png_both(base, pm, S * n, S);
+  free(pm);
+}
+
 static void dst_settings(int tab, const wchar_t *name) {
   g_tab = tab;
   if (!IsWindowVisible(g_setHwnd)) toggle_settings();
@@ -303,7 +327,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
     _snwprintf(name, 200, L"%ls-pad-search.png", tn);
     dst_shot(hwnd, name);
     set_pad_mode(0);
-    /* Настройки: все вкладки */
+    /* Настройки: все вкладки; на «Курсоре» выбрана «Тяночка» (системные курсоры стенд не трогает) */
+    if (!t) set_skin(SKIN_K8);
     for (int s = 0; s < SEC_COUNT; s++) {
       if (!t || s == 0 || s == 2) {
         _snwprintf(name, 200, L"%ls-settings-%d-%ls.png", tn, s, kSecNames[s]);
@@ -396,6 +421,11 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
   dst_pump(300);
   ac_bubble_update();
   if (g_acBubblePixels) dst_png_both(L"avatar-bubble-say", g_acBubblePixels, g_acBubbleW, g_acBubbleH);
+
+  { /* эффект «Лепестки» (kind 16): четыре момента */
+    static const int frames[4] = {3, 10, 22, 38};
+    dst_fx_strip(16, L"fx-petals", frames, 4);
+  }
 
   char out[48000];
   int k = WideCharToMultiByte(CP_UTF8, 0, g_dstReport, -1, out, sizeof(out), NULL, NULL);
