@@ -52,8 +52,9 @@
 #define FX_OPTIONS 18    /* сколько вариантов в «Эффект при нажатии» */
 #define ID_CHK_TESS 176   /* точное распознавание (Tesseract) */
 #define ID_SEC_BASE 440   /* 440..445: вкладки Настроек */
-#define SEC_COUNT 6
+#define SEC_COUNT 7
 #define SEC_AI 5          /* вкладка «ИИ» (ai_ui.c) */
+#define SEC_NORMS 6       /* вкладка «Нормирование» (norms_set.c) */
 #define ID_CUR_ST_BASE 460 /* 460..466: персонажи «Ворон»…«Баклажан» (styles.c) */
 #define ST_COUNT 7
 #define ST_RAZREZ 3         /* «Разрез» — клинок вместо стрелки */
@@ -321,7 +322,7 @@ static HWND g_btnSt[ST_COUNT];       /* стили, нарисованные к�
 static HWND g_btnSec[SEC_COUNT];     /* вкладки Настроек; индекс — что на вкладке, не место */
 static HWND g_preview;               /* просмотр курсора и эффекта (styles.c) */
 static int g_tab;                    /* открытая вкладка Настроек (что на ней, 0…SEC_COUNT-1) */
-static int g_tabOrder[SEC_COUNT] = {0, 1, 2, 3, 4, 5}; /* слева направо: какая вкладка на каком месте */
+static int g_tabOrder[SEC_COUNT] = {0, 1, 2, 3, 4, 5, 6}; /* слева направо: какая вкладка на каком месте */
 static HWND g_chkTess;
 static HWND g_min;
 static HWND g_ocr;
@@ -2687,7 +2688,7 @@ static void pad_btn_paint(const DRAWITEMSTRUCT *dis, COLORREF fill, COLORREF bd,
 }
 
 /* значки разделов Настроек (Segoe Fluent Icons / MDL2), по номеру раздела */
-static const wchar_t kSecIcons[SEC_COUNT] = {0xE8B0, 0xE945, 0xE790, 0xE721, 0xE712, 0xE99A};
+static const wchar_t kSecIcons[SEC_COUNT] = {0xE8B0, 0xE945, 0xE790, 0xE721, 0xE712, 0xE99A, 0xE916};
 
 /* раздел Настроек — строка левой панели, как в «Параметрах» Windows 11:
    значок и название; открытый — на чуть более тёмной подложке с полоской
@@ -3509,7 +3510,7 @@ static void draw_set_label(HDC hdc, const wchar_t *text, RECT r, int clientBotto
    можно менять правым щелчком по разделу, он запоминается (g_tabOrder), как и
    открытый раздел. Элементы других разделов уезжают далеко за край — их
    прячет clip_settings_children, как и всё, что ушло под шапку при прокрутке. */
-static const wchar_t *const kSecNames[SEC_COUNT] = {L"Курсор", L"Эффект", L"Кастомизация", L"Поиск", L"Ещё", L"ИИ"};
+static const wchar_t *const kSecNames[SEC_COUNT] = {L"Курсор", L"Эффект", L"Кастомизация", L"Поиск", L"Ещё", L"ИИ", L"Нормирование"};
 #define SET_SEC_H 28
 static int g_setContentH = 480; /* высота содержимого: по открытой вкладке (settings_fit_height подгоняет окно) */
 static BOOL g_layOpen;          /* раскладывается открытая вкладка */
@@ -3536,6 +3537,11 @@ static int set_grid(HWND *b, int n, int cols, int x, int y, int w, int bh, int g
 }
 
 #include "ai_ui.c" /* вкладка «ИИ» */
+static void nl_create(HWND p); /* вкладка «Нормирование» — norms_set.c, после norms.c */
+static void nl_layout(int btnH);
+static void nl_paint(HDC hdc, RECT rc);
+static BOOL nl_command(HWND hwnd, int id, int code);
+static void nl_load(void);
 
 /* ---- Настройки как «Параметры» Windows 11 (с 2026.10.21) ------------------
    Слева — разделы со значками (порядок — правым щелчком, как раньше), справа —
@@ -3791,6 +3797,9 @@ static void layout_settings(void) {
       sd_card_end();
       break;
     }
+    case SEC_NORMS: /* пределы режимов резания для норм (norms_set.c) */
+      nl_layout(btnH);
+      break;
     default: { /* общая папка (через неё идут и игры), распознавание, программа */
       sd_group(L"Общая папка отдела");
       sd_card_begin();
@@ -4009,6 +4018,7 @@ static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
     if (g_fontSmall) SelectObject(hdc, g_fontSmall);
     SetTextColor(hdc, COL_MUTED);
     ai_ui_paint(hdc, rc); /* подписи над элементами раздела «ИИ» */
+    nl_paint(hdc, rc);    /* и столбцов раздела «Нормирование» */
     {
       RECT ver = {16, rc.bottom - 28, rc.right - 16, rc.bottom - 10};
       wchar_t vs[64];
@@ -4097,6 +4107,7 @@ static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
       return 0;
     }
     if (ai_ui_command(hwnd, LOWORD(wParam), HIWORD(wParam))) return 0;
+    if (nl_command(hwnd, LOWORD(wParam), HIWORD(wParam))) return 0;
     if (LOWORD(wParam) == ID_FILES_BROWSE) {
       wchar_t picked[MAX_PATH];
       if (pick_folder(hwnd, picked, MAX_PATH)) {
@@ -4638,6 +4649,7 @@ static void create_settings(HWND owner) {
   if (g_chkAnsPin)
     SendMessageW(g_chkAnsPin, BM_SETCHECK, g_ansKeepPos ? BST_CHECKED : BST_UNCHECKED, 0);
   ai_ui_create(g_setHwnd);
+  nl_create(g_setHwnd);
   if (g_chkNotify) {
     SendMessageW(g_chkNotify, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
     SendMessageW(g_chkNotify, BM_SETCHECK, g_filesNotify ? BST_CHECKED : BST_UNCHECKED, 0);
@@ -4669,6 +4681,7 @@ static void create_settings(HWND owner) {
 #include "techno.c"     /* маршрут обработки по чертежу: правила технолога */
 #include "tables_seed.c"  /* встроенные таблицы (ОМН, стандарты) — в папку пользователя, с обновлением */
 #include "norms.c"      /* нормы времени операций маршрута по таблицам ОМН (после резки и маршрута) */
+#include "norms_set.c"  /* Настройки → «Нормирование»: пределы режимов резания */
 #include "cut_ask.c"    /* расход на резку по вопросу словами: чат и инструмент агента cut_calc */
 #include "std.c"        /* справочник ГОСТ/DIN/ISO: разбор таблиц и поиск */
 #include "std_files.c"  /* его таблицы с диска пользователя (CursorPad-std) */
@@ -4756,6 +4769,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     load_notes();
     load_cursor_pref();
     load_plm_pref();
+    nl_load(); /* пределы режимов для норм (norms.ini) */
     share_start();
     nardy_start(); /* «я в сети» для нард и приглашения — пока задана общая папка */
     shashki_start(); /* приглашения и партии в шашки — там же */
