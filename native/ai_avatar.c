@@ -577,6 +577,11 @@ static void ac_avatar_face(DWORD now, const AcXf *xf) {
       ac_face_pt(&ax, cx, cy, 0.0f, -0.16f * h, pts + 2);
       ac_face_pt(&ax, cx, cy, 0.55f * w, 0.12f * h, pts + 4);
       ac_paint_stroke(g_acAvatarFramePixels, S, S, pts, 3, line * 1.15f, core, mood, glowR, 1.0f);
+      if (state == AC_AV_LAUGH) { /* смеётся до румянца */
+        float blush[2];
+        ac_face_pt(&ax, cx, cy, -in * 0.4f, 0.62f * h, blush);
+        ac_paint_stroke(g_acAvatarFramePixels, S, S, blush, 1, w * 0.3f, RGB(255, 130, 170), RGB(255, 90, 150), w * 0.3f, 0.4f);
+      }
     } else {
       DWORD blink = now - g_acAvatarBlinkAt;
       float open = !g_acAvatarBlinkAt ? 1.0f : blink < 80 ? 0.0f : blink < 150 ? 0.5f : 1.0f;

@@ -335,6 +335,12 @@ static void ac_girl_render(DWORD now, const AcXf *xf) {
   if (emo == AC_EMO_SURPRISED) { p.earL += 0.12f; p.earR -= 0.12f; p.blink = 0.0f; }
   if (emo == AC_EMO_ANGRY) { p.earL -= 0.2f; p.earR += 0.2f; p.head += 0.05f; p.tail += 0.25f * sinf(now / 90.0f); }
   if (emo == AC_EMO_DIZZY) { p.head += 0.12f * sinf(now / 120.0f); p.blink = 1.0f; }
+  if (g_acAvatarBlinkAt && now - g_acAvatarBlinkAt < 170) { /* моргает в случайные моменты, как робот; иногда — и ушком */
+    float b = (now - g_acAvatarBlinkAt) / 170.0f;
+    p.blink = fmaxf(p.blink, b < 0.35f ? b / 0.35f : b < 0.55f ? 1.0f : (1.0f - b) / 0.45f);
+  }
+  if (g_acAvatarBlinkAt && (g_acAvatarBlinkAt >> 3) % 3 == 0 && now - g_acAvatarBlinkAt < 300)
+    p.earR -= 0.09f * sinf(3.14159265f * (now - g_acAvatarBlinkAt) / 300.0f);
   if ((g_acAvatarState == AC_AV_TALKING || g_acAvatarState == AC_AV_TELL) && act == AGA_TALK && !emo) p.mouth = 0.94f;
   if (g_acHeld) { /* держат: правая рука тянется к курсору, левая отведена */
     AgM inv = ag_canvas();
