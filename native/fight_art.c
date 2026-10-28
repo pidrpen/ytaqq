@@ -509,24 +509,31 @@ typedef struct {
   FCol bot, botD;              /* низ: брюки, хакама */
   FCol shoe, shoeD;
   FCol eye, eyeD, accent, accentD;
+  FCol hairLine; /* обводка волос светлее общей: в пиксель-арте у прядей шириной в две точки иначе одна обводка */
   float thigh, knee, ankle, arm, elbow, wrist;
 } FLook;
 
+/* Цвета подобраны под пиксель-арт боя (боец 40–70 точек ростом): заливка
+   светлее обводки настолько, чтобы читалась и в две точки шириной, а двое
+   бойцов различались издали — Годжо тёмный в синей форме, Сукуна светлый в
+   кремовом кимоно и тёмной хакаме. Перерисовка 28.10.2026 */
 static const FLook kLookGojo = {
-    1.06f, {26, 22, 40}, {252, 224, 204}, {224, 180, 160},
-    {255, 255, 255}, {214, 224, 248}, {176, 188, 226}, {150, 162, 210},
-    {62, 72, 124}, {44, 52, 96}, {30, 35, 68}, {22, 25, 50},
-    {50, 57, 104}, {27, 31, 60},
+    1.06f, {24, 20, 38}, {252, 226, 206}, {226, 182, 160},
+    {255, 255, 255}, {226, 232, 250}, {182, 194, 232}, {148, 160, 212},
+    {66, 80, 140}, {50, 60, 112}, {38, 46, 88}, {28, 34, 66},
+    {60, 70, 124}, {32, 38, 74},
     {30, 28, 38}, {16, 14, 22},
-    {70, 185, 255}, {20, 90, 200}, {120, 132, 182}, {84, 94, 140},
+    {80, 195, 255}, {20, 100, 210}, {128, 140, 190}, {90, 100, 146},
+    {112, 122, 168},
     5.7f, 4.5f, 3.6f, 4.4f, 3.9f, 3.0f};
-static const FLook kLookSukuna = {
-    1.0f, {32, 12, 20}, {250, 218, 192}, {216, 168, 144},
-    {255, 196, 218}, {238, 120, 162}, {216, 104, 146}, {184, 70, 112},
-    {96, 72, 100}, {72, 54, 78}, {56, 40, 62}, {42, 30, 48},
-    {62, 54, 72}, {38, 32, 46},
-    {40, 32, 44}, {22, 16, 26},
-    {235, 25, 35}, {150, 10, 20}, {242, 236, 226}, {204, 194, 178},
+static const FLook kLookSukuna = { /* accent — пояс (оби): тёмный */
+    1.0f, {34, 14, 22}, {244, 206, 178}, {210, 160, 136},
+    {246, 150, 186}, {226, 116, 160}, {196, 84, 128}, {150, 54, 98},
+    {244, 238, 226}, {228, 218, 200}, {200, 188, 170}, {172, 158, 142},
+    {58, 46, 68}, {38, 30, 46},
+    {36, 28, 40}, {20, 16, 24},
+    {236, 28, 38}, {150, 10, 20}, {44, 32, 44}, {26, 18, 26},
+    {122, 40, 80},
     6.9f, 6.7f, 6.4f, 4.6f, 4.2f, 2.4f};
 
 typedef struct {
@@ -569,6 +576,9 @@ static FCol fx_col(const FCtx *c, FCol a) {
 /* обводка от удара не белеет: фигура вспыхивает, но остаётся собой */
 static FCol fx_line(const FCtx *c) {
   return c->g->tintA > 0.0f ? fa_mix(c->L->line, c->g->tint, c->g->tintA) : c->L->line;
+}
+static FCol fx_hair_line(const FCtx *c) {
+  return c->g->tintA > 0.0f ? fa_mix(c->L->hairLine, c->g->tint, c->g->tintA) : c->L->hairLine;
 }
 static void fx_part(const FCtx *c, FPart *p, FCol lit, FCol dark, float sh) {
   fp_init(p, fx_col(c, lit), fx_col(c, dark), fx_line(c), c->ow, sh * c->U);
@@ -695,15 +705,15 @@ static void ff_hand(const FCtx *c, int i, int type, float dim) {
     }
     FH_SEG(1.2f, 1.5f, 3.2f, 3.0f, 0.7f);
     break;
-  case FH_CLAW: {
-    FH_ELL(2.2f, 0.0f, 2.3f, 2.1f);
+  case FH_CLAW: { /* растопыренные пальцы с когтями: ладонь уже, пальцы тоньше, чем кулак */
+    FH_ELL(2.1f, 0.0f, 2.0f, 1.85f);
     static const float fv[4] = {-1.35f, -0.45f, 0.45f, 1.3f};
     for (int j = 0; j < 4; j++) {
-      FH_SEG(3.2f, fv[j] * 0.9f, 5.4f, fv[j] * 1.3f, 0.62f);
-      FH_SEG(5.4f, fv[j] * 1.3f, 6.6f, fv[j] * 1.3f - 1.0f, 0.55f);
-      tips[nt][0] = 6.9f, tips[nt][1] = fv[j] * 1.3f - 1.3f, nt++;
+      FH_SEG(3.0f, fv[j] * 0.85f, 5.4f, fv[j] * 1.3f, 0.54f);
+      FH_SEG(5.4f, fv[j] * 1.3f, 6.7f, fv[j] * 1.3f - 1.1f, 0.46f);
+      tips[nt][0] = 7.0f, tips[nt][1] = fv[j] * 1.3f - 1.4f, nt++;
     }
-    FH_SEG(1.2f, 1.6f, 3.0f, 3.0f, 0.7f);
+    FH_SEG(1.2f, 1.5f, 2.9f, 2.9f, 0.62f);
     break;
   }
   case FH_POINT:
@@ -813,21 +823,23 @@ static void ff_arm(const FCtx *c, int i) {
   fx_grad(c, &p, fa_dim(L->top2, dim), fa_dim(L->topD2, dim), k->sh[i][1], k->el[i][1] - 6.0f);
   float ex = k->el[i][0] + dx * 5.4f, ey = k->el[i][1] + dy * 5.4f;
   fx_cap(c, &p, k->sh[i][0], k->sh[i][1], k->el[i][0], k->el[i][1], L->arm, L->elbow);
-  fx_cap(c, &p, k->el[i][0], k->el[i][1], ex, ey, L->elbow, L->elbow + 1.6f);
-  fx_ell(c, &p, k->sh[i][0], k->sh[i][1] - 1.0f, 5.0f, 4.6f, 1.0f, 0.0f); /* плечо */
-  { /* широкий рукав висит вниз */
-    float sl[] = {k->el[i][0], k->el[i][1] + 1.0f, ex, ey, ex, ey - 4.0f - L->elbow,
-                  k->el[i][0], k->el[i][1] - 3.0f - L->elbow};
+  fx_cap(c, &p, k->el[i][0], k->el[i][1], ex, ey, L->elbow, L->elbow - 0.5f); /* к раструбу не шар, а ровно */
+  fx_ell(c, &p, k->sh[i][0], k->sh[i][1] - 0.6f, 4.3f, 3.9f, 1.0f, 0.0f); /* плечо: чуть шире рукава, не шар */
+  { /* широкий рукав висит вниз от локтя до раструба */
+    float sl[] = {k->el[i][0], k->el[i][1] + 1.0f, ex, ey + 0.5f, ex + dx * 0.6f, ey - 3.6f - L->elbow,
+                  k->el[i][0] - dx * 0.4f, k->el[i][1] - 2.6f - L->elbow};
     float zero[2] = {0, 0}, e1[2] = {1, 0}, e2[2] = {0, 1};
     fx_poly(c, &p, sl, 4, zero, e1, e2);
   }
   fp_draw(c->cv, &p);
-  { /* складки рукава */
+  { /* складки рукава и тёмная изнанка у раструба */
     FCol fc = fa_dim(L->topD2, dim);
-    float e[2] = {ex, ey};
+    float e[2] = {ex, ey}, zero[2] = {0, 0}, e1[2] = {1, 0}, e2[2] = {0, 1};
     fx_fold(c, k->sh[i], k->el[i], 0.55f, 0.6f, L->arm, 1.6f, 1.8f, 0.24f, fc);
     fx_fold(c, k->sh[i], k->el[i], 0.82f, -0.6f, L->elbow, -1.2f, 1.6f, 0.24f, fc);
     fx_fold(c, k->el[i], e, 0.4f, -0.7f, L->elbow + 1.0f, 2.2f, 0.6f, 0.22f, fc);
+    fx_stroke(c, zero, e1, e2, ex + dx * 0.3f, ey + dy * 0.3f + 0.4f, ex + dx * 0.3f, ey + dy * 0.3f - 3.6f - L->elbow,
+              0.42f, fa_dim(FC(70, 52, 64), dim));
   }
 }
 
@@ -881,7 +893,7 @@ static void ff_leg(const FCtx *c, int i) {
   fx_poly(c, &q, kShoe, 6, o, fw, up);
   fp_draw(c->cv, &q);
   if (c->g->who) { /* сандалии Сукуны: светлая подошва */
-    fx_stroke(c, o, fw, up, -2.2f, -0.35f, 5.6f, -0.55f, 0.32f, fa_dim(L->accentD, dim));
+    fx_stroke(c, o, fw, up, -2.2f, -0.35f, 5.6f, -0.55f, 0.32f, fa_dim(FC(206, 192, 172), dim));
     /* складки хакамы */
     float mx = (k->hp[i][0] + k->kn[i][0]) * 0.5f, my = (k->hp[i][1] + k->kn[i][1]) * 0.5f;
     float zero[2] = {0, 0}, ex[2] = {1, 0}, ey[2] = {0, 1};
@@ -897,9 +909,9 @@ static void ff_torso(const FCtx *c) {
   float o[2] = {k->hip[0], k->hip[1]};
   FPart p;
   if (c->g->who == 0) {
-    /* куртка формы: грудь вперёд, полы ниже пояса чуть расходятся */
-    static const float kJacket[] = {-8.0f, -8.6f, 8.4f, -8.9f, 7.0f, 3.0f, 8.6f, 15.0f, 8.8f, 23.0f, 6.0f, 28.6f,
-                                    2.6f, 30.3f, -2.8f, 30.3f, -6.6f, 28.4f, -8.2f, 22.6f, -6.8f, 9.0f, -7.2f, 0.0f};
+    /* куртка формы: плечи шире пояса, грудь вперёд, полы ниже пояса чуть расходятся */
+    static const float kJacket[] = {-8.0f, -8.6f, 8.4f, -8.9f, 7.0f, 3.0f, 8.8f, 15.0f, 9.5f, 23.0f, 7.4f, 28.6f,
+                                    2.8f, 30.3f, -3.0f, 30.3f, -7.6f, 28.4f, -9.0f, 22.6f, -7.0f, 9.0f, -7.2f, 0.0f};
     fx_part(c, &p, L->top, L->topD, 2.0f);
     fx_grad(c, &p, L->top2, L->topD2, k->hip[1] + 26.0f, k->hip[1] - 6.0f);
     fx_poly(c, &p, kJacket, 12, o, k->bf, k->bu);
@@ -917,42 +929,44 @@ static void ff_torso(const FCtx *c) {
     fx_stroke(c, o, k->bf, k->bu, 4.2f, -8.4f, 4.6f, -4.0f, 0.22f, sm); /* разрез полы */
     return;
   }
-  /* Сукуна: кимоно, вырез, белая кайма, пояс; ниже — верх хакамы */
+  /* Сукуна: светлое кимоно с глубоким вырезом — голая грудь с чёрными метками,
+     тёмная изнанка по краю выреза, тёмный пояс с узлом; ниже — верх хакамы */
   static const float kHakama[] = {-7.4f, 7.0f, 7.4f, 7.0f, 8.6f, -7.0f, -8.4f, -7.0f};
   fx_part(c, &p, L->bot, L->botD, 2.0f);
   fx_poly(c, &p, kHakama, 4, o, k->bf, k->bu);
   fp_draw(c->cv, &p);
-  static const float kKimono[] = {-7.6f, 1.0f, 7.6f, 1.0f, 7.4f, 7.0f, 9.2f, 17.0f, 7.0f, 28.4f, 2.6f, 30.2f,
-                                  -3.0f, 30.2f, -7.8f, 28.0f, -8.6f, 20.0f, -7.4f, 7.0f};
+  static const float kKimono[] = {-7.6f, 1.0f, 7.6f, 1.0f, 7.4f, 7.0f, 9.4f, 17.0f, 7.6f, 28.4f, 3.0f, 30.2f,
+                                  -3.2f, 30.2f, -8.2f, 28.0f, -8.8f, 20.0f, -7.4f, 7.0f};
   fx_part(c, &p, L->top, L->topD, 2.0f);
   fx_grad(c, &p, L->top2, L->topD2, k->hip[1] + 26.0f, k->hip[1] + 2.0f);
   fx_poly(c, &p, kKimono, 10, o, k->bf, k->bu);
   fp_draw(c->cv, &p);
-  static const float kChest[] = {-0.6f, 30.3f, 5.2f, 30.0f, 2.6f, 11.0f};
-  fx_part(c, &p, L->skin, L->skinD, 1.2f);
+  static const float kChest[] = {-2.2f, 30.4f, 6.4f, 30.2f, 2.8f, 9.4f};
+  fx_part(c, &p, L->skin, L->skinD, 1.4f);
   p.ow = 0;
   fx_poly(c, &p, kChest, 3, o, k->bf, k->bu);
   fp_draw(c->cv, &p);
-  fx_stroke(c, o, k->bf, k->bu, -0.6f, 30.2f, 2.6f, 10.6f, 0.7f, L->accent); /* кайма */
-  fx_stroke(c, o, k->bf, k->bu, 5.2f, 29.9f, 2.6f, 10.6f, 0.7f, L->accentD);
-  fx_stroke(c, o, k->bf, k->bu, 1.6f, 22.0f, 2.2f, 17.0f, 0.22f, L->skinD); /* грудь */
+  fx_stroke(c, o, k->bf, k->bu, 1.6f, 22.0f, 2.3f, 16.0f, 0.22f, L->skinD); /* грудь: ложбинка */
+  fx_stroke(c, o, k->bf, k->bu, 0.6f, 24.2f, 4.0f, 22.4f, 0.4f, L->line);   /* метки на груди */
+  fx_stroke(c, o, k->bf, k->bu, 1.2f, 18.8f, 4.0f, 17.4f, 0.4f, L->line);
+  fx_stroke(c, o, k->bf, k->bu, -2.0f, 30.3f, 2.8f, 9.8f, 0.55f, FC(54, 40, 52)); /* тёмная изнанка по вырезу */
+  fx_stroke(c, o, k->bf, k->bu, 6.2f, 30.1f, 2.8f, 9.8f, 0.55f, FC(54, 40, 52));
   { /* складки кимоно к поясу и на спине */
     FCol sm = L->topD2;
-    fx_stroke(c, o, k->bf, k->bu, 6.6f, 9.0f, 4.0f, 15.0f, 0.24f, sm);
-    fx_stroke(c, o, k->bf, k->bu, 7.6f, 11.0f, 6.2f, 18.6f, 0.22f, sm);
-    fx_stroke(c, o, k->bf, k->bu, -6.6f, 9.0f, -3.4f, 16.0f, 0.24f, sm);
-    fx_stroke(c, o, k->bf, k->bu, -7.4f, 13.0f, -6.2f, 22.0f, 0.22f, sm);
-    fx_stroke(c, o, k->bf, k->bu, -5.0f, 27.0f, -6.6f, 21.0f, 0.22f, fa_mix(L->top, FC(255, 255, 255), 0.18f));
+    fx_stroke(c, o, k->bf, k->bu, 6.8f, 9.0f, 4.4f, 15.0f, 0.24f, sm);
+    fx_stroke(c, o, k->bf, k->bu, 7.8f, 11.0f, 6.6f, 18.6f, 0.22f, sm);
+    fx_stroke(c, o, k->bf, k->bu, -6.8f, 9.0f, -3.6f, 16.0f, 0.24f, sm);
+    fx_stroke(c, o, k->bf, k->bu, -7.6f, 13.0f, -6.4f, 22.0f, 0.22f, sm);
   }
-  static const float kObi[] = {-7.3f, 1.4f, 7.3f, 1.4f, 7.5f, 6.6f, -7.4f, 6.6f};
+  static const float kObi[] = {-7.3f, 1.4f, 7.3f, 1.4f, 7.5f, 6.8f, -7.4f, 6.8f};
   fx_part(c, &p, L->accent, L->accentD, 0.9f);
   fx_poly(c, &p, kObi, 4, o, k->bf, k->bu);
   fp_draw(c->cv, &p);
-  fx_stroke(c, o, k->bf, k->bu, 2.0f, 4.0f, 0.6f, -1.6f, 0.45f, FC(70, 46, 58)); /* узел пояса */
-  fx_stroke(c, o, k->bf, k->bu, 2.0f, 4.0f, 3.6f, -1.3f, 0.45f, FC(70, 46, 58));
+  fx_stroke(c, o, k->bf, k->bu, -6.4f, 4.1f, 6.4f, 4.1f, 0.2f, FC(104, 84, 100)); /* шнур поверх пояса */
+  fx_stroke(c, o, k->bf, k->bu, 2.0f, 4.0f, 0.6f, -1.6f, 0.5f, FC(74, 56, 72));    /* узел пояса */
+  fx_stroke(c, o, k->bf, k->bu, 2.0f, 4.0f, 3.6f, -1.3f, 0.5f, FC(74, 56, 72));
   fx_stroke(c, o, k->bf, k->bu, 2.6f, 1.6f, 3.4f, -5.6f, 0.5f, L->accentD); /* концы пояса висят */
   fx_stroke(c, o, k->bf, k->bu, 1.6f, 1.6f, 1.2f, -4.6f, 0.45f, L->accentD);
-  fx_stroke(c, o, k->bf, k->bu, -6.0f, 4.0f, 6.0f, 4.0f, 0.16f, fa_dim(L->accentD, 0.85f)); /* шов пояса */
 }
 
 /* ---- голова ---- */
@@ -1030,35 +1044,50 @@ static void ff_eye(const FCtx *c, const float *o, const float *fw, const float *
             FC(255, 255, 255));
 }
 
-/* волосы: острые пряди, ветер (wb) сдувает кончики назад. В tips — концы прядей */
+/* волосы: острые пряди. Годжо — высокий зачёс вверх и назад: пряди длинные,
+   кончики позади основания, самые высокие — над макушкой; Сукуна — короткий
+   ёжик вверх над выбритыми висками. Ветер (wb) сдувает кончики назад.
+   В tips — концы прядей */
 static int ff_hair_shape(const FCtx *c, FPart *h, const float *o, const float *fw, const float *up, float wb,
                          float tips[][2]) {
   int suk = c->g->who, nt = 0;
   float hp[40];
   int n = 0;
   if (suk) {
-    float hair[] = {6.6f, 3.8f, 9.2f + wb, 6.2f, 5.8f, 6.9f, 6.8f + wb, 11.6f, 3.2f, 9.2f, 2.0f + wb, 13.8f,
-                    -0.2f, 9.8f, -4.0f + wb, 13.2f, -3.6f, 8.6f, -9.4f + wb, 9.6f, -6.2f, 5.6f, -9.4f + wb, 3.0f,
-                    -6.6f, 2.2f, -6.5f, 0.2f, -4.4f, 2.8f, -1.6f, 4.7f, 2.4f, 5.1f};
+    float hair[] = {7.0f, 3.4f, 9.6f + wb * 0.6f, 6.4f, 6.4f, 7.4f, 8.0f + wb, 12.6f, 4.4f, 9.6f, 4.0f + wb, 15.8f,
+                    1.0f, 10.6f, -1.0f + wb, 16.0f, -3.0f, 10.2f, -6.6f + wb, 13.8f, -6.0f, 8.2f, -10.6f + wb, 9.4f,
+                    -7.4f, 5.0f, -10.2f + wb, 2.6f, -6.8f, 1.8f, -4.4f, 3.0f, -1.6f, 4.8f, 2.6f, 5.2f};
+    fx_poly(c, h, hair, 18, o, fw, up);
+    memcpy(hp, hair, sizeof(float) * 36), n = 18;
+  } else {
+    float hair[] = {7.2f, 2.6f, 9.8f + wb * 0.5f, 7.4f, 6.2f, 8.4f, 7.4f + wb, 13.8f, 4.0f, 11.6f, 3.8f + wb, 19.0f,
+                    1.0f, 13.2f, -1.2f + wb, 20.4f, -3.2f, 13.0f, -6.8f + wb, 17.6f, -6.4f, 11.6f, -11.6f + wb, 13.2f,
+                    -8.6f, 8.6f, -13.0f + wb, 7.6f, -8.6f, 4.6f, -11.4f + wb, 1.4f, -7.4f, 0.4f};
     fx_poly(c, h, hair, 17, o, fw, up);
     memcpy(hp, hair, sizeof(float) * 34), n = 17;
-  } else {
-    float hair[] = {7.1f, 3.4f, 9.8f + wb, 7.2f, 6.1f, 7.7f, 7.6f + wb, 12.8f, 4.0f, 10.4f, 3.6f + wb, 16.4f,
-                    1.2f, 11.4f, -1.4f + wb, 16.8f, -2.4f, 11.6f, -6.6f + wb, 14.8f, -5.8f, 9.6f, -11.0f + wb, 10.4f,
-                    -7.4f, 6.4f, -11.2f + wb, 4.0f, -7.2f, 2.8f, -7.1f, 0.6f};
-    fx_poly(c, h, hair, 16, o, fw, up);
-    memcpy(hp, hair, sizeof(float) * 32), n = 16;
-    float nape[] = {-6.6f, 1.0f, -9.2f + wb, -2.6f, -6.5f, -1.8f, -7.6f + wb, -5.0f, -4.8f, -3.0f, -4.4f, 0.8f};
+    float nape[] = {-6.6f, 1.0f, -9.4f + wb, -2.8f, -6.5f, -1.8f, -7.8f + wb, -5.2f, -4.8f, -3.0f, -4.4f, 0.8f};
     fx_poly(c, h, nape, 6, o, fw, up);
-    if (!c->g->blind) { /* без повязки — чёлка на лоб */
-      float bangs[] = {7.1f, 3.6f, 7.4f, 0.9f + 0.4f * wb, 5.6f, 2.9f, 4.4f, 0.8f + 0.4f * wb, 3.0f, 3.3f,
-                       1.6f, 1.6f + 0.4f * wb, 0.2f, 3.6f, -1.0f, 4.6f, 3.0f, 5.6f};
-      fx_poly(c, h, bangs, 9, o, fw, up);
-    }
   }
   for (int i = 1; i < n; i += 2) /* у формы концы прядей — через точку */
     if (hp[i * 2 + 1] > 5.0f) tips[nt][0] = hp[i * 2], tips[nt][1] = hp[i * 2 + 1], nt++;
   return nt;
+}
+
+/* чёлка Годжо: три пряди падают с линии волос вперёд — на повязку (до скулы)
+   или, без неё, до бровей; ветер относит кончики назад */
+static void ff_gojo_bangs(const FCtx *c, const float *o, const float *fw, const float *up, float wb) {
+  const FLook *L = c->L;
+  float tip = c->g->blind ? -3.2f : 1.4f, bk = wb * 0.6f;
+  float s1[] = {6.6f, 3.8f, 8.0f, 3.5f, 8.3f + bk, tip};            /* у виска спереди, до скулы */
+  float s2[] = {3.0f, 4.2f, 4.3f, 4.1f, 3.9f + bk, tip + 1.2f};      /* между глаз, до брови */
+  float s3[] = {-4.4f, 3.7f, -3.0f, 3.9f, -4.2f + bk, tip + 0.4f};   /* перед ухом */
+  FPart b;
+  fx_part(c, &b, L->hair, L->hairD, 0.7f);
+  b.line = fx_hair_line(c);
+  fx_poly(c, &b, s1, 3, o, fw, up);
+  fx_poly(c, &b, s2, 3, o, fw, up);
+  fx_poly(c, &b, s3, 3, o, fw, up);
+  fp_draw(c->cv, &b);
 }
 
 static void ff_head(const FCtx *c) {
@@ -1090,22 +1119,43 @@ static void ff_head(const FCtx *c) {
     FPart hb;
     float tb[12][2], ob[2] = {o[0] - fw[0] * 1.3f - up[0] * 0.4f, o[1] - fw[1] * 1.3f - up[1] * 0.4f};
     fx_part(c, &hb, L->hairD, L->hairD2, 0.8f);
+    hb.line = fx_hair_line(c);
     ff_hair_shape(c, &hb, ob, fw, up, -g->wind * 2.6f, tb);
     fp_draw(c->cv, &hb);
   }
-  /* голова: череп, челюсть, ухо — одна форма */
-  static const float kJaw[] = {-5.2f, 0.6f, -3.6f, -4.9f, 0.6f, -7.9f, 3.7f, -8.4f, 5.9f, -5.9f, 6.9f, -2.4f,
-                               6.8f, 1.2f};
+  if (!suk && g->blind) { /* хвосты повязки из узла на затылке: висят, ветер относит назад */
+    float w = g->wind;
+    FCol bc = FC(28, 28, 38), bh = FC(70, 70, 92);
+    fx_stroke(c, o, fw, up, -6.4f, 2.6f, -10.4f - 2.4f * w, -1.6f + 1.4f * w, 0.78f, bc);
+    fx_stroke(c, o, fw, up, -10.4f - 2.4f * w, -1.6f + 1.4f * w, -12.8f - 3.8f * w, -5.6f + 3.4f * w, 0.5f, bc);
+    fx_stroke(c, o, fw, up, -6.6f, 1.4f, -9.6f - 2.6f * w, -3.4f + 1.8f * w, 0.72f, bc);
+    fx_stroke(c, o, fw, up, -9.6f - 2.6f * w, -3.4f + 1.8f * w, -11.0f - 4.0f * w, -7.6f + 4.0f * w, 0.46f, bc);
+    fx_stroke(c, o, fw, up, -7.0f, 2.3f, -9.8f - 2.2f * w, -1.4f + 1.2f * w, 0.2f, bh);
+  }
+  /* голова: череп, челюсть, ухо — одна форма. У Годжо подбородок уже и острее */
+  static const float kJawG[] = {-5.2f, 0.6f, -3.4f, -5.0f, 1.0f, -8.4f, 3.9f, -9.0f, 6.0f, -6.2f, 6.9f, -2.4f,
+                                6.8f, 1.2f};
+  static const float kJawS[] = {-5.2f, 0.6f, -3.6f, -5.1f, 0.8f, -8.1f, 4.1f, -8.5f, 6.2f, -5.9f, 6.9f, -2.4f,
+                                6.8f, 1.2f};
   fx_part(c, &p, L->skin, L->skinD, 1.7f);
   float hx, hy;
   fx_loc(o, fw, up, 0.0f, 0.8f, &hx, &hy);
-  fx_ell(c, &p, hx, hy, 6.6f, 7.2f, fw[0], fw[1]);
-  fx_poly(c, &p, kJaw, 7, o, fw, up);
+  fx_ell(c, &p, hx, hy, suk ? 6.6f : 6.4f, 7.2f, fw[0], fw[1]);
+  fx_poly(c, &p, suk ? kJawS : kJawG, 7, o, fw, up);
   fx_loc(o, fw, up, -1.5f, -0.3f, &hx, &hy);
   fx_ell(c, &p, hx, hy, 1.35f, 2.0f, fw[0], fw[1]);
   fp_draw(c->cv, &p);
   fx_stroke(c, o, fw, up, -1.3f, 0.9f, -1.0f, -1.1f, 0.2f, L->skinD); /* ухо внутри */
-  fx_stroke(c, o, fw, up, 6.55f, 0.3f, 7.15f, -1.4f, 0.22f, L->skinD); /* нос */
+  fx_stroke(c, o, fw, up, 6.5f, 0.6f, 7.2f, -1.6f, 0.24f, L->skinD);  /* нос */
+  fx_stroke(c, o, fw, up, 7.2f, -1.6f, 6.4f, -2.1f, 0.22f, L->skinD);
+  if (suk) { /* выбритые виски и затылок под ёжиком — тёмный слой без обводки */
+    static const float kUnder[] = {-7.0f, -0.6f, -7.3f, 2.2f, -4.6f, 3.4f, -1.6f, 5.0f, 2.6f, 5.4f, 7.0f, 3.4f,
+                                   6.2f, 1.4f, 2.4f, 2.8f, -1.6f, 2.4f, -4.4f, 1.0f};
+    fx_part(c, &p, FC(74, 34, 56), FC(52, 22, 40), 0.0f);
+    p.ow = 0;
+    fx_poly(c, &p, kUnder, 10, o, fw, up);
+    fp_draw(c->cv, &p);
+  }
   /* глаза */
   if (suk) {
     int open = g->power;
@@ -1142,6 +1192,7 @@ static void ff_head(const FCtx *c) {
   float wb = -g->wind * 2.2f;
   FPart h;
   fx_part(c, &h, L->hair, L->hairD, 1.5f);
+  h.line = fx_hair_line(c);
   fx_grad(c, &h, L->hair2, L->hairD2, k->head[1] + 14.0f, k->head[1] + 1.0f);
   float tips[12][2];
   int nt = ff_hair_shape(c, &h, o, fw, up, wb, tips);
@@ -1154,16 +1205,17 @@ static void ff_head(const FCtx *c) {
   }
   fx_stroke(c, o, fw, up, 1.0f, 9.6f, 4.2f, 8.4f, 0.32f, sh); /* блик на макушке */
   fx_stroke(c, o, fw, up, -1.4f, 9.4f, 0.2f, 9.9f, 0.26f, sh);
-  if (!suk && g->blind) { /* повязка поверх нижнего края волос */
-    static const float kBand[] = {-7.4f, 0.4f, 7.15f, -0.1f, 7.25f, 3.5f, -7.3f, 4.2f};
+  if (!suk && g->blind) { /* повязка поверх нижнего края волос, широкая, от виска до виска */
+    static const float kBand[] = {-7.6f, 0.0f, 7.2f, -0.6f, 7.4f, 3.6f, -7.6f, 4.4f};
     fx_part(c, &p, FC(30, 30, 40), FC(16, 16, 24), 0.8f);
     fx_poly(c, &p, kBand, 4, o, fw, up);
     fp_draw(c->cv, &p);
-    fx_stroke(c, o, fw, up, -6.8f, 3.6f, 6.8f, 3.0f, 0.22f, FC(84, 84, 104));
+    fx_stroke(c, o, fw, up, -6.8f, 3.7f, 6.8f, 3.0f, 0.22f, FC(84, 84, 104));
   } else if (!suk) { /* снятая повязка висит на шее */
     float to[2] = {k->hip[0], k->hip[1]};
     fx_stroke(c, to, k->bf, k->bu, -3.6f, 33.4f, 4.0f, 32.6f, 0.75f, FC(24, 24, 32));
   }
+  if (!suk) ff_gojo_bangs(c, o, fw, up, wb); /* чёлка поверх повязки */
 }
 
 static void ff_draw(FCv *cv, const FFig *g) {
