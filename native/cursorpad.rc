@@ -93,6 +93,7 @@ END
 293 CURSOR "cursors/k5_person.cur"
 308 RCDATA "cursors/k5_wait.ani"
 309 RCDATA "cursors/k5_app.ani"
+312 RCDATA "cp-soyuz.exe"
 340 CURSOR "cursors/k6_static.cur"
 341 CURSOR "cursors/k6_ibeam.cur"
 342 CURSOR "cursors/k6_hand.cur"

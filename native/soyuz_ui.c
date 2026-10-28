@@ -858,7 +858,7 @@ static LRESULT CALLBACK SzProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
     return panel_hittest(hwnd, lParam);
   case WM_GETMINMAXINFO: {
     MINMAXINFO *mm = (MINMAXINFO *)lParam;
-    mm->ptMinTrackSize.x = SZS(540); /* семь кнопок подвала */
+    mm->ptMinTrackSize.x = SZS(600); /* семь кнопок подвала */
     mm->ptMinTrackSize.y = SZS(520);
     return 0;
   }
@@ -1031,7 +1031,7 @@ static void sz_window(void) {
   wc.hbrBackground = g_paper;
   wc.lpszClassName = L"CursorPadSoyuz";
   RegisterClassExW(&wc);
-  int w = SZS(560), h = SZS(700), x, y;
+  int w = SZS(620), h = SZS(700), x, y;
   sz_place(w, h, &x, &y);
   /* WS_EX_NOACTIVATE: «Копировать» и «Дальше» жмутся, а ввод остаётся в «Союзе» */
   g_szWnd = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, L"CursorPadSoyuz",
