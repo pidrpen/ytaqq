@@ -1575,6 +1575,8 @@ static void load_plm_pref(void) {
           MultiByteToWideChar(CP_UTF8, 0, val, -1, g_plmDatabase, 96);
         else if (!strcmp(line, "user") && val[0])
           MultiByteToWideChar(CP_UTF8, 0, val, -1, g_sqlUser, 96);
+        else if (!strcmp(line, "soyuz_bridge") && val[0]) /* мост cp-soyuz.exe (soyuz_make.c) */
+          MultiByteToWideChar(CP_UTF8, 0, val, -1, g_szBridge, MAX_PATH);
         else if (!strcmp(line, "share") && val[0])
           MultiByteToWideChar(CP_UTF8, 0, val, -1, g_shareRoot, MAX_PATH);
         else if (!strcmp(line, "serve"))

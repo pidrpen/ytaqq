@@ -259,6 +259,31 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
   st_check(iShl > 0 && !wcscmp(g_szR.it[iShl].code, L"4130") && g_szR.it[iShl].guid[0],
            L"круглошлифовальной 4131 в ТП нет — взята ходовая 4130 из запасных");
   st_check(iOkr > 0 && !g_szR.it[iOkr].guid[0], L"окрасочная: аналога нет — пойдёт текстом");
+  /* «Создать ТП»: описание для функции пакета «CursorPad — Союз» (soyuz_make.c) */
+  {
+    st_check(g_szR.mat[0] && g_szR.blank[0], L"из маршрута взяты материал и заготовка детали");
+    wchar_t spec[MAX_PATH], note[200];
+    _snwprintf(spec, MAX_PATH, L"%ls\\cursorpad-soyuz.txt", g_stDir);
+    int n = szm_write_spec(spec, L"Тестовая сборка ЭСИ", TRUE, note, 200);
+    wchar_t *t = NULL;
+    HANDLE h = CreateFileW(spec, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (h != INVALID_HANDLE_VALUE) {
+      char buf[16000];
+      DWORD rd = 0;
+      ReadFile(h, buf, sizeof(buf) - 1, &rd, NULL);
+      CloseHandle(h);
+      buf[rd] = 0;
+      t = rd > 3 ? utf8_to_alloc(buf + 3, rd - 3) : NULL;
+    }
+    st_check(n == 10 && t && wcsstr(t, L"ПАПКА\tТестовая сборка ЭСИ\r\n") &&
+                 wcsstr(t, L"ИЗДЕЛИЕ\tАБВГ.711141.001\tУдлинитель вала\tДетали\t"),
+             L"описание: папка, изделие с обозначением из «Лист:», 10 операций");
+    st_check(t && wcsstr(t, L"ТП\tАБВГ.711141.001\t010\t4110\t31\t16К20, Токарно-винторезный станок\t15\t4\r\n"),
+             L"строка ТП токарной: код 4110, участок 31, станок и нормы аналога");
+    st_check(t && wcsstr(t, L"\t045\t7300\t\t\t\t\r\n"), L"окрасочная без аналога: код есть, участок и нормы пустые");
+    if (t) st_note(L"     %ls", t);
+    free(t);
+  }
   st_check(!wcscmp(g_stClip, L"0110 Заготовительная") && g_szTextOnly,
            L"по умолчанию — текст для «Создать операцию» (в сквозной ТП копию не вставить)");
   st_shot(L"2a-text-default.png");

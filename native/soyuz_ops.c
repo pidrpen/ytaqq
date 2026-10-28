@@ -46,6 +46,8 @@ typedef struct {
 typedef struct {
   wchar_t des[80];   /* обозначение детали — из «Лист: файл · обозначение» */
   wchar_t name[120]; /* наименование — из «Деталь: …» */
+  wchar_t mat[200];   /* материал — из «Материал: марка ГОСТ — класс» (для создания детали, soyuz_make.c) */
+  wchar_t blank[200]; /* заготовка — из «Заготовка: Круг 50 ГОСТ 2590-2006 (…)» */
   SoItem it[SO_MAX];
   int n;
   int cur;           /* строка, которая сейчас в буфере */
@@ -216,6 +218,20 @@ static int so_parse(const wchar_t *text, SoRoute *r) {
       wchar_t *dot = NULL;
       for (wchar_t *q = s; (q = wcsstr(q, L" · ")) != NULL; q += 3) dot = q;
       if (dot) tn_cpy(r->des, 80, dot + 3);
+      continue;
+    }
+    if (so_starts(s, L"Материал: ")) { /* «Материал: 45 ГОСТ 1050-2013 — сталь» */
+      tn_cpy(r->mat, 200, s + 10);
+      wchar_t *dash = wcsstr(r->mat, L" — ");
+      if (dash) *dash = 0;
+      if (so_starts(r->mat, L"не прочитан")) r->mat[0] = 0;
+      continue;
+    }
+    if (so_starts(s, L"Заготовка: ")) { /* «Заготовка: Круг 50 ГОСТ 2590-2006 (указана на чертеже)» */
+      tn_cpy(r->blank, 200, s + 11);
+      wchar_t *br = wcsstr(r->blank, L" (");
+      if (br) *br = 0;
+      if (so_starts(r->blank, L"Готовая деталь")) r->blank[0] = 0;
       continue;
     }
     if (so_starts(s, L"Деталь: ")) { /* «Деталь: Вал — тело вращения (…)» */
