@@ -312,6 +312,16 @@ static void pks_pend_flush(int row) {
 
 /* СБ (ВО, ГЧ…) сборки — строкой вида «Документация» в её состав: «АБВГ.123456.000СБ Сборочный чертеж»,
    файл чертежа — к этой строке (в «Союзе» ляжет подлинником документа) */
+/* номер листа в имени файла: «…00СБ-1.tif», «…00СБ_2.pdf» — 1, 2; без него — 0; пусто — большой */
+static int pks_sheet_no(const wchar_t *path) {
+  if (!path[0]) return 1000;
+  const wchar_t *b = tm_base(path), *e = wcsrchr(b, L'.');
+  if (!e) e = b + wcslen(b);
+  const wchar_t *d = e;
+  while (d > b && d[-1] >= L'0' && d[-1] <= L'9') d--;
+  return d < e && d > b && (d[-1] == L'-' || d[-1] == L'_') && e - d <= 2 ? _wtoi(d) : 0;
+}
+
 static void pks_doc_row(int asmRow, const PkStRes *r) {
   XpTable *it = &g_pk[PK_ITEMS];
   wchar_t a[DR_CELL], dd[DR_CELL];
@@ -328,7 +338,8 @@ static void pks_doc_row(int asmRow, const PkStRes *r) {
   }
   pks_fill_empty(row, 1, pp_doc_title(r->docCode));
   pks_fill_empty(row, 2, L"Документация");
-  pk_put(it, row, 5, r->file);
+  if (pks_sheet_no(r->file) <= pks_sheet_no(xp_cell(it, row, 5))) pk_put(it, row, 5, r->file); /* «…СБ-1» — лист 2: */
+  /* подлинник — первый лист, второй его не заменит */
   if (pks_link(a, dd, L"1", L"")) g_pksLinks++;
   g_pksDocs++;
 }

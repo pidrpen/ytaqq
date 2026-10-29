@@ -264,6 +264,9 @@ static int pp_file_title_code(const wchar_t *path, wchar_t *des, wchar_t *name, 
     pp_clean(name);
   }
   *doc = pp_draw_doc_code(des, name, code);
+  int letter = 0; /* «…00СБ-1.tif» — второй лист СБ: «1» — не наименование */
+  for (const wchar_t *q = name; *q && !letter; q++) letter = !tn_isdig(*q) && !wcschr(L" -_.,()№", *q);
+  if (!letter) name[0] = 0;
   return des[0] != 0;
 }
 

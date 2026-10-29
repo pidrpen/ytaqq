@@ -38,6 +38,9 @@
 #define ID_PK_QAREA 319
 #define ID_PK_QEQUIP 320
 #define ID_PK_QADD 321
+#define ID_PK_QALL 322  /* «Все детали» / «Эта деталь»: на листе «Операции» — весь лист или ТП одной детали */
+#define ID_PK_QUP 323   /* ▲ ▼ — выделенную операцию выше или ниже в ТП её детали */
+#define ID_PK_QDOWN 324
 #define WM_PK_ESI (WM_APP + 99) /* lParam — RtJob*, освобождает окно */
 /* чертежи, брошенные мышью (pk_stamp.c): штамп читает рабочий поток */
 #define WM_PK_STAMP (WM_APP + 96)   /* lParam — PkStRes*, освобождает окно */
@@ -97,6 +100,7 @@ static BOOL g_pkQShown, g_pkQBusy;
 static wchar_t g_pkQLastArea[200], g_pkQLastEquip[200]; /* участок — для следующей операции, в черновике (станок —
                                                            только из старых черновиков) */
 static void pk_layout(void);
+static void pk_q_new(void); /* строка быстрого ТП — снова для новой операции */
 static void pk_stamp_drop(HWND hwnd, HDROP hd); /* pk_stamp.c: бросили файлы — читать штампы */
 static void pk_stamp_done(void *res);           /* pk_stamp.c: WM_PK_STAMP */
 static void pk_stamp_progress(void);            /* pk_stamp.c: WM_PK_STAMPGO */
@@ -292,30 +296,115 @@ static void pk_draft_load(void) {
 }
 
 /* ---- таблица окна ---- */
+
+/* Лист «Операции» — ТП одной детали (с 2026.10.29.9): той, что в поле «деталь» строки быстрого
+   ТП, по номерам операций; «Все детали» — весь лист, как лежит. Строка списка — не строка
+   таблицы: pk_row (строка списка → таблицы) и pk_item (обратно). На других листах — одно и то же. */
+static int *g_pkView, g_pkViewN, g_pkViewCap;
+static wchar_t g_pkFilt[200]; /* чьи операции показаны; L"" — все строки листа */
+static BOOL g_pkQAll;         /* нажали «Все детали»: не сужать, пока не выберут деталь */
+static int g_pkQEdit = -1;    /* строка «Операций», загруженная в строку быстрого ТП для правки; -1 — новая */
+static BOOL g_pkFilling;      /* список перестраивается: его LVN_ITEMCHANGED — не выбор человека */
+
+static int pk_row(int item) {
+  if (!g_pkFilt[0]) return item;
+  return item >= 0 && item < g_pkViewN ? g_pkView[item] : -1;
+}
+
+static int pk_item(int row) {
+  if (!g_pkFilt[0]) return row;
+  for (int i = 0; i < g_pkViewN; i++)
+    if (g_pkView[i] == row) return i;
+  return -1;
+}
+
+static int pk_sel_row(void) { return pk_row(ListView_GetNextItem(g_pkList, -1, LVNI_SELECTED)); }
+
+/* номер операции для порядка: «005» → 5; пустой — в конец */
+static int pk_op_key(int r) {
+  const wchar_t *n = xp_cell(&g_pk[PK_OPS], r, 1);
+  return n[0] >= L'0' && n[0] <= L'9' ? _wtoi(n) : 1000000;
+}
+
+/* есть ли такая деталь: в «Изделиях» или у операций */
+static BOOL pk_is_part(const wchar_t *d) {
+  for (int k = 0; d[0] && k < 2; k++) {
+    XpTable *t = &g_pk[k ? PK_OPS : PK_ITEMS];
+    for (int r = 0; r < t->n; r++)
+      if (!_wcsicmp(xp_cell(t, r, 0), d)) return TRUE;
+  }
+  return FALSE;
+}
+
+/* кого показать: на «Операциях» — деталь из поля строки быстрого ТП (если она есть в пакете) */
+static void pk_view_build(void) {
+  XpTable *t = &g_pk[g_pkSheet];
+  g_pkFilt[0] = 0;
+  if (g_pkSheet == PK_OPS && g_pkQPart && !g_pkQAll) {
+    wchar_t p[200];
+    GetWindowTextW(g_pkQPart, p, 200);
+    wchar_t *b = p;
+    while (*b == L' ') b++;
+    size_t l = wcslen(b);
+    while (l && b[l - 1] == L' ') b[--l] = 0;
+    if (b[0] && pk_is_part(b)) lstrcpynW(g_pkFilt, b, 200);
+  }
+  if (g_pkViewCap < t->n + 1) {
+    int nc = t->n + 64;
+    int *v = (int *)realloc(g_pkView, sizeof(int) * (size_t)nc);
+    if (!v) {
+      g_pkFilt[0] = 0;
+      g_pkViewN = 0;
+      return;
+    }
+    g_pkView = v, g_pkViewCap = nc;
+  }
+  g_pkViewN = 0;
+  for (int r = 0; r < t->n; r++) {
+    if (g_pkFilt[0] && _wcsicmp(xp_cell(t, r, 0), g_pkFilt)) continue;
+    int i = g_pkViewN++, k = g_pkFilt[0] ? pk_op_key(r) : 0;
+    while (g_pkFilt[0] && i > 0 && pk_op_key(g_pkView[i - 1]) > k) g_pkView[i] = g_pkView[i - 1], i--; /* по номерам */
+    g_pkView[i] = r;
+  }
+}
+
 static void pk_tabs(void) {
   if (g_pkQPart && (g_pkSheet == PK_OPS) != g_pkQShown) pk_layout(); /* строка быстрого ТП — только у «Операций» */
   for (int k = 0; k < PK_NT; k++) {
     wchar_t s[60];
-    _snwprintf(s, 60, L"%s%s · %d", k == g_pkSheet ? L"● " : L"", kPkSheets[k].name, g_pk[k].n);
+    if (k == PK_OPS && g_pkSheet == PK_OPS && g_pkFilt[0])
+      _snwprintf(s, 60, L"● %s · %d/%d", kPkSheets[k].name, g_pkViewN, g_pk[k].n); /* показаны операции одной детали */
+    else
+      _snwprintf(s, 60, L"%s%s · %d", k == g_pkSheet ? L"● " : L"", kPkSheets[k].name, g_pk[k].n);
     SetWindowTextW(GetDlgItem(g_pkWnd, ID_PK_TAB + k), s);
+  }
+  HWND all = GetDlgItem(g_pkWnd, ID_PK_QALL);
+  if (all) {
+    SetWindowTextW(all, g_pkQAll ? L"Эта деталь" : L"Все детали");
+    EnableWindow(all, g_pkQAll || g_pkFilt[0]);
+    InvalidateRect(all, NULL, FALSE);
   }
 }
 
 static void pk_set_item(int r) {
   XpTable *t = &g_pk[g_pkSheet];
+  int it = pk_item(r);
+  if (it < 0) return; /* не эта деталь — в списке её нет */
   for (int c = 0; c < t->ncols; c++) {
     LVITEMW si;
     memset(&si, 0, sizeof(si));
     si.iSubItem = c;
     si.pszText = (wchar_t *)xp_cell(t, r, c);
-    SendMessageW(g_pkList, LVM_SETITEMTEXTW, (WPARAM)r, (LPARAM)&si);
+    SendMessageW(g_pkList, LVM_SETITEMTEXTW, (WPARAM)it, (LPARAM)&si);
   }
 }
 
 static void pk_fill(BOOL columns) {
   XpTable *t = &g_pk[g_pkSheet];
+  g_pkFilling = TRUE;
   SendMessageW(g_pkList, WM_SETREDRAW, FALSE, 0);
   ListView_DeleteAllItems(g_pkList);
+  pk_view_build();
   if (columns) {
     while (SendMessageW(g_pkList, LVM_DELETECOLUMN, 0, 0)) {
     }
@@ -329,17 +418,19 @@ static void pk_fill(BOOL columns) {
       SendMessageW(g_pkList, LVM_INSERTCOLUMNW, (WPARAM)c, (LPARAM)&col);
     }
   }
-  for (int r = 0; r < t->n; r++) {
+  for (int i = 0; i < g_pkViewN; i++) {
+    int r = g_pkView[i];
     LVITEMW it;
     memset(&it, 0, sizeof(it));
     it.mask = LVIF_TEXT;
-    it.iItem = r;
+    it.iItem = i;
     it.pszText = (wchar_t *)xp_cell(t, r, 0);
     SendMessageW(g_pkList, LVM_INSERTITEMW, 0, (LPARAM)&it);
     pk_set_item(r);
   }
   SendMessageW(g_pkList, WM_SETREDRAW, TRUE, 0);
   InvalidateRect(g_pkList, NULL, TRUE);
+  g_pkFilling = FALSE;
   pk_tabs();
 }
 
@@ -453,7 +544,7 @@ static LRESULT CALLBACK PkEditProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
       return 0;
     }
     if (wParam == VK_RETURN || wParam == VK_TAB) {
-      int r = g_pkEditRow, c = g_pkEditCol;
+      int r = pk_item(g_pkEditRow), c = g_pkEditCol; /* дальше — по списку: на «Операциях» он может быть одной детали */
       BOOL shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
       pk_edit_end(TRUE);
       XpTable *t = &g_pk[g_pkSheet];
@@ -461,7 +552,7 @@ static LRESULT CALLBACK PkEditProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
       else r++;
       if (c >= t->ncols) c = 0, r++;
       if (c < 0) c = t->ncols - 1, r--;
-      if (r >= 0 && r < t->n) pk_edit_begin(r, c);
+      if (r >= 0 && pk_row(r) >= 0 && pk_row(r) < t->n) pk_edit_begin(pk_row(r), c);
       return 0;
     }
   }
@@ -524,15 +615,16 @@ static void pk_combo_fill(int kind) {
 
 static void pk_edit_begin(int r, int c) {
   XpTable *t = &g_pk[g_pkSheet];
-  if (r < 0 || r >= t->n || c < 0 || c >= t->ncols) return;
+  int it = pk_item(r);
+  if (r < 0 || r >= t->n || c < 0 || c >= t->ncols || it < 0) return;
   RECT rc;
-  ListView_EnsureVisible(g_pkList, r, FALSE);
+  ListView_EnsureVisible(g_pkList, it, FALSE);
   if (c == 0) {
-    ListView_GetItemRect(g_pkList, r, &rc, LVIR_LABEL);
+    ListView_GetItemRect(g_pkList, it, &rc, LVIR_LABEL);
   } else {
     rc.top = c;
     rc.left = LVIR_BOUNDS;
-    SendMessageW(g_pkList, LVM_GETSUBITEMRECT, (WPARAM)r, (LPARAM)&rc);
+    SendMessageW(g_pkList, LVM_GETSUBITEMRECT, (WPARAM)it, (LPARAM)&rc);
   }
   if (!g_pkEdit) {
     g_pkEdit = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_BORDER | ES_AUTOHSCROLL, 0, 0, 10, 10, g_pkList, NULL,
@@ -591,7 +683,9 @@ static void pk_add_row(void) {
   if (!xp_row(t)) return;
   /* в составе, операциях и заготовках — сборка/деталь как у строки выше, а в пустом листе —
      выбранная позиция: вбивать меньше */
-  const wchar_t *first = g_pkSheet == PK_ITEMS ? L"" : t->n > 1 ? xp_cell(t, t->n - 2, 0) : g_pkCur;
+  const wchar_t *first = g_pkSheet == PK_ITEMS ? L"" : g_pkSheet == PK_OPS && g_pkFilt[0] ? g_pkFilt
+                        : t->n > 1                                     ? xp_cell(t, t->n - 2, 0)
+                                                                       : g_pkCur;
   if (first[0]) pk_put(t, t->n - 1, 0, first);
   pk_fill(FALSE);
   pk_changed();
@@ -724,9 +818,10 @@ static void pk_q_add(void) {
   wchar_t name[200];
   pk_q_resolve(op, name, 200);
   XpTable *t = &g_pk[PK_OPS];
+  int ed = g_pkQEdit >= 0 && g_pkQEdit < t->n ? g_pkQEdit : -1;
   int last = 0, cnt = 0;
   for (int r = 0; r < t->n; r++)
-    if (!_wcsicmp(xp_cell(t, r, 0), part)) {
+    if (r != ed && !_wcsicmp(xp_cell(t, r, 0), part)) {
       int v = _wtoi(xp_cell(t, r, 1));
       if (v > last) last = v;
       cnt++;
@@ -734,6 +829,24 @@ static void pk_q_add(void) {
   wchar_t num[8];
   _snwprintf(num, 8, L"%03d", last + 5);
   num[7] = 0;
+  if (ed >= 0) { /* правка загруженной операции: на месте, номер тот же (к другой детали — следующий её номер) */
+    if (_wcsicmp(xp_cell(t, ed, 0), part) || !xp_cell(t, ed, 1)[0]) pk_put(t, ed, 1, num);
+    lstrcpynW(num, xp_cell(t, ed, 1), 8);
+    pk_put(t, ed, 0, part);
+    pk_put(t, ed, 2, name);
+    pk_put(t, ed, 3, area);
+    pk_put(t, ed, 4, eq); /* стёрли станок — pk_changed подберёт заново */
+    lstrcpynW(g_pkQLastArea, area, 200);
+    lstrcpynW(g_pkCur, part, 200);
+    pk_q_new();
+    if (g_pkSheet == PK_OPS) pk_fill(FALSE);
+    pk_changed();
+    SetFocus(g_pkQOp);
+    const wchar_t *got = xp_cell(t, ed, 4);
+    pk_status(L"Операция %s «%s» изменена: %s%s%s%s. Следующую — печатайте; править — щёлкните строку", num, part, name,
+              got[0] ? L", " : L"", got, got[0] && !eq[0] ? L" (подобран по «Союзу»)" : L"");
+    return;
+  }
   wchar_t **w = xp_row(t);
   if (!w) return;
   xp_set(w, 0, part);
@@ -746,7 +859,7 @@ static void pk_q_add(void) {
   lstrcpynW(g_pkCur, part, 200);
   if (g_pkSheet == PK_OPS) {
     pk_fill(FALSE);
-    ListView_EnsureVisible(g_pkList, t->n - 1, FALSE);
+    ListView_EnsureVisible(g_pkList, pk_item(t->n - 1), FALSE);
   }
   pk_changed();
   g_pkQBusy = TRUE; /* очистка поля — не фильтр */
@@ -762,11 +875,132 @@ static void pk_q_add(void) {
             got[0] ? L", " : L"", got, got[0] && !eq[0] ? L" (подобран по «Союзу»)" : L"");
 }
 
-/* Enter в полях строки быстрого ТП — «+ Операция»; в раскрытом списке — сперва выбранное */
+/* строка быстрого ТП — снова для новой операции: кнопка «+ Операция», операция и станок пусты,
+   в списке ничего не выделено */
+static void pk_q_new(void) {
+  g_pkQEdit = -1;
+  if (!g_pkQPart) return;
+  HWND b = GetDlgItem(g_pkWnd, ID_PK_QADD);
+  SetWindowTextW(b, L"+ Операция");
+  InvalidateRect(b, NULL, FALSE);
+  g_pkQBusy = TRUE;
+  SetWindowTextW(g_pkQOp, L"");
+  SetWindowTextW(g_pkQEquip, L"");
+  g_pkQBusy = FALSE;
+  if (g_pkSheet == PK_OPS && ListView_GetSelectedCount(g_pkList)) ListView_SetItemState(g_pkList, -1, 0, LVIS_SELECTED);
+}
+
+/* выделили одну операцию — она в строке быстрого ТП: поправить поля и Enter («Сохранить 010») */
+static void pk_q_load(int row) {
+  XpTable *t = &g_pk[PK_OPS];
+  if (row < 0 || row >= t->n || !g_pkQPart) return;
+  g_pkQBusy = TRUE;
+  SetWindowTextW(g_pkQPart, xp_cell(t, row, 0));
+  SetWindowTextW(g_pkQOp, xp_cell(t, row, 2));
+  SetWindowTextW(g_pkQArea, xp_cell(t, row, 3));
+  SetWindowTextW(g_pkQEquip, xp_cell(t, row, 4));
+  g_pkQBusy = FALSE;
+  g_pkQEdit = row;
+  wchar_t b[40];
+  _snwprintf(b, 40, L"Сохранить %s", xp_cell(t, row, 1));
+  b[39] = 0;
+  HWND bt = GetDlgItem(g_pkWnd, ID_PK_QADD);
+  SetWindowTextW(bt, b);
+  InvalidateRect(bt, NULL, FALSE);
+  pk_status(L"Правка операции %s %s: поменяйте поля вверху, Enter — сохранить; ▲ ▼ — переставить; Delete — удалить; Esc — "
+            L"новая операция",
+            xp_cell(t, row, 1), xp_cell(t, row, 2));
+}
+
+/* ▲ ▼: выделенная операция меняется местами с соседней по номеру в ТП своей детали — номера
+   остаются на местах (005, 010…), переезжает содержимое: операция, участок, станок, нормы */
+static void pk_q_move(int dir) {
+  XpTable *t = &g_pk[PK_OPS];
+  int row = g_pkSheet == PK_OPS && ListView_GetSelectedCount(g_pkList) == 1 ? pk_sel_row() : -1;
+  if (row < 0 || row >= t->n) {
+    pk_status(L"Выделите одну операцию — ▲ ▼ переставят её выше или ниже в ТП детали");
+    return;
+  }
+  const wchar_t *part = xp_cell(t, row, 0);
+  int me = pk_op_key(row), best = -1, bk = 0;
+  for (int r = 0; r < t->n; r++) {
+    if (r == row || _wcsicmp(xp_cell(t, r, 0), part)) continue;
+    int k = pk_op_key(r);
+    if (dir < 0 ? k < me && (best < 0 || k > bk) : k > me && (best < 0 || k < bk)) best = r, bk = k;
+  }
+  if (best < 0) {
+    pk_status(dir < 0 ? L"Операция и так первая в ТП «%s»" : L"Операция и так последняя в ТП «%s»", part);
+    return;
+  }
+  for (int c = 2; c < t->ncols; c++) {
+    wchar_t **a = &t->cell[(size_t)row * (size_t)t->ncols + (size_t)c], **b = &t->cell[(size_t)best * (size_t)t->ncols + (size_t)c];
+    wchar_t *x = *a;
+    *a = *b, *b = x;
+  }
+  pk_fill(FALSE);
+  int it = pk_item(best);
+  ListView_SetItemState(g_pkList, it, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED); /* загрузит её */
+  ListView_EnsureVisible(g_pkList, it, FALSE);
+  pk_changed();
+  pk_status(L"Операция «%s» теперь %s в ТП «%s»", xp_cell(t, best, 2), xp_cell(t, best, 1), xp_cell(t, best, 0));
+}
+
+/* в поле «деталь» выбрали или вписали деталь — на листе её операции (sel — выбор в списке:
+   поле ещё со старым текстом) */
+static void pk_q_part_changed(BOOL sel) {
+  if (g_pkQBusy || !g_pkQPart) return;
+  if (sel) {
+    int i = (int)SendMessageW(g_pkQPart, CB_GETCURSEL, 0, 0);
+    wchar_t v[200] = L"";
+    if (i >= 0 && SendMessageW(g_pkQPart, CB_GETLBTEXTLEN, (WPARAM)i, 0) < 200)
+      SendMessageW(g_pkQPart, CB_GETLBTEXT, (WPARAM)i, (LPARAM)v);
+    g_pkQBusy = TRUE;
+    SetWindowTextW(g_pkQPart, v);
+    g_pkQBusy = FALSE;
+  }
+  wchar_t was[200];
+  lstrcpynW(was, g_pkFilt, 200);
+  g_pkQAll = FALSE;
+  if (g_pkSheet != PK_OPS) return;
+  pk_view_build();
+  if (wcscmp(was, g_pkFilt)) {
+    if (g_pkQEdit >= 0) pk_q_new();
+    pk_fill(FALSE);
+    if (g_pkFilt[0])
+      pk_status(L"ТП «%s»: операций %d — щёлкните строку, чтобы поправить; новую — печатайте в поле операции", g_pkFilt,
+                g_pkViewN);
+  }
+}
+
+/* «Все детали» ↔ «Эта деталь» */
+static void pk_q_all(void) {
+  g_pkQAll = !g_pkQAll && g_pkFilt[0];
+  if (!g_pkQAll) {
+    wchar_t p[200];
+    GetWindowTextW(g_pkQPart, p, 200);
+    if (!p[0] && g_pkCur[0]) SetWindowTextW(g_pkQPart, g_pkCur);
+  }
+  if (g_pkQEdit >= 0) pk_q_new();
+  pk_fill(FALSE);
+  pk_status(g_pkQAll ? L"Все операции листа — щёлкните строку, чтобы поправить; «Эта деталь» — снова одна"
+            : g_pkFilt[0] ? L"Операции «%s» — по номерам; другую деталь выберите в поле слева"
+                          : L"Впишите или выберите деталь слева — покажу только её операции",
+            g_pkFilt);
+}
+
+/* Enter в полях строки быстрого ТП — «+ Операция» (или «Сохранить» загруженную); в раскрытом списке —
+   сперва выбранное; Esc — бросить правку, дальше — новая операция */
 static LRESULT CALLBACK PkQProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
   WNDPROC old = (WNDPROC)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
   HWND cb = GetParent(hwnd);
-  if (msg == WM_CHAR && (wParam == L'\r' || wParam == L'\n' || wParam == L'\t')) return 0; /* без писка */
+  if (msg == WM_CHAR && (wParam == L'\r' || wParam == L'\n' || wParam == L'\t' || wParam == 27)) return 0; /* без писка */
+  if (msg == WM_KEYDOWN && wParam == VK_ESCAPE && !SendMessageW(cb, CB_GETDROPPEDSTATE, 0, 0)) {
+    if (g_pkQEdit >= 0) {
+      pk_q_new();
+      pk_status(L"Правка брошена — печатайте новую операцию");
+    }
+    return 0;
+  }
   if (msg == WM_KEYDOWN && wParam == VK_TAB) { /* Tab / Shift+Tab — по полям строки по кругу */
     HWND f[4] = {g_pkQPart, g_pkQOp, g_pkQArea, g_pkQEquip};
     int i = 0;
@@ -816,8 +1050,16 @@ static HWND pk_q_combo(int id, const wchar_t *cue) {
 static void pk_delete_selected(void) {
   XpTable *t = &g_pk[g_pkSheet];
   int removed = 0;
+  char *del = t->n ? (char *)calloc((size_t)t->n, 1) : NULL; /* строки списка — не по порядку таблицы */
+  if (!del) return;
+  for (int i = ListView_GetNextItem(g_pkList, -1, LVNI_SELECTED); i >= 0; i = ListView_GetNextItem(g_pkList, i, LVNI_SELECTED)) {
+    int r = pk_row(i);
+    if (r >= 0 && r < t->n) del[r] = 1;
+  }
+  if (g_pkSheet == PK_OPS) pk_q_new(); /* номера строк сдвинутся — загруженная правка больше не та */
   for (int r = t->n - 1; r >= 0; r--)
-    if (ListView_GetItemState(g_pkList, r, LVIS_SELECTED) & LVIS_SELECTED) pk_del_row(t, r), removed++;
+    if (del[r]) pk_del_row(t, r), removed++;
+  free(del);
   if (!removed) {
     pk_status(L"Выделите строки, которые удалить");
     return;
@@ -830,7 +1072,7 @@ static void pk_delete_selected(void) {
 /* куда вставлять то, у чего в тексте нет детали или сборки: выделенная строка открытого листа,
    иначе — выбранная позиция (g_pkCur) */
 static void pk_target(wchar_t *asmb, wchar_t *part) {
-  int r = ListView_GetNextItem(g_pkList, -1, LVNI_SELECTED);
+  int r = pk_sel_row();
   const wchar_t *sel = r >= 0 && r < g_pk[g_pkSheet].n ? xp_cell(&g_pk[g_pkSheet], r, 0) : L"";
   lstrcpynW(part, sel[0] ? sel : g_pkCur, 200);
   lstrcpynW(asmb, sel[0] ? sel : g_pkCur, 200);
@@ -1008,7 +1250,7 @@ static void pk_esi_start(void) {
   size_t l = wcslen(d);
   while (l && d[l - 1] == L' ') d[--l] = 0;
   if (!d[0]) { /* поле пустое — выделенная строка */
-    int r = ListView_GetNextItem(g_pkList, -1, LVNI_SELECTED);
+    int r = pk_sel_row();
     if (r >= 0 && r < g_pk[g_pkSheet].n) lstrcpynW(des, xp_cell(&g_pk[g_pkSheet], r, 0), 200), d = des;
   }
   if (!d[0]) {
@@ -1147,7 +1389,10 @@ static void pk_help(void) {
       L"  печатать («ток», «4110»), список сузится; участок остаётся для следующей; станок пустой — подберётся сам\r\n"
       L"  (какой в «Союзе» стоит на этой операции на этом участке), можно вписать свой. Tab — к следующему полю.\r\n"
       L"  Enter или «+ Операция» — строка с номером 005, 010…; потом «В Союз…» — ТП создастся в папке ТП\r\n"
-      L"  и привяжется к детали.\r\n\r\n"
+      L"  и привяжется к детали.\r\n"
+      L"  Лист показывает операции только детали из поля слева, по номерам (на вкладке — «5/40»); «Все детали» —\r\n"
+      L"  весь лист. Щелчок по операции — она в строке вверху: поправьте и Enter («Сохранить 010»), Esc — бросить;\r\n"
+      L"  ▲ ▼ (или Ctrl+↑ ↓) — переставить выше или ниже, номера остаются на местах; Delete — удалить.\r\n\r\n"
       L"КАК БЫСТРО ВСТАВИТЬ\r\n"
       L"  Ctrl+V или «Вставить» понимает: таблицу Excel и Word с шапкой (столбцы в любом порядке: «Обозн.», «Кол.»,\r\n"
       L"  «№ опер.», «Станок», «Тшт, ч»…), спецификацию с разделами, маршрут из чата ИИ, операции строками\r\n"
@@ -1479,6 +1724,9 @@ static void pk_clear(void) {
   xp_package_free(g_pk);
   pk_soy_clear();
   g_pkCur[0] = 0;
+  pk_q_new();
+  g_pkQAll = FALSE;
+  if (g_pkQPart) SetWindowTextW(g_pkQPart, L"");
   InterlockedIncrement(&g_pkStGen); /* недочитанные чертежи — мимо */
   pk_stamp_forget();
   pk_init();
@@ -1506,23 +1754,21 @@ static void pk_layout(void) {
   /* лист «Операции»: над таблицей — строка быстрого ТП */
   g_pkQShown = g_pkSheet == PK_OPS;
   if (g_pkQPart) {
-    int gap = PKS(6), wPart = PKS(170), wOp = PKS(250), wArea = PKS(230), wBtn = PKS(116);
-    int wEq = rc.right - pad * 2 - wPart - wOp - wArea - wBtn - gap * 4;
+    /* деталь, «Все детали», операция, участок, станок, «+ Операция» («Сохранить 010»), ▲ ▼ */
+    int gap = PKS(6), wPart = PKS(160), wAll = PKS(92), wOp = PKS(210), wArea = PKS(190), wBtn = PKS(132), wArr = PKS(30);
+    int wEq = rc.right - pad * 2 - wPart - wAll - wOp - wArea - wBtn - wArr * 2 - gap * 7;
     if (wEq < PKS(100)) wEq = PKS(100);
-    HWND q[] = {g_pkQPart, g_pkQOp, g_pkQArea, g_pkQEquip, GetDlgItem(g_pkWnd, ID_PK_QADD)};
-    int qw[] = {wPart, wOp, wArea, wEq, wBtn}, qx = pad;
-    for (int i = 0; i < 5; i++) {
-      if (i < 4) MoveWindow(q[i], qx, ly, qw[i], PKS(320), TRUE);
+    HWND q[] = {g_pkQPart, GetDlgItem(g_pkWnd, ID_PK_QALL), g_pkQOp, g_pkQArea, g_pkQEquip, GetDlgItem(g_pkWnd, ID_PK_QADD),
+                GetDlgItem(g_pkWnd, ID_PK_QUP), GetDlgItem(g_pkWnd, ID_PK_QDOWN)};
+    int qw[] = {wPart, wAll, wOp, wArea, wEq, wBtn, wArr, wArr}, qx = pad;
+    for (int i = 0; i < 8; i++) {
+      BOOL btn = i == 1 || i >= 5;
+      if (!btn) MoveWindow(q[i], qx, ly, qw[i], PKS(320), TRUE);
       else MoveWindow(q[i], qx, ly - PKS(1), qw[i], PKS(27), TRUE);
       ShowWindow(q[i], g_pkQShown ? SW_SHOW : SW_HIDE);
       qx += qw[i] + gap;
     }
-    if (g_pkQShown) {
-      wchar_t t[200];
-      GetWindowTextW(g_pkQPart, t, 200);
-      if (!t[0] && g_pkCur[0]) SetWindowTextW(g_pkQPart, g_pkCur); /* выбранная позиция — деталь ТП */
-      ly += PKS(34);
-    }
+    if (g_pkQShown) ly += PKS(34);
   }
   MoveWindow(g_pkList, pad, ly, rc.right - pad * 2, foot - PKS(26) - ly, TRUE);
   /* подвал (с 2026.10.21): правка строк — слева, главное «Сохранить» — справа */
@@ -1572,8 +1818,12 @@ static LRESULT CALLBACK PkListProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
   if (msg == WM_KEYDOWN) {
     BOOL ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
     if (wParam == VK_F2 || wParam == VK_RETURN) {
-      int r = ListView_GetNextItem(hwnd, -1, LVNI_FOCUSED);
+      int r = pk_row(ListView_GetNextItem(hwnd, -1, LVNI_FOCUSED));
       if (r >= 0) pk_edit_begin(r, 0);
+      return 0;
+    }
+    if (ctrl && (wParam == VK_UP || wParam == VK_DOWN) && g_pkSheet == PK_OPS) { /* как ▲ ▼ */
+      pk_q_move(wParam == VK_UP ? -1 : 1);
       return 0;
     }
     if (wParam == VK_DELETE) {
@@ -1644,24 +1894,29 @@ static LRESULT CALLBACK PkProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
       NMLVCUSTOMDRAW *cd = (NMLVCUSTOMDRAW *)lParam;
       if (cd->nmcd.dwDrawStage == CDDS_PREPAINT) return CDRF_NOTIFYITEMDRAW;
       if (cd->nmcd.dwDrawStage == CDDS_ITEMPREPAINT) {
-        int r = (int)cd->nmcd.dwItemSpec;
+        int r = pk_row((int)cd->nmcd.dwItemSpec);
         if (r >= 0 && r < g_pk[g_pkSheet].n && pk_row_from_soyuz(g_pkSheet, r)) cd->clrText = COL_MUTED;
       }
       return CDRF_DODEFAULT;
     }
     if (nh->hwndFrom == g_pkList && nh->code == NM_DBLCLK) {
       NMITEMACTIVATE *ia = (NMITEMACTIVATE *)lParam;
-      if (ia->iItem >= 0 && g_pkSheet == PK_ITEMS && ia->iSubItem == 5) pk_pick_drawing(ia->iItem);
-      else if (ia->iItem >= 0) pk_edit_begin(ia->iItem, ia->iSubItem);
+      int r = pk_row(ia->iItem);
+      if (r >= 0 && g_pkSheet == PK_ITEMS && ia->iSubItem == 5) pk_pick_drawing(r);
+      else if (r >= 0) pk_edit_begin(r, ia->iSubItem);
       else pk_add_row(); /* по пустому месту — новая строка */
       return 0;
     }
-    /* строка «Операций» — её деталь в строку быстрого ТП: дописывать этот ТП */
-    if (nh->hwndFrom == g_pkList && nh->code == LVN_ITEMCHANGED && g_pkSheet == PK_OPS && g_pkQPart) {
+    /* одна строка «Операций» выделена — она в строке быстрого ТП, для правки; выделение снято — снова новая */
+    if (nh->hwndFrom == g_pkList && nh->code == LVN_ITEMCHANGED && g_pkSheet == PK_OPS && g_pkQPart && !g_pkFilling) {
       NMLISTVIEW *lv = (NMLISTVIEW *)lParam;
-      if (lv->iItem >= 0 && lv->iItem < g_pk[PK_OPS].n && (lv->uNewState & LVIS_SELECTED) && !(lv->uOldState & LVIS_SELECTED)) {
-        const wchar_t *d = xp_cell(&g_pk[PK_OPS], lv->iItem, 0);
-        if (d[0]) SetWindowTextW(g_pkQPart, d);
+      if ((lv->uNewState ^ lv->uOldState) & LVIS_SELECTED) {
+        int r = ListView_GetSelectedCount(g_pkList) == 1 ? pk_sel_row() : -1;
+        if (r >= 0 && r < g_pk[PK_OPS].n) {
+          if (r != g_pkQEdit) pk_q_load(r);
+        } else if (g_pkQEdit >= 0) {
+          pk_q_new();
+        }
       }
     }
     /* выбрали позицию в «Изделиях» — к ней пойдут вставленные операции и заготовка */
@@ -1672,6 +1927,12 @@ static LRESULT CALLBACK PkProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
         const wchar_t *d = xp_cell(&g_pk[PK_ITEMS], lv->iItem, 0);
         if (d[0] && _wcsicmp(d, g_pkCur)) {
           lstrcpynW(g_pkCur, d, 200);
+          if (g_pkQPart) { /* и в строку быстрого ТП: на «Операциях» — её операции */
+            g_pkQBusy = TRUE;
+            SetWindowTextW(g_pkQPart, d);
+            g_pkQBusy = FALSE;
+            g_pkQAll = FALSE;
+          }
           PkSoyItem *si = pk_soy_item(d);
           pk_status(L"Выбрано: %s%s — %s", d,
                     si ? (si->tp ? L" (из «Союза», ТП уже есть)" : L" (из «Союза», без ТП)") : L"",
@@ -1735,12 +1996,22 @@ static LRESULT CALLBACK PkProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
     }
     if (id >= ID_PK_TAB && id < ID_PK_TAB + PK_NT) {
       if (g_pkEditRow >= 0) pk_edit_end(TRUE);
+      if (g_pkQEdit >= 0) pk_q_new();
       g_pkSheet = id - ID_PK_TAB;
+      if (g_pkSheet == PK_OPS && g_pkQPart) { /* выбранная позиция — деталь ТП, её операции */
+        wchar_t t[200];
+        GetWindowTextW(g_pkQPart, t, 200);
+        if (!t[0] && g_pkCur[0]) SetWindowTextW(g_pkQPart, g_pkCur);
+      }
       pk_fill(TRUE);
     }
     if (id == ID_PK_ADD) pk_add_row();
     if (id == ID_PK_ASM) pk_add_asm();
     if (id == ID_PK_QADD) pk_q_add();
+    if (id == ID_PK_QALL) pk_q_all();
+    if (id == ID_PK_QUP || id == ID_PK_QDOWN) pk_q_move(id == ID_PK_QUP ? -1 : 1);
+    if (id == ID_PK_QPART && (HIWORD(wParam) == CBN_EDITCHANGE || HIWORD(wParam) == CBN_SELCHANGE))
+      pk_q_part_changed(HIWORD(wParam) == CBN_SELCHANGE);
     if (id == ID_PK_QOP && HIWORD(wParam) == CBN_EDITCHANGE) pk_q_filter();
     if ((id == ID_PK_QPART || id == ID_PK_QAREA || id == ID_PK_QEQUIP) && HIWORD(wParam) == CBN_DROPDOWN)
       pk_q_list((HWND)lParam);
@@ -1820,6 +2091,9 @@ static void package_show(BOOL fill) {
     g_pkQArea = pk_q_combo(ID_PK_QAREA, L"участок");
     g_pkQEquip = pk_q_combo(ID_PK_QEQUIP, L"оборудование — само по операции и участку");
     mk_btn(g_pkWnd, L"+ Операция", ID_PK_QADD);
+    mk_btn(g_pkWnd, L"Все детали", ID_PK_QALL);
+    mk_btn(g_pkWnd, L"▲", ID_PK_QUP);
+    mk_btn(g_pkWnd, L"▼", ID_PK_QDOWN);
     g_pkList = CreateWindowExW(0, WC_LISTVIEWW, L"", WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP | LVS_REPORT |
                                                        LVS_SHOWSELALWAYS | WS_CLIPCHILDREN,
                                0, 0, 10, 10, g_pkWnd, NULL, g_inst, NULL);
