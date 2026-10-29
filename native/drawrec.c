@@ -64,6 +64,7 @@ typedef struct {
   wchar_t note[300];  /* что не так — в столбец «Заметки» */
   DrSpecRow *rows;
   int nrows;
+  int rowsBy;         /* чем прочитаны строки спецификации: 1 — Tesseract, 2 — модель, 0 — нет (карточка ЭСИ) */
   wchar_t *text;      /* весь лист (ТТ, Ra, допуски, резьбы) — для маршрута, techno.c; NULL — не читали */
   /* то же, прочитанное локальной моделью с картинками (drawrec_vl): графы штампа и ТТ */
   wchar_t vlName[DR_CELL], vlMat[DR_CELL];
@@ -1349,6 +1350,14 @@ static void dr_spec_cell(DrSpecRow *o, int c, const wchar_t *in, int conf) {
   o->doubt[c] = (BYTE)bad;
 }
 
+/* «Резерв» в наименовании — место под позицию, не изделие: в состав не идёт */
+static BOOL dr_spec_reserve(const wchar_t *name) {
+  wchar_t low[8];
+  lstrcpynW(low, name, 8);
+  CharLowerBuffW(low, (DWORD)wcslen(low));
+  return !wcsncmp(low, L"резерв", 6);
+}
+
 static void dr_vl_spec(const DrImg *m, const DrStamp *s, int top, DrPage *pg);
 
 static void dr_spec(DrImg *m, int thr, const DrLines *L, const DrStamp *s, DrPage *pg) {
@@ -1459,7 +1468,7 @@ static void dr_spec(DrImg *m, int thr, const DrLines *L, const DrStamp *s, DrPag
         if (c != DS_NAME) onlyName = FALSE;
       }
     }
-    if (!any) continue;
+    if (!any || (!cell[r][DS_DES][0] && dr_spec_reserve(cell[r][DS_NAME]))) continue; /* «Резерв» — не продолжение наименования */
     if (onlyName && dr_section(cell[r][DS_NAME]) >= 0) {
       lstrcpynW(sect, cell[r][DS_NAME], DR_CELL);
       continue;
@@ -1476,6 +1485,7 @@ static void dr_spec(DrImg *m, int thr, const DrLines *L, const DrStamp *s, DrPag
     for (int c = DS_FMT; c < DS_N; c++) dr_spec_cell(o, c, cell[r][c], conf[r][c]);
   }
   for (int r = 0; r < pg->nrows; r++) dr_fix_latin(pg->rows[r].c[DS_NAME]), dr_fix_thread(pg->rows[r].c[DS_NAME]);
+  pg->rowsBy = pg->nrows ? 1 : 0;
   free(cell);
   free(conf);
   dr_vl_spec(m, s, top, pg);
@@ -2031,7 +2041,8 @@ static BOOL dr_json_spec(const wchar_t *j, DrPage *pg) {
       if (c == DS_SECT) lstrcpynW(o->c[c], v, DR_CELL);
       else dr_spec_cell(o, c, v, 100), any |= v[0] != 0;
     }
-    if (any) n++;
+    if (any && (o->c[DS_DES][0] || !dr_spec_reserve(o->c[DS_NAME]))) n++;
+    else memset(o, 0, sizeof(*o));
     q = end + 1;
   }
   if (!n) {
@@ -2041,6 +2052,7 @@ static BOOL dr_json_spec(const wchar_t *j, DrPage *pg) {
   free(pg->rows);
   pg->rows = rows;
   pg->nrows = n;
+  pg->rowsBy = 2;
   return TRUE;
 }
 
@@ -2093,6 +2105,7 @@ static void dr_recognize(IWICImagingFactory *f, DrPage *pg) {
   pg->note[0] = pg->fmt[0] = 0;
   pg->type = DRT_OTHER;
   pg->form = 0;
+  pg->rowsBy = 0;
   DrImg m;
   double dpi = 96;
   HRESULT hr = dr_read(f, pg->path, pg->frame, &m, &dpi);
@@ -2291,7 +2304,7 @@ static void dr_spec_json_test(const wchar_t *in, const wchar_t *out) {
     wchar_t *w = (wchar_t *)calloc((size_t)wn + 1, sizeof(wchar_t));
     if (w) MultiByteToWideChar(CP_UTF8, 0, raw, (int)n, w, wn);
     BOOL ok = w && dr_json_spec(w, &pg);
-    sb_add(&b, L"ok=%d rows=%d\n", ok, pg.nrows);
+    sb_add(&b, L"ok=%d rows=%d by=%d\n", ok, pg.nrows, pg.rowsBy);
     for (int r = 0; r < pg.nrows; r++) {
       for (int c = 0; c < DS_N; c++)
         sb_add(&b, L"%s%s%s=%s", c ? L" | " : L"", pg.rows[r].doubt[c] ? L"?" : L"", kDrSpecKey[c], pg.rows[r].c[c]);
