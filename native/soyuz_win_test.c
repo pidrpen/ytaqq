@@ -522,8 +522,20 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
                      !ac_is_path_start(L"ТСТ.100.000"),
                  L"кликабельный чат: обозначения узнаются, даты, ГОСТы, коды и слова — нет; путь — по «X:\\»");
         st_check(np == 1 && pl.n >= 1 && wcsstr(pl.p[0], L".png"), L"чат: путь к папке в кавычках найден, её картинки собраны в список");
-        st_note(L"     файлов из папки стенда: %d", pl.n);
+        st_note(L"     файлов из папки стенда: %d (папка «%ls»)", pl.n, g_stDir);
         free(pl.p);
+        { /* тот же путь с хвостовым «\\» и с прямыми слэшами — как его вставляют из Проводника или терминала */
+          wchar_t alt[600], fwd[MAX_PATH];
+          lstrcpynW(fwd, g_stDir, MAX_PATH);
+          for (wchar_t *c = fwd; *c; c++)
+            if (*c == L'\\') *c = L'/';
+          _snwprintf(alt, 600, L"по чертежам \"%ls\\\" и %ls в Союз", g_stDir, fwd);
+          TmPaths pl2 = {0};
+          int np2 = esi_paths(alt, &pl2);
+          st_check(np2 == 2 && pl2.n >= 2, L"чат: путь с хвостовым «\\» в кавычках и путь с прямыми слэшами без кавычек — оба найдены");
+          st_note(L"     найдено путей %d, файлов %d", np2, pl2.n);
+          free(pl2.p);
+        }
       }
       package_show(FALSE);
       szm_dicts_start(g_pkWnd);
@@ -541,7 +553,10 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
       st_check(g_pkEditCtl == g_pkCombo && SendMessageW(g_pkCombo, CB_GETCOUNT, 0, 0) == 1, L"правка «Участка» — список из базы");
       st_shot_wnd(L"9-package.png", g_pkWnd);
       pk_edit_end(FALSE);
+      /* строки таблицы дописывает очередь окна (справочники из базы → pk_equip_fill → pk_fill): ждём её, не таймер */
+      for (int t = 0; t < 50 && ListView_GetItemCount(g_pkList) != 7; t++) st_pump(100);
       st_check(ListView_GetItemCount(g_pkList) == 7, L"в таблице листа «Операции» семь строк (с транспортированиями и сборкой)");
+      st_note(L"     строк в таблице «Операции»: %d, в данных %d", ListView_GetItemCount(g_pkList), g_pk[PK_OPS].n);
       pk_to_soyuz();
       for (int t = 0; t < 100 && SendMessageW(g_szmCombo, CB_GETCOUNT, 0, 0) == 0; t++) st_pump(100);
       int nf = (int)SendMessageW(g_szmCombo, CB_GETCOUNT, 0, 0);
