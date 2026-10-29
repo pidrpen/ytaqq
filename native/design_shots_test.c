@@ -216,11 +216,28 @@ static void dst_fx_strip(int kind, const wchar_t *base, const int *frames, int n
 }
 
 static void dst_settings(int tab, const wchar_t *name) {
+  SetCursorPos(2, 2); /* мышь не над кнопками: наведённая в снимке выходила пустой плашкой */
   g_tab = tab;
+  g_setScroll = 0;
   if (!IsWindowVisible(g_setHwnd)) toggle_settings();
   place_settings();
   dst_pump(200);
   dst_shot(g_setHwnd, name);
+  /* вкладка выше окна (с 2026.10.29 окно не растёт) — второй снимок, прокрученный до конца */
+  RECT rc;
+  GetClientRect(g_setHwnd, &rc);
+  if (g_setContentH > rc.bottom) {
+    wchar_t end[200];
+    lstrcpynW(end, name, 190);
+    wchar_t *dot = wcsrchr(end, L'.');
+    if (dot) lstrcpyW(dot, L"-end.png");
+    scroll_settings(g_setContentH);
+    dst_pump(500); /* показанные прокруткой элементы успевают нарисоваться */
+    RedrawWindow(g_setHwnd, NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+    dst_pump(200);
+    dst_shot(g_setHwnd, end);
+    scroll_settings(0);
+  }
 }
 
 /* «Современный» набор (cursor_kit.c): все 16 видов стиля st рядами 32, 48 и 64 точки
@@ -356,20 +373,58 @@ static void dst_kit_all(void) {
     set_theme(th[i]);
     dst_pump(150);
     wchar_t name[200];
-    _snwprintf(name, 200, L"kit-card-%ls.png", thn[i]);
-    dst_settings(2, name);
-    _snwprintf(name, 200, L"kit-cursortab-%ls.png", thn[i]);
+    _snwprintf(name, 200, L"kit-card-%ls.png", thn[i]); /* с 2026.10.29 карточка — на вкладке «Курсор» */
     dst_settings(0, name);
   }
   /* крупный размер: карточка с просмотром */
   set_theme(0);
   g_kitSize = 2;
-  dst_settings(2, L"kit-card-krupny.png");
+  dst_settings(0, L"kit-card-krupny.png");
   g_kitSize = 0;
   if (IsWindowVisible(g_setHwnd)) toggle_settings();
   set_theme(0);
   dst_kit_context(L"kit-context-32.png", 32);
   dst_kit_context(L"kit-context-48.png", 48);
+}
+
+/* окна модулей: открыть, снять всё, что появилось нового, спрятать */
+static HWND g_dstSeen[64];
+static int g_dstSeenN;
+static BOOL CALLBACK dst_seen_cb(HWND h, LPARAM lp) {
+  (void)lp;
+  if (IsWindowVisible(h) && g_dstSeenN < 64) g_dstSeen[g_dstSeenN++] = h;
+  return TRUE;
+}
+static BOOL CALLBACK dst_new_cb(HWND h, LPARAM lp) {
+  const wchar_t *base = (const wchar_t *)lp;
+  if (!IsWindowVisible(h) || h == g_hwnd) return TRUE;
+  for (int i = 0; i < g_dstSeenN; i++)
+    if (g_dstSeen[i] == h) return TRUE;
+  wchar_t cls[64], name[200];
+  GetClassNameW(h, cls, 64);
+  _snwprintf(name, 200, L"%ls-%ls.png", base, cls);
+  dst_shot(h, name);
+  ShowWindow(h, SW_HIDE);
+  return TRUE;
+}
+static void dst_module(void (*show)(void), const wchar_t *base) {
+  g_dstSeenN = 0;
+  EnumThreadWindows(GetCurrentThreadId(), dst_seen_cb, 0);
+  show();
+  dst_pump(400);
+  EnumThreadWindows(GetCurrentThreadId(), dst_new_cb, (LPARAM)base);
+}
+static void dst_pkg(void) { package_show(FALSE); }
+static void dst_modules(const wchar_t *tn) {
+  struct { void (*f)(void); const wchar_t *n; } m[] = {
+      {drawrec_show, L"drawrec"}, {drs_show, L"drsort"}, {export_show, L"export"}, {match_show, L"match"},
+      {dst_pkg, L"package"}, {route_show, L"route"}, {szm_show, L"szm"}, {cutting_show, L"cutting"},
+      {paint_show, L"paint"}, {mm_show, L"memory"}, {tiffmerge_show, L"tiff"}, {nu_open, L"norms"}, {cvx_show, L"cvx"}};
+  for (size_t i = 0; i < sizeof(m) / sizeof(m[0]); i++) {
+    wchar_t b[100];
+    _snwprintf(b, 100, L"%ls-mod-%ls", tn, m[i].n);
+    dst_module(m[i].f, b);
+  }
 }
 
 static void dst_chat_fill(void) {
@@ -457,6 +512,20 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
   if (g_follow) toggle_follow(); /* закреплено: кнопки живые, как при работе в окне */
   dst_pump(100);
 
+  if (argc >= 3 && !wcscmp(argv[2], L"mods")) { /* окна модулей в светлой и четырёх темах «Кастомизации» */
+    static const int th[5] = {0, 5, 6, 7, 8};
+    static const wchar_t *const thn[5] = {L"obychnaya", L"steklo", L"grafit", L"sinka", L"tseh"};
+    for (int i = 0; i < 5; i++) {
+      set_theme(th[i]);
+      dst_pump(150);
+      dst_modules(thn[i]);
+    }
+    char rep[48000];
+    int kk = WideCharToMultiByte(CP_UTF8, 0, g_dstReport, -1, rep, sizeof(rep), NULL, NULL);
+    dst_write(L"report.txt", rep, kk > 0 ? (DWORD)kk - 1 : 0);
+    LocalFree(argv);
+    return 0;
+  }
   if (argc >= 3 && !wcscmp(argv[2], L"kit")) { /* только «Современный» набор и его карточка */
     dst_kit_all();
     char rep[48000];
@@ -488,19 +557,20 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
     /* Настройки: все вкладки; на «Курсоре» выбрана «Тяночка» (системные курсоры стенд не трогает) */
     if (!t) set_skin(SKIN_K8);
     for (int s = 0; s < SEC_COUNT; s++) {
-      if (!t || s == 0 || s == 2) {
+      if (!t || t >= 5 || s == 0 || s == 2) { /* четыре темы с «Кастомизации» — все вкладки */
         _snwprintf(name, 200, L"%ls-settings-%d-%ls.png", tn, s, kSecNames[s]);
         dst_settings(s, name);
       }
     }
     if (IsWindowVisible(g_setHwnd)) toggle_settings();
     /* окна из окна курсора и клавиш: ответ поиска, карточка PLM, распознанный текст, горячие клавиши */
-    if (!t) {
+    if (!t || t >= 5) {
+      wchar_t wn[200];
       show_answer_text(L"Вал 40Х — сталь конструкционная легированная, ГОСТ 4543-2016.\r\n"
                        L"Улучшение: закалка 860 °C, отпуск 500 °C, 269…302 HB.\r\n"
                        L"Заменители: 45Х, 38ХА, 40ХН, 40ХС.");
       dst_pump(200);
-      dst_shot(g_answer, L"obychnaya-answer.png");
+      dst_shot(g_answer, (_snwprintf(wn, 200, L"%ls-answer.png", tn), wn));
       if (g_answer) ShowWindow(g_answer, SW_HIDE);
       show_card_text(L"АБВГ.715221.004  Вал\r\n"
                      L"Материал      Круг 65 ГОСТ 2590-2006 / 40Х ГОСТ 4543-2016\r\n"
@@ -508,17 +578,17 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
                      L"Применяемость АБВГ.301234.001 СБ (2 шт.)\r\n"
                      L"Изменение     Изв. 1247 от 12.09.2026");
       dst_pump(200);
-      dst_shot(g_card, L"obychnaya-card.png");
+      dst_shot(g_card, (_snwprintf(wn, 200, L"%ls-card.png", tn), wn));
       if (g_card) ShowWindow(g_card, SW_HIDE);
       show_ocr_text(L"Неуказанные предельные отклонения размеров: H14, h14, ±IT14/2.\r\n"
                     L"Покрытие Хим.Окс.прм. Твёрдость 269…302 HB.\r\n"
                     L"* Размер для справок.");
       dst_pump(200);
-      dst_shot(g_ocrWnd, L"obychnaya-ocr.png");
+      dst_shot(g_ocrWnd, (_snwprintf(wn, 200, L"%ls-ocr.png", tn), wn));
       if (g_ocrWnd) ShowWindow(g_ocrWnd, SW_HIDE);
       hk_show();
       dst_pump(200);
-      dst_shot(g_hkWnd, L"obychnaya-hotkeys.png");
+      dst_shot(g_hkWnd, (_snwprintf(wn, 200, L"%ls-hotkeys.png", tn), wn));
       if (g_hkWnd) ShowWindow(g_hkWnd, SW_HIDE);
     }
     /* чат с мини-ИИ: полный и мини-чат у помощника */

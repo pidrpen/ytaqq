@@ -311,7 +311,7 @@ static void nu_paint(HWND hwnd, HDC hdc) {
   y += NUS(28);
   if (g_fontSmall) SelectObject(hdc, g_fontSmall);
   if (o->toNeed[0]) {
-    SetTextColor(hdc, RGB(185, 74, 34));
+    SetTextColor(hdc, ui_warn(RGB(185, 74, 34)));
     _snwprintf(t, 600, L"Для машинного То нужно: %s", o->toNeed);
   } else {
     SetTextColor(hdc, COL_MUTED);

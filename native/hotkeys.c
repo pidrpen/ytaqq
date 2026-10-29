@@ -436,7 +436,7 @@ static void hk_paint(HWND hwnd, HDC hdc) {
         hk_combo_name(f, g_hkVk[f], g_hkMods[f], nm, 40);
         _snwprintf(kt, 80, L"%s занята", nm);
         kt[79] = 0;
-        fg = RGB(0xB4, 0x23, 0x18);
+        fg = ui_warn(RGB(0xB4, 0x23, 0x18));
       } else {
         lstrcpynW(kt, L"нет", 80);
         fg = COL_MUTED;

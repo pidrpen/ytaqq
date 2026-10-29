@@ -961,7 +961,7 @@ static void sx_paint(HWND hwnd, HDC hdc) {
   gn_diag_text(&g_sxn, dg, 400);
   RECT dr = {pad, yb + XS_(66), rc.right - pad, rc.bottom - XS_(4)};
   if (g_fontSmall) SelectObject(hdc, g_fontSmall);
-  SetTextColor(hdc, g_sxn.writeFail ? RGB(200, 60, 40) : COL_MUTED);
+  SetTextColor(hdc, g_sxn.writeFail ? ui_warn(RGB(200, 60, 40)) : COL_MUTED);
   DrawTextW(hdc, dg, -1, &dr, DT_LEFT | DT_WORDBREAK | DT_NOPREFIX);
 }
 
