@@ -21,6 +21,8 @@
 
 #define WM_SZM_FOLDERS (WM_APP + 95) /* lParam — SzmFolders*, освобождает окно */
 #define WM_SZM_DONE (WM_APP + 96)    /* lParam — wchar_t* отчёт, освобождает окно */
+#define WM_SZM_PROGRESS (WM_APP + 98) /* lParam — wchar_t* «12 из 40: ТП …» из потока отправки, освобождает окно */
+#define SZM_WM_NOTE (WM_APP + 82)     /* = WM_AC_NOTE (ai_chat.c): та же строка — в состояние чата */
 #define ID_SZM_FOLDER 4870
 #define ID_SZM_NEW 4871
 #define ID_SZM_OK 4872
@@ -45,6 +47,66 @@ static SzmFolders *g_szmFold; /* последний принятый списо�
 static HWND g_szmWnd, g_szmCombo, g_szmTpCombo, g_szmDes, g_szmChk, g_szmStatus, g_szmLog;
 static volatile LONG g_szmBusy, g_szmGen, g_szmListBusy;
 static int g_szmPkgNew;   /* функция в клиенте: 1 — новая (папки, чертежи), -1 — старая, 0 — не знаем */
+static unsigned g_szmPkgVer; /* версия пакета в клиенте по строке «ПАКЕТ\t1.0.0.7» отчёта (szm_ver_num); 0 — до 1.0.0.7 или не знаем */
+#define SZM_VER(a, b, c, d) (((unsigned)(a) << 24) | ((unsigned)(b) << 16) | ((unsigned)(c) << 8) | (unsigned)(d))
+
+/* «1.0.0.7» → число для сравнения; не версия — 0 */
+static unsigned szm_ver_num(const wchar_t *v) {
+  unsigned parts[4] = {0, 0, 0, 0};
+  int k = 0;
+  const wchar_t *p = v ? v : L"";
+  while (*p == L' ') p++;
+  if (!(*p >= L'0' && *p <= L'9')) return 0;
+  for (; *p && k < 4; p++) {
+    if (*p >= L'0' && *p <= L'9') parts[k] = parts[k] * 10 + (unsigned)(*p - L'0');
+    else if (*p == L'.') k++;
+    else break;
+  }
+  if (parts[0] > 255 || parts[1] > 255 || parts[2] > 255 || parts[3] > 255) return 0;
+  return SZM_VER(parts[0], parts[1], parts[2], parts[3]);
+}
+
+/* строка «ПАКЕТ\t<версия>» в ответе функции (с 1.0.0.7 — первой в любом отчёте): запомнить версию. 0 — строки нет */
+static unsigned szm_pkg_line(const wchar_t *text) {
+  for (const wchar_t *p = text; p && *p;) {
+    if (!wcsncmp(p, L"ПАКЕТ\t", 6)) {
+      unsigned v = szm_ver_num(p + 6);
+      if (v) g_szmPkgVer = v;
+      return v;
+    }
+    p = wcspbrk(p, L"\r\n");
+    while (p && (*p == L'\r' || *p == L'\n')) p++;
+  }
+  return 0;
+}
+
+/* файл хода работы функции 1.0.0.7 («<сделано>\t<всего>\t<что>») → «12 из 40: ТП …»; нет файла или пусто — FALSE */
+static BOOL szm_progress_text(const wchar_t *path, wchar_t *out, int cap) {
+  HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, 0, NULL);
+  if (h == INVALID_HANDLE_VALUE) return FALSE;
+  char u[600];
+  DWORD rd = 0;
+  ReadFile(h, u, sizeof(u) - 1, &rd, NULL);
+  CloseHandle(h);
+  if (!rd) return FALSE;
+  u[rd] = 0;
+  const char *b = rd >= 3 && (unsigned char)u[0] == 0xEF ? u + 3 : u;
+  wchar_t w[600];
+  int n = MultiByteToWideChar(CP_UTF8, 0, b, -1, w, 600);
+  if (n <= 0) return FALSE;
+  wchar_t *t1 = wcschr(w, L'\t'), *t2 = t1 ? wcschr(t1 + 1, L'\t') : NULL;
+  if (!t1 || !t2) {
+    lstrcpynW(out, w, cap);
+    return out[0] != 0;
+  }
+  *t1 = *t2 = 0;
+  long done = wcstol(w, NULL, 10), total = wcstol(t1 + 1, NULL, 10);
+  const wchar_t *what = t2 + 1;
+  if (total > 0) _snwprintf(out, cap, L"%ld из %ld: %s", done, total, what);
+  else _snwprintf(out, cap, L"%s", what);
+  out[cap - 1] = 0;
+  return TRUE;
+}
 static BOOL g_szmClientList; /* в списках — папки из клиента: SQL их не заменяет */
 static BOOL g_szmSqlAsked;    /* папки читаются и из базы SQL (есть вход) */
 static wchar_t *g_szmText;      /* описание из окна пакета (ИЗДЕЛИЕ, СОСТАВ, ТП без ПАПКА); NULL — по маршруту (g_szR) */
@@ -559,6 +621,7 @@ static DWORD WINAPI szm_client_folders_thread(LPVOID arg) {
   else if (code == 3) lstrcpynW(f->err, L"клиент «Союза» не запущен", 300);
   else if (text && wcsstr(text, L"непонятная строка описания")) f->old = 1;
   else if (text) {
+    szm_pkg_line(text); /* с 1.0.0.7 функция называет версию — дальше описание пойдёт одним вызовом */
     f->path = (wchar_t (*)[SZM_PATH])calloc(SZM_MAX, sizeof(*f->path));
     f->tp = (wchar_t (*)[SZM_PATH])calloc(SZM_MAX, sizeof(*f->tp));
     f->pathId = (long *)calloc(SZM_MAX, sizeof(long));
@@ -746,6 +809,37 @@ typedef struct {
    (одна деталь) идёт одним вызовом, как раньше. */
 #define SZM_PART_TP 3
 
+/* Пакет 1.0.0.7 и новее: всё описание — одним вызовом (функция сама ищет обозначения разом, отдаёт
+   управление окну клиента между шагами и пишет ход в <описание>.progress). Пока мост работает,
+   второй поток раз в полсекунды читает этот файл и шлёт «12 из 40: ТП …» окну папки
+   (WM_SZM_PROGRESS) или чату (WM_AC_NOTE). Пакет старее — частями, как раньше. */
+typedef struct {
+  wchar_t path[MAX_PATH];
+  HWND to;
+  volatile LONG stop;
+} SzmWatch;
+
+static void szm_progress_post(HWND to, const wchar_t *text) {
+  if (!to || !IsWindow(to)) return;
+  wchar_t *m = _wcsdup(text);
+  if (!m) return;
+  if (!PostMessageW(to, to == g_szmWnd ? WM_SZM_PROGRESS : SZM_WM_NOTE, 0, (LPARAM)m)) free(m);
+}
+
+static DWORD WINAPI szm_watch_thread(LPVOID arg) {
+  SzmWatch *w = (SzmWatch *)arg;
+  wchar_t last[400] = L"", cur[400];
+  while (!w->stop) {
+    Sleep(500);
+    if (w->stop) break;
+    if (szm_progress_text(w->path, cur, 400) && wcscmp(cur, last)) {
+      lstrcpynW(last, cur, 400);
+      szm_progress_post(w->to, cur);
+    }
+  }
+  return 0;
+}
+
 static wchar_t *szm_read_spec(const wchar_t *path) {
   HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
   if (h == INVALID_HANDLE_VALUE) return NULL;
@@ -866,7 +960,32 @@ static DWORD WINAPI szm_run_thread(LPVOID arg) {
   }
   wchar_t *parts[200];
   int np = spec[0] ? szm_split_spec(spec, parts, 200) : 0;
-  if (np > 1) { /* частями: отчёты — в один, код — худший */
+  HWND to0 = r->notify ? r->notify : g_szmWnd;
+  if (np > 1 && g_szmPkgVer >= SZM_VER(1, 0, 0, 7)) { /* новая функция: одним вызовом, ход — из файла */
+    for (int i = 0; i < np; i++) free(parts[i]);
+    np = 0;
+    SzmWatch *w = (SzmWatch *)calloc(1, sizeof(SzmWatch));
+    HANDLE wt = NULL;
+    if (w) {
+      _snwprintf(w->path, MAX_PATH, L"%s.progress", spec);
+      w->path[MAX_PATH - 1] = 0;
+      DeleteFileW(w->path);
+      w->to = to0;
+      wt = CreateThread(NULL, 0, szm_watch_thread, w, 0, NULL);
+    }
+    szm_progress_post(to0, L"Клиент «Союза» работает — всё описание одним вызовом…");
+    DWORD was = g_runCaptureMs;
+    g_runCaptureMs = 1800000; /* полчаса: большое описание */
+    ok = run_capture(r->cmd, &out, &outn, &code, err, 200);
+    g_runCaptureMs = was;
+    text = ok ? utf8_to_alloc(out, outn) : NULL;
+    if (w) {
+      InterlockedExchange(&w->stop, 1);
+      if (wt) WaitForSingleObject(wt, 2000), CloseHandle(wt);
+      DeleteFileW(w->path);
+      free(w);
+    }
+  } else if (np > 1) { /* частями: отчёты — в один, код — худший */
     size_t cap = 4000;
     text = (wchar_t *)calloc(cap, sizeof(wchar_t));
     ok = TRUE;
@@ -891,6 +1010,11 @@ static DWORD WINAPI szm_run_thread(LPVOID arg) {
       }
       _snwprintf(text + l, cap - l, L"— часть %d из %d —\r\n%s", i + 1, np, t ? t : L"(мост не ответил)\r\n");
       free(t);
+      {
+        wchar_t pm[120];
+        _snwprintf(pm, 120, L"«Союз»: часть %d из %d сделана", i + 1, np);
+        szm_progress_post(to0, pm);
+      }
       if (!k) ok = FALSE;
       if (c != 0 && (code == 0 || c == 3)) code = c;
       if (c == 3 || !k) break; /* клиента нет — дальше не зовём */
@@ -903,6 +1027,7 @@ static DWORD WINAPI szm_run_thread(LPVOID arg) {
     ok = run_capture(r->cmd, &out, &outn, &code, err, 200);
     text = ok ? utf8_to_alloc(out, outn) : NULL;
   }
+  if (text) szm_pkg_line(text); /* версия функции из ответа — следующая отправка пойдёт по ней */
   size_t extra = 800 + (text ? wcslen(text) : 0);
   wchar_t *rep = (wchar_t *)malloc(extra * sizeof(wchar_t));
   if (rep) {
@@ -1254,6 +1379,9 @@ static LRESULT CALLBACK SzmProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     free(f);
     return 0;
   }
+  case WM_SZM_PROGRESS: /* «12 из 40: ТП …» из потока отправки */
+    if (lParam) szm_status((const wchar_t *)lParam), free((void *)lParam);
+    return 0;
   case WM_SZM_DONE: {
     wchar_t *rep = (wchar_t *)lParam;
     EnableWindow(GetDlgItem(hwnd, ID_SZM_OK), TRUE);

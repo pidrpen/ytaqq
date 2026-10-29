@@ -6455,6 +6455,7 @@ static BOOL save_rect_bmp(int x, int y, int bw, int bh, const wchar_t *path) {
 /* Помощник молчит дольше этого — висит: его снимают вместе со всем, что он
    запустил. Настоящее распознавание (и пачка вырезок чертежа) укладывается с запасом. */
 #define RUN_CAPTURE_MS 300000
+static DWORD g_runCaptureMs = RUN_CAPTURE_MS; /* на один долгий вызов (мост «Союза» одним разом) поднимается и возвращается */
 
 /* Забрать из канала то, что в нём уже есть, не дожидаясь конца: ReadFile на
    пустом канале ждал, пока его не закроет помощник — или его потомок, которому
@@ -6551,7 +6552,7 @@ static BOOL run_capture_in(wchar_t *cmd, const wchar_t *cwd, char **out, DWORD *
       if (exited) break;
       exited = WaitForSingleObject(pi.hProcess, 20) == WAIT_OBJECT_0;
     }
-    if (!exited && GetTickCount() - t0 > RUN_CAPTURE_MS) {
+    if (!exited && GetTickCount() - t0 > g_runCaptureMs) {
       if (job) TerminateJobObject(job, 1);
       else TerminateProcess(pi.hProcess, 1);
       WaitForSingleObject(pi.hProcess, 3000);
