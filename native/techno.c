@@ -1058,6 +1058,14 @@ static const wchar_t *tn_cut_way(double S, int mat) {
   return S <= 10 ? L"лазерная резка" : S <= 30 || noOxy ? L"плазменная резка" : L"газокислородная резка";
 }
 
+/* операция заготовки из листа — по способу резки: своя операция справочника (лазерная 9171,
+   плазменная 9176, кислородная 9172 — soyuz_ops.c) и свой участок, а не общая «Заготовительная» */
+static const wchar_t *tn_cut_op(double S, int mat) {
+  const wchar_t *w = tn_cut_way(S, mat);
+  return !S ? L"Заготовительная (раскрой)" : w[0] == L'л' ? L"Лазерная резка" : w[0] == L'п' ? L"Плазменная резка"
+                                                                                               : L"Газовая резка";
+}
+
 static void tn_route(const wchar_t *name, const wchar_t *mat, const wchar_t *text, TnRoute *r) {
   memset(r, 0, sizeof(*r));
   TnSigns *s = &r->s;
@@ -1230,6 +1238,16 @@ static void tn_route(const wchar_t *name, const wchar_t *mat, const wchar_t *tex
   if (fineTurn) grind = 0;
   /* «калить в заготовке» — ТО сразу после отрезки, потом обработка уже твёрдого металла */
   int heatFirst = s->heatFirst && (harden || temper);
+  /* черновая и чистовая токарные — только с основанием: улучшение между ними при точных поверхностях
+     (IT9 и точнее, Ra 3,2 и чище, допуск до 0,05). Без точности улучшают заготовку — токарная одна;
+     закалка со шлифованием — одна токарная с припуском под шлифование */
+  int precise = (s->itMin && s->itMin <= 9) || (s->raMin && s->raMin <= 3.2) || (s->band && s->band <= 0.05);
+  int twoTurn = r->cls == TN_ROT && temper && precise && !heatFirst;
+  const wchar_t *heatWhy = L"ТТ: калить в заготовке — до механообработки";
+  if (r->cls == TN_ROT && temper && !precise && !heatFirst) {
+    heatFirst = 1;
+    heatWhy = L"точных поверхностей нет — улучшение заготовки до обработки, токарная одна";
+  }
   if (s->raDoubt && s->raMin <= 0.8) tn_item(r->check, 1200, L"Ra прочитана без запятой — проверить шероховатость");
   if (!s->nRa && r->cls != TN_REWORK && r->cls != TN_BAR && r->cls != TN_BENT) tn_item(r->check, 1200, L"шероховатость не прочитана — проверить, нужна ли шлифовка");
   if (s->hrcHi && !steel && s->mat) tn_item(r->check, 1200, L"твёрдость указана, но материал не сталь — проверить");
@@ -1249,7 +1267,7 @@ static void tn_route(const wchar_t *name, const wchar_t *mat, const wchar_t *tex
   if (r->cls == TN_BAR || r->cls == TN_BENT) {
     tn_cpy(w, 300, r->cls == TN_BENT ? L"Отрезать пруток по длине развёртки"
                                      : L"Отрезать в размер на ленточнопильном станке; торцы под углом — по чертежу");
-    tn_op(r, L"Заготовительная", w, r->cls == TN_BENT ? L"развёртка на чертеже" : L"заготовка — прокат в размер детали");
+    tn_op(r, L"Отрезная", w, r->cls == TN_BENT ? L"развёртка на чертеже" : L"заготовка — прокат в размер детали");
   } else if (r->cls == TN_FLAT || (r->cls == TN_BODY && fromSheet && r->blankRolled)) {
     tn_cpy(w, 300, plateMill ? L"Вырезать заготовку из листа" : L"Вырезать деталь из листа");
     if (sheetS) tn_cat(w, 300, L" S="), tn_catnum(w, 300, sheetS);
@@ -1257,19 +1275,20 @@ static void tn_route(const wchar_t *name, const wchar_t *mat, const wchar_t *tex
     if (plateMill) tn_cat(w, 300, L" с припуском под фрезерование");
     if (s->holes && !plateDrill) tn_cat(w, 300, L" вместе с отверстиями");
     if (!plateMill && (!sheetS || sheetS <= 10)) tn_cat(w, 300, L"; прямоугольную без отверстий — на гильотине");
-    tn_op(r, L"Заготовительная (раскрой)", w,
-          sheetS ? L"деталь из листа; до 10 мм — лазер, 10…30 — плазма, толще — кислород" : L"деталь из листа");
+    tn_op(r, tn_cut_op(sheetS, s->mat), w,
+          sheetS ? L"деталь из листа; до 10 мм — лазер, 10…30 — плазма, толще — кислород"
+                 : L"деталь из листа; толщина не прочитана — способ резки уточнить");
   } else if (r->blankRolled) {
     tn_cpy(w, 300, r->cls == TN_ROT ? L"Отрезать заготовку от прутка: длина детали" : L"Отрезать (вырезать) заготовку с припуском на обработку");
     if (r->cls == TN_ROT && s->gL) tn_cat(w, 300, L" "), tn_catnum(w, 300, s->gL), tn_cat(w, 300, L" мм");
     if (r->cls == TN_ROT) tn_cat(w, 300, L" + припуск на подрезку торцов");
-    tn_op(r, L"Заготовительная", w, L"заготовка — прокат");
+    tn_op(r, L"Отрезная", w, L"заготовка — прокат");
   }
   if (s->heat & TNH_NORM) tn_op(r, L"Термическая", L"Нормализация (отжиг) заготовки", L"ТТ: нормализация/отжиг");
   if (heatFirst) {
     tn_cpy(w, 300, harden ? L"Закалка и отпуск заготовки" : L"Улучшение заготовки");
     if (hrc[0]) tn_cat(w, 300, L" до "), tn_cat(w, 300, hrc);
-    tn_op(r, L"Термическая", w, L"ТТ: калить в заготовке — до механообработки");
+    tn_op(r, L"Термическая", w, heatWhy);
     harden = temper = 0;
   }
 
@@ -1282,11 +1301,20 @@ static void tn_route(const wchar_t *name, const wchar_t *mat, const wchar_t *tex
     tn_op(r, L"Гибочная", L"Гнуть по линиям сгиба (на трубогибе или в приспособлении), радиусы — по чертежу",
           L"на чертеже развёртка и линии сгиба");
   } else if (r->cls == TN_ROT) {
-    int two = temper || hard || grind;
-    tn_cpy(w, 300, two ? L"Подрезать торцы, точить наружные поверхности и обработать отверстия с припуском под чистовую"
-                       : L"Подрезать торцы, точить наружные поверхности и отверстия начисто, фаски, канавки");
+    int two = twoTurn;
+    tn_cpy(w, 300, two    ? L"Подрезать торцы, точить наружные поверхности и обработать отверстия с припуском под чистовую"
+                   : grind ? L"Подрезать торцы, точить наружные поверхности и отверстия, фаски, канавки; под шлифование "
+                             L"оставить припуск 0,2…0,4 мм на диаметр"
+                           : L"Подрезать торцы, точить наружные поверхности и отверстия начисто, фаски, канавки");
     if (s->ax[0]) tn_cat(w, 300, L"; сверлить по оси: "), tn_cat(w, 300, s->ax);
-    tn_op(r, two ? L"Токарная (черновая)" : L"Токарная", w, r->clsWhy[0] ? L"тело вращения" : L"");
+    /* основание двух токарных — в «почему»: что точное на чертеже */
+    wchar_t pr[80] = L"";
+    if (s->itMin && s->itMin <= 9) tn_cat(pr, 80, L"IT"), tn_catnum(pr, 80, s->itMin);
+    if (s->raMin && s->raMin <= 3.2) tn_cat(pr, 80, pr[0] ? L", Ra " : L"Ra "), tn_catnum(pr, 80, s->raMin);
+    if (s->band && s->band <= 0.05) tn_cat(pr, 80, pr[0] ? L", допуск " : L"допуск "), tn_catnum(pr, 80, s->band);
+    tn_cpy(why, TN_TXT, two ? L"две токарные: улучшение между ними, точные поверхности (" : r->clsWhy[0] ? L"тело вращения" : L"");
+    if (two) tn_cat(why, TN_TXT, pr), tn_cat(why, TN_TXT, L") — после ТО");
+    tn_op(r, two ? L"Токарная (черновая)" : L"Токарная", w, why);
     if (temper) {
       tn_cpy(w, 300, L"Улучшение (закалка и высокий отпуск)");
       if (hrc[0]) tn_cat(w, 300, L" до "), tn_cat(w, 300, hrc);
@@ -1295,7 +1323,10 @@ static void tn_route(const wchar_t *name, const wchar_t *mat, const wchar_t *tex
     if (two) {
       tn_cpy(w, 300, L"Точить начисто, фаски, канавки");
       if (grind) tn_cat(w, 300, L"; под шлифование оставить припуск 0,2…0,4 мм на диаметр");
-      tn_op(r, L"Токарная (чистовая)", w, grind ? L"точные поверхности — потом шлифование" : L"после ТО");
+      tn_cpy(why, TN_TXT, L"после улучшения — в размер: ");
+      tn_cat(why, TN_TXT, pr);
+      if (grind) tn_cat(why, TN_TXT, L"; потом шлифование");
+      tn_op(r, L"Токарная (чистовая)", w, why);
     }
     if (fineTurn)
       tn_op(r, L"Токарная (тонкая)", L"Тонкое (алмазное) точение точных поверхностей",
