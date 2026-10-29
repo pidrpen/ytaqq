@@ -75,7 +75,9 @@ static const AiFile kAiDrawLora = {L"pidrpen/ytaqq", L"9d44727431dc58cd658f25f0c
    качается; tool-lora*.gguf, положенный рядом с моделью руками, всё равно подключается. */
 /* Адаптер габаритов (чертежи v2.5): лист им спрашивают вторым вопросом и берут из ответа только
    габариты — остальное читает адаптер чертежей (drawrec.c, dr_vl_read). Пустой коммит — не качается. */
-static const AiFile kAiDrawGabLora = {L"pidrpen/ytaqq", L"", L"models/draw-gab-lora-qwen3.5-4b.gguf", 0ULL, ""};
+static const AiFile kAiDrawGabLora = {L"pidrpen/ytaqq", L"73ef8b76d188a7dab63dcc28879f8ffc039057f6",
+                                      L"models/draw-gab-lora-qwen3.5-4b.gguf", 42485376ULL,
+                                      "3a409d45e2eedcf9c04ba1d901a10497ca808bfa0d50f532433d2ebdae2dd48e"};
 static const AiFile kAiToolLora = {L"pidrpen/ytaqq", L"4bf9d1ba243789ef2d484011903f750f48d03fb2",
                                    L"models/tool-lora-qwen3.5-4b.gguf", 42485376ULL,
                                    "00898bb3cdcd3db81300ee63b72275e909e66a0fa68cc199237489fc9905ddbf"};
