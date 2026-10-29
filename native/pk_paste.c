@@ -166,14 +166,17 @@ static int pp_is_doc(const wchar_t *des, const wchar_t *name) {
 /* код документа — прочь: из конца обозначения («АБВГ.123456.000 СБ», «…000СБ») и начала
    наименования («СБ Редуктор» из имени файла), «Сборочный чертеж» — из конца наименования
    (Tesseract берёт графу целиком). 1 — чертёж сборки (СБ, ВО, ГЧ, МЧ, МЭ, УЧ), 2 — другой
-   документ изделия (схема, ПЗ…), 0 — кода нет: чертёж детали */
-static int pp_draw_doc(wchar_t *des, wchar_t *name) {
+   документ изделия (схема, ПЗ…), 0 — кода нет: чертёж детали. code (если не NULL, 8 знаков) — какой
+   код снят: «СБ»; только фразой «Сборочный чертеж» — её код */
+static int pp_draw_doc_code(wchar_t *des, wchar_t *name, wchar_t *code) {
   static const wchar_t *const kCode[] = {L"СБ", L"ВО", L"ГЧ", L"МЧ", L"МЭ", L"УЧ", /* сборка — первые 6 */
                                          L"ВП", L"ВС", L"ПЗ", L"ТУ", L"ПС", L"РЭ", L"ЭМ", L"ИМ", L"Э1", L"Э2",
                                          L"Э3", L"Э4", L"Э5", L"Э6", L"Э7", L"ТЧ"};
   static const wchar_t *const kPhrase[] = {L"сборочный чертеж", L"чертеж общего вида", L"габаритный чертеж",
                                            L"монтажный чертеж", L"упаковочный чертеж"};
+  static const wchar_t *const kPhraseCode[] = {L"СБ", L"ВО", L"ГЧ", L"МЧ", L"УЧ"};
   int doc = 0;
+  if (code) code[0] = 0;
   wchar_t *d = pp_trim(des);
   if (d != des) memmove(des, d, (wcslen(d) + 1) * sizeof(wchar_t));
   int e = (int)wcslen(des);
@@ -183,6 +186,7 @@ static int pp_draw_doc(wchar_t *des, wchar_t *name) {
       while (k > 0 && (des[k - 1] == L' ' || des[k - 1] == L'-')) k--;
       des[k] = 0;
       doc = i < 6 ? 1 : 2;
+      if (code) tn_cpy(code, 8, kCode[i]);
     }
   }
   wchar_t *n = pp_trim(name);
@@ -192,6 +196,7 @@ static int pp_draw_doc(wchar_t *des, wchar_t *name) {
     if (!wcsncmp(name, kCode[i], l) && (name[l] == L' ' || name[l] == L'-' || !name[l])) {
       memmove(name, name + l, (wcslen(name + l) + 1) * sizeof(wchar_t));
       if (!doc) doc = i < 6 ? 1 : 2;
+      if (code && !code[0]) tn_cpy(code, 8, kCode[i]);
       break;
     }
   }
@@ -206,6 +211,7 @@ static int pp_draw_doc(wchar_t *des, wchar_t *name) {
       while (k > 0 && (name[k - 1] == L' ' || name[k - 1] == L'.' || name[k - 1] == L',')) k--;
       name[k] = 0;
       doc = 1;
+      if (code && !code[0]) tn_cpy(code, 8, kPhraseCode[i]);
       break;
     }
   }
@@ -213,10 +219,22 @@ static int pp_draw_doc(wchar_t *des, wchar_t *name) {
   return doc;
 }
 
+#define pp_draw_doc(des, name) pp_draw_doc_code(des, name, NULL)
+
+/* наименование документа сборки в разделе «Документация» — по коду: «СБ» → «Сборочный чертеж» */
+static const wchar_t *pp_doc_title(const wchar_t *code) {
+  static const wchar_t *const kC[] = {L"СБ", L"ВО", L"ГЧ", L"МЧ", L"МЭ", L"УЧ"};
+  static const wchar_t *const kT[] = {L"Сборочный чертеж",  L"Чертеж общего вида",      L"Габаритный чертеж",
+                                      L"Монтажный чертеж",  L"Электромонтажный чертеж", L"Упаковочный чертеж"};
+  for (size_t i = 0; i < sizeof(kC) / sizeof(kC[0]); i++)
+    if (!wcscmp(code, kC[i])) return kT[i];
+  return L"";
+}
+
 /* обозначение и наименование из имени файла: «АБВГ.123456.002 Корпус.pdf», «Корпус_АБВГ.123456.002.tif»,
    «АБВГ.123456.000 СБ Редуктор.pdf» — когда штамп не прочитался (или файл КОМПАС, DWG).
-   0 — обозначения в имени нет; *doc — как у pp_draw_doc */
-static int pp_file_title(const wchar_t *path, wchar_t *des, wchar_t *name, int *doc) {
+   0 — обозначения в имени нет; *doc и code — как у pp_draw_doc_code */
+static int pp_file_title_code(const wchar_t *path, wchar_t *des, wchar_t *name, int *doc, wchar_t *code) {
   const wchar_t *b = path;
   for (const wchar_t *p = path; *p; p++)
     if (*p == L'\\' || *p == L'/') b = p + 1;
@@ -233,6 +251,7 @@ static int pp_file_title(const wchar_t *path, wchar_t *des, wchar_t *name, int *
   }
   des[0] = name[0] = 0;
   *doc = 0;
+  if (code) code[0] = 0;
   wchar_t p[SR_Q];
   sr_prep(s, p, SR_Q);
   int db, de;
@@ -244,9 +263,11 @@ static int pp_file_title(const wchar_t *path, wchar_t *des, wchar_t *name, int *
     pp_ncpy(name, PP_CELL, p, db);
     pp_clean(name);
   }
-  *doc = pp_draw_doc(des, name);
+  *doc = pp_draw_doc_code(des, name, code);
   return des[0] != 0;
 }
+
+#define pp_file_title(path, des, name, doc) pp_file_title_code(path, des, name, doc, NULL)
 
 /* наименование стандартного (ГОСТ, ОСТ, DIN, ISO) или покупного (ТУ) изделия: 1 — стандартное,
    2 — прочее, 0 — ни то, ни другое */
@@ -264,7 +285,8 @@ static int pp_std_name(const wchar_t *name) {
    «Деталь» в единственном числе не нашлась бы, и сборка завелась бы деталью. */
 static const wchar_t *const kPpKinds[] = {L"Сборочные единицы", L"Детали",          L"Детали БЧ",
                                           L"Стандартные изделия", L"Прочие изделия", L"Материалы",
-                                          L"Комплекты",          L"Комплексы",       L"Комплекты разборки"};
+                                          L"Комплекты",          L"Комплексы",       L"Комплекты разборки",
+                                          L"Документация"}; /* документ сборки в её составе: «…СБ Сборочный чертеж» */
 #define PP_KINDS ((int)(sizeof(kPpKinds) / sizeof(kPpKinds[0])))
 
 /* вид как в «Союзе»: «Деталь», «СЕ», «сборка», «Стандартное изделие» → «Детали»,
@@ -285,6 +307,7 @@ static int pp_kind(const wchar_t *in, wchar_t *out, int cap) {
   else if (pp_pre(k, L"комплекты разборки")) v = kPpKinds[8];
   else if (pp_pre(k, L"комплект")) v = kPpKinds[6];
   else if (pp_pre(k, L"комплекс")) v = kPpKinds[7];
+  else if (pp_pre(k, L"документ")) v = kPpKinds[9];
   if (!v) {
     tn_cpy(out, cap, in);
     return 0;

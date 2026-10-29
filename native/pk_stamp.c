@@ -29,6 +29,7 @@ typedef struct {
   int how;                  /* 2 — модель, 1 — Tesseract, 3 — имя файла, 0 — не прочитано */
   BOOL doubt;               /* обозначение под вопросом */
   BOOL asmDoc;              /* чертёж сборки или спецификация */
+  wchar_t docCode[8];       /* «СБ», «ВО», «ГЧ»… — чертёж сборки: сам ляжет документом в её состав */
   wchar_t note[200];
   wchar_t parent[200];      /* сборка, на которую бросили; L"" — нет */
   int parentRow;            /* её строка в «Изделиях» (обозначения у неё может ещё не быть); -1 — нет */
@@ -52,7 +53,7 @@ static CRITICAL_SECTION g_pksLock;
 static BOOL g_pksLockInit, g_pksRunning;
 static PkStJob *g_pksQ, *g_pksQTail;
 /* итог бросков для строки состояния: сколько прочитано, чем, куда легло */
-static int g_pksDone, g_pksTotal, g_pksNew, g_pksMerged, g_pksLinks, g_pksNoDes, g_pksBy[4], g_pksWait;
+static int g_pksDone, g_pksTotal, g_pksNew, g_pksMerged, g_pksLinks, g_pksNoDes, g_pksBy[4], g_pksWait, g_pksDocs;
 static wchar_t g_pksDoubt[120], g_pksParent[200];
 /* строки состава, ждущие обозначения сборки: строка «Изделий» сборки и входящее */
 typedef struct {
@@ -111,7 +112,8 @@ static void pks_from_page(DrPage *pg, PkStRes *r) {
   if (!r->how) return;
   wchar_t name[DR_CELL];
   lstrcpynW(name, rs_name(pg), DR_CELL);
-  int doc = pp_draw_doc(raw, name); /* «… СБ», «Сборочный чертеж» — сборка; код — прочь */
+  int doc = pp_draw_doc_code(raw, name, r->docCode); /* «… СБ», «Сборочный чертеж» — сборка; код — прочь */
+  if (doc != 1 || pg->type == DRT_SPEC) r->docCode[0] = 0; /* спецификация — подлинник самой сборки */
   lstrcpynW(r->des, v, DR_CELL);   /* dr_find_des уже без кода и с кириллицей вместо похожей латиницы */
   lstrcpynW(r->name, name, DR_CELL);
   r->asmDoc = doc == 1 || pg->type == DRT_SPEC;
@@ -157,7 +159,8 @@ static void pks_read(IWICImagingFactory *f, PkStRes *r) {
   if (tmp[0]) dr_rmdir(tmp);
   if (!r->des[0]) { /* штамп не прочитался (КОМПАС, DWG, скан без штампа) — имя файла */
     int doc;
-    if (pp_file_title(r->file, r->des, r->name, &doc)) {
+    if (pp_file_title_code(r->file, r->des, r->name, &doc, r->docCode)) {
+      if (doc != 1) r->docCode[0] = 0;
       r->how = 3;
       r->asmDoc = doc == 1;
       if (!r->kind[0]) lstrcpynW(r->kind, r->asmDoc ? L"Сборочные единицы" : !doc ? L"Детали" : L"", 40);
@@ -257,6 +260,29 @@ static void pks_pend_flush(int row) {
   lstrcpynW(g_pksParent, a, 200);
 }
 
+/* СБ (ВО, ГЧ…) сборки — строкой вида «Документация» в её состав: «АБВГ.123456.000СБ Сборочный чертеж»,
+   файл чертежа — к этой строке (в «Союзе» ляжет подлинником документа) */
+static void pks_doc_row(int asmRow, const PkStRes *r) {
+  XpTable *it = &g_pk[PK_ITEMS];
+  wchar_t a[DR_CELL], dd[DR_CELL];
+  lstrcpynW(a, xp_cell(it, asmRow, 0), DR_CELL); /* копия: новая строка двигает ячейки */
+  if (!a[0]) return;
+  _snwprintf(dd, DR_CELL, L"%ls%ls", a, r->docCode);
+  dd[DR_CELL - 1] = 0;
+  int row = pks_find(dd);
+  if (row < 0) {
+    if (!xp_row(it)) return;
+    row = it->n - 1;
+    pk_put(it, row, 0, dd);
+    g_pksNew++;
+  }
+  pks_fill_empty(row, 1, pp_doc_title(r->docCode));
+  pks_fill_empty(row, 2, L"Документация");
+  pk_put(it, row, 5, r->file);
+  if (pks_link(a, dd, L"1", L"")) g_pksLinks++;
+  g_pksDocs++;
+}
+
 static void pks_apply(PkStRes *r) {
   XpTable *it = &g_pk[PK_ITEMS];
   int row = -1;
@@ -285,7 +311,8 @@ static void pks_apply(PkStRes *r) {
   pks_fill_empty(row, 2, r->kind);
   pks_fill_empty(row, 3, r->mat);
   pks_fill_empty(row, 4, r->mass);
-  if (target || !xp_cell(it, row, 5)[0]) pk_put(it, row, 5, r->file); /* на свою строку — файл заменить */
+  BOOL docDraw = r->docCode[0] != 0; /* СБ: файл — не сборке, а её документу */
+  if (!docDraw && (target || !xp_cell(it, row, 5)[0])) pk_put(it, row, 5, r->file); /* на свою строку — файл заменить */
   if (fresh) g_pksNew++;
   else g_pksMerged++;
   if (r->how >= 1 && r->how <= 3) g_pksBy[r->how]++;
@@ -329,6 +356,7 @@ static void pks_apply(PkStRes *r) {
     if (pks_link(des, s->des, s->qty, s->pos)) g_pksLinks++;
   }
   if (r->nrows) lstrcpynW(g_pksParent, des, 200);
+  if (docDraw) pks_doc_row(row, r);
 }
 
 /* обозначение в «Изделиях» вписали руками: сборка — её состав из ждавших; скан без обозначения —
@@ -369,13 +397,14 @@ static void pk_stamp_forget(void) {
 
 /* итог — в строку состояния */
 static void pks_status(const wchar_t *note) {
-  wchar_t by[120] = L"", wait[120] = L"";
+  wchar_t by[120] = L"", wait[120] = L"", docs[80] = L"";
+  if (g_pksDocs) _snwprintf(docs, 80, L" (из них сборочных чертежей документом: %d)", g_pksDocs);
   if (g_pksBy[2] || g_pksBy[1] || g_pksBy[3])
     _snwprintf(by, 120, L"; обозначения: моделью %d, Tesseract %d, из имени файла %d", g_pksBy[2], g_pksBy[1], g_pksBy[3]);
   if (g_pksWait) _snwprintf(wait, 120, L"; %d ждут обозначения сборки — впишите его", g_pksWait);
-  pk_status(L"Чертежи: %d из %d — новых изделий %d, дополнено %d, в состав%ls%ls%ls %d%ls%ls%ls%ls%ls%ls%ls",
+  pk_status(L"Чертежи: %d из %d — новых изделий %d, дополнено %d, в состав%ls%ls%ls %d%ls%ls%ls%ls%ls%ls%ls%ls",
             g_pksDone, g_pksTotal, g_pksNew, g_pksMerged, g_pksParent[0] ? L" «" : L"", g_pksParent,
-            g_pksParent[0] ? L"»" : L"", g_pksLinks, by, g_pksNoDes ? L"; без обозначения — впишите" : L"",
+            g_pksParent[0] ? L"»" : L"", g_pksLinks, docs, by, g_pksNoDes ? L"; без обозначения — впишите" : L"",
             g_pksDoubt[0] ? L"; проверьте: " : L"", g_pksDoubt, wait, note && note[0] ? L"; " : L"",
             note ? note : L"");
 }
@@ -459,7 +488,7 @@ static void pks_enqueue(TmPaths *pl, int hit) {
   EnterCriticalSection(&g_pksLock);
   BOOL idle = !g_pksRunning;
   if (idle) { /* новый бросок после затишья — итог считать заново */
-    g_pksDone = g_pksTotal = g_pksNew = g_pksMerged = g_pksLinks = g_pksNoDes = g_pksWait = 0;
+    g_pksDone = g_pksTotal = g_pksNew = g_pksMerged = g_pksLinks = g_pksNoDes = g_pksWait = g_pksDocs = 0;
     memset(g_pksBy, 0, sizeof(g_pksBy));
     g_pksDoubt[0] = g_pksParent[0] = 0;
   }

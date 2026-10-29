@@ -303,6 +303,19 @@ int main(int argc, char **argv) {
     eqw(n, L"Крышка", "наименование впереди");
     ok(pp_file_title(L"АБВГ.123456.004", d, n, &doc) && !wcscmp(d, L"АБВГ.123456.004"), "без расширения — .004 не срезан");
     ok(!pp_file_title(L"скан 0012.pdf", d, n, &doc), "в имени нет обозначения");
+    g_case = "код документа";
+    wchar_t code[8];
+    wcscpy(d, L"АБВГ.123456.100СБ"), wcscpy(n, L"Узел входной");
+    ok(pp_draw_doc_code(d, n, code) == 1, "СБ слитно — сборка"), eqw(code, L"СБ", "код СБ");
+    eqw(pp_doc_title(code), L"Сборочный чертеж", "наименование документа");
+    wcscpy(d, L"ТСТ.120.000"), wcscpy(n, L"Узел пробный. Габаритный чертеж");
+    ok(pp_draw_doc_code(d, n, code) == 1, "ГЧ фразой"), eqw(code, L"ГЧ", "код по фразе");
+    wcscpy(d, L"АБВГ.123456.002"), wcscpy(n, L"Корпус");
+    ok(pp_draw_doc_code(d, n, code) == 0 && !code[0], "деталь — без кода");
+    ok(pp_file_title_code(L"Z:\\Сканы\\АБВГ.123456.000 СБ Редуктор.pdf", d, n, &doc, code) && doc == 1, "СБ в имени файла");
+    eqw(code, L"СБ", "код из имени файла");
+    wchar_t k[80];
+    ok(pp_kind(L"документация", k, 80) == 1, "вид «документация»"), eqw(k, L"Документация", "вид как в «Союзе»");
   }
 
   printf("%s: %d проверок, ошибок %d\n", g_fail ? "FAIL" : "ok", g_n, g_fail);
