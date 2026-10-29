@@ -253,7 +253,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
   /* живой маршрут, как в чате */
   static wchar_t txt[9000];
   st_route(txt, 9000);
-  st_check(sz_start(txt) && g_szWnd && g_szR.n == 9, L"маршрут из 9 операций (названия справочника, резьба в токарной) — в очереди, окно открыто");
+  st_check(sz_start(txt) && g_szWnd && g_szR.n >= 9, L"маршрут из 9+ операций (названия справочника; их число меняется с правилами технолога) — в очереди, окно открыто");
+  st_note(L"     операций в маршруте: %d", g_szR.n);
   st_check(g_szDb == 1, L"база: ищу аналоги");
   wchar_t first[200];
   lstrcpynW(first, g_stClip, 200);
@@ -781,7 +782,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
   st_check(g_szR.it[iOkr].pasted && g_szR.cur == iKon && !wcscmp(g_stClip, g_szR.it[iKon].guid),
            L"после Ctrl+V текста — контрольная, её GUID в буфере");
   if (g_szR.it[iOkr].dir) {
-    st_newop(g_szR.it[iOkr].dir, ver, L"040");
+    st_newop(g_szR.it[iOkr].dir, ver, g_szR.it[iOkr].num); /* номер окрасочной — какой есть в маршруте */
     st_check(g_szR.it[iOkr].state == SO_DONE && g_szR.cur == iKon, L"окрасочная появилась в ТП — отмечена, буфер на месте");
   }
 
