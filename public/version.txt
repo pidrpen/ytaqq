@@ -1,7 +1,10 @@
-2026102907
-2026.10.29.7
-sha256 b463810ce7cc7778daeaa7dd15d6af4ec64df4f7b05914d757c7988ca8ecddec
-== 0 signature-rsa-sha256 jRpJotKmz7xJ/D1YtxHmgeNEZ4KSCeZtAA4xYGSKwsboGzE+RxnQtdnjeKL+NTj4PApVCMMsHSjaJ8yCWxwgbPx+9QqAWna9qhPrOO4EKaGI1V+j7LGnmZ0/HHEcC6fpnM68mkxGxAOfCme856mIEvW64NAlFGAPwbXqAH+93jxHWWjaTQkFkn0zqZ6RJC7iiW0uka9b/y3VXIN65daQcwuE2h8nNEI+ga9QTOJnWPKjfBxp4+7p4oU+FDgCCbOGsPzv/MkiTPP5lyAnDNcOs5l9lrGnrbnm1YqunXkK6BfXa/ii+7fRJa59cpiF3pKTCwVbA4UgAYJa+07OOBGx/FCexjumckhVOiZG+5e5saaQdSl6/JVcl8ig+cY/NmtunwEcxfOidxmt6JBAPuc7VxA5OzWzre1rXEhNfR5YswEE/okiAzYUIJ81DaM+JONPv13v+DGFNnbDcN60XUN8Hnle3Gu+U5es2OI1IQwix6ngevBje7NP7C3Q/3hFf5uG
+2026102908
+2026.10.29.8
+sha256 bd032fb5f200289655f6b17844f662a4f84863d5ce7d268f1d9f1b02026b1abc
+== 0 signature-rsa-sha256 ZzSWJdF/nU59GwUC4ZSzz6vBqWDAvs/4tnEW55OLLCAZ7DTuXocFSMgsNZf/cQKg97g0ItYHogQ5yelmf8hay6gnD8QnqfK5345Gkh3in4tGbHwQL+VX59anRYOvKNZ9ZWEt0fgcLVM/R1MufAFljXLr3E0jhDpRKtPJ93PSfgAo7VLYjVxFQSiJP1vRZFku6QcaUuWynxwvThAsinaakLkeHM6t5fHsmnwYxeoqYY2B8F87MvD7RjwaRIIi+y0myLN71xbNuHBmxZti91VuX+FbUtZp7qaGFXOiB1ZYMZ3k4GiS5xEW02OZNmtm4ZSA7GXCmG4DUO4BOGIPjN4tHnULds+Pd7JepONK+vtCaoiYfR76DT/dXVJcdSdI3ieW2OO5Ff8aPy3SbLmhS83WwPTHPZeR4TDvgRxkIbap400DjFYJzc9W6vdpqBJQgJ8BpM61tghqGEreXKMuRWoFXQuqdyXeUDyn26a/XtfNIa3zTHdCVEADUXmyeYbiEdRh
+== 2026.10.29.8
+Окно «ЭСИ и ТП»: чертёж детали теперь сразу даёт и операции. Бросьте чертёж в таблицу (или выберите в «Чертежи…») — мини-ИИ прочитает весь лист: технические требования, шероховатость, допуски, резьбы. Маршрут и нормы времени составят правила технолога, как «Маршрут обработки» в чате. Операции с кодами 1С лягут на лист «Операции» к этой детали, а участок и станок подставятся, как чаще всего стоят на этой операции в техпроцессах завода. Если у детали свои операции уже есть, они не меняются. Для деталей, которые уже лежат в таблице с файлом чертежа, есть пункт «Чертежи…» → «Операции по чертежам». Отключить можно галочкой в том же меню. Маршрут — черновик: проверьте операции перед «В Союз…». На настоящих чертежах и с живым «Союзом» не проверялось.
+
 == 2026.10.29.7
 Окно «ЭСИ и ТП»: сборочный чертёж, брошенный на сборку (с «СБ» на конце обозначения, а также ВО, ГЧ, МЧ, МЭ, УЧ), теперь ложится в её состав документацией: появляется отдельная строка, например «АБВГ.123456.000СБ Сборочный чертеж», вид «Документация», файл скана — на ней, а не на самой сборке. В «Союзе» скан становится подлинником сборочного чертежа. Для этого администратор «Союза» ставит пакет «CursorPad — Союз» 1.0.0.5 (вместо 1.0.0.4). С живым «Союзом» не проверялось.
 
