@@ -1,7 +1,10 @@
-2026102904
-2026.10.29.4
-sha256 b0492f687c4b1b4b5c6a704448ae371e7c6707765f675faaafc65e299e446588
-== 0 signature-rsa-sha256 GZpEtLuf68hHgvKy0Kxvu3gZgVvXsnE4r0TvXdd9LuUXOHeboqcFVK/g9ycHpGlwo2nnhPtDeEm5S06RJtD+DmecxmLUbGzqjBO3g2k8Z2tNYLb9CB5TWTE6R1KGM4jpjoSMxTCwe7MynVsI6bID01RnOQ/BlFy7ZIA3dxrQ2nmNSzu0DRYnePumMK7ARQn1O5OKPcy21D09yZMSFniejOV71PK/f620W9ptytUCGkuCAuiBH3Jing43t4ltXseg3MF/JkDZnS9q0TFE690/qAO+CQtIYyY40f6rgUw77effIr0yyrmtGFnsKFDwhk6nAsA4AZeOy8qleFw5MZINBQ4QXryqrDetEZJZNQvGpFD7fO0ypfD8nY657vHt+bWqxhSRUOzDxGFoo30/5xm42EmWMsO2mPOE9EB+fpUvZGBcTPpAWRZyydFa8SHmbwXUSfqA8wDRK3HRFR4lx2i3nZqiIvTFMgHyMP42IHpeBHU4HfsZs01Ze4aTD7A7IBzc
+2026102905
+2026.10.29.5
+sha256 54b8cd1972ba911e47b232f8ba33329dde1cee27b323af2de5386652e6bbde54
+== 0 signature-rsa-sha256 oZgDO1TI3HOOdmMl3oLdF63fbQ+45bLjNYcoH7ubNpfOKYJSeUs/qAPzIOyj8rcOnPTvFe11I30GtCOzvPBa2nRte/FeuM9b6kZdbWKUddMH91ZXDW8LlIr/crUllTwJtsdq+sBq4Y8zIiBO+SdCkujUAO/IUGkZM0Hu1g4hSUrfjeYp0dauSMZoGJmOcSIsv4X1P0yzjftgQXJ7bIr5uL0r6a35f/mqW6N7FTzxLQhwnzTHueGtiY+LxrHRQ6PcOO3koZ4HQuF7R3rC+6LSruCEVl0pv1XqnLyGdM2/2OJ6JMHi5H2RAebUI/ahq3v8LsqFlR7sf9YgQ8KXBjq+IbRE6qTwIfmZw1Pg20fDKWXbExXZhoZnxbtBtlb6T/nZj2ySL3P2oN8OKVG0a+cOr2BlOGJENx2qS6/+8xjEaLQSJ7+6BmCv6nttcO6M+qK4LTvTTUhrNLOG5YY/0iBgfhr1A1irL1WsREkITwN3sjulIldHcRZ9qJYmrf+ZTIt5
+== 2026.10.29.5
+Окно «ЭСИ и ТП»: чертежи можно бросать мышью прямо в таблицу или выбрать в «Чертежи…» → «Выбрать файлы» (PDF, TIF, PNG или целую папку). Обозначение и наименование ИИ читает со штампа; не прочитался штамп — берутся из имени файла, в строке состояния видно, откуда. Новая кнопка «+ Сборка»: чертежи, брошенные на строку сборки, сразу ложатся в её состав по 1 шт., а её сборочный чертёж или спецификация дают ей обозначение и заполняют состав. Состав можно дописать и руками: «+ Строка» на листе «Состав». На листе «Операции» над таблицей — строка быстрого ТП: деталь, операция (список 1С сужается по мере набора), участок, станок; Enter добавляет операцию 005, 010…, участок и станок остаются для следующей, Tab — к следующему полю. В «Изделиях» новый столбец «Признак изготовления» со значениями из базы — ставится и изделию «Из Союза»; для него администратор «Союза» ставит пакет «CursorPad — Союз» 1.0.0.3. В окне «В Союз…» последние папки для ЭСИ и для ТП стоят первыми в списках. Чтение штампов на настоящих чертежах и связка с живым «Союзом» не проверялись.
+
 == 2026.10.29.4
 Кольцо «Создать» работает и в папках Проводника. Зажмите Shift, протяните мышью по пустому месту открытой папки (не по значку), наведите на плитку и отпустите — папка, текстовый файл, Word, Excel или «Карта заказа» появятся в этой папке и сразу выделятся; занятое имя получает номер, как на рабочем столе. В «Этом компьютере», библиотеках и Корзине создавать некуда — кольцо так и скажет. В настоящем Проводнике это пока не проверялось.
 
