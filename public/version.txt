@@ -1,7 +1,10 @@
-2026102906
-2026.10.29.6
-sha256 e6dfe722225820d6ac3a98739dc882f0dcd7f62d3b8643e7b1f5d6ad80a7122f
-== 0 signature-rsa-sha256 LsSUNwMTquPgl+WAjEAZO9Ftt0Cq9j8g/EjGtGcMosuD0wH3txJoWDn6wNZjm+slIQoLzw5xYNOD4ul9ul0lZ5Yyb3Bw+8WRkoSy26F+p6wgR8F/7oRCFTX2oxs1MnFFic4nPjXXtjmOMNkokLe+CNvKcD+VfAJpDNyXEyty5npeeR3fSdKdkSy6IEHYFNafW2Olc1F5wzXa84HHVAXgV4QwYgE86IC+xQGI+jf7SzsmYQmzkrB78qdgpNt3nk9YXliyFFUSp2QZKPdVANMkG99nEXhMsiVBL4BCja4veBYKy3QkLUEKYN/hVeZB5bhU7nltpxKSIZXG+8iQ3JhHt71Qww3GfeKde/pFzJYpt/8PDcI4Qtk2JrU215c+Stx6wEXrQQ9Bvdv8pjClENU9TUwVmAqggniDb+10GStoyXDV+sBzTNVMftsxPSJ9vCqLtLYA65CbWqVoRcVoyFSiUQJIpJW7JDid6uUOoWXsBCS++M9wXPTfIxz+gRQHh52H
+2026102907
+2026.10.29.7
+sha256 b463810ce7cc7778daeaa7dd15d6af4ec64df4f7b05914d757c7988ca8ecddec
+== 0 signature-rsa-sha256 jRpJotKmz7xJ/D1YtxHmgeNEZ4KSCeZtAA4xYGSKwsboGzE+RxnQtdnjeKL+NTj4PApVCMMsHSjaJ8yCWxwgbPx+9QqAWna9qhPrOO4EKaGI1V+j7LGnmZ0/HHEcC6fpnM68mkxGxAOfCme856mIEvW64NAlFGAPwbXqAH+93jxHWWjaTQkFkn0zqZ6RJC7iiW0uka9b/y3VXIN65daQcwuE2h8nNEI+ga9QTOJnWPKjfBxp4+7p4oU+FDgCCbOGsPzv/MkiTPP5lyAnDNcOs5l9lrGnrbnm1YqunXkK6BfXa/ii+7fRJa59cpiF3pKTCwVbA4UgAYJa+07OOBGx/FCexjumckhVOiZG+5e5saaQdSl6/JVcl8ig+cY/NmtunwEcxfOidxmt6JBAPuc7VxA5OzWzre1rXEhNfR5YswEE/okiAzYUIJ81DaM+JONPv13v+DGFNnbDcN60XUN8Hnle3Gu+U5es2OI1IQwix6ngevBje7NP7C3Q/3hFf5uG
+== 2026.10.29.7
+Окно «ЭСИ и ТП»: сборочный чертёж, брошенный на сборку (с «СБ» на конце обозначения, а также ВО, ГЧ, МЧ, МЭ, УЧ), теперь ложится в её состав документацией: появляется отдельная строка, например «АБВГ.123456.000СБ Сборочный чертеж», вид «Документация», файл скана — на ней, а не на самой сборке. В «Союзе» скан становится подлинником сборочного чертежа. Для этого администратор «Союза» ставит пакет «CursorPad — Союз» 1.0.0.5 (вместо 1.0.0.4). С живым «Союзом» не проверялось.
+
 == 2026.10.29.6
 Окно «ЭСИ и ТП»: вместо «Признака изготовления» — «Признак покупки». У каждого нового изделия он сам ставится «Собственного изготовления», сменить на «Покупное» можно выбором в ячейке; у изделий «Из Союза» признак сам не меняется. Для него администратор «Союза» ставит пакет «CursorPad — Союз» 1.0.0.4 (вместо 1.0.0.3). Оборудование у операций теперь подставляется само: CursorPad смотрит в базе «Союза», какой станок стоит на этой операции на этом участке — сначала в типовых операциях, потом в техпроцессах завода; своё можно вписать или выбрать. Сканы чертежей, брошенные на сборку: если у скана обозначение не прочиталось, впишите его — строка сама встанет в состав сборки; обозначение, вписанное самой сборке, тоже сразу доделывает её состав. С живым «Союзом» подбор станка и признак покупки не проверялись.
 
