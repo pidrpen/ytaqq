@@ -707,7 +707,7 @@ static void sz_paint(HWND hwnd, HDC hdc) {
   y += SZS(36);
   /* что сделать в «Союзе» — цветом */
   if (g_fontUi) SelectObject(hdc, g_fontUi);
-  SetTextColor(hdc, g_szClip == 2 ? RGB(185, 74, 34) : COL_SAGE);
+  SetTextColor(hdc, g_szClip == 2 ? ui_warn(RGB(185, 74, 34)) : COL_SAGE);
   sz_hint(t, 600);
   RECT h = {pad, y, right, sz_fields_top() - SZS(6)};
   DrawTextW(hdc, t, -1, &h, DT_LEFT | DT_WORDBREAK | DT_END_ELLIPSIS | DT_NOPREFIX | DT_EDITCONTROL);
@@ -753,7 +753,7 @@ static void sz_paint(HWND hwnd, HDC hdc) {
                       : g_szDb == 1 ? L"Связываюсь с базой…"
                                     : L"Нет входа в базу (Настройки → PLM): только текст по Ctrl+V";
   RECT sr = {pad, foot - SZS(48), right, foot - SZS(12)}; /* две строки: сообщение автоввода бывает длинным */
-  if (g_szNote[0] && wcsncmp(g_szNote, L"Шаг ", 4) == 0) SetTextColor(hdc, RGB(185, 74, 34));
+  if (g_szNote[0] && wcsncmp(g_szNote, L"Шаг ", 4) == 0) SetTextColor(hdc, ui_warn(RGB(185, 74, 34)));
   DrawTextW(hdc, st, -1, &sr, DT_LEFT | DT_WORDBREAK | DT_END_ELLIPSIS | DT_NOPREFIX | DT_EDITCONTROL);
 }
 

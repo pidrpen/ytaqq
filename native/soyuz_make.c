@@ -969,6 +969,13 @@ static LRESULT CALLBACK SzmProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     SetTextColor(hdc, (HWND)lParam == g_szmStatus ? COL_MUTED : COL_INK);
     return (LRESULT)g_paper;
   }
+  case WM_CTLCOLOREDIT: /* поля и выпадающие списки — в цветах темы (в тёмных темах были белыми) */
+  case WM_CTLCOLORLISTBOX: {
+    HDC hdc = (HDC)wParam;
+    SetBkColor(hdc, COL_PAPER);
+    SetTextColor(hdc, COL_INK);
+    return (LRESULT)g_paper;
+  }
   case WM_DRAWITEM:
     draw_pad_button((const DRAWITEMSTRUCT *)lParam);
     return TRUE;

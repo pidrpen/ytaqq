@@ -317,6 +317,171 @@ static void ui_scroll_theme(HWND h, BOOL list) {
   }
 }
 
+/* предупреждения красным: на тёмной бумаге тёмно-красный не читается (около 2:1),
+   у тёмных тем — светлый красный (не хуже 5:1), у светлых — как задано */
+static COLORREF ui_warn(COLORREF light) { return ui_theme_dark() ? RGB(255, 132, 116) : light; }
+
+/* выпадающий список: у тёмной темы — тёмное поле со светлым текстом (DarkMode_CFD,
+   как в диалогах Windows), у светлой — обычный; системно-белые поля на графите слепили */
+static void ui_combo_theme(HWND h) {
+  int want = ui_theme_dark() ? 2 : 1, have = (int)(INT_PTR)GetPropW(h, L"CpUiScroll");
+  if (have == want || (want == 1 && !have)) return;
+  UiThemeFn fn = ui_set_theme_fn();
+  if (!fn) return;
+  fn(h, want == 2 ? L"DarkMode_CFD" : NULL, NULL);
+  SetPropW(h, L"CpUiScroll", (HANDLE)(INT_PTR)want);
+  InvalidateRect(h, NULL, TRUE);
+}
+
+/* ---- флажки и переключатели в тёмных темах ------------------------------------
+   Подпись флажка со стилями Windows рисует сама и всегда чёрным — цвет из
+   WM_CTLCOLORSTATIC она не слушает, и на «Графите», «Синьке», «Цехе» подписи
+   пропадали. В тёмной теме флажок рисуется целиком здесь (NM_CUSTOMDRAW у
+   родителя: так кнопка зовёт рисование при любом состоянии — наведение, нажатие,
+   галочка): квадратик (у переключателя — кружок) со скруглением, галочка цветом
+   акцента, подпись цветом текста темы. Родитель подменяется один раз
+   (ui_check_parent_proc), в светлых темах всё как было. */
+static BOOL ui_is_check(HWND b) {
+  wchar_t cls[16];
+  if (!GetClassNameW(b, cls, 16) || _wcsicmp(cls, L"Button")) return FALSE;
+  LONG st = GetWindowLongW(b, GWL_STYLE);
+  if (st & BS_PUSHLIKE) return FALSE;
+  switch (st & BS_TYPEMASK) {
+  case BS_CHECKBOX: case BS_AUTOCHECKBOX: case BS_3STATE: case BS_AUTO3STATE: case BS_RADIOBUTTON: case BS_AUTORADIOBUTTON:
+    return TRUE;
+  }
+  return FALSE;
+}
+
+static LRESULT ui_check_draw(const NMCUSTOMDRAW *cd) {
+  HWND b = cd->hdr.hwndFrom, par = GetParent(b);
+  HDC dc = cd->hdc;
+  RECT rc;
+  GetClientRect(b, &rc);
+  /* фон — тот, что родитель даёт подписям (на пергаменте — с узором) */
+  HBRUSH br = par ? (HBRUSH)SendMessageW(par, WM_CTLCOLORSTATIC, (WPARAM)dc, (LPARAM)b) : NULL;
+  if (!br || GetObjectType(br) != OBJ_BRUSH) br = bg_brush(FALSE);
+  FillRect(dc, &rc, br);
+  LONG st = GetWindowLongW(b, GWL_STYLE);
+  int type = st & BS_TYPEMASK;
+  BOOL radio = type == BS_RADIOBUTTON || type == BS_AUTORADIOBUTTON;
+  LRESULT chk = SendMessageW(b, BM_GETCHECK, 0, 0);
+  BOOL dis = !IsWindowEnabled(b), hot = (cd->uItemState & (CDIS_HOT | CDIS_SELECTED)) != 0;
+  int box = ui_px(b, 16), cy = (rc.top + rc.bottom) / 2;
+  if (box > rc.bottom - rc.top) box = rc.bottom - rc.top;
+  RECT bx = {rc.left + ui_px(b, 1), cy - box / 2, rc.left + ui_px(b, 1) + box, cy - box / 2 + box};
+  UiCanvas cv;
+  if (ui_canvas_begin(&cv, dc, bx, bx.left, bx.top, TRUE)) {
+    UiShape s;
+    memset(&s, 0, sizeof(s));
+    s.r = radio ? -1.0f : (float)ui_px(b, 4);
+    s.fillA = 255;
+    s.borderA = 255;
+    s.bw = (float)ui_px(b, 1);
+    if (chk && !dis) {
+      s.fill = hot ? blend_rgb(COL_SAGE, COL_INK, 40) : COL_SAGE;
+      s.border = s.fill;
+    } else {
+      s.fill = blend_rgb(COL_PAPER, COL_INK, hot ? 34 : 16);
+      s.border = dis ? blend_rgb(COL_PAPER, COL_INK, 70) : blend_rgb(COL_PAPER, COL_INK, hot ? 160 : 120);
+    }
+    ui_shape(&cv, bx, &s);
+    if (chk && radio) { /* точка */
+      int d = box * 2 / 5;
+      RECT dot = {bx.left + (box - d) / 2, bx.top + (box - d) / 2, bx.left + (box - d) / 2 + d, bx.top + (box - d) / 2 + d};
+      s.fill = COL_PAPER;
+      s.borderA = 0;
+      ui_shape(&cv, dot, &s);
+    }
+    ui_canvas_end(&cv, dc);
+  }
+  if (chk && !radio) { /* галочка (у третьего состояния — черта) цветом бумаги по акценту */
+    HPEN pen = CreatePen(PS_SOLID, ui_px(b, 2), dis ? COL_MUTED : COL_PAPER);
+    HGDIOBJ op = SelectObject(dc, pen);
+    if (chk == BST_INDETERMINATE) {
+      MoveToEx(dc, bx.left + box / 4, cy, NULL);
+      LineTo(dc, bx.right - box / 4, cy);
+    } else {
+      POINT pt[3] = {{bx.left + box * 24 / 100, bx.top + box * 52 / 100},
+                     {bx.left + box * 42 / 100, bx.top + box * 70 / 100},
+                     {bx.left + box * 76 / 100, bx.top + box * 32 / 100}};
+      Polyline(dc, pt, 3);
+    }
+    SelectObject(dc, op);
+    DeleteObject(pen);
+  }
+  wchar_t t[256];
+  GetWindowTextW(b, t, 256);
+  if (t[0]) {
+    HFONT f = (HFONT)SendMessageW(b, WM_GETFONT, 0, 0);
+    HGDIOBJ of = f ? SelectObject(dc, f) : NULL;
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, dis ? COL_MUTED : COL_INK);
+    RECT tr = {bx.right + ui_px(b, 7), rc.top, rc.right, rc.bottom};
+    UINT fl = DT_LEFT | DT_NOPREFIX | DT_END_ELLIPSIS;
+    if (st & BS_MULTILINE) { /* по высоте — посередине */
+      RECT m = tr;
+      DrawTextW(dc, t, -1, &m, fl | DT_WORDBREAK | DT_CALCRECT);
+      int h = m.bottom - m.top;
+      tr.top = cy - h / 2;
+      tr.bottom = tr.top + h;
+      DrawTextW(dc, t, -1, &tr, fl | DT_WORDBREAK);
+    } else {
+      DrawTextW(dc, t, -1, &tr, fl | DT_VCENTER | DT_SINGLELINE);
+    }
+    if ((cd->uItemState & CDIS_FOCUS) && !(SendMessageW(b, WM_QUERYUISTATE, 0, 0) & UISF_HIDEFOCUS)) {
+      RECT fr = tr;
+      DrawTextW(dc, t, -1, &fr, fl | DT_SINGLELINE | DT_CALCRECT);
+      InflateRect(&fr, 2, 1);
+      DrawFocusRect(dc, &fr);
+    }
+    if (of) SelectObject(dc, of);
+  }
+  return CDRF_SKIPDEFAULT;
+}
+
+static LRESULT CALLBACK ui_check_parent_proc(HWND h, UINT m, WPARAM w, LPARAM l, UINT_PTR id, DWORD_PTR ref) {
+  (void)id;
+  (void)ref;
+  if (m == WM_NOTIFY && ui_theme_dark() && !knight_on()) {
+    const NMHDR *nh = (const NMHDR *)l;
+    if (nh && nh->code == (UINT)NM_CUSTOMDRAW && ui_is_check(nh->hwndFrom)) {
+      const NMCUSTOMDRAW *cd = (const NMCUSTOMDRAW *)l;
+      if (cd->dwDrawStage == CDDS_PREPAINT) return ui_check_draw(cd);
+      return CDRF_DODEFAULT;
+    }
+  }
+  if (m == WM_NCDESTROY) RemoveWindowSubclass(h, ui_check_parent_proc, 0x5547);
+  return DefSubclassProc(h, m, w, l);
+}
+
+/* кисти фона прежних тем. Окна модулей регистрируют класс с g_paper той темы,
+   что стояла при первом открытии; тема сменилась — кисть удалена, а класс
+   помнит её, и под кнопками («×» в «Режимах») проступал фон первой темы.
+   При показе и смене темы такая кисть класса меняется на нынешнюю */
+static HBRUSH g_uiOldBr[32][2];
+static int g_uiOldN;
+static void ui_brush_retire(HBRUSH paper, HBRUSH dark) {
+  if (!paper && !dark) return;
+  if (g_uiOldN == 32) {
+    memmove(g_uiOldBr[0], g_uiOldBr[1], sizeof(g_uiOldBr[0]) * 31);
+    g_uiOldN = 31;
+  }
+  g_uiOldBr[g_uiOldN][0] = paper;
+  g_uiOldBr[g_uiOldN][1] = dark;
+  g_uiOldN++;
+}
+static void ui_class_brush_fix(HWND h) {
+  HBRUSH cb = (HBRUSH)GetClassLongPtrW(h, GCLP_HBRBACKGROUND);
+  if (!cb || cb == g_paper || cb == g_paperDark) return;
+  for (int i = g_uiOldN - 1; i >= 0; i--)
+    for (int k = 0; k < 2; k++)
+      if (g_uiOldBr[i][k] == cb) {
+        SetClassLongPtrW(h, GCLP_HBRBACKGROUND, (LONG_PTR)(k ? g_paperDark : g_paper));
+        return;
+      }
+}
+
 /* ---- шрифт значков --------------------------------------------------------- */
 /* Segoe Fluent Icons (Windows 11) или Segoe MDL2 Assets (Windows 10): значки
    чёткие на любом масштабе. Нет ни того, ни другого — кнопки рисуют значки
@@ -676,6 +841,19 @@ static BOOL CALLBACK ui_skin_cb(HWND c, LPARAM lp) {
   (void)lp;
   wchar_t cls[32];
   if (!GetClassNameW(c, cls, 32)) return TRUE;
+  if (!_wcsicmp(cls, L"ComboBox")) {
+    ui_combo_theme(c);
+    return TRUE;
+  }
+  if (!_wcsicmp(cls, L"Button")) { /* флажок: его родитель рисует его в тёмных темах */
+    HWND par = GetParent(c);
+    if (par && ui_is_check(c) && !GetPropW(par, L"CpUiChk")) {
+      SetPropW(par, L"CpUiChk", (HANDLE)1);
+      SetWindowSubclass(par, ui_check_parent_proc, 0x5547, 0);
+    }
+    if (ui_is_check(c)) InvalidateRect(c, NULL, TRUE);
+    return TRUE;
+  }
   BOOL edit = !_wcsicmp(cls, L"Edit") || !_wcsicmp(cls, L"RICHEDIT50W") || !_wcsicmp(cls, L"RichEdit20W");
   BOOL list = !wcscmp(cls, L"SysListView32") || !wcscmp(cls, L"SysTreeView32");
   if (!edit && !list && wcscmp(cls, L"ListBox")) return TRUE;
@@ -714,6 +892,7 @@ static BOOL ui_our_window(HWND h) {
 
 static void ui_chrome_once(HWND h) {
   if ((int)(INT_PTR)GetPropW(h, L"CpUiGen") == g_uiGen) return;
+  ui_class_brush_fix(h);
   ui_window_chrome(h);
   EnumChildWindows(h, ui_skin_cb, 0);
   SetPropW(h, L"CpUiGen", (HANDLE)(INT_PTR)g_uiGen);

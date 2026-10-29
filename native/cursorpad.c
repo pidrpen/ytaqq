@@ -363,6 +363,9 @@ static HWND g_kitPreview;
 static int g_kitStyle; /* 0 Светлый, 1 Тёмный, 2 Акцент, 3 Стекло */
 static int g_kitSize;  /* 0 ×1, 1 ×1,25, 2 ×1,5 */
 static BOOL g_kitOutline = TRUE, g_kitShadow = TRUE, g_kitThemeAcc = TRUE, g_kitAnim = TRUE, g_kitFx = TRUE;
+/* окно Настроек тянется мышью за край (с 2026.10.29): выбранные ширина и высота, точки
+   экрана; 0 — по умолчанию (SET_W и SET_H_DEF). Высота — предел: вкладка короче — окно ниже */
+static int g_setUserW, g_setUserH;
 static HWND g_btnSet;
 static HWND g_btnAsk;
 static HWND g_btnNd; /* кнопка «Нарды» в Настройках */
@@ -776,6 +779,7 @@ static void ani_apply(const wchar_t *tag) {
 }
 
 static void style_apply(int st); /* styles.c */
+static void settings_trackbars(void); /* ползунки прозрачности Настроек — заново при смене темы */
 static void kit_apply(void);     /* cursor_kit.c */
 
 static void apply_scheme_slots(void) {
@@ -1181,6 +1185,7 @@ static void apply_theme(void) {
   COL_SAGE = kThemes[g_theme].sage;
   COL_LINE = blend_rgb(COL_INK, COL_PAPER, 224);
   ui_sync_tokens();
+  ui_brush_retire(g_paper, g_paperDark); /* классы окон модулей ещё помнят эти кисти */
   if (g_paper) DeleteObject(g_paper);
   if (g_paperDark) DeleteObject(g_paperDark);
   g_paper = CreateSolidBrush(COL_PAPER);
@@ -1218,7 +1223,10 @@ static void apply_theme(void) {
     if (tops[i]) round_corners(tops[i]);
   /* шрифт другой — у надписей другая ширина, кнопки перемеряем */
   if (g_hwnd) layout_children();
-  if (g_setHwnd) layout_settings();
+  if (g_setHwnd) {
+    settings_trackbars(); /* новые ползунки — с кистью новой темы */
+    layout_settings();
+  }
   if (g_askHwnd) layout_ask();
   if (g_answer) layout_answer();
   if (g_card) layout_card();
@@ -1277,11 +1285,14 @@ static void load_cursor_pref(void) {
   int ringStyle = -1, ringBlur = -1, ringDots = -1, ringAnim = -1; /* панель Shift; нет в файле — стекло, всё включено */
   /* «Современный» набор: стиль, размер, обводка, тень, цвет темы, анимация, эффект; нет в файле — светлый, всё включено */
   int kSt = -1, kSz = -1, kOut = -1, kSh = -1, kAcc = -1, kAn = -1, kFx = -1;
+  int setW = 0, setH = 0; /* размер окна Настроек; нет в файле — по умолчанию */
   sscanf(buf, "%15s %d %d %15s %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d"
-              " %d %d %d %d %d %d %d", skin,
+              " %d %d %d %d %d %d %d %d %d", skin,
          &bg, &fg, eng, &autoOn, &theme, &aw, &ah, &cw, &ch, &pt, &keep, &ax, &ay, &cx, &cy, &cpt,
          &ox, &oy, &ow, &oh, &opt, &sparkle, &padMode, &flame, &catFx, &fxPick, &tab, &order, &idle, &idleSz, &idleWatch,
-         &ringStyle, &ringBlur, &ringDots, &ringAnim, &kSt, &kSz, &kOut, &kSh, &kAcc, &kAn, &kFx);
+         &ringStyle, &ringBlur, &ringDots, &ringAnim, &kSt, &kSz, &kOut, &kSh, &kAcc, &kAn, &kFx, &setW, &setH);
+  if (setW >= 360 && setW <= 8000) g_setUserW = setW;
+  if (setH >= 240 && setH <= 8000) g_setUserH = setH;
   if (kSt >= 0 && kSt < KIT_STYLES) g_kitStyle = kSt;
   if (kSz >= 0 && kSz < KIT_SIZES) g_kitSize = kSz;
   if (kOut == 0 || kOut == 1) g_kitOutline = kOut == 1;
@@ -1376,13 +1387,13 @@ static void save_cursor_pref(void) {
   int order = 0;
   for (int i = 0; i < SEC_COUNT; i++) order = order * 10 + g_tabOrder[i];
   snprintf(buf, sizeof(buf), "%s %d %d %s %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d"
-                             " %d %d %d %d %d %d %d\n",
+                             " %d %d %d %d %d %d %d %d %d\n",
            v, g_alphaFollow, g_alphaPinned, e, g_autostart ? 1 : 0, g_theme, g_ansW, g_ansH,
            g_cardW, g_cardH, g_ansPt, g_ansKeepPos ? 1 : 0, g_ansX, g_ansY, g_cardX, g_cardY,
            g_cardPt, g_ocrX, g_ocrY, g_ocrW, g_ocrH, g_ocrPt, g_sparkle ? 1 : 0, g_padMode,
            g_flame ? 1 : 0, g_catFx, g_fxPick, g_tab, order, g_idleSec, g_idleSize, g_idleWatch,
            g_ringStyle, g_ringBlur ? 1 : 0, g_ringDots ? 1 : 0, g_ringAnim ? 1 : 0, g_kitStyle, g_kitSize,
-           g_kitOutline ? 1 : 0, g_kitShadow ? 1 : 0, g_kitThemeAcc ? 1 : 0, g_kitAnim ? 1 : 0, g_kitFx ? 1 : 0);
+           g_kitOutline ? 1 : 0, g_kitShadow ? 1 : 0, g_kitThemeAcc ? 1 : 0, g_kitAnim ? 1 : 0, g_kitFx ? 1 : 0, g_setUserW, g_setUserH);
   HANDLE h = CreateFileW(g_prefPath, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
                          FILE_ATTRIBUTE_NORMAL, NULL);
   if (h == INVALID_HANDLE_VALUE) return;
@@ -3789,7 +3800,7 @@ static void layout_settings(void) {
         HWND sk[9 + ST_COUNT] = {g_btnKit, g_btnK2, g_btnK3, g_btnK4, g_btnK5, g_btnK6, g_btnK7, g_btnK8};
         for (int i = 0; i < ST_COUNT; i++) sk[8 + i] = g_btnSt[i];
         sk[8 + ST_COUNT] = g_btnSys;
-        y = sd_stack(L"Курсор", L"«Современный» настраивается на вкладке «Кастомизация»; «Курсор Windows» — обычные стрелки");
+        y = sd_stack(L"Набор", L"«Современный» настраивается ниже; «Курсор Windows» — обычные стрелки");
         y += set_grid(sk, 9 + ST_COUNT, 3, x0, y, iw, btnH, gap) - gap;
       } else {
         y = sd_stack(L"Эффект при нажатии", L"Любой курсор можно сочетать с любым эффектом");
@@ -3797,6 +3808,29 @@ static void layout_settings(void) {
       }
       sd_stack_end(y);
       sd_card_end();
+      if (sec == 0) { /* «Современный»: стиль, размер и переключатели — здесь, рядом с остальными наборами */
+        sd_group(L"Современный");
+        sd_card_begin();
+        {
+          int ph = kit_preview_h();
+          y = sd_stack(NULL, NULL);
+          set_place(g_kitPreview, x0, y, iw, ph);
+          sd_stack_end(y + ph);
+        }
+        y = sd_stack(L"Стиль курсора", L"Новый набор, нарисован кодом: чёткий на любом размере, виден на светлом и тёмном");
+        y += set_grid(g_btnKitSt, KIT_STYLES, 2, x0, y, iw, btnH, gap) - gap;
+        sd_stack_end(y);
+        y = sd_stack(L"Размер", NULL);
+        y += set_grid(g_btnKitSz, KIT_SIZES, KIT_SIZES, x0, y, iw, btnH, gap) - gap;
+        sd_stack_end(y);
+        {
+          HWND c[5] = {g_btnKitOut, g_btnKitShadow, g_btnKitAcc, g_btnKitAnim, g_btnKitFx};
+          y = sd_stack(L"Эффекты", L"Двойная кайма, мягкая тень, значки цветом темы, крутится «Ожидание», своя «Волна» при нажатии");
+          y += set_grid(c, 5, 3, x0, y, iw, btnH, gap) - gap;
+          sd_stack_end(y);
+        }
+        sd_card_end();
+      }
       break;
     }
     case 2: { /* тема, прозрачность, бой при бездействии */
@@ -3805,27 +3839,6 @@ static void layout_settings(void) {
       int y = sd_stack(L"Тема", L"Меняет шрифт, форму кнопок, шапки и углы окон");
       y += set_grid(g_btnTheme, THEME_COUNT, 3, x0, y, iw, btnH, gap) - gap;
       sd_stack_end(y);
-      sd_card_end();
-      sd_group(L"Курсор");
-      sd_card_begin();
-      {
-        int ph = kit_preview_h();
-        y = sd_stack(NULL, NULL);
-        set_place(g_kitPreview, x0, y, iw, ph);
-        sd_stack_end(y + ph);
-      }
-      y = sd_stack(L"Стиль курсора", L"Новый набор, нарисован кодом: чёткий на любом размере, виден на светлом и тёмном");
-      y += set_grid(g_btnKitSt, KIT_STYLES, 2, x0, y, iw, btnH, gap) - gap;
-      sd_stack_end(y);
-      y = sd_stack(L"Размер", NULL);
-      y += set_grid(g_btnKitSz, KIT_SIZES, KIT_SIZES, x0, y, iw, btnH, gap) - gap;
-      sd_stack_end(y);
-      {
-        HWND c[5] = {g_btnKitOut, g_btnKitShadow, g_btnKitAcc, g_btnKitAnim, g_btnKitFx};
-        y = sd_stack(L"Эффекты", L"Двойная кайма, мягкая тень, значки цветом темы, крутится «Ожидание», своя «Волна» при нажатии");
-        y += set_grid(c, 5, 3, x0, y, iw, btnH, gap) - gap;
-        sd_stack_end(y);
-      }
       sd_card_end();
       sd_group(L"Панель Shift");
       sd_card_begin();
@@ -4041,21 +4054,53 @@ static void scroll_settings(int pos) {
 /* высота окна Настроек — по содержимому: раскрыли раздел — окно выросло (до
    высоты экрана, дальше прокрутка), свернули — сжалось. Верх остаётся на месте,
    пока окно не упрётся в низ экрана */
+#define SET_H_DEF 680 /* предел высоты Настроек по умолчанию (при 100 %); выше — прокрутка */
+static BOOL g_setSizing;   /* окно тянут за край — не подгонять под вкладку посреди движения */
+static RECT g_setSizeFrom; /* каким было окно, когда начали тянуть */
+
+/* С 2026.10.29 окно не растёт под длинную вкладку: высота по вкладке, но не выше
+   выбранной (тянется за край, запоминается; по умолчанию SET_H_DEF), дальше —
+   прокрутка колесом и полосой справа. Ширина — выбранная. Верх остаётся на месте,
+   пока окно не упрётся в низ экрана */
 static void settings_fit_height(void) {
-  if (!g_setHwnd || !IsWindowVisible(g_setHwnd)) return;
-  RECT wr, wa;
+  if (!g_setHwnd || !IsWindowVisible(g_setHwnd) || g_setSizing) return;
+  RECT wr, cr, wa;
   GetWindowRect(g_setHwnd, &wr);
+  GetClientRect(g_setHwnd, &cr);
   POINT pt = {wr.left + 8, wr.top + 8};
   get_work_area(pt, &wa);
-  int h = g_setContentH, maxh = wa.bottom - wa.top - 16;
-  if (maxh < 160) maxh = 160;
+  int frame = (wr.bottom - wr.top) - cr.bottom; /* рамка, за которую тянут */
+  int cap = g_setUserH > 0 ? g_setUserH : MulDiv(SET_H_DEF, ui_dpi(g_setHwnd), 96);
+  int h = g_setContentH + frame, maxh = wa.bottom - wa.top - 16;
+  if (maxh < 240) maxh = 240;
+  if (h > cap) h = cap;
   if (h > maxh) h = maxh;
-  int y = wr.top;
+  if (h < 240) h = 240;
+  int w = g_setUserW > 0 ? g_setUserW : wr.right - wr.left, maxw = wa.right - wa.left - 16;
+  if (w > maxw) w = maxw;
+  int x = wr.left, y = wr.top;
+  if (x + w > wa.right - 4) x = wa.right - w - 8;
+  if (x < wa.left + 4) x = wa.left + 8;
   if (y + h > wa.bottom - 4) y = wa.bottom - h - 8;
   if (y < wa.top + 4) y = wa.top + 8;
-  if (h == wr.bottom - wr.top && y == wr.top) return;
-  SetWindowPos(g_setHwnd, NULL, wr.left, y, wr.right - wr.left, h, SWP_NOZORDER | SWP_NOACTIVATE);
+  if (h == wr.bottom - wr.top && w == wr.right - wr.left && y == wr.top && x == wr.left) return;
+  SetWindowPos(g_setHwnd, NULL, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
 }
+
+/* полоса прокрутки справа: где ползунок; FALSE — прокручивать нечего */
+static BOOL settings_thumb(RECT rc, RECT *th, int *bandH, int *thumbH, int *maxScroll) {
+  int bandTop = PANEL_TITLE_H, bandBot = rc.bottom - SET_FOOT_H;
+  if (g_setContentH <= rc.bottom || bandBot <= bandTop) return FALSE;
+  *bandH = bandBot - bandTop;
+  *maxScroll = g_setContentH - rc.bottom;
+  *thumbH = *bandH * rc.bottom / g_setContentH;
+  if (*thumbH < 28) *thumbH = 28;
+  if (*thumbH > *bandH) *thumbH = *bandH;
+  int y = bandTop + (*bandH - *thumbH) * g_setScroll / *maxScroll;
+  SetRect(th, rc.right - 10, y, rc.right - 3, y + *thumbH);
+  return TRUE;
+}
+static int g_setDragFrom = -1, g_setDragY; /* ползунок тянут: прокрутка и точка, где взяли */
 
 static void settings_relayout(void) {
   for (int i = 0; i < SEC_COUNT; i++)
@@ -4139,14 +4184,11 @@ static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
     }
     {
       /* полоска прокрутки справа: видно, что страница выше окна */
-      int bandTop = PANEL_TITLE_H, bandBot = rc.bottom - SET_FOOT_H;
-      if (g_setContentH > rc.bottom && bandBot > bandTop) {
-        int bandH = bandBot - bandTop, maxScroll = g_setContentH - rc.bottom;
-        int thumbH = bandH * rc.bottom / g_setContentH;
-        if (thumbH < 24) thumbH = 24;
-        int thumbY = bandTop + (bandH - thumbH) * g_setScroll / maxScroll;
-        RECT th = {rc.right - 7, thumbY, rc.right - 3, thumbY + thumbH};
-        fill_round_rect(hdc, th, blend_rgb(COL_MUTED, COL_PAPER_DARK, 90), blend_rgb(COL_MUTED, COL_PAPER_DARK, 90), 2);
+      RECT th;
+      int bandH, thumbH, maxScroll;
+      if (settings_thumb(rc, &th, &bandH, &thumbH, &maxScroll)) { /* тянется мышью, щелчок мимо — на страницу */
+        COLORREF c = blend_rgb(COL_MUTED, COL_PAPER_DARK, g_setDragFrom >= 0 ? 20 : 80);
+        fill_round_rect(hdc, th, c, c, 3);
       }
     }
     if (hdc != pdc) {
@@ -4408,6 +4450,67 @@ static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
     return 0;
   case WM_SIZE:
     layout_settings();
+    InvalidateRect(hwnd, NULL, FALSE);
+    return 0;
+  case WM_GETMINMAXINFO: {
+    MINMAXINFO *mm = (MINMAXINFO *)lParam;
+    mm->ptMinTrackSize.x = ui_px(hwnd, 460);
+    mm->ptMinTrackSize.y = ui_px(hwnd, 300);
+    return 0;
+  }
+  case WM_ENTERSIZEMOVE:
+    g_setSizing = TRUE;
+    GetWindowRect(hwnd, &g_setSizeFrom);
+    return 0;
+  case WM_EXITSIZEMOVE: { /* тянули за край — запомнить; просто переносили — ничего */
+    g_setSizing = FALSE;
+    RECT wr;
+    GetWindowRect(hwnd, &wr);
+    BOOL dw = wr.right - wr.left != g_setSizeFrom.right - g_setSizeFrom.left;
+    BOOL dh = wr.bottom - wr.top != g_setSizeFrom.bottom - g_setSizeFrom.top;
+    if (dw) g_setUserW = wr.right - wr.left;
+    if (dh) g_setUserH = wr.bottom - wr.top;
+    if (dw || dh) {
+      save_cursor_pref();
+      settings_relayout();
+    }
+    return 0;
+  }
+  case WM_LBUTTONDOWN: { /* полоса прокрутки: тянуть ползунок или листать щелчком мимо */
+    RECT rc, th;
+    int bandH, thumbH, maxScroll;
+    GetClientRect(hwnd, &rc);
+    POINT pt = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+    if (pt.x < rc.right - 16 || !settings_thumb(rc, &th, &bandH, &thumbH, &maxScroll)) break;
+    if (pt.y >= th.top && pt.y < th.bottom) {
+      g_setDragFrom = g_setScroll;
+      g_setDragY = pt.y;
+      SetCapture(hwnd);
+      InvalidateRect(hwnd, &th, FALSE);
+    } else if (pt.y >= PANEL_TITLE_H && pt.y < rc.bottom - SET_FOOT_H) {
+      int page = rc.bottom - PANEL_TITLE_H - SET_FOOT_H - 40;
+      scroll_settings(g_setScroll + (pt.y < th.top ? -page : page));
+    }
+    return 0;
+  }
+  case WM_MOUSEMOVE:
+    if (g_setDragFrom >= 0 && GetCapture() == hwnd) {
+      RECT rc, th;
+      int bandH, thumbH, maxScroll;
+      GetClientRect(hwnd, &rc);
+      if (settings_thumb(rc, &th, &bandH, &thumbH, &maxScroll) && bandH > thumbH)
+        scroll_settings(g_setDragFrom + (GET_Y_LPARAM(lParam) - g_setDragY) * maxScroll / (bandH - thumbH));
+      return 0;
+    }
+    break;
+  case WM_LBUTTONUP:
+    if (g_setDragFrom >= 0) ReleaseCapture();
+    return 0;
+  case WM_CAPTURECHANGED:
+    if (g_setDragFrom >= 0) {
+      g_setDragFrom = -1;
+      InvalidateRect(hwnd, NULL, FALSE);
+    }
     return 0;
   case WM_CLOSE:
     ShowWindow(hwnd, SW_HIDE);
@@ -4447,7 +4550,9 @@ static void place_popup(HWND win, int wantW, int wantH, BOOL prefer_left) {
 
 static void place_settings(void) {
   if (!g_setHwnd) return;
-  place_popup(g_setHwnd, SET_W, g_setContentH, FALSE);
+  /* ширина — выбранная (в точках экрана, place_popup ждёт 96 dpi); высоту поправит settings_fit_height */
+  int dpi = ui_dpi(g_setHwnd);
+  place_popup(g_setHwnd, g_setUserW > 0 ? MulDiv(g_setUserW, 96, dpi) : SET_W, g_setContentH, FALSE);
   layout_settings();
   settings_fit_height();
 }
@@ -4641,6 +4746,36 @@ static void create_ask(HWND owner) {
   layout_ask();
 }
 
+/* ползунки прозрачности. Ползунок со стилями запоминает кисть фона, а при смене
+   темы прежняя кисть удаляется — в тёмных темах под ним оставалась белая плашка.
+   Поэтому при смене темы оба создаются заново на тех же местах (apply_theme) */
+static void settings_trackbars(void) {
+  if (!g_setHwnd) return;
+  HWND *tb[2] = {&g_tbBg, &g_tbFg};
+  static const int id[2] = {ID_ALPHA_BG, ID_ALPHA_FG};
+  int pos[2] = {g_alphaFollow, g_alphaPinned};
+  for (int i = 0; i < 2; i++) {
+    RECT r = {0, 0, 120, 28};
+    BOOL vis = TRUE, hide = FALSE;
+    if (*tb[i]) {
+      GetWindowRect(*tb[i], &r);
+      MapWindowPoints(HWND_DESKTOP, g_setHwnd, (POINT *)&r, 2);
+      vis = (GetWindowLongW(*tb[i], GWL_STYLE) & WS_VISIBLE) != 0;
+      hide = GetPropW(*tb[i], L"CpScrollHide") != NULL; /* спрятан прокруткой — пусть знает об этом и новый */
+      RemovePropW(*tb[i], L"CpScrollHide");
+      DestroyWindow(*tb[i]);
+    }
+    *tb[i] = CreateWindowExW(0, TRACKBAR_CLASSW, L"", WS_CHILD | (vis ? WS_VISIBLE : 0) | TBS_NOTICKS | TBS_TOOLTIPS,
+                             r.left, r.top, r.right - r.left, r.bottom - r.top, g_setHwnd, (HMENU)(INT_PTR)id[i], NULL, NULL);
+    if (!*tb[i]) continue;
+    if (hide) SetPropW(*tb[i], L"CpScrollHide", (HANDLE)1);
+    SendMessageW(*tb[i], TBM_SETRANGEMIN, FALSE, 40);
+    SendMessageW(*tb[i], TBM_SETRANGEMAX, FALSE, 255);
+    SendMessageW(*tb[i], TBM_SETPOS, TRUE, pos[i]);
+    EnableWindow(*tb[i], !g_follow);
+  }
+}
+
 static void create_settings(HWND owner) {
   WNDCLASSEXW wc;
   memset(&wc, 0, sizeof(wc));
@@ -4654,7 +4789,7 @@ static void create_settings(HWND owner) {
   RegisterClassExW(&wc);
   g_setHwnd = CreateWindowExW(
       WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED, L"CursorPadSettings",
-      L"Настройки", WS_POPUP | WS_CLIPCHILDREN, 0, 0,
+      L"Настройки", WS_POPUP | WS_THICKFRAME | WS_CLIPCHILDREN, 0, 0,
       SET_W, g_setContentH, owner, NULL, g_inst, NULL);
   mk_btn(g_setHwnd, L"×", ID_PANEL_CLOSE);
   round_corners(g_setHwnd);
@@ -4744,16 +4879,7 @@ static void create_settings(HWND owner) {
   g_btnKitAnim = mk_btn(g_setHwnd, L"Анимация", ID_KIT_ANIM);
   g_btnKitFx = mk_btn(g_setHwnd, L"Эффект нажатия", ID_KIT_FX);
   update_kit_buttons();
-  g_tbBg = CreateWindowExW(0, TRACKBAR_CLASSW, L"", WS_CHILD | WS_VISIBLE | TBS_NOTICKS | TBS_TOOLTIPS,
-                           0, 0, 120, 28, g_setHwnd, (HMENU)(INT_PTR)ID_ALPHA_BG, NULL, NULL);
-  g_tbFg = CreateWindowExW(0, TRACKBAR_CLASSW, L"", WS_CHILD | WS_VISIBLE | TBS_NOTICKS | TBS_TOOLTIPS,
-                           0, 0, 120, 28, g_setHwnd, (HMENU)(INT_PTR)ID_ALPHA_FG, NULL, NULL);
-  SendMessageW(g_tbBg, TBM_SETRANGEMIN, FALSE, 40);
-  SendMessageW(g_tbBg, TBM_SETRANGEMAX, FALSE, 255);
-  SendMessageW(g_tbBg, TBM_SETPOS, TRUE, g_alphaFollow);
-  SendMessageW(g_tbFg, TBM_SETRANGEMIN, FALSE, 40);
-  SendMessageW(g_tbFg, TBM_SETRANGEMAX, FALSE, 255);
-  SendMessageW(g_tbFg, TBM_SETPOS, TRUE, g_alphaPinned);
+  settings_trackbars();
   SendMessageW(g_btnK2, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
   SendMessageW(g_btnK3, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
   SendMessageW(g_btnK4, WM_SETFONT, (WPARAM)g_fontUi, TRUE);

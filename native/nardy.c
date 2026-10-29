@@ -991,7 +991,7 @@ static void nd_paint(HWND hwnd, HDC hdc) {
   gn_diag_text(&g_ndn, dg, 400);
   RECT dr = {pad, S_(ND_TOP) + S_(ND_H) + S_(62), rc.right - pad, rc.bottom - S_(4)};
   if (g_fontSmall) SelectObject(hdc, g_fontSmall);
-  SetTextColor(hdc, g_ndn.writeFail ? RGB(200, 60, 40) : COL_MUTED);
+  SetTextColor(hdc, g_ndn.writeFail ? ui_warn(RGB(200, 60, 40)) : COL_MUTED);
   DrawTextW(hdc, dg, -1, &dr, DT_LEFT | DT_WORDBREAK | DT_NOPREFIX);
 }
 
