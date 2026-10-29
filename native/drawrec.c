@@ -1014,7 +1014,7 @@ static void dr_norm_des(const wchar_t *in, wchar_t *out, int cap) {
     const wchar_t *q = wcschr(lat, t[k]);
     if (q) t[k] = cyr[q - lat];
   }
-  /* буквенный код, прилипший к цифрам: «АДЕ3424-1074.00.00.02» → «АДЕ 3424-1074.00.00.02» */
+  /* буквенный код, прилипший к цифрам: «АДЕ3422-682.01.01» → «АДЕ 3422-682.01.01» */
   for (int i = 0; t[i]; i++) {
     if (i > 0 && t[i - 1] != L' ') continue;
     int l = 0;

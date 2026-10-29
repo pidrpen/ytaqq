@@ -494,7 +494,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
                      !esi_chat_cmd(L"есть ли в союзе ТСТ.110.004") && !rt_chat_cmd(L"норма материала по ведомости") &&
                      !prio_chat_cmd(L"какой участок у токарной"),
                  L"чат: «загрузи ЭСИ по чертежам» узнаётся, «выгрузи», «в союз», сверка и вопросы — нет");
-        st_check(ac_is_des(L"АБВГ.711141.001") && ac_is_des(L"ТСТ.100.000") && ac_is_des(L"АДЕ 3424-1073.00.00.01") &&
+        st_check(ac_is_des(L"АБВГ.711141.001") && ac_is_des(L"ТСТ.100.000") && ac_is_des(L"АДЕ 3422-682.01.01") &&
                      ac_is_des(L"АБВГ.123456.000СБ") && !ac_is_des(L"2026-10-29") && !ac_is_des(L"ГОСТ 2590-2006") &&
                      !ac_is_des(L"16К20,") && !ac_is_des(L"4110") && !ac_is_des(L"Токарная") && ac_is_path_start(L"C:\\x") &&
                      !ac_is_path_start(L"ТСТ.100.000"),
