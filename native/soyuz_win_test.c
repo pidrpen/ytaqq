@@ -246,7 +246,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
   st_check(g_szDb == 1, L"база: ищу аналоги");
   wchar_t first[200];
   lstrcpynW(first, g_stClip, 200);
-  st_check(!wcscmp(first, L"0110 Заготовительная"), L"до ответа базы в буфере — текст первой операции");
+  st_check(!wcscmp(first, L"4280 Отрезная"), L"до ответа базы в буфере — текст первой операции (заготовка — «Отрезная» 4280)");
   st_shot(L"1-loading.png");
   for (int t = 0; t < 300 && !g_szLoaded && !g_szNote[0]; t++) st_pump(100);
   st_pump(2500); /* слежение: первый круг */
@@ -258,9 +258,10 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
             it->num, it->op, it->code, it->name, it->dir, it->uses, it->guid[0] ? it->guid : L"—", it->from, it->ceh,
             it->equip, it->aTpz, it->aTsht);
   }
-  int iZag = st_find(L"Заготовительная"), iTok = st_find(L"Токарная (черновая)"),
+  int iZag = st_find(L"Отрезная"), iTok = st_find(L"Токарная (черновая)"),
       iShl = st_find(L"Круглошлифовальная"), iOkr = st_find(L"Окрасочная"), iKon = st_find(L"Контрольная");
-  st_check(iZag == 0 && g_szR.it[0].dir && g_szR.it[0].guid[0], L"заготовительная: справочная и аналог");
+  st_check(iZag == 0 && g_szR.it[0].dir && !wcscmp(g_szR.it[0].code, L"4280") && !g_szR.it[0].guid[0],
+           L"отрезная первой: справочная 4280 есть, аналога в ТП дома нет — пойдёт текстом");
   st_check(iTok > 0 && g_szR.it[iTok].guid[0] && !wcscmp(g_szR.it[iTok].code, L"4110"), L"токарная: аналог 4110");
   st_check(iShl > 0 && !wcscmp(g_szR.it[iShl].code, L"4130") && g_szR.it[iShl].guid[0],
            L"круглошлифовальной 4131 в ТП нет — взята ходовая 4130 из запасных");
@@ -318,10 +319,10 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
       }
       int ntr = 0;
       for (const wchar_t *q = t2; q && (q = wcsstr(q, L"\t0401\t")) != NULL; q += 6) ntr++;
-      st_check(n2 > 10 && t2 && wcsstr(t2, L"\t005\t0110\t31\t\t5\t1\r\n") && wcsstr(t2, L"\t010\t0401\t32\t\t\t\r\n") &&
+      st_check(n2 > 10 && t2 && wcsstr(t2, L"\t005\t4280\t12\t\t\t\r\n") && wcsstr(t2, L"\t010\t0401\t32\t\t\t\r\n") &&
                    wcsstr(t2, L"\t015\t4110\t32\t1К62\t15\t4\r\n") && wcsstr(t2, L"\t4210\t31\t2Н135\t10\t4\r\n") &&
                    wcsstr(t2, L"\t0401\t12\t\t\t\r\n") && wcsstr(t2, L"\t4130\t12\t") && ntr >= 4,
-               L"«Создать ТП»: приоритет перекрыл аналог (4110 → 32/1К62, 4210 → 31, 4130 → 12 мехобработка); «0401 Транспортирование» "
+               L"«Создать ТП»: отрезная на 12 (мехобработка), приоритет перекрыл аналог (4110 → 32/1К62, 4210 → 31, 4130 → 12 мехобработка); «0401 Транспортирование» "
                L"перед каждой сменой участка, номера по порядку");
       st_note(L"     транспортирований в описании: %d", ntr);
       free(t2);
@@ -545,11 +546,12 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
     if (t) st_note(L"     %ls", t);
     free(t);
   }
-  st_check(!wcscmp(g_stClip, L"0110 Заготовительная") && g_szTextOnly,
+  st_check(!wcscmp(g_stClip, L"4280 Отрезная") && g_szTextOnly,
            L"по умолчанию — текст для «Создать операцию» (в сквозной ТП копию не вставить)");
   st_shot(L"2a-text-default.png");
   sz_command(ID_SZ_MODE);
-  st_check(!g_szTextOnly && !wcscmp(g_stClip, g_szR.it[0].guid), L"«Аналог» — в буфере GUID аналога");
+  st_check(!g_szTextOnly && !wcscmp(g_stClip, L"4280 Отрезная") && g_szR.it[iTok].guid[0],
+           L"«Аналог»: у отрезной аналога нет — остаётся текст, у токарной GUID есть");
 
   /* GUID в буфере — настоящая операция ТП с тем же кодом */
   {
