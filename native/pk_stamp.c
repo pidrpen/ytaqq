@@ -12,6 +12,11 @@
        спецификация — сборка и весь её состав со всех листов файла (до PKS_PAGES).
    Сборка без обозначения («+ Сборка» и сразу бросили её СБ вместе с деталями) получает
    обозначение с первого чертежа сборки; состав, прочитанный раньше, достраивается тогда же.
+   Операции сразу (g_pkAiOps, «Чертежи…» → галочка; с 2026.10.29.8): у чертежа детали лист читается
+   целиком (модель с картинками и Tesseract, как «Маршрут обработки» в чате), маршрут и заготовку
+   решают правила технолога (techno.c), нормы — norms.c; текст маршрута раскладывает «Вставить»
+   (pk_paste_text) — операции с кодами 1С на лист «Операции» к этой детали, если своих у неё нет.
+   Участок и станок подставит pk_equip_fill. «Операции по чертежам» — то же для уже лежащих строк.
    Чтение — в своём потоке, по одному файлу; результаты — WM_PK_STAMP. «Очистить» прерывает. */
 
 #define PKS_PAGES 8   /* листов спецификации из одного файла */
@@ -37,6 +42,9 @@ typedef struct {
   wchar_t rowDes[200];      /* её обозначение в момент броска: строка всё та же? */
   PkStRow *rows;            /* спецификация */
   int nrows;
+  int doc;                  /* pp_draw_doc: 0 — чертёж детали, 1 — сборки, 2 — другой документ (ВП, ПЗ…) */
+  BOOL ops, opsOnly;        /* составить и операции; только они (строка уже есть — по файлу) */
+  wchar_t *route;           /* маршрут по листу, как в чате (tn_text + нормы); malloc, NULL — нет */
 } PkStRes;
 
 typedef struct PkStJob {
@@ -47,6 +55,7 @@ typedef struct PkStJob {
   wchar_t parent[200];
   int parentRow, row;
   wchar_t rowDes[200];
+  BOOL ops, opsOnly;
 } PkStJob;
 
 static CRITICAL_SECTION g_pksLock;
@@ -70,6 +79,16 @@ typedef struct {
 } PkStOrphan;
 static PkStOrphan g_pksOrph[64];
 static int g_pksOrphN;
+/* операции сразу по чертежу детали: галочка в «Чертежи…» (package.ini); итог для строки состояния */
+static BOOL g_pkAiOps = TRUE, g_pkAiOpsRead;
+static int g_pksOps, g_pksOpsParts, g_pksOpsHad, g_pksOpsNo;
+/* маршрут скана без обозначения: впишут обозначение — операции лягут к нему (по файлу строки) */
+typedef struct {
+  wchar_t file[MAX_PATH];
+  wchar_t *route;
+} PkStRouteWait;
+static PkStRouteWait g_pksRw[16];
+static int g_pksRwN;
 
 /* ---- чтение (рабочий поток) ------------------------------------------------------------ */
 
@@ -114,6 +133,7 @@ static void pks_from_page(DrPage *pg, PkStRes *r) {
   lstrcpynW(name, rs_name(pg), DR_CELL);
   int doc = pp_draw_doc_code(raw, name, r->docCode); /* «… СБ», «Сборочный чертеж» — сборка; код — прочь */
   if (doc != 1 || pg->type == DRT_SPEC) r->docCode[0] = 0; /* спецификация — подлинник самой сборки */
+  r->doc = doc;
   lstrcpynW(r->des, v, DR_CELL);   /* dr_find_des уже без кода и с кириллицей вместо похожей латиницы */
   lstrcpynW(r->name, name, DR_CELL);
   r->asmDoc = doc == 1 || pg->type == DRT_SPEC;
@@ -123,6 +143,25 @@ static void pks_from_page(DrPage *pg, PkStRes *r) {
     if (pg->f[DF_MASS][0] && !pg->doubt[DF_MASS]) lstrcpynW(r->mass, pg->f[DF_MASS], 40);
   }
   if (pg->type == DRT_SPEC) pks_spec_rows(pg, r);
+}
+
+/* маршрут по прочитанному листу — тот же текст, что «Маршрут обработки» кладёт в чат (без «Лист:»):
+   его разбирает «Вставить»; операций нет — NULL */
+static wchar_t *pks_route(const DrPage *pg, const wchar_t *mass) {
+  TnRoute *tr = (TnRoute *)malloc(sizeof(TnRoute));
+  wchar_t *txt = (wchar_t *)malloc(sizeof(wchar_t) * 9000);
+  if (tr && txt) {
+    dr_tn_route(pg, tr);
+    if (tr->n) {
+      tn_text(tr, txt, 9000);
+      txt = nm_append(txt, tr, mass, NULL); /* нормы времени по таблицам ОМН, если они есть */
+      free(tr);
+      return txt;
+    }
+  }
+  free(tr);
+  free(txt);
+  return NULL;
 }
 
 static void pks_read(IWICImagingFactory *f, PkStRes *r) {
@@ -143,10 +182,13 @@ static void pks_read(IWICImagingFactory *f, PkStRes *r) {
     if (pdf) _snwprintf(pg.path, MAX_PATH, L"%ls\\p%04d.png", tmp, i + 1), pg.path[MAX_PATH - 1] = 0;
     else lstrcpynW(pg.path, pl.p[i].path, MAX_PATH), pg.frame = pl.p[i].frame;
     pg.vlStamp = !i && dr_vl_ok() ? 2 : 0; /* модель — графы «Обозначение» и «Наименование», лист не спрашивать */
+    pg.wantText = !i && r->ops;            /* операции сразу — и весь лист (ТТ, Ra, допуски), как для маршрута */
     dr_recognize(f, &pg);
     if (!i) {
       pks_from_page(&pg, r);
       if (!r->how && pg.note[0]) lstrcpynW(why, pg.note, 200);
+      if (r->ops && (pg.type == DRT_DRAW || pg.type == DRT_OTHER) && !r->asmDoc)
+        r->route = pks_route(&pg, r->mass[0] ? r->mass : pg.f[DF_MASS]);
     } else if (pg.type == DRT_SPEC) {
       pks_spec_rows(&pg, r); /* продолжение спецификации */
     }
@@ -161,12 +203,17 @@ static void pks_read(IWICImagingFactory *f, PkStRes *r) {
     int doc;
     if (pp_file_title_code(r->file, r->des, r->name, &doc, r->docCode)) {
       if (doc != 1) r->docCode[0] = 0;
+      r->doc = doc;
       r->how = 3;
       r->asmDoc = doc == 1;
       if (!r->kind[0]) lstrcpynW(r->kind, r->asmDoc ? L"Сборочные единицы" : !doc ? L"Детали" : L"", 40);
     }
   }
-  if (!r->des[0]) lstrcpynW(r->note, why[0] ? why : L"обозначение не прочиталось", 200);
+  if (r->route && (r->asmDoc || r->doc || r->nrows)) {
+    free(r->route); /* чертёж сборки, документ или спецификация — операций по ним нет */
+    r->route = NULL;
+  }
+  if (!r->des[0] && !r->opsOnly) lstrcpynW(r->note, why[0] ? why : L"обозначение не прочиталось", 200);
 }
 
 static DWORD WINAPI pks_worker(LPVOID arg) {
@@ -194,12 +241,15 @@ static DWORD WINAPI pks_worker(LPVOID arg) {
       r->n = j->n;
       r->parentRow = j->parentRow;
       r->row = j->n == 1 ? j->row : -1;
+      r->ops = j->ops;
+      r->opsOnly = j->opsOnly;
       lstrcpynW(r->file, j->files[i], MAX_PATH);
       lstrcpynW(r->parent, j->parent, 200);
       lstrcpynW(r->rowDes, j->rowDes, 200);
       pks_read(f, r);
       if (!g_pkWnd || !PostMessageW(g_pkWnd, WM_PK_STAMP, 0, (LPARAM)r)) {
         free(r->rows);
+        free(r->route);
         free(r);
       }
     }
@@ -283,7 +333,8 @@ static void pks_doc_row(int asmRow, const PkStRes *r) {
   g_pksDocs++;
 }
 
-static void pks_apply(PkStRes *r) {
+/* куда лёг чертёж: строка «Изделий» (у СБ — сама сборка); -1 — никуда */
+static int pks_apply(PkStRes *r) {
   XpTable *it = &g_pk[PK_ITEMS];
   int row = -1;
   /* сборка без обозначения, и это её чертёж — он и даёт ей обозначение */
@@ -299,7 +350,7 @@ static void pks_apply(PkStRes *r) {
   if (!target && r->des[0]) row = pks_find(r->des);
   BOOL fresh = row < 0;
   if (fresh) {
-    if (!xp_row(it)) return;
+    if (!xp_row(it)) return -1;
     row = it->n - 1;
   }
   const wchar_t *have = xp_cell(it, row, 0);
@@ -357,6 +408,46 @@ static void pks_apply(PkStRes *r) {
   }
   if (r->nrows) lstrcpynW(g_pksParent, des, 200);
   if (docDraw) pks_doc_row(row, r);
+  return row;
+}
+
+static BOOL pks_has_ops(const wchar_t *des) {
+  for (int k = 0; k < g_pk[PK_OPS].n; k++)
+    if (!_wcsicmp(xp_cell(&g_pk[PK_OPS], k, 0), des)) return TRUE;
+  return FALSE;
+}
+
+/* маршрут чертежа — операциями детали в строке row: разбирает «Вставить», как маршрут из чата
+   («Лист: файл · обозначение» — к этой детали). Свои операции у детали уже есть — не трогаем.
+   Обозначения ещё нет — маршрут ждёт его (pk_stamp_typed); route забирается */
+static void pks_ops(int row, const wchar_t *file, wchar_t **route) {
+  XpTable *it = &g_pk[PK_ITEMS];
+  if (!*route || row < 0 || row >= it->n || pks_is_asm(row)) return;
+  const wchar_t *des = xp_cell(it, row, 0);
+  if (!des[0]) {
+    if (g_pksRwN < (int)(sizeof(g_pksRw) / sizeof(g_pksRw[0]))) {
+      lstrcpynW(g_pksRw[g_pksRwN].file, file, MAX_PATH);
+      g_pksRw[g_pksRwN++].route = *route;
+      *route = NULL;
+    }
+    return;
+  }
+  if (pks_has_ops(des)) {
+    g_pksOpsHad++;
+    return;
+  }
+  size_t n = wcslen(*route) + wcslen(des) + MAX_PATH + 16;
+  wchar_t *t = (wchar_t *)malloc(n * sizeof(wchar_t));
+  if (!t) return;
+  _snwprintf(t, n, L"Лист: %ls · %ls\n%ls", tm_base(file), des, *route);
+  t[n - 1] = 0;
+  wchar_t d[DR_CELL], msg[400];
+  lstrcpynW(d, des, DR_CELL); /* «Вставить» может дописать строки «Изделий» — des переедет */
+  int show, was = g_pk[PK_OPS].n;
+  pk_paste_text(t, PK_OPS, L"", d, &show, msg, 400);
+  free(t);
+  if (g_pk[PK_OPS].n > was) g_pksOps += g_pk[PK_OPS].n - was, g_pksOpsParts++;
+  else g_pksOpsNo++;
 }
 
 /* обозначение в «Изделиях» вписали руками: сборка — её состав из ждавших; скан без обозначения —
@@ -385,6 +476,21 @@ static void pk_stamp_typed(int row) {
     if (g_pksNoDes > 0) g_pksNoDes--;
     break;
   }
+  int opsWas = g_pksOps;
+  for (int i = 0; file[0] && i < g_pksRwN; i++) {
+    if (_wcsicmp(g_pksRw[i].file, file)) continue;
+    wchar_t *route = g_pksRw[i].route;
+    wchar_t f[MAX_PATH];
+    lstrcpynW(f, g_pksRw[i].file, MAX_PATH);
+    g_pksRw[i] = g_pksRw[--g_pksRwN];
+    pks_ops(row, f, &route);
+    free(route);
+    break;
+  }
+  if (g_pksOps > opsWas) {
+    pk_status(L"К «%s» — операций по чертежу %d: лист «Операции», проверьте", xp_cell(it, row, 0), g_pksOps - opsWas);
+    return;
+  }
   if (g_pksLinks > was)
     pk_status(L"В состав «%s»: %d — см. лист «Состав»", parent[0] ? parent : des, g_pksLinks - was);
 }
@@ -393,20 +499,36 @@ static void pk_stamp_typed(int row) {
 static void pk_stamp_forget(void) {
   g_pksPendN = g_pksOrphN = 0;
   g_pksWait = 0;
+  for (int i = 0; i < g_pksRwN; i++) free(g_pksRw[i].route);
+  g_pksRwN = 0;
 }
 
 /* итог — в строку состояния */
 static void pks_status(const wchar_t *note) {
-  wchar_t by[120] = L"", wait[120] = L"", docs[80] = L"";
+  wchar_t by[120] = L"", wait[120] = L"", docs[80] = L"", ops[200] = L"";
   if (g_pksDocs) _snwprintf(docs, 80, L" (из них сборочных чертежей документом: %d)", g_pksDocs);
+  if (g_pksOps || g_pksOpsHad || g_pksOpsNo || g_pksRwN) {
+    int l = _snwprintf(ops, 200, L"; операций по чертежам %d у %d дет. — лист «Операции», проверьте", g_pksOps, g_pksOpsParts);
+    if (l > 0 && g_pksOpsHad) l += _snwprintf(ops + l, 200 - l, L"; у %d свои уже были — не тронуты", g_pksOpsHad);
+    if (l > 0 && l < 200 && g_pksOpsNo) l += _snwprintf(ops + l, 200 - l, L"; без маршрута %d", g_pksOpsNo);
+    if (l > 0 && l < 200 && g_pksRwN) _snwprintf(ops + l, 200 - l, L"; %d ждут обозначения", g_pksRwN);
+    ops[199] = 0;
+  }
   if (g_pksBy[2] || g_pksBy[1] || g_pksBy[3])
     _snwprintf(by, 120, L"; обозначения: моделью %d, Tesseract %d, из имени файла %d", g_pksBy[2], g_pksBy[1], g_pksBy[3]);
   if (g_pksWait) _snwprintf(wait, 120, L"; %d ждут обозначения сборки — впишите его", g_pksWait);
-  pk_status(L"Чертежи: %d из %d — новых изделий %d, дополнено %d, в состав%ls%ls%ls %d%ls%ls%ls%ls%ls%ls%ls%ls",
+  pk_status(L"Чертежи: %d из %d — новых изделий %d, дополнено %d, в состав%ls%ls%ls %d%ls%ls%ls%ls%ls%ls%ls%ls%ls",
             g_pksDone, g_pksTotal, g_pksNew, g_pksMerged, g_pksParent[0] ? L" «" : L"", g_pksParent,
-            g_pksParent[0] ? L"»" : L"", g_pksLinks, docs, by, g_pksNoDes ? L"; без обозначения — впишите" : L"",
+            g_pksParent[0] ? L"»" : L"", g_pksLinks, docs, ops, by, g_pksNoDes ? L"; без обозначения — впишите" : L"",
             g_pksDoubt[0] ? L"; проверьте: " : L"", g_pksDoubt, wait, note && note[0] ? L"; " : L"",
             note ? note : L"");
+}
+
+/* «Операции по чертежам»: только операции — итог отдельно */
+static void pks_ops_status(void) {
+  pk_status(L"Операции по чертежам: %d из %d — операций %d у %d дет.%ls%ls — лист «Операции», участок и станок проверьте",
+            g_pksDone, g_pksTotal, g_pksOps, g_pksOpsParts, g_pksOpsHad ? L"; у кого свои были — не тронуты" : L"",
+            g_pksOpsNo ? L"; у части маршрута нет (лист не прочитался)" : L"");
 }
 
 /* WM_PK_STAMP: прочитанный чертёж — в листы */
@@ -414,23 +536,65 @@ static void pk_stamp_done(void *p) {
   PkStRes *r = (PkStRes *)p;
   if (r->gen == g_pkStGen) {
     if (g_pkEditRow >= 0) pk_edit_end(TRUE);
-    pks_apply(r);
+    if (r->opsOnly) { /* строка уже есть: та, у которой этот файл */
+      int row = -1;
+      for (int k = 0; k < g_pk[PK_ITEMS].n && row < 0; k++)
+        if (!_wcsicmp(xp_cell(&g_pk[PK_ITEMS], k, 5), r->file)) row = k;
+      if (r->route) pks_ops(row, r->file, &r->route);
+      else g_pksOpsNo++;
+    } else {
+      int row = pks_apply(r);
+      if (r->route) pks_ops(row, r->file, &r->route);
+      else if (r->ops && !r->asmDoc && !r->doc && !r->nrows) g_pksOpsNo++;
+    }
     g_pksDone++;
     pk_fill(FALSE);
     pk_changed();
     BOOL last = r->i == r->n - 1;
-    pks_status(r->note[0] ? r->note : last && !dr_vl_ok() && g_pksBy[1]
-                                          ? L"мини-ИИ с картинками выключен — Tesseract путает буквы, сверьте обозначения"
-                                          : L"");
+    if (r->opsOnly) pks_ops_status();
+    else
+      pks_status(r->note[0] ? r->note : last && !dr_vl_ok() && g_pksBy[1]
+                                            ? L"мини-ИИ с картинками выключен — Tesseract путает буквы, сверьте обозначения"
+                                            : last && r->ops && !dr_vl_ok() && g_pksOps
+                                                ? L"мини-ИИ с картинками выключен — маршрут по Tesseract, сверьте операции"
+                                                : L"");
   }
   free(r->rows);
+  free(r->route);
   free(r);
 }
 
 /* WM_PK_STAMPGO: читается следующий файл (счёт — по всем броскам подряд) */
 static void pk_stamp_progress(void) {
-  pk_status(L"Читаю штамп: %d из %d%ls… (бросать можно ещё; «Очистить» — прервать)", g_pksDone + 1, g_pksTotal,
+  pk_status(L"Читаю %ls: %d из %d%ls… (бросать можно ещё; «Очистить» — прервать)",
+            g_pkAiOps ? L"чертёж — штамп и лист для операций" : L"штамп", g_pksDone + 1, g_pksTotal,
             dr_vl_ok() ? L", мини-ИИ" : L"");
+}
+
+/* галочка «операции сразу» — в package.ini папки данных */
+static void pks_ops_pref(void) {
+  if (g_pkAiOpsRead || !g_dataDir[0]) return;
+  wchar_t p[MAX_PATH];
+  _snwprintf(p, MAX_PATH, L"%ls\\package.ini", g_dataDir);
+  p[MAX_PATH - 1] = 0;
+  g_pkAiOps = GetPrivateProfileIntW(L"Чертежи", L"Операции", 1, p) != 0;
+  g_pkAiOpsRead = TRUE;
+}
+
+static BOOL pk_stamp_ops_on(void) {
+  pks_ops_pref();
+  return g_pkAiOps;
+}
+
+static void pks_ops_toggle(void) {
+  pks_ops_pref();
+  g_pkAiOps = !g_pkAiOps;
+  wchar_t p[MAX_PATH];
+  _snwprintf(p, MAX_PATH, L"%ls\\package.ini", g_dataDir);
+  p[MAX_PATH - 1] = 0;
+  if (g_dataDir[0]) WritePrivateProfileStringW(L"Чертежи", L"Операции", g_pkAiOps ? L"1" : L"0", p);
+  pk_status(g_pkAiOps ? L"Чертёж детали — сразу и операции: мини-ИИ читает лист, маршрут и нормы — по правилам технолога"
+                      : L"Чертежи — только штамп; операции — «Чертежи…» → «Операции по чертежам»");
 }
 
 /* файл или папка (её картинки) — в список чтения */
@@ -441,17 +605,19 @@ static void pks_add_path(TmPaths *l, const wchar_t *p) {
   else tm_paths_add(l, p);                                   /* файл — любой: PDF, КОМПАС, DWG — по имени */
 }
 
-/* файлы — в очередь чтения; hit — строка открытого листа, куда их отдали (-1 — никуда) */
-static void pks_enqueue(TmPaths *pl, int hit) {
+/* файлы — в очередь чтения; hit — строка открытого листа, куда их отдали (-1 — никуда);
+   opsOnly — строки уже есть, нужны только операции по их чертежам */
+static void pks_enqueue(TmPaths *pl, int hit, BOOL opsOnly) {
   TmPaths l = *pl;
   if (!l.n) {
     pk_status(L"Чертежей не нашлось — бросьте файлы (PDF, TIF, PNG…) или папку с ними");
     free(l.p);
     return;
   }
-  tm_paths_sort(&l);
+  if (!opsOnly) tm_paths_sort(&l);
   if (g_pkEditRow >= 0) pk_edit_end(TRUE);
   pk_init();
+  pks_ops_pref();
   PkStJob *j = (PkStJob *)calloc(1, sizeof(PkStJob));
   if (!j) {
     free(l.p);
@@ -460,7 +626,10 @@ static void pks_enqueue(TmPaths *pl, int hit) {
   j->files = l.p;
   j->n = l.n;
   j->parentRow = j->row = -1;
+  j->ops = opsOnly || g_pkAiOps;
+  j->opsOnly = opsOnly;
   wchar_t note[200] = L"";
+  if (opsOnly) hit = -1;
   if (g_pkSheet == PK_LINKS && hit >= 0 && hit < g_pk[PK_LINKS].n) { /* на строку состава — в её сборку */
     lstrcpynW(j->parent, xp_cell(&g_pk[PK_LINKS], hit, 0), 200);
     j->parentRow = pks_find(j->parent);
@@ -476,7 +645,7 @@ static void pks_enqueue(TmPaths *pl, int hit) {
       lstrcpynW(note, L"на деталь бросили несколько — легли новыми строками; в состав — бросайте на строку сборки", 200);
     }
   }
-  if (g_pkSheet != PK_ITEMS && g_pkSheet != PK_LINKS) {
+  if (!opsOnly && g_pkSheet != PK_ITEMS && g_pkSheet != PK_LINKS) {
     g_pkSheet = PK_ITEMS;
     pk_fill(TRUE);
   }
@@ -489,6 +658,7 @@ static void pks_enqueue(TmPaths *pl, int hit) {
   BOOL idle = !g_pksRunning;
   if (idle) { /* новый бросок после затишья — итог считать заново */
     g_pksDone = g_pksTotal = g_pksNew = g_pksMerged = g_pksLinks = g_pksNoDes = g_pksWait = g_pksDocs = 0;
+    g_pksOps = g_pksOpsParts = g_pksOpsHad = g_pksOpsNo = 0;
     memset(g_pksBy, 0, sizeof(g_pksBy));
     g_pksDoubt[0] = g_pksParent[0] = 0;
   }
@@ -502,6 +672,11 @@ static void pks_enqueue(TmPaths *pl, int hit) {
     HANDLE t = CreateThread(NULL, 0, pks_worker, NULL, 0, NULL);
     if (t) CloseHandle(t);
     else g_pksRunning = FALSE;
+  }
+  if (opsOnly) {
+    pk_status(L"Операции по чертежам: читаю %d %ls%ls…", g_pksTotal, g_pksTotal == 1 ? L"лист" : L"листов",
+              dr_vl_ok() ? L" (мини-ИИ)" : L" (Tesseract — мини-ИИ с картинками выключен)");
+    return;
   }
   pk_status(L"Читаю штампы: %d %ls%ls%ls%ls%ls%ls…", g_pksTotal, g_pksTotal == 1 ? L"чертёж" : L"чертежей",
             j->parent[0] ? L" → в состав «" : j->parentRow >= 0 ? L" → в состав новой сборки" : L"", j->parent,
@@ -525,7 +700,7 @@ static void pk_stamp_drop(HWND hwnd, HDROP hd) {
   memset(&hi, 0, sizeof(hi));
   hi.pt = pt;
   int hit = (int)SendMessageW(g_pkList, LVM_HITTEST, 0, (LPARAM)&hi);
-  pks_enqueue(&l, hi.flags & LVHT_ONITEM ? hit : -1);
+  pks_enqueue(&l, hi.flags & LVHT_ONITEM ? hit : -1, FALSE);
 }
 
 /* «Чертежи…» → «Выбрать файлы…»: то же, что бросить их на выделенную строку (нет — в новые строки) */
@@ -559,7 +734,38 @@ static void pk_stamp_pick(void) {
   }
   free(buf);
   int sel = ListView_GetNextItem(g_pkList, -1, LVNI_SELECTED);
-  pks_enqueue(&l, sel >= 0 && sel < g_pk[g_pkSheet].n && ListView_GetSelectedCount(g_pkList) == 1 ? sel : -1);
+  pks_enqueue(&l, sel >= 0 && sel < g_pk[g_pkSheet].n && ListView_GetSelectedCount(g_pkList) == 1 ? sel : -1, FALSE);
+}
+
+/* «Чертежи…» → «Операции по чертежам»: деталям с файлом чертежа и без своих операций (выделены —
+   только выделенным) — маршрут по листу, как при броске */
+static void pk_stamp_ops(void) {
+  XpTable *it = &g_pk[PK_ITEMS];
+  TmPaths l = {0};
+  int sel = g_pkSheet == PK_ITEMS && g_pkList ? ListView_GetSelectedCount(g_pkList) : 0, had = 0, nofile = 0;
+  for (int r = 0; r < it->n; r++) {
+    if (sel && !(ListView_GetItemState(g_pkList, r, LVIS_SELECTED) & LVIS_SELECTED)) continue;
+    const wchar_t *des = xp_cell(it, r, 0), *file = xp_cell(it, r, 5);
+    if (!des[0] || pks_is_asm(r) || pk_kind_noname(xp_cell(it, r, 2)) || !_wcsicmp(xp_cell(it, r, 2), L"Документация"))
+      continue;
+    if (!file[0] || GetFileAttributesW(file) == INVALID_FILE_ATTRIBUTES) {
+      nofile++;
+      continue;
+    }
+    if (pks_has_ops(des)) {
+      had++;
+      continue;
+    }
+    tm_paths_add(&l, file);
+  }
+  if (!l.n) {
+    pk_status(L"Операции по чертежам: некому — %ls%ls", had ? L"у деталей с чертежом операции уже есть" : L"",
+              nofile ? (had ? L"; у остальных нет файла чертежа (столбец «Чертёж (файл)»)" : L"у деталей нет файла чертежа (столбец «Чертёж (файл)»)")
+                     : had ? L"" : L"деталей нет");
+    free(l.p);
+    return;
+  }
+  pks_enqueue(&l, -1, TRUE);
 }
 
 #ifdef SET_TEST

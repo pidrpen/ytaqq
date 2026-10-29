@@ -103,6 +103,9 @@ static void pk_stamp_progress(void);            /* pk_stamp.c: WM_PK_STAMPGO */
 static void pk_stamp_typed(int row);            /* pk_stamp.c: обозначение вписали — состав, который его ждал */
 static void pk_stamp_forget(void);              /* pk_stamp.c: «Очистить» */
 static void pk_stamp_pick(void);                /* pk_stamp.c: выбрать файлы чертежей — как бросить их */
+static void pk_stamp_ops(void);                 /* pk_stamp.c: операции по чертежам деталей без операций */
+static BOOL pk_stamp_ops_on(void);              /* pk_stamp.c: чертёж детали — сразу и операции */
+static void pks_ops_toggle(void);               /* pk_stamp.c: та галочка */
 
 /* Строки, пришедшие из «Союза» («Из Союза»): изделие и связь там уже есть. Пока строка как
    была — в «Союз» не идёт (у изделия функция выровняла бы наименование, пустое стёрла бы);
@@ -368,10 +371,11 @@ static void pk_buy_fill(BOOL dicts) {
 }
 
 /* станок к операции: какой в «Союзе» ставят на операцию с этим кодом на этом участке (типовые
-   операции, потом ТП завода — SzmFit); участок пуст — самый частый у этой операции вообще.
-   Участка нет в справочнике или пары нет в базе — 0 */
-static int pk_equip_for(const wchar_t *op, const wchar_t *area, wchar_t *out, int cap) {
+   операции, потом ТП завода — SzmFit); участок пуст — самый частый у этой операции вообще, и его
+   участок — в *areaId. Участка нет в справочнике или пары нет в базе — 0 */
+static int pk_equip_for(const wchar_t *op, const wchar_t *area, wchar_t *out, int cap, long *areaId) {
   out[0] = 0;
+  *areaId = 0;
   if (!g_szmDicts.nf || !op[0]) return 0;
   while (*op == L' ') op++;
   long code = -1;
@@ -407,18 +411,23 @@ static int pk_equip_for(const wchar_t *op, const wchar_t *area, wchar_t *out, in
         break;
       }
   }
+  if (best) *areaId = best->area;
   return best != NULL;
 }
 
-/* пустое оборудование операций — подобранным; сколько подставлено */
+/* пустое оборудование операций — подобранным; нет и участка (операции по чертежу, маршрут из чата) —
+   участок того же станка: где эта операция чаще всего стоит в ТП завода. Сколько подставлено */
 static int pk_equip_fill(void) {
   XpTable *t = &g_pk[PK_OPS];
   int n = 0;
   for (int r = 0; r < t->n && g_szmDicts.nf; r++) {
     if (xp_cell(t, r, 4)[0] || pk_row_from_soyuz(PK_OPS, r)) continue;
     wchar_t eq[200];
-    if (!pk_equip_for(xp_cell(t, r, 2), xp_cell(t, r, 3), eq, 200)) continue;
+    long aid;
+    if (!pk_equip_for(xp_cell(t, r, 2), xp_cell(t, r, 3), eq, 200, &aid)) continue;
     pk_put(t, r, 4, eq);
+    for (int i = 0; !xp_cell(t, r, 3)[0] && g_szmDicts.areaId && i < g_szmDicts.na; i++)
+      if (g_szmDicts.areaId[i] == aid) pk_put(t, r, 3, g_szmDicts.area[i]);
     if (g_pkSheet == PK_OPS && g_pkList) pk_set_item(r);
     n++;
   }
@@ -933,12 +942,18 @@ static void pk_draw_menu(void) {
   if (!m) return;
   AppendMenuW(m, MF_STRING, 1, L"Выбрать файлы чертежей… — штамп прочитает ИИ (на выделенную строку: сборка — в состав)");
   AppendMenuW(m, MF_STRING, 2, L"Найти в архиве по обозначениям — к изделиям без файла");
+  AppendMenuW(m, MF_SEPARATOR, 0, NULL);
+  AppendMenuW(m, MF_STRING | (pk_stamp_ops_on() ? MF_CHECKED : 0), 3,
+              L"Чертёж детали — сразу и операции (мини-ИИ читает лист, маршрут и нормы — правила технолога)");
+  AppendMenuW(m, MF_STRING, 4, L"Операции по чертежам — деталям с файлом и без операций (выделены — только им)");
   RECT r;
   GetWindowRect(GetDlgItem(g_pkWnd, ID_PK_DRAW), &r);
   int cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_LEFTALIGN | TPM_BOTTOMALIGN, r.left, r.top, 0, g_pkWnd, NULL);
   DestroyMenu(m);
   if (cmd == 1) pk_stamp_pick();
   if (cmd == 2) pk_find_drawings();
+  if (cmd == 3) pks_ops_toggle();
+  if (cmd == 4) pk_stamp_ops();
 }
 
 static void pk_from_export(void) {
@@ -1123,7 +1138,11 @@ static void pk_help(void) {
       L"  лягут в её состав по 1 шт (количество — на листе «Состав»). Её СБ даёт ей обозначение и наименование,\r\n"
       L"  спецификация — ещё и весь состав. На листе «Состав» — бросок на строку кладёт в сборку этой строки.\r\n"
       L"  Сборочный чертёж («…000 СБ», ВО, ГЧ, МЧ, УЧ) сам ложится документом в состав своей сборки: строка\r\n"
-      L"  «АБВГ.123456.000СБ Сборочный чертеж», вид «Документация», файл — к ней (в «Союзе» — подлинник СБ).\r\n\r\n"
+      L"  «АБВГ.123456.000СБ Сборочный чертеж», вид «Документация», файл — к ней (в «Союзе» — подлинник СБ).\r\n"
+      L"  Чертёж детали — сразу и операции («Чертежи…», галочка; включена): мини-ИИ читает весь лист (ТТ, Ra,\r\n"
+      L"  допуски, резьбы), маршрут и нормы — правила технолога, как «Маршрут обработки» в чате; операции с кодами\r\n"
+      L"  1С — на лист «Операции» к этой детали, участок и станок — как чаще всего в ТП завода. Свои операции\r\n"
+      L"  у детали уже есть — не трогаются. «Чертежи…» → «Операции по чертежам» — то же для лежащих строк.\r\n\r\n"
       L"ТП БЫСТРО — лист «Операции», строка над таблицей: деталь (выбранная позиция — сама), операция — начните\r\n"
       L"  печатать («ток», «4110»), список сузится; участок остаётся для следующей; станок пустой — подберётся сам\r\n"
       L"  (какой в «Союзе» стоит на этой операции на этом участке), можно вписать свой. Tab — к следующему полю.\r\n"
