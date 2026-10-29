@@ -1059,6 +1059,38 @@ static void tn_opc(TnRoute *r, const wchar_t *num, const wchar_t *sub, const wch
   tn_cpy(o->why, TN_TXT, why);
 }
 
+/* после термической обработки — слесарная: зачистить окалину и заусенцы (правило технолога). Уже
+   стоит слесарная сразу за ТО — к ней переход, иначе своя операция; уточнение — для нормы зачистки
+   (norms.c): «зачистка ТО» — своя, «+зачистка ТО» — добавлена к слесарной */
+#define TN_CLEAN_HEAT L"Зачистить после термической обработки"
+static void tn_after_heat(TnRoute *r) {
+  for (int i = 0; i < r->n; i++) {
+    if (wcscmp(r->op[i].code, L"5000")) continue;
+    TnOp *next = i + 1 < r->n ? &r->op[i + 1] : NULL;
+    if (next && !wcscmp(next->code, L"0108")) {
+      if (!wcsstr(next->what, TN_CLEAN_HEAT)) {
+        wchar_t w[300];
+        tn_cpy(w, 300, TN_CLEAN_HEAT);
+        tn_cat(w, 300, L"; ");
+        tn_cat(w, 300, next->what);
+        tn_cpy(next->what, 300, w);
+        tn_cpy(next->sub, 24, L"+зачистка ТО");
+      }
+      continue;
+    }
+    if (r->n >= 24) return;
+    memmove(&r->op[i + 2], &r->op[i + 1], sizeof(TnOp) * (size_t)(r->n - i - 1));
+    r->n++;
+    TnOp *o = &r->op[i + 1];
+    tn_cpy(o->op, 128, tn_dir_name(L"0108"));
+    tn_cpy(o->code, 8, L"0108");
+    tn_cpy(o->sub, 24, L"зачистка ТО");
+    tn_cpy(o->what, 300, TN_CLEAN_HEAT);
+    tn_cpy(o->why, TN_TXT, L"после термической обработки — окалина и заусенцы");
+    i++;
+  }
+}
+
 /* покрытие цинком: «цинк» или обозначение по ГОСТ 9.306 «Ц9.хр», «Ц12» */
 static int tn_zinc(const wchar_t *w) {
   wchar_t *f = tn_fold(w, 0);
@@ -1528,6 +1560,7 @@ static void tn_route(const wchar_t *name, const wchar_t *mat, const wchar_t *tex
   if (hrc[0]) tn_cat(w, 300, hrc);
   if (s->coatKind) tn_cat(w, 300, L", покрытие");
   tn_opc(r, L"0200", NULL, w, L"");
+  tn_after_heat(r);
 }
 
 /* текст для чата и окна чертежа */

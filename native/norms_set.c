@@ -9,13 +9,15 @@
 
 #define ID_NL_FACTORY 4895
 #define ID_NL_OP 4940 /* + номер правила операции (g_nmOps) — галочка «нормировать» */
-#define ID_NL_HEAT 4930 /* + 0 — порог массы, 1 — Тшт до порога, 2 — тяжелее (норма технолога на ТО) */
+#define ID_NL_HEAT 4930 /* + 0 — порог массы, 1 — Тшт до порога, 2 — тяжелее, 3 — зачистка после (норма технолога на ТО) */
 #define ID_NL_EDIT 4900 /* + параметр·3 + столбец: 0 — от, 1 — до, 2 — по умолчанию */
 
 static HWND g_nlEdit[NM_LIMS][3];
-static HWND g_nlFactory, g_nlOp[NM_OPRULES], g_nlHeat[3];
-static const wchar_t *const kNlHeatKey[3] = {L"limit", L"light", L"heavy"};
-static double *nl_heat(int c) { return c == 0 ? &g_nmHeat.limit : c == 1 ? &g_nmHeat.light : &g_nmHeat.heavy; }
+static HWND g_nlFactory, g_nlOp[NM_OPRULES], g_nlHeat[4];
+static const wchar_t *const kNlHeatKey[4] = {L"limit", L"light", L"heavy", L"clean"};
+static double *nl_heat(int c) {
+  return c == 0 ? &g_nmHeat.limit : c == 1 ? &g_nmHeat.light : c == 2 ? &g_nmHeat.heavy : &g_nmHeat.clean;
+}
 static BOOL g_nlFill; /* поля заполняет код: EN_CHANGE — не правка */
 static wchar_t g_nlTitle[NM_LIMS][64], g_nlDesc[NM_LIMS][96]; /* подписи строк: раскладка хранит указатели */
 static const wchar_t *const kNlCol[3] = {L"min", L"max", L"def"};
@@ -50,7 +52,7 @@ static void nl_load(void) {
       else if (nm_num(v, &x, &e)) *nl_cell(k, c) = x;
     }
   g_nmHeat = (NmHeat)NM_HEAT0;
-  for (int c = 0; c < 3; c++) { /* [heat] limit=1 light=2 heavy=3 — норма технолога на термическую */
+  for (int c = 0; c < 4; c++) { /* [heat] limit=1 light=2 heavy=3 clean=0.5 — норма технолога на термическую */
     double x;
     const wchar_t *e;
     GetPrivateProfileStringW(L"heat", kNlHeatKey[c], L"", v, 64, p);
@@ -73,7 +75,7 @@ static void nl_save(void) {
     CloseHandle(f);
   }
   for (int k = 0; k < NM_OPRULES; k++) WritePrivateProfileStringW(L"ops", g_nmOps[k].op, g_nmOps[k].off ? L"0" : L"1", p);
-  for (int c = 0; c < 3; c++) {
+  for (int c = 0; c < 4; c++) {
     _snwprintf(v, 64, L"%g", *nl_heat(c));
     v[63] = 0;
     WritePrivateProfileStringW(L"heat", kNlHeatKey[c], v, p);
@@ -91,7 +93,7 @@ static void nl_save(void) {
 
 static void nl_refresh(void) {
   g_nlFill = TRUE;
-  for (int c = 0; c < 3; c++) {
+  for (int c = 0; c < 4; c++) {
     wchar_t v[48];
     tn_numstr(*nl_heat(c), v, 48);
     if (g_nlHeat[c]) SetWindowTextW(g_nlHeat[c], v);
@@ -125,7 +127,7 @@ static void nl_create(HWND p) {
     }
   }
   g_nlFactory = mk_btn(p, L"Заводские пределы", ID_NL_FACTORY);
-  for (int c = 0; c < 3; c++) {
+  for (int c = 0; c < 4; c++) {
     g_nlHeat[c] = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL | ES_CENTER, 0, -4000,
                                   70, 26, p, (HMENU)(INT_PTR)(ID_NL_HEAT + c), NULL, NULL);
     SendMessageW(g_nlHeat[c], WM_SETFONT, (WPARAM)g_fontBody, TRUE);
@@ -170,6 +172,8 @@ static void nl_layout(int btnH) {
   sd_row(L"Порог массы детали, кг", L"масса со штампа чертежа; до порога включительно — «лёгкая»", &g_nlHeat[0], &hw, 1, btnH);
   sd_row(L"Тшт до порога, мин", L"детали до порога массы", &g_nlHeat[1], &hw, 1, btnH);
   sd_row(L"Тшт тяжелее порога, мин", L"и когда масса не прочитана — тогда в ответе «проверить»", &g_nlHeat[2], &hw, 1, btnH);
+  sd_row(L"Слесарная после ТО: зачистить, мин", L"маршрут ставит её сразу за термической обработкой", &g_nlHeat[3], &hw,
+         1, btnH);
   sd_card_end();
 }
 
@@ -195,7 +199,7 @@ static BOOL nl_command(HWND hwnd, int id, int code) {
     nl_refresh();
     return TRUE;
   }
-  if (id >= ID_NL_HEAT && id < ID_NL_HEAT + 3) {
+  if (id >= ID_NL_HEAT && id < ID_NL_HEAT + 4) {
     if (code == EN_CHANGE && !g_nlFill) {
       wchar_t v[48];
       double x;
