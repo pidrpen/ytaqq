@@ -1529,10 +1529,26 @@ static double nm_to_cut(NmJob *j) {
   if (!okP || !okT || !mat) return NM_NONE;
   double P = nm_v(&j->c, L"периметр"), th = nm_v(&j->c, L"толщина");
   CutPack *pk = (CutPack *)malloc(sizeof(CutPack));
-  int m = -1;
+  int m = -1, any = -1;
+  /* способ — по операции: «Лазерная резка» — лазер, «Плазменная» — плазма, «Газовая» — газ;
+     у «Заготовительной (раскрой)» — первый, у которого в нормах есть скорость */
+  const wchar_t *want = nm_pre(j->o->op, L"Лазерн") ? L"Лазер" : nm_pre(j->o->op, L"Плазмен") ? L"Плазма"
+                        : nm_pre(j->o->op, L"Газов") ? L"Газовая" : NULL;
   if (pk && cut_calc(mat, th, P, pk))
     for (int i = 0; i < pk->n && m < 0; i++)
-      if (!cut_na(pk->m[i].num[CN_SPEED]) && pk->m[i].num[CN_SPEED] > 0) m = i;
+      if (!cut_na(pk->m[i].num[CN_SPEED]) && pk->m[i].num[CN_SPEED] > 0) {
+        if (any < 0) any = i;
+        if (!want || (pk->m[i].kind && nm_pre(pk->m[i].kind, want))) m = i;
+      }
+  if (m < 0 && any >= 0) {
+    m = any;
+    tn_cpy(s, 300, L"в нормах резки завода нет «");
+    tn_cat(s, 300, want);
+    tn_cat(s, 300, L"» для этой марки и толщины — взят «");
+    tn_cat(s, 300, pk->m[m].kind);
+    tn_cat(s, 300, L"»; способ резки проверить");
+    nm_line(j, s);
+  }
   if (m < 0) {
     free(pk);
     tn_cpy(s, 300, L"нет скорости резки: ");
@@ -1785,7 +1801,9 @@ static int nm_kind(const wchar_t *op) {
   if (nm_pre(op, L"Токарная")) return NMK_TURN;
   if (nm_pre(op, L"Сверлильная")) return NMK_DRILL;
   if (nm_pre(op, L"Фрезерная")) return NMK_MILL;
-  if (nm_pre(op, L"Заготовительная (раскрой)")) return NMK_CUT;
+  if (nm_pre(op, L"Заготовительная (раскрой)") || nm_pre(op, L"Лазерная резка") || nm_pre(op, L"Плазменная резка") ||
+      nm_pre(op, L"Газовая резка"))
+    return NMK_CUT;
   return NMK_NONE;
 }
 
