@@ -2214,8 +2214,9 @@ enum { NMS_OMN, NMS_CUT, NMS_EST, NMS_FACT, NMS_TECH };
    массы нет — как у тяжёлой, с пометкой. Цифры — Настройки → «Нормирование» (norms.ini [heat]) */
 typedef struct {
   double limit, light, heavy; /* кг; мин до порога включительно; мин тяжелее */
+  double clean;               /* мин — слесарная после ТО: зачистить (techno.c ставит её за термической) */
 } NmHeat;
-#define NM_HEAT0 {1, 2, 3} /* как сказал технолог: до 1 кг — 2 мин, тяжелее — 3 */
+#define NM_HEAT0 {1, 2, 3, 0.5} /* как сказал технолог: до 1 кг — 2 мин, тяжелее — 3, зачистить после — 0,5 */
 static NmHeat g_nmHeat = NM_HEAT0;
 typedef struct {
   const wchar_t *op; /* как в маршруте; «Токарная» — и черновая, и чистовая */
@@ -2273,7 +2274,7 @@ static NmOpRule *nm_op_rule(const wchar_t *op) {
 /* название с уточнением маршрута: «Токарная (резьба)» — для правил и строк оценки */
 static void nm_op_key(const wchar_t *op, const wchar_t *sub, wchar_t *out, int cap) {
   tn_cpy(out, cap, op);
-  if (sub && sub[0]) tn_cat(out, cap, L" ("), tn_cat(out, cap, sub), tn_cat(out, cap, L")");
+  if (sub && !wcscmp(sub, L"резьба")) tn_cat(out, cap, L" (резьба)"); /* своё правило и строка оценки */
 }
 
 /* оценка операции без таблиц нормативов: строка таблицы «оценка» по названию операции */
@@ -2286,6 +2287,14 @@ static void nm_est(NmJob *j) {
   const NmOpRule *rule = nm_op_rule(key);
   if (o->kind == NMK_FACT) {
     nm_line(j, rule ? rule->src : L"по факту");
+    return;
+  }
+  if (o->kind == NMK_TECH && !wcscmp(o->sub, L"зачистка ТО")) { /* слесарная после ТО */
+    o->tsht = g_nmHeat.clean;
+    tn_cpy(s, 400, L"Тшт ");
+    tn_catnum(s, 400, o->tsht);
+    tn_cat(s, 400, L" мин — норма технолога: зачистка после термической обработки (Настройки → Нормирование)");
+    nm_line(j, s);
     return;
   }
   if (o->kind == NMK_TECH) { /* норма технолога: по массе детали со штампа */
@@ -2334,6 +2343,15 @@ static void nm_est(NmJob *j) {
   tn_cat(s, 400, L"; ");
   tn_cat(s, 400, h.why);
   nm_line(j, s);
+  if (!wcscmp(o->sub, L"+зачистка ТО")) { /* к слесарной добавлена зачистка после ТО — её норма сверху */
+    o->tsht += g_nmHeat.clean;
+    tn_cpy(s, 400, L"+ ");
+    tn_catnum(s, 400, g_nmHeat.clean);
+    tn_cat(s, 400, L" мин — зачистка после термической обработки, норма технолога; Тшт ≈ ");
+    tn_catnum(s, 400, o->tsht);
+    tn_cat(s, 400, L" мин");
+    nm_line(j, s);
+  }
   double q = nm_v(&j->c, L"партия");
   if (!nm_na(o->tpz) && !nm_na(q) && q > 0) o->tshk = o->tsht + o->tpz / q;
 }
@@ -2353,6 +2371,7 @@ static void nm_route(const NmBase *b, const TnRoute *r, const wchar_t *mass, con
       continue;
     }
     if (!kind) kind = !rule ? NMK_EST : rule->how == NMS_FACT ? NMK_FACT : rule->how == NMS_TECH ? NMK_TECH : NMK_EST;
+    if (!wcscmp(r->op[i].sub, L"зачистка ТО")) kind = NMK_TECH; /* слесарная после ТО — норма технолога */
     if (!b->n && kind != NMK_CUT) continue; /* без таблиц — только То резки по нормам завода */
     NmOp *o = &res->op[res->n++];
     memset(o, 0, sizeof(*o));
@@ -2395,8 +2414,9 @@ static int nm_head_est(const NmOp *o, wchar_t *out, int cap) {
   if (o->kind == NMK_TECH) {
     tn_cat(out, cap, L"Тшт ");
     nm_catmin(out, cap, o->tsht);
-    tn_cat(out, cap, nm_na(nm_v(&o->c, L"масса")) ? L" (норма технолога; масса не прочитана — проверить)"
-                                                   : L" (норма технолога)");
+    tn_cat(out, cap, nm_na(nm_v(&o->c, L"масса")) && wcscmp(o->sub, L"зачистка ТО")
+                         ? L" (норма технолога; масса не прочитана — проверить)"
+                         : L" (норма технолога)");
     return 1;
   }
   if (o->kind != NMK_EST) return 0;
