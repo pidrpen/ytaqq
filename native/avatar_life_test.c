@@ -271,13 +271,14 @@ static void al_skins(void) {
   _snwprintf(ini, MAX_PATH, L"%ls\\ai_avatar.ini", g_dataDir);
   ac_avatar_menu(g_acAvatar);
   al_pump(150);
-  int start = g_acAvatarSkin;
+  /* по кругу — робот и кошко-девочка; простой «Кошки» в выборе нет */
   for (int k = 0; k < AC_SKIN_N; k++) {
+    int want = ac_skin_step(g_acAvatarSkin, 1);
     ac_menu_activate(ACM_SKIN);
     al_pump(120);
     GetPrivateProfileStringW(L"Avatar", L"Skin", L"", value, 32, ini);
     _snwprintf(line, 400, L"облик: «%ls», в ai_avatar.ini Skin=%ls", kAcSkinName[g_acAvatarSkin], value);
-    al_check(g_acAvatarSkin == (start + k + 1) % AC_SKIN_N && !wcscmp(value, kAcSkinKey[g_acAvatarSkin]), line);
+    al_check(g_acAvatarSkin == want && g_acAvatarSkin != AC_SKIN_CAT && !wcscmp(value, kAcSkinKey[g_acAvatarSkin]), line);
     if (g_acAvatarSkin == AC_SKIN_GIRL && g_acMenuPix)
       al_png(L"menu-catgirl.png", g_acMenuPix, g_acMenuBmpW, g_acMenuBmpH, RGB(242, 242, 242));
   }

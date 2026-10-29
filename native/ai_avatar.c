@@ -1515,11 +1515,19 @@ static void ac_menu_size_at(int x) {
   ac_menu_render();
 }
 
+/* следующий вид в меню: простая «Кошка» убрана из выбора (29.10, по просьбе пользователя) —
+   её место заняла «Кошко-девочка»; код и кадры остались для стенда снимков */
+static int ac_skin_step(int skin, int d) {
+  do skin = (skin + d + AC_SKIN_N) % AC_SKIN_N;
+  while (skin == AC_SKIN_CAT);
+  return skin;
+}
+
 static void ac_menu_activate(int i) {
   switch (i) {
   case ACM_CHAT: ac_menu_close(); aichat_show(); break;
   case ACM_SKIN:
-    ac_avatar_set_skin((g_acAvatarSkin + 1) % AC_SKIN_N);
+    ac_avatar_set_skin(ac_skin_step(g_acAvatarSkin, 1));
     ac_menu_render();
     break;
   case ACM_BUBBLES:
@@ -1613,7 +1621,7 @@ static LRESULT CALLBACK AcMenuProc(HWND h, UINT msg, WPARAM wParam, LPARAM lPara
       return 0;
     }
     if ((k == VK_LEFT || k == VK_RIGHT) && g_acMenuHot == ACM_SKIN) {
-      ac_avatar_set_skin((g_acAvatarSkin + (k == VK_RIGHT ? 1 : AC_SKIN_N - 1)) % AC_SKIN_N);
+      ac_avatar_set_skin(ac_skin_step(g_acAvatarSkin, k == VK_RIGHT ? 1 : -1));
       ac_menu_render();
       return 0;
     }
@@ -1962,6 +1970,7 @@ static void ac_avatar_show(void) {
     g_acAvatarSkin = AC_SKIN_ROBOT;
     for (int i = 0; i < AC_SKIN_N; i++)
       if (!_wcsicmp(value, kAcSkinKey[i])) g_acAvatarSkin = i;
+    if (g_acAvatarSkin == AC_SKIN_CAT) g_acAvatarSkin = AC_SKIN_GIRL; /* «Кошки» в выборе больше нет */
   }
   /* сохранённое место — если оно на каком-нибудь мониторе */
   RECT saved = {g_acAvatarX, g_acAvatarY, g_acAvatarX + g_acAvatarSize, g_acAvatarY + g_acAvatarSize};
