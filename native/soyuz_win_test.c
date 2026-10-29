@@ -392,6 +392,38 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
         DeleteFileW(pp2);
         g_szpLoaded = FALSE;
       }
+      /* ссылка PLM на папку (soyuz_make.c): разбор, поиск по номеру в списке, подстановка в описание */
+      {
+        wchar_t kind = 0;
+        long id = 0;
+        st_check(szm_link_parse(L"pmsz-plm:um-splmsrv[a4484722]:4450/C.18122", &kind, &id) && kind == L'C' && id == 18122 &&
+                     szm_link_parse(L"C.468", &kind, &id) && kind == L'C' && id == 468 &&
+                     szm_link_parse(L"#468", &kind, &id) && kind == L'C' && id == 468 &&
+                     szm_link_parse(L"pmsz-plm:PLM:4450/IO.5794", &kind, &id) && kind == L'I' && id == 5794 &&
+                     !szm_link_parse(L"31", &kind, &id) && !szm_link_parse(L"Тестовая сборка ЭСИ", &kind, &id) &&
+                     !szm_link_parse(L"Корневая\\Подпапка", &kind, &id),
+                 L"ссылка PLM: pmsz-plm…/C.18122, C.468, #468 — папка; IO.5794 — объект; «31» и пути — не ссылки");
+        SzmFolders *fl = (SzmFolders *)calloc(1, sizeof(SzmFolders));
+        fl->path = (wchar_t (*)[SZM_PATH])calloc(2, sizeof(*fl->path));
+        fl->pathId = (long *)calloc(2, sizeof(long));
+        fl->tp = (wchar_t (*)[SZM_PATH])calloc(1, sizeof(*fl->tp));
+        fl->tpId = (long *)calloc(1, sizeof(long));
+        lstrcpynW(fl->path[0], L"Тестовая сборка ЭСИ", SZM_PATH);
+        fl->pathId[0] = 468;
+        lstrcpynW(fl->path[1], L"Конструкторская подготовка производства\\Заказ 1", SZM_PATH);
+        fl->pathId[1] = 999;
+        fl->n = 2;
+        g_szmFold = fl;
+        wchar_t r1[SZM_PATH], r2[SZM_PATH], r3[SZM_PATH];
+        szm_folder_resolve(L"pmsz-plm:PLM:4450/C.468", 0, r1, SZM_PATH);
+        szm_folder_resolve(L"#999", 0, r2, SZM_PATH);
+        szm_folder_resolve(L"C.12345", 0, r3, SZM_PATH);
+        st_check(!wcscmp(r1, L"Тестовая сборка ЭСИ") && !wcscmp(r2, L"Конструкторская подготовка производства\\Заказ 1") &&
+                     !wcscmp(r3, L"C.12345"),
+                 L"ссылка → путь из списка по номеру; неизвестный номер уходит функции как C.12345");
+        g_szmFold = NULL;
+        free(fl->path), free(fl->pathId), free(fl->tp), free(fl->tpId), free(fl);
+      }
       package_show(FALSE);
       szm_dicts_start(g_pkWnd);
       for (int t = 0; t < 100 && !g_szmDicts.na && !g_szmDicts.err[0]; t++) st_pump(100);
