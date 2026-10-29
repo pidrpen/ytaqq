@@ -601,6 +601,29 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
       for (int i = 0; i < n; i++) withDir += rows[i].n2 != 0, withVer += rows[i].n3 != 0;
       st_note(L"     слежение: операций ТП %d, со справочной %d, с версией %d %ls", n, withDir, withVer, err);
       st_check(n > 0 && withDir == n && withVer == n, L"запрос слежения: справочная и версия у каждой операции ТП");
+      /* дерево ТП в базе: каждая операция (TSOperation) — дочерняя версии ТП (TSVersion), не варианта;
+         «Способ комплектования» ТП — на варианте ТП в версии (OnTSVVariant), как ставит пакет 1.0.0.7 */
+      n = card_query(dbc,
+                     L"SELECT COUNT(*), N'', N'', SUM(CASE WHEN tp.NameKey=N'TSVersion' THEN 1 ELSE 0 END), 0 "
+                     L"FROM InfoObjects AS o JOIN Templates AS t ON t.TemplateId=o.TemplateId AND t.NameKey=N'TSOperation' "
+                     L"JOIN InfoObjects AS p ON p.InfoObjectId=o.ParentId JOIN Templates AS tp ON tp.TemplateId=p.TemplateId "
+                     L"WHERE o.Erased=0",
+                     rows, 1, err, 300);
+      st_check(n == 1 && rows[0].n1 > 0 && rows[0].n2 == rows[0].n1,
+               L"операции ТП в базе — дочерние версии ТП (TSVersion), не варианта: ParentId каждой — версия");
+      n = card_query(dbc,
+                     L"SELECT COUNT(*), N'', N'', SUM(CASE WHEN nv.NameKey=N'OnTSVVariant' THEN 1 ELSE 0 END), "
+                     L"SUM(CASE WHEN nv.NameKey=N'OnTSOperationVariant' THEN 1 ELSE 0 END) "
+                     L"FROM InfoObjects AS o JOIN Templates AS t ON t.TemplateId=o.TemplateId AND t.NameKey=N'TechnologicalStructure' "
+                     L"JOIN InfoObjectAttributes AS a ON a.OwnerId=o.InfoObjectId AND a.Outdated=0 "
+                     L"JOIN NameKeys AS nk ON nk.NameKeyId=a.NameKeyId AND nk.Value=N'KindOfStorageItems' "
+                     L"JOIN NamedValues AS nv ON nv.NamedValueId=a.Link WHERE o.Erased=0",
+                     rows, 1, err, 300);
+      if (n == 1)
+        st_note(L"     способ комплектования ТП в базе: всего %ld, на варианте ТП в версии %ld, на операции в варианте %ld "
+                L"(старый пакет) — после установки 1.0.0.7 новые ТП должны идти в первый столбец",
+                rows[0].n1, rows[0].n2, rows[0].n3);
+
       SQLDisconnect(dbc);
       SQLFreeHandle(SQL_HANDLE_DBC, dbc);
       SQLFreeHandle(SQL_HANDLE_ENV, env);
