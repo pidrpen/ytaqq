@@ -1465,6 +1465,127 @@ static BOOL pk_is_parent(const wchar_t *des) {
 }
 
 /* Проверка (и что можно — правит сама): FALSE — есть ошибки */
+/* ---- «Транспортирование» (с 2026.10.29): при смене участка между соседними операциями детали — операция
+   0401 «Транспортирование» с участком следующей операции (куда едет); в конце маршрута детали
+   собственного изготовления, входящей в сборку, — на участок первой операции этой сборки. Соседние
+   операции на одном участке — без транспортирования; уже стоящее не дублируется. Номера операций
+   детали пересчитываются по порядку с тем же шагом (005, 010…). Нормы на транспортирование не
+   считаются; строки обычные — их можно удалить или поменять. Сколько строк добавлено */
+static BOOL pk_is_transport(const wchar_t *op) {
+  while (*op == L' ') op++;
+  return !wcsncmp(op, L"0401", 4) || wcsstr(op, L"ранспортир") != NULL;
+}
+
+static void pk_area_code_of(const wchar_t *area, wchar_t *out, int cap) {
+  while (*area == L' ') area++;
+  int k = 0;
+  for (; area[k] >= L'0' && area[k] <= L'9' && k < cap - 1; k++) out[k] = area[k];
+  out[k] = 0;
+  if (!k) lstrcpynW(out, area, cap); /* участок без номера — сравниваем как текст */
+}
+
+/* участок первой операции изделия des (по номеру); FALSE — нет операций с участком */
+static BOOL pk_first_area(const wchar_t *des, wchar_t *out, int cap) {
+  XpTable *t = &g_pk[PK_OPS];
+  int best = -1;
+  for (int r = 0; r < t->n; r++)
+    if (!_wcsicmp(xp_cell(t, r, 0), des) && xp_cell(t, r, 3)[0] && !pk_is_transport(xp_cell(t, r, 2)) &&
+        (best < 0 || _wtoi(xp_cell(t, r, 1)) < _wtoi(xp_cell(t, best, 1))))
+      best = r;
+  if (best < 0) return FALSE;
+  lstrcpynW(out, xp_cell(t, best, 3), cap);
+  return TRUE;
+}
+
+static int pk_transport_fill(void) {
+  XpTable *t = &g_pk[PK_OPS], *ln = &g_pk[PK_LINKS], *it = &g_pk[PK_ITEMS];
+  int added = 0;
+  wchar_t parts[200][200];
+  int np = 0;
+  for (int r = 0; r < t->n && np < 200; r++) {
+    const wchar_t *des = xp_cell(t, r, 0);
+    if (!des[0] || pk_row_from_soyuz(PK_OPS, r)) continue;
+    int seen = 0;
+    for (int q = 0; q < np && !seen; q++) seen = !_wcsicmp(parts[q], des);
+    if (!seen) lstrcpynW(parts[np++], des, 200);
+  }
+  for (int p = 0; p < np; p++) {
+    const wchar_t *des = parts[p];
+    /* покупное — не наш маршрут */
+    BOOL purchased = FALSE;
+    for (int r = 0; r < it->n; r++)
+      if (!_wcsicmp(xp_cell(it, r, 0), des) && wcsstr(xp_cell(it, r, 6), L"окупн")) purchased = TRUE;
+    if (purchased) continue;
+    /* операции детали по номерам */
+    int order[200], n = 0;
+    for (int r = 0; r < t->n && n < 200; r++)
+      if (!_wcsicmp(xp_cell(t, r, 0), des) && xp_cell(t, r, 2)[0]) order[n++] = r;
+    for (int i = 1; i < n; i++)
+      for (int k = i; k > 0 && _wtoi(xp_cell(t, order[k - 1], 1)) > _wtoi(xp_cell(t, order[k], 1)); k--) {
+        int tmp = order[k];
+        order[k] = order[k - 1];
+        order[k - 1] = tmp;
+      }
+    if (!n) continue;
+    /* куда едет в конце: участок первой операции сборки, в которую входит */
+    wchar_t endArea[200] = L"";
+    for (int r = 0; r < ln->n && !endArea[0]; r++)
+      if (!_wcsicmp(xp_cell(ln, r, 1), des) && xp_cell(ln, r, 0)[0] && _wcsicmp(xp_cell(ln, r, 0), des))
+        pk_first_area(xp_cell(ln, r, 0), endArea, 200);
+    /* новая последовательность: строки + транспортирования между сменами участка и в конце */
+    int seq[400], ns = 0;
+    wchar_t prev[200] = L"";
+    for (int i = 0; i < n; i++) {
+      int r = order[i];
+      const wchar_t *area = xp_cell(t, r, 3);
+      BOOL tr = pk_is_transport(xp_cell(t, r, 2));
+      if (!tr && area[0] && prev[0]) {
+        wchar_t a[40], b[40];
+        pk_area_code_of(area, a, 40);
+        pk_area_code_of(prev, b, 40);
+        BOOL already = ns && pk_is_transport(xp_cell(t, seq[ns - 1], 2));
+        if (wcscmp(a, b) && !already && ns < 398) {
+          wchar_t **w = xp_row(t);
+          if (!w) break;
+          t = &g_pk[PK_OPS]; /* таблица могла переехать */
+          int nr = t->n - 1;
+          xp_set(w, 0, des);
+          xp_set(w, 2, L"0401 Транспортирование");
+          xp_set(w, 3, area);
+          seq[ns++] = nr;
+          added++;
+        }
+      }
+      if (ns < 399) seq[ns++] = r;
+      if (area[0]) lstrcpynW(prev, tr ? area : area, 200);
+    }
+    if (endArea[0] && ns && !pk_is_transport(xp_cell(t, seq[ns - 1], 2))) {
+      wchar_t a[40], b[40];
+      pk_area_code_of(endArea, a, 40);
+      pk_area_code_of(prev, b, 40);
+      if ((!prev[0] || wcscmp(a, b)) && ns < 399) {
+        wchar_t **w = xp_row(t);
+        if (w) {
+          t = &g_pk[PK_OPS];
+          xp_set(w, 0, des);
+          xp_set(w, 2, L"0401 Транспортирование");
+          xp_set(w, 3, endArea);
+          seq[ns++] = t->n - 1;
+          added++;
+        }
+      }
+    }
+    /* номера — по порядку с шагом 5 */
+    for (int i = 0; i < ns; i++) {
+      wchar_t num[8];
+      _snwprintf(num, 8, L"%03d", (i + 1) * 5);
+      num[7] = 0;
+      if (wcscmp(xp_cell(t, seq[i], 1), num)) pk_put(t, seq[i], 1, num);
+    }
+  }
+  return added;
+}
+
 static BOOL pk_check(BOOL quiet) {
   ShareBuf b;
   memset(&b, 0, sizeof(b));
@@ -1580,6 +1701,11 @@ static BOOL pk_check(BOOL quiet) {
   if (fixes) {
     pk_fill(FALSE);
     pk_changed();
+  }
+  int trn = pk_transport_fill();
+  if (trn) {
+    sb_add(&b, L"• Транспортирование добавлено: %d (при смене участка и в конце — на участок сборки)\n", trn);
+    if (g_pkSheet == PK_OPS) pk_fill(FALSE);
   }
   int nmf = pk_norms_fill(TRUE);
   if (nmf) sb_add(&b, L"• Нормы Тпз/Тшт по таблицам ОМН посчитаны у %d операций (Тшт — только где есть машинное время)\n", nmf);

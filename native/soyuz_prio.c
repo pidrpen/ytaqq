@@ -24,6 +24,8 @@ typedef struct {
 
 static SzPrio *g_szp;
 static int g_szpN;
+static wchar_t g_szpMech[80]; /* «МЕХОБРАБОТКА<Tab>12»: участок всех операций резанием без своей строки */
+static SzPrio g_szpMechRow;   /* та же настройка в виде строки таблицы — что отдаёт szp_find */
 static FILETIME g_szpStamp; /* файл перечитывается, когда менялся */
 static BOOL g_szpLoaded;
 static HWND g_szpWnd, g_szpEdit;
@@ -50,6 +52,8 @@ static const wchar_t kSzpTemplate[] =
     L"# Строка: операция (код 4110 или название)\tучасток\tстанок\t[участок 2\tстанок 2 …] — поля через Tab.\r\n"
     L"# Участок — код («31») или как в «Союзе» («31 Механический участок 31»); станок — как в справочнике.\r\n"
     L"# Пары — по убыванию предпочтения: если участок операции уже задан, берётся пара с этим участком.\r\n"
+    L"# МЕХОБРАБОТКА\t12 — все операции резанием (токарная, фрезерная, сверлильная, шлифовальная, отрезная…)\r\n"
+    L"#   на участок 12, если у операции нет своей строки; уберите «#», чтобы включить, и смените номер.\r\n"
     L"# Пример (уберите «#» в начале, чтобы строка заработала):\r\n"
     L"# 4110\t31\t16К20, Токарно-винторезный станок\t32\t1К62\r\n"
     L"# Сверлильная\t31\t2Н135\r\n";
@@ -91,6 +95,7 @@ static void szp_load(void) {
   g_szpStamp = fa.ftLastWriteTime;
   g_szpLoaded = TRUE;
   g_szpN = 0;
+  g_szpMech[0] = 0;
   if (!g_szp) g_szp = (SzPrio *)calloc(SZP_MAX, sizeof(SzPrio));
   wchar_t *t = g_szp ? share_read(p) : NULL;
   if (!t) return;
@@ -100,6 +105,12 @@ static void szp_load(void) {
     if (!*line || *line == L'#') continue;
     wchar_t *f[2 + SZP_PAIRS * 2];
     int n = share_split(line, f, 2 + SZP_PAIRS * 2);
+    if (n >= 2 && !_wcsicmp(f[0], L"МЕХОБРАБОТКА")) { /* настройка, не операция */
+      const wchar_t *a = f[1];
+      while (*a == L' ') a++;
+      lstrcpynW(g_szpMech, a, 80);
+      continue;
+    }
     if (n < 3) continue;
     SzPrio *r = &g_szp[g_szpN];
     memset(r, 0, sizeof(*r));
@@ -119,7 +130,19 @@ static void szp_load(void) {
   free(t);
 }
 
-/* строка таблицы для операции («4110 Токарная», «4110», «Токарная (черновая)»); NULL — нет */
+/* операция резанием: коды 4100…4299 справочника (обработка резанием, отрезка) или название */
+static BOOL szp_is_mech(long code, const wchar_t *key) {
+  if (code >= 4100 && code <= 4299) return TRUE;
+  static const wchar_t *const stems[] = {L"токарн",  L"фрезерн",  L"сверлильн", L"шлифовальн", L"расточн",
+                                        L"долбежн", L"долбёжн",  L"зубо",      L"резьбо",     L"протяжн",
+                                        L"строгальн", L"хонинг", L"притир",    L"доводочн",   L"отрезн"};
+  for (size_t i = 0; key && i < sizeof(stems) / sizeof(stems[0]); i++)
+    if (wcsstr(key, stems[i])) return TRUE;
+  return FALSE;
+}
+
+/* строка таблицы для операции («4110 Токарная», «4110», «Токарная (черновая)»); нет своей, но это
+   операция резанием и задана МЕХОБРАБОТКА — строка с этим участком; NULL — нет */
 static const SzPrio *szp_find(const wchar_t *op) {
   if (!op || !op[0]) return NULL;
   szp_load();
@@ -128,6 +151,14 @@ static const SzPrio *szp_find(const wchar_t *op) {
   szp_key(op, key, 80);
   for (int i = 0; i < g_szpN; i++)
     if ((code >= 0 && g_szp[i].code == code) || (key[0] && !wcscmp(g_szp[i].name, key))) return &g_szp[i];
+  if (g_szpMech[0] && szp_is_mech(code, key)) {
+    memset(&g_szpMechRow, 0, sizeof(g_szpMechRow));
+    g_szpMechRow.code = -1;
+    lstrcpynW(g_szpMechRow.name, L"мехобработка", 80);
+    lstrcpynW(g_szpMechRow.area[0], g_szpMech, 80);
+    g_szpMechRow.n = 1;
+    return &g_szpMechRow;
+  }
   return NULL;
 }
 

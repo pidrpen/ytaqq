@@ -345,7 +345,8 @@ static int szm_write_spec(const wchar_t *path, const wchar_t *folder, const wcha
     l += (size_t)_snwprintf(txt + l, 16000 - l, L"ПАПКА\t%s\r\n", fold);
     l += (size_t)_snwprintf(txt + l, 16000 - l, L"ИЗДЕЛИЕ\t%s\t%s\tДетали\t%s\t\r\n", des, name, mat);
   }
-  int n = 0, skipped = 0;
+  int n = 0, skipped = 0, seq = 0;
+  wchar_t prevArea[16] = L"";
   for (int i = 0; i < g_szR.n; i++) {
     const SoItem *it = &g_szR.it[i];
     if (it->state == SO_SKIP) continue;
@@ -372,9 +373,16 @@ static int szm_write_spec(const wchar_t *path, const wchar_t *folder, const wcha
       if (*c == L',') *c = L'.';
     wchar_t eq[200] = L"";
     szm_tsv(eq, 200, eqSrc);
+    /* смена участка — перед операцией «0401 Транспортирование» на участок, куда едет; номера — по порядку */
+    if (area[0] && prevArea[0] && wcscmp(area, prevArea)) {
+      l = wcslen(txt);
+      if (l + 200 < 16000) _snwprintf(txt + l, 16000 - l, L"ТП\t%s\t%03d\t0401\t%s\t\t\t\r\n", des, ++seq * 5, area);
+      n++;
+    }
+    if (area[0]) lstrcpynW(prevArea, area, 16);
     l = wcslen(txt);
     if (l + 400 < 16000)
-      _snwprintf(txt + l, 16000 - l, L"ТП\t%s\t%s\t%s\t%s\t%s\t%s\t%s\r\n", des, it->num, it->code, area, eq, tpz, tsht);
+      _snwprintf(txt + l, 16000 - l, L"ТП\t%s\t%03d\t%s\t%s\t%s\t%s\t%s\r\n", des, ++seq * 5, it->code, area, eq, tpz, tsht);
     n++;
   }
   txt[15999] = 0;
