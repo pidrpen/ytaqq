@@ -15,7 +15,7 @@ import time
 import urllib.request
 
 HERE = pathlib.Path(__file__).resolve().parent
-TAGS = ('name', 'mat', 'sheet')
+TAGS = ('name', 'mat', 'sheet', 'des', 'spec')  # des — графа «Обозначение», spec — таблица спецификации
 DR_CELL = 260  # drawrec.c
 CLS = ['ROT', 'FLAT', 'BODY', 'UNK', 'BAR', 'BENT', 'REWORK']  # techno.c TN_*
 # операция маршрута → группа для сверки с разметкой (Слесарная и Контрольная не считаются)
@@ -67,6 +67,8 @@ def load_sheets(dump):
         for tag in TAGS:
             im = dump / f'{base}.{tag}.bmp'
             s[tag] = im if im.exists() else None
+        st = dump / f'{base}.spec_tess.json'  # строки спецификации, прочитанные Tesseract
+        s['spec_tess'] = st.read_text('utf-8-sig') if st.exists() else None
         sheets[base] = s
     return sheets
 
@@ -94,7 +96,13 @@ def gen2_elements(elements):
 
 
 def target(label, tag, elements=False, gabarit=False):
-    """что модель должна ответить на вопрос tag по разметке листа"""
+    """что модель должна ответить на вопрос tag по разметке листа; None — этого в разметке нет"""
+    if tag == 'des':
+        return label.get('des')
+    if tag == 'spec':
+        return json.dumps({'rows': label['rows']}, ensure_ascii=False) if 'rows' in label else None
+    if label.get('type') == 'spec':
+        return label.get('name') if tag == 'name' else None
     if tag == 'name':
         return label['name']
     if tag == 'mat':
@@ -245,6 +253,154 @@ def norm(s):
 def similar(a, b):
     import difflib
     return difflib.SequenceMatcher(None, norm(a), norm(b)).ratio()
+
+
+# ---- обозначение и строки спецификации ----------------------------------------------------
+
+def des_key(s):
+    """обозначение для сверки: латиница → кириллица, без пробелов, регистр не важен"""
+    return re.sub(r'\s+', '', (s or '').translate(_LAT)).upper().replace('Ё', 'Е')
+
+
+def _isdig(s, i):
+    return 0 <= i < len(s) and s[i].isdigit()
+
+
+def _digits(s, i, mn, mx):
+    """search_route.c dr_digits: конец цифр с i (их mn…mx) или -1"""
+    j = i
+    while _isdig(s, j) and j - i < mx:
+        j += 1
+    return -1 if j - i < mn or _isdig(s, j) else j
+
+
+def _upper(s, i):
+    return 0 <= i < len(s) and ('А' <= s[i] <= 'Я' or s[i] == 'Ё')
+
+
+def des_core(s, i=0):
+    """search_route.c dr_des_core: конец ядра обозначения с позиции i или -1"""
+    at = lambda q: s[q] if 0 <= q < len(s) else ''
+    j = _digits(s, i, 3, 5)
+    if j > 0 and at(j) == '-':
+        k, dots = _digits(s, j + 1, 1, 5), 0
+        if k < 0:
+            return -1
+        if at(k) == '-':
+            q = k + 1
+            if at(q) in 'сС' and at(q + 1) in 'бБ' and at(q) and at(q + 1):
+                q += 2
+            e = _digits(s, q, 1, 4)
+            if e > 0:
+                return e
+        while at(k) == '.' and _isdig(s, k + 1):
+            q = _digits(s, k + 1, 1, 3)
+            if q < 0:
+                break
+            k, dots = q, dots + 1
+        return k if dots else -1
+    n = 0
+    while _upper(s, i + n) and n < 5:
+        n += 1
+    if n == 4 and at(i + 4) == '.':
+        k = _digits(s, i + 5, 6, 6)
+        if k > 0 and at(k) == '.':
+            return _digits(s, k + 1, 3, 3)
+    if n >= 2 and at(i + n) == '.':
+        k = _digits(s, i + n + 1, 2, 6)
+        while k > 0 and at(k) == '.' and _isdig(s, k + 1):
+            k = _digits(s, k + 1, 1, 4)
+        if k > 0 and at(k) == '.' and _upper(s, k + 1):
+            q = k + 1
+            while _upper(s, q) or _isdig(s, q):
+                q += 1
+            if q - k - 1 <= 4:
+                return q
+    return -1
+
+
+def des_fix_sb(s):
+    """search_route.c dr_des_fix_sb: «321-23-с632» → «321-23-сб32», «….000С6» → «….000СБ» — как CursorPad
+    правит обозначение после распознавания"""
+    s = list(s or '')
+    for i in range(1, len(s) - 1):
+        if s[i] not in 'сС' or s[i + 1] != '6':
+            continue
+        x = s[i + 2] if i + 2 < len(s) else ''
+        if s[i - 1] == '-' and x.isdigit():
+            b = i
+            while b > 0 and (s[b - 1].isdigit() or s[b - 1] in '-.'):
+                b -= 1
+            s[i + 1] = 'б' if s[i] == 'с' else 'Б'
+            if des_core(''.join(s), b) <= i + 2:
+                s[i + 1] = '6'
+            continue
+        if x not in ('', '.', ' '):
+            continue
+        e = i - (s[i - 1] == ' ')
+        b = e
+        while b > 0 and (s[b - 1].isdigit() or s[b - 1] in '-.' or _upper(s, b - 1)):
+            b -= 1
+        if e > 0 and s[e - 1].isdigit() and des_core(''.join(s), b) == e:
+            s[i], s[i + 1] = 'С', 'Б'
+    return ''.join(s)
+
+
+def has_sb(s):
+    return 'СБ' in des_key(s)
+
+
+SPEC_KEYS = ('sect', 'fmt', 'zone', 'pos', 'des', 'name', 'qty', 'note')  # drawrec.c kDrSpecKey
+
+
+def spec_rows(ans):
+    """строки из ответа {"rows": [...]} (модель или выгрузка Tesseract .spec_tess.json); не JSON — []"""
+    try:
+        j = json.loads(ans) if isinstance(ans, str) else ans
+    except ValueError:
+        return []
+    rows = (j or {}).get('rows') if isinstance(j, dict) else None
+    return [{k: str(r.get(k) or '').strip() for k in SPEC_KEYS} for r in rows or [] if isinstance(r, dict)]
+
+
+def _qty(s):
+    return (s or '').replace(' ', '').replace('.', ',')
+
+
+def score_spec(want, got):
+    """строки разметки против прочитанных: пара — по обозначению, без него — по наименованию и позиции.
+    Счёт: верно целиком, обозначений, количеств, разделов, позиций; сходство наименований; выдумано, пропущено"""
+    used, r = set(), dict(n=len(want), ok=0, des_n=0, des_ok=0, qty_ok=0, sect_ok=0, pos_ok=0, sim=0.0, fp=0, fn=0)
+    for w in want:
+        best, bs = None, 0.0
+        for i, g in enumerate(got):
+            if i in used:
+                continue
+            if w['des'] and des_key(g['des']) == des_key(w['des']):
+                best, bs = i, 2.0
+                break
+            s = similar(g['name'], w['name']) + (0.2 if g['pos'] == w['pos'] else 0)
+            if s > bs and s >= 0.75:
+                best, bs = i, s
+        if best is None:
+            r['fn'] += 1
+            if w['des']:
+                r['des_n'] += 1
+            continue
+        used.add(best)
+        g = got[best]
+        d_ok = not w['des'] or des_key(g['des']) == des_key(w['des'])
+        q_ok, s_ok, p_ok = _qty(g['qty']) == _qty(w['qty']), g['sect'] == w['sect'], g['pos'] == w['pos']
+        sim = similar(g['name'], w['name'])
+        r['des_n'] += bool(w['des'])
+        r['des_ok'] += bool(w['des']) and d_ok
+        r['qty_ok'] += q_ok
+        r['sect_ok'] += s_ok
+        r['pos_ok'] += p_ok
+        r['sim'] += sim
+        r['ok'] += d_ok and q_ok and s_ok and p_ok and sim >= 0.9
+    r['fp'] = len(got) - len(used)
+    return r
 
 
 # ---- llama-server, как его запускает CursorPad (ai_local.c) ---------------------------

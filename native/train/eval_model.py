@@ -20,9 +20,31 @@ import time
 import cpvl
 
 
-def score_sheet(lab, got, tess, tn):
+def score_des(r, lab, got):
+    """графа «Обозначение» моделью: как прочитано и после поправки кодом (dr_des_fix_sb), отдельно — «СБ»:
+    по нему сборочный чертёж отличают от спецификации"""
+    if not lab.get('des') or got.get('des') is None:
+        return
+    raw = cpvl.first_line(got['des'])
+    fixed = cpvl.des_fix_sb(raw.translate(cpvl._LAT))
+    want = cpvl.des_key(lab['des'])
+    r['des_ok'], r['des_fix_ok'] = cpvl.des_key(raw) == want, cpvl.des_key(fixed) == want
+    if cpvl.has_sb(lab['des']):
+        r['sb_n'], r['sb_ok'], r['sb_fix_ok'] = 1, cpvl.has_sb(raw), cpvl.has_sb(fixed)
+    elif cpvl.has_sb(fixed):
+        r['sb_fp'] = 1
+
+
+def score_sheet(lab, got, tess, tn, spec_tess=None):
     r = {}
     if lab is None:
+        return r
+    score_des(r, lab, got)
+    if lab.get('type') == 'spec':  # спецификация: только строки (маршрута у неё нет)
+        if got.get('spec') is not None:
+            r['spec'] = cpvl.score_spec(lab['rows'], cpvl.spec_rows(got['spec']))
+        if spec_tess is not None:
+            r['spec_tess'] = cpvl.score_spec(lab['rows'], cpvl.spec_rows(spec_tess))
         return r
     if got.get('name') is not None:
         r['name_ok'] = cpvl.norm(got['name']) == cpvl.norm(lab['name'])
@@ -142,8 +164,10 @@ def main():
 
     res = {}
     for k in keep:
-        res[k] = {'got': answers[k], **score_sheet(labels[k], answers[k], sheets[k]['tess'], a.tn)}
+        res[k] = {'got': answers[k], **score_sheet(labels[k], answers[k], sheets[k]['tess'], a.tn,
+                                                   sheets[k].get('spec_tess'))}
     n = len(res)
+    draw = {k: r for k, r in res.items() if labels[k].get('type') != 'spec'}
 
     def cnt(key):
         v = [r[key] for r in res.values() if key in r]
@@ -153,12 +177,27 @@ def main():
     summary = {
         'листов': n,
         'маршрут целиком': cnt('route_ok'), 'вид детали': cnt('cls_ok'),
-        'операций верных': sum(r['tp'] for r in res.values()), 'лишних': sum(r['fp'] for r in res.values()),
-        'пропущено': sum(r['fn'] for r in res.values()),
+        'операций верных': sum(r['tp'] for r in draw.values()), 'лишних': sum(r['fp'] for r in draw.values()),
+        'пропущено': sum(r['fn'] for r in draw.values()),
         'наименование': cnt('name_ok'), 'материал': cnt('mat_ok'),
         'ТТ сходство': round(sum(tts) / len(tts), 3) if tts else '—', 'ТТ число пунктов': cnt('tt_n_ok'),
         'развертка': cnt('razv_ok'), 'отверстия': cnt('holes_ok'),
     }
+    if any('des_ok' in r for r in res.values()):
+        summary.update({'обозначение верно': cnt('des_ok'), 'обозначение верно после поправки': cnt('des_fix_ok'),
+                        'СБ в обозначении верно': cnt('sb_ok'), 'СБ после поправки': cnt('sb_fix_ok'),
+                        'СБ лишнее': sum(r.get('sb_fp', 0) for r in res.values())})
+    for key, who in (('spec', 'модель'), ('spec_tess', 'Tesseract')):  # строки спецификации
+        sp = [r[key] for r in res.values() if key in r]
+        if not sp:
+            continue
+        t = lambda f: sum(s[f] for s in sp)
+        summary[f'спецификация, {who}'] = {
+            'листов': len(sp), 'строк в разметке': t('n'), 'верно целиком': t('ok'),
+            'обозначений верно': f"{t('des_ok')}/{t('des_n')}", 'количеств верно': t('qty_ok'),
+            'разделов верно': t('sect_ok'), 'позиций верно': t('pos_ok'),
+            'наименования сходство': round(t('sim') / max(1, t('n') - t('fn')), 3),
+            'выдумано строк': t('fp'), 'пропущено строк': t('fn')}
     if any('el_tp' in r for r in res.values()):
         tot = lambda key: sum(r.get(key, 0) for r in res.values())
         summary.update({'элементы целиком': cnt('el_ok'), 'элементов верных': tot('el_tp'), 'выдуманных': tot('el_fp'),
@@ -171,6 +210,11 @@ def main():
                         'габаритов выдумано': tot('gb_fp'), 'габаритов не прочитано': tot('gb_fn')})
     for k, r in res.items():
         lab = labels[k]
+        if lab.get('type') == 'spec':
+            line = lambda s: f"{s['ok']}/{s['n']} целиком, обозн. {s['des_ok']}/{s['des_n']}, +{s['fp']} −{s['fn']}"
+            print(f'СП {k[:34]:34} модель {line(r["spec"]) if "spec" in r else "—":34} '
+                  f'Tesseract {line(r["spec_tess"]) if "spec_tess" in r else "—"}')
+            continue
         miss = set(lab['route'][1].split()) - set(r['ops'])
         extra = set(r['ops']) - set(lab['route'][1].split())
         print(f'{"OK" if r["route_ok"] else "--"} {k[:34]:34} {r["cls"]:6} ждали {lab["route"][0]:6} '

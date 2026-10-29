@@ -5875,6 +5875,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
     if (argv && argc >= 3 && !wcscmp(argv[1], L"--idlefight")) if_test_shots(argv[2]);
     if (argv && argc >= 3 && !wcscmp(argv[1], L"--xptest")) export_test(argv[2]);
     if (argv && argc >= 4 && !wcscmp(argv[1], L"--drawrec")) dr_test(argc, argv);
+    if (argv && argc >= 4 && !wcscmp(argv[1], L"--drspecjson")) dr_spec_json_test(argv[2], argv[3]);
     if (argv && argc >= 4 && !wcscmp(argv[1], L"--rename-by-stamp")) rs_test(argc, argv);
     if (argv && argc >= 4 && !wcscmp(argv[1], L"--fqread")) fq_test(argc, argv);
     if (argv && argc >= 4 && (!wcscmp(argv[1], L"--linktest") || !wcscmp(argv[1], L"--foldertest"))) flk_test(argc, argv);
@@ -5895,6 +5896,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
     if (argv && argc >= 5 && !wcscmp(argv[1], L"--aifiles")) ai_files_test(argc, argv);
     if (argv && argc >= 4 && !wcscmp(argv[1], L"--airoute")) ai_route_test(argv);
     if (argv && argc >= 4 && !wcscmp(argv[1], L"--aidl")) ai_dltest(argv[2], (int)wcstol(argv[3], NULL, 10), argc >= 5);
+    if (argv && argc >= 4 && !wcscmp(argv[1], L"--aistart")) ai_starttest(argv[2], argv[3]);
     if (argv && argc >= 3 && !wcscmp(argv[1], L"--panel")) { /* проверка шапок окон: 1 карточка, 2 текст, 3 выгрузка, 4 маршрут, 5 нарды, 6 шашки, 7 пакет, 8 морской бой, 9 шахматы */
       int n = (int)wcstol(argv[2], NULL, 10);
       if (n >= 5 && g_follow) toggle_follow(); /* игры: окошко не бегает за мышью и не закрывает доску */

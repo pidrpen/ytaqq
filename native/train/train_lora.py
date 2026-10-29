@@ -73,6 +73,8 @@ def samples(a, prompts, labels, sheets, rnd):
             if s[tag] is None or tag not in prompts:
                 continue
             ex = {'image': str(s[tag]), 'tag': tag, 'answer': cpvl.target(lab, tag, el, gab), 'real': True}
+            if ex['answer'] is None:  # графа или таблица, которой в разметке листа нет
+                continue
             if lab.get('eval'):
                 held.append(ex)
             else:

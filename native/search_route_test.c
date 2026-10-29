@@ -59,6 +59,22 @@ static void prep(const wchar_t *in, const wchar_t *want) {
   printf("»\n");
 }
 
+static void sb(const wchar_t *in, const wchar_t *want, int fixes) {
+  wchar_t s[200];
+  wcscpy(s, in);
+  int n = dr_des_fix_sb(s);
+  g_n++;
+  if (n == fixes && !wcscmp(s, want)) return;
+  g_fail++;
+  printf("FAIL сб «");
+  out8(in);
+  printf("»: %d «", n);
+  out8(s);
+  printf("», ждали %d «", fixes);
+  out8(want);
+  printf("»\n");
+}
+
 static void dbw(const wchar_t *in, const wchar_t *want) {
   SrWords w;
   wchar_t got[SR_Q] = L"";
@@ -164,6 +180,22 @@ int main(void) {
   score(L"Корпус.pdf", L"\\\\srv\\А", L"*.pdf", 10);
   score(L"Корпус.pdf", L"\\\\srv\\А", L"корп* *", 60);
   score(L"Корпус.tif", L"\\\\srv\\А", L"*.pdf", -1);
+
+  /* «б» из «СБ», прочитанная как «6» (выдуманные обозначения) */
+  sb(L"321-23-с632", L"321-23-сб32", 1);
+  sb(L"321-23-С632", L"321-23-СБ32", 1);
+  sb(L"АДЕ 321-23-с632", L"АДЕ 321-23-сб32", 1);
+  sb(L"321-23-сб32", L"321-23-сб32", 0);
+  sb(L"АБВГ.123456.000С6", L"АБВГ.123456.000СБ", 1);
+  sb(L"АБВГ.123456.000 С6", L"АБВГ.123456.000 СБ", 1);
+  sb(L"АБВГ.123456.000с6", L"АБВГ.123456.000СБ", 1);
+  sb(L"АДЕ 3424-1074.00.00.02 С6", L"АДЕ 3424-1074.00.00.02 СБ", 1);
+  sb(L"АБВГ.123456.000СБ", L"АБВГ.123456.000СБ", 0);
+  sb(L"М6-с632", L"М6-с632", 0);           /* не обозначение: ядро не сходится */
+  sb(L"Труба-с6", L"Труба-с6", 0);
+  sb(L"3424-с6", L"3424-с6", 0);
+  sb(L"Ст3с6", L"Ст3с6", 0);
+  sb(L"14637-89 С6", L"14637-89 С6", 0);   /* номер ГОСТ — не ядро обозначения */
 
   printf("%d проверок, ошибок: %d\n", g_n, g_fail);
   return g_fail ? 1 : 0;

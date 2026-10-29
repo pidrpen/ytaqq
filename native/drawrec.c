@@ -64,6 +64,7 @@ typedef struct {
   wchar_t note[300];  /* что не так — в столбец «Заметки» */
   DrSpecRow *rows;
   int nrows;
+  int rowsBy;         /* чем прочитаны строки спецификации: 1 — Tesseract, 2 — модель, 0 — нет (карточка ЭСИ) */
   wchar_t *text;      /* весь лист (ТТ, Ra, допуски, резьбы) — для маршрута, techno.c; NULL — не читали */
   /* то же, прочитанное локальной моделью с картинками (drawrec_vl): графы штампа и ТТ */
   wchar_t vlName[DR_CELL], vlMat[DR_CELL];
@@ -1040,6 +1041,12 @@ static void dr_norm_des(const wchar_t *in, wchar_t *out, int cap) {
   ocr_fix_query(t, out, cap);
   for (int i = 0; out[i]; i++)
     if (out[i] >= 0xE000 && out[i] <= 0xE003) out[i] = L"сСбБ"[out[i] - 0xE000];
+  /* «б» в «СБ» распознавание (и Tesseract, и модель) часто отдаёт цифрой: «321-23-с632» */
+  if (wcsstr(out, L"с6") || wcsstr(out, L"С6")) {
+    wchar_t was[DR_CELL];
+    lstrcpynW(was, out, DR_CELL);
+    if (dr_des_fix_sb(out)) ai_log(L"Обозначение: «%s» → «%s» — «б» в «СБ» было прочитано как «6»", was, out);
+  }
   /* код документа «ЗК» после точки: «.3 К», «.3К» → «.ЗК» */
   for (int i = 1; out[i]; i++)
     if (out[i - 1] == L'.' && (out[i] == L'3' || out[i] == L'З')) {
@@ -1318,6 +1325,41 @@ static int dr_section(const wchar_t *s) {
   return -1;
 }
 
+/* графа строки спецификации к виду ГОСТ: обозначение и формат — по шаблону, позиция и количество —
+   числом, в наименовании латиница и резьбы поправлены. conf — уверенность Tesseract (модель — 100);
+   сомнительное — подсветить */
+static void dr_spec_cell(DrSpecRow *o, int c, const wchar_t *in, int conf) {
+  wchar_t t[DR_CELL], d[DR_CELL];
+  lstrcpynW(t, in, DR_CELL);
+  BOOL bad = t[0] && conf < 70;
+  if (t[0] && c == DS_DES) {
+    dr_norm_des(t, d, DR_CELL);
+    lstrcpyW(t, d);
+    bad = !dr_des_ok(t) || conf < 80; /* «АДЕ»→«АМЕ» шаблон не ловит */
+  }
+  if (t[0] && c == DS_FMT) {
+    dr_norm_fmt(t);
+    bad = !dr_fmt_ok(t);
+  }
+  if (c == DS_NAME || c == DS_NOTE) dr_fix_latin(t), dr_fix_thread(t);
+  if (t[0] && (c == DS_POS || c == DS_QTY)) {
+    if (dr_number(t, d, DR_CELL, c == DS_QTY)) lstrcpyW(t, d);
+    else bad = TRUE;
+  }
+  lstrcpynW(o->c[c], t, DR_CELL);
+  o->doubt[c] = (BYTE)bad;
+}
+
+/* «Резерв» в наименовании — место под позицию, не изделие: в состав не идёт */
+static BOOL dr_spec_reserve(const wchar_t *name) {
+  wchar_t low[8];
+  lstrcpynW(low, name, 8);
+  CharLowerBuffW(low, (DWORD)wcslen(low));
+  return !wcsncmp(low, L"резерв", 6);
+}
+
+static void dr_vl_spec(const DrImg *m, const DrStamp *s, int top, DrPage *pg);
+
 static void dr_spec(DrImg *m, int thr, const DrLines *L, const DrStamp *s, DrPage *pg) {
   double k = s->k;
   int x20 = s->sl + (int)(20 * k + 0.5);
@@ -1426,7 +1468,7 @@ static void dr_spec(DrImg *m, int thr, const DrLines *L, const DrStamp *s, DrPag
         if (c != DS_NAME) onlyName = FALSE;
       }
     }
-    if (!any) continue;
+    if (!any || (!cell[r][DS_DES][0] && dr_spec_reserve(cell[r][DS_NAME]))) continue; /* «Резерв» — не продолжение наименования */
     if (onlyName && dr_section(cell[r][DS_NAME]) >= 0) {
       lstrcpynW(sect, cell[r][DS_NAME], DR_CELL);
       continue;
@@ -1440,31 +1482,13 @@ static void dr_spec(DrImg *m, int thr, const DrLines *L, const DrStamp *s, DrPag
     }
     DrSpecRow *o = &pg->rows[pg->nrows++];
     lstrcpynW(o->c[DS_SECT], sect, DR_CELL);
-    for (int c = DS_FMT; c < DS_N; c++) {
-      wchar_t t[DR_CELL], d[DR_CELL];
-      lstrcpynW(t, cell[r][c], DR_CELL);
-      BOOL bad = t[0] && conf[r][c] < 70;
-      if (t[0] && c == DS_DES) {
-        dr_norm_des(t, d, DR_CELL);
-        lstrcpyW(t, d);
-        bad = !dr_des_ok(t) || conf[r][c] < 80; /* «АДЕ»→«АМЕ» шаблон не ловит */
-      }
-      if (t[0] && c == DS_FMT) {
-        dr_norm_fmt(t);
-        bad = !dr_fmt_ok(t);
-      }
-      if (c == DS_NAME || c == DS_NOTE) dr_fix_latin(t), dr_fix_thread(t);
-      if (t[0] && (c == DS_POS || c == DS_QTY)) {
-        if (dr_number(t, d, DR_CELL, c == DS_QTY)) lstrcpyW(t, d);
-        else bad = TRUE;
-      }
-      lstrcpynW(o->c[c], t, DR_CELL);
-      o->doubt[c] = (BYTE)bad;
-    }
+    for (int c = DS_FMT; c < DS_N; c++) dr_spec_cell(o, c, cell[r][c], conf[r][c]);
   }
   for (int r = 0; r < pg->nrows; r++) dr_fix_latin(pg->rows[r].c[DS_NAME]), dr_fix_thread(pg->rows[r].c[DS_NAME]);
+  pg->rowsBy = pg->nrows ? 1 : 0;
   free(cell);
   free(conf);
+  dr_vl_spec(m, s, top, pg);
 }
 
 #ifdef SET_TEST
@@ -1871,21 +1895,36 @@ static void dr_json_elements(const wchar_t *j, wchar_t *out, int cap) {
   }
 }
 
+/* графа «Обозначение» 65…185 × 0…15 мм от верха штампа высотой hmm (форма 1 — 55, форма 2 — 40) — моделью:
+   для переименования по штампу и состава ЭСИ. Tesseract на этой графе путает буквы (АДЕ → АМЕ) и теряет
+   хвост, а имя файла и состав должны быть точными. Выгрузка (native/train) — всегда: по ней считают «СБ» */
+static void dr_vl_des(const DrImg *m, const DrStamp *s, DrPage *pg, int hmm) {
+  DrImg im;
+  if (!dr_img_part(m, s->sl + (int)(64 * s->k), s->by - (int)((hmm + 1) * s->k), s->sl + (int)(186 * s->k),
+                   s->by - (int)((hmm - 16) * s->k), 2, 0, &im))
+    return;
+  wchar_t *a = dr_vl_ask(&im, L"des", L"На картинке — графа «Обозначение» основной надписи чертежа. Перепиши обозначение точно, "
+                                      L"как написано: буквы, цифры, точки и дефисы, одной строкой. Только текст.", NULL, 40);
+  dr_vl_line(a, pg->vlDes, DR_CELL);
+  free(a);
+  dr_img_free(&im);
+}
+
+static BOOL dr_vl_dumping(void) {
+#ifdef SET_TEST
+  return g_drVlDump[0] != 0;
+#else
+  return FALSE;
+#endif
+}
+
 /* sheet — спросить и весь лист (ТТ, отверстия, элементы, габариты); FALSE — только графы штампа */
 static void dr_vl_read(const DrImg *m, const DrStamp *s, DrPage *pg, BOOL sheet) {
   DrImg im;
   wchar_t *a;
   if (s) { /* графы штампа формы 1: наименование 65…135 × 15…40 мм, материал 65…135 × 40…55 мм от верха */
     int x0 = s->sl + (int)(64 * s->k), x1 = s->sl + (int)(136 * s->k);
-    /* обозначение 65…185 × 0…15 мм — только для переименования по штампу: Tesseract на этой
-       графе путает буквы (АДЕ → АМЕ) и теряет хвост, а имя файла должно быть точным */
-    if (pg->vlStamp && dr_img_part(m, x0, s->by - (int)(56 * s->k), s->sl + (int)(186 * s->k), s->by - (int)(39 * s->k), 2, 0, &im)) {
-      a = dr_vl_ask(&im, L"des", L"На картинке — графа «Обозначение» основной надписи чертежа. Перепиши обозначение точно, "
-                         L"как написано: буквы, цифры, точки и дефисы, одной строкой. Только текст.", NULL, 40);
-      dr_vl_line(a, pg->vlDes, DR_CELL);
-      free(a);
-      dr_img_free(&im);
-    }
+    if (pg->vlStamp || dr_vl_dumping()) dr_vl_des(m, s, pg, 55);
     if (pg->vlStamp != 1 && dr_img_part(m, x0, s->by - (int)(41 * s->k), x1, s->by - (int)(14 * s->k), 2, 0, &im)) {
       a = dr_vl_ask(&im, L"name", L"На картинке — графа «Наименование» основной надписи чертежа. Перепиши текст точно, как "
                          L"написано, одной строкой. Только текст.", NULL, 80);
@@ -1939,6 +1978,125 @@ static void dr_vl_read(const DrImg *m, const DrStamp *s, DrPage *pg, BOOL sheet)
   }
 }
 
+/* ---- спецификация моделью -------------------------------------------------------------
+   Таблица целиком (от верха таблицы до штампа, во всю ширину) — строки JSON;
+   раздел — у каждой строки, перенос наименования — одной строкой. Ответ ложится в те же DrSpecRow,
+   что и строки Tesseract: состав сборки (pk_stamp.c) берёт их как есть. Пока только для замера
+   (native/train: выгрузка, CP_SPECVL) — в работу, когда модель на спецификациях окажется точнее
+   Tesseract */
+static const wchar_t kDrVlSpecQ[] =
+    L"На картинке — таблица спецификации (ГОСТ 2.106) с графами «Формат», «Зона», «Поз.», «Обозначение», "
+    L"«Наименование», «Кол.», «Примечание». Перепиши все заполненные строки сверху вниз точно, как написано, "
+    L"ничего не придумывая. Заголовок раздела («Документация», «Сборочные единицы», «Детали», «Стандартные "
+    L"изделия», «Прочие изделия», «Материалы», «Комплекты») — не строка: впиши его в sect у каждой строки под ним; "
+    L"строки выше первого заголовка — sect пустой. Наименование, перенесённое на следующую строку таблицы, — "
+    L"в той же строке через пробел. Пустые строки и «Резерв» пропусти. Пустая графа — пустая строка.";
+static const char kDrVlSpecSchema[] =
+    "{\"type\":\"object\",\"properties\":{\"rows\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{"
+    "\"sect\":{\"type\":\"string\",\"enum\":[\"\",\"Документация\",\"Комплексы\",\"Сборочные единицы\",\"Детали\","
+    "\"Стандартные изделия\",\"Прочие изделия\",\"Материалы\",\"Комплекты\"]},\"fmt\":{\"type\":\"string\"},"
+    "\"zone\":{\"type\":\"string\"},\"pos\":{\"type\":\"string\"},\"des\":{\"type\":\"string\"},"
+    "\"name\":{\"type\":\"string\"},\"qty\":{\"type\":\"string\"},\"note\":{\"type\":\"string\"}},"
+    "\"required\":[\"sect\",\"fmt\",\"zone\",\"pos\",\"des\",\"name\",\"qty\",\"note\"],\"additionalProperties\":false}}},"
+    "\"required\":[\"rows\"],\"additionalProperties\":false}";
+/* таблица плотная: при 1600 лист 200 dpi ужимался вдвое — буквы 3,5 мм в 14 точек. До 3000 по длинной стороне
+   лист идёт как есть, остальное llama.cpp ужимает сама до своих 4096 токенов картинки (models.json) */
+#define DR_SPEC_SIDE 3000
+static const wchar_t *const kDrSpecKey[DS_N] = {L"sect", L"fmt", L"zone", L"pos", L"des", L"name", L"qty", L"note"};
+
+/* конец JSON-объекта с p (p — на «{»), строки в кавычках — мимо */
+static const wchar_t *dr_json_obj_end(const wchar_t *p) {
+  int depth = 0;
+  for (BOOL str = FALSE; *p; p++) {
+    if (str) {
+      if (*p == L'\\' && p[1]) p++;
+      else if (*p == L'"') str = FALSE;
+    } else if (*p == L'"') str = TRUE;
+    else if (*p == L'{') depth++;
+    else if (*p == L'}' && --depth == 0) return p;
+  }
+  return NULL;
+}
+
+/* строки спецификации из ответа модели — вместо прочитанных Tesseract; FALSE — строк нет */
+static BOOL dr_json_spec(const wchar_t *j, DrPage *pg) {
+  const wchar_t *p = j ? wcsstr(j, L"\"rows\"") : NULL;
+  if (!p || !(p = wcschr(p, L'['))) return FALSE;
+  int cap = 0, n = 0;
+  for (const wchar_t *q = p; (q = wcschr(q, L'{')) != NULL; q++) cap++;
+  DrSpecRow *rows = cap ? (DrSpecRow *)calloc((size_t)cap, sizeof(DrSpecRow)) : NULL;
+  for (const wchar_t *q = p; rows && n < cap && (q = wcschr(q, L'{')) != NULL;) {
+    const wchar_t *end = dr_json_obj_end(q);
+    if (!end) break;
+    wchar_t v[DR_CELL];
+    DrSpecRow *o = &rows[n];
+    BOOL any = FALSE;
+    for (int c = 0; c < DS_N; c++) {
+      dr_json_field(q, end, kDrSpecKey[c], v, DR_CELL);
+      int l = (int)wcslen(v), b = 0; /* только пробелы: dr_trim срезал бы и кавычки «"А"» — у модели это не рамка */
+      while (b < l && v[b] == L' ') b++;
+      while (l > b && v[l - 1] == L' ') l--;
+      memmove(v, v + b, (size_t)(l - b) * sizeof(wchar_t));
+      v[l - b] = 0;
+      if (c == DS_SECT) lstrcpynW(o->c[c], v, DR_CELL);
+      else dr_spec_cell(o, c, v, 100), any |= v[0] != 0;
+    }
+    if (any && (o->c[DS_DES][0] || !dr_spec_reserve(o->c[DS_NAME]))) n++;
+    else memset(o, 0, sizeof(*o));
+    q = end + 1;
+  }
+  if (!n) {
+    free(rows);
+    return FALSE;
+  }
+  free(pg->rows);
+  pg->rows = rows;
+  pg->nrows = n;
+  pg->rowsBy = 2;
+  return TRUE;
+}
+
+static void dr_vl_spec(const DrImg *m, const DrStamp *s, int top, DrPage *pg) {
+#ifdef SET_TEST
+  BOOL want = g_drVlDump[0] || getenv("CP_SPECVL");
+#else
+  BOOL want = getenv("CP_SPECVL") != NULL;
+#endif
+  DrImg im;
+  if (!want || !dr_vl_want() || !dr_img_part(m, s->sl, top, s->rx, s->st, 1, DR_SPEC_SIDE, &im)) return;
+#ifdef SET_TEST
+  if (g_drVlDump[0]) { /* строки Tesseract — тем же JSON, что у модели: замер «как сейчас» (eval_model.py) */
+    size_t cap = 64 + (size_t)pg->nrows * DS_N * (DR_CELL * 2 + 16), n = 0;
+    wchar_t *js = (wchar_t *)malloc(cap * sizeof(wchar_t)), p[MAX_PATH];
+    if (js) {
+      n += _snwprintf(js + n, cap - n, L"{\"rows\":[");
+      for (int r = 0; r < pg->nrows; r++) {
+        n += _snwprintf(js + n, cap - n, L"%s{", r ? L"," : L"");
+        for (int c = 0; c < DS_N; c++) {
+          n += _snwprintf(js + n, cap - n, L"%s\"%s\":\"", c ? L"," : L"", kDrSpecKey[c]);
+          for (const wchar_t *v = pg->rows[r].c[c]; *v && n + 3 < cap; v++) {
+            if (*v == L'"' || *v == L'\\') js[n++] = L'\\';
+            js[n++] = *v < 32 ? L' ' : *v;
+          }
+          n += _snwprintf(js + n, cap - n, L"\"");
+        }
+        n += _snwprintf(js + n, cap - n, L"}");
+      }
+      _snwprintf(js + n, cap - n, L"]}");
+      js[cap - 1] = 0;
+      _snwprintf(p, MAX_PATH, L"%s\\%s.spec_tess.json", g_drVlDump, g_drVlBase);
+      p[MAX_PATH - 1] = 0;
+      share_write_ex(p, js, TRUE);
+      free(js);
+    }
+  }
+#endif
+  wchar_t *a = dr_vl_ask(&im, L"spec", kDrVlSpecQ, kDrVlSpecSchema, 2500);
+  if (a && dr_json_spec(a, pg)) ai_log(L"Спецификация: строки прочитала модель (%d)", pg->nrows);
+  free(a);
+  dr_img_free(&im);
+}
+
 static void dr_recognize(IWICImagingFactory *f, DrPage *pg) {
   ULONGLONG t0 = GetTickCount64();
   dr_page_free(pg);
@@ -1947,6 +2105,7 @@ static void dr_recognize(IWICImagingFactory *f, DrPage *pg) {
   pg->note[0] = pg->fmt[0] = 0;
   pg->type = DRT_OTHER;
   pg->form = 0;
+  pg->rowsBy = 0;
   DrImg m;
   double dpi = 96;
   HRESULT hr = dr_read(f, pg->path, pg->frame, &m, &dpi);
@@ -2026,6 +2185,8 @@ static void dr_recognize(IWICImagingFactory *f, DrPage *pg) {
       if (cols >= 4) {
         pg->type = DRT_SPEC;
         dr_spec(&m, thr, &L, &s, pg);
+        /* обозначение спецификации — обозначение самой сборки (без «СБ»): моделью, как у чертежа */
+        if (s.form == 2 && (pg->vlStamp || dr_vl_dumping()) && dr_vl_want()) dr_vl_des(&m, &s, pg, 40);
       }
     }
   } else {
@@ -2129,6 +2290,35 @@ static void dr_pages_cb(void *ctx, TmPage *tp) {
 }
 
 #ifdef SET_TEST
+/* --drspecjson ответ.json выход.txt — ответ модели по спецификации (UTF-8) → строки DrSpecRow, как их
+   получит состав ЭСИ: графа = значение, «?» — подсвечена */
+static void dr_spec_json_test(const wchar_t *in, const wchar_t *out) {
+  char *raw = NULL;
+  DWORD n = 0;
+  DrPage pg;
+  memset(&pg, 0, sizeof(pg));
+  ShareBuf b;
+  memset(&b, 0, sizeof(b));
+  if (read_file_bytes(in, &raw, &n, 1 << 20)) {
+    int wn = MultiByteToWideChar(CP_UTF8, 0, raw, (int)n, NULL, 0);
+    wchar_t *w = (wchar_t *)calloc((size_t)wn + 1, sizeof(wchar_t));
+    if (w) MultiByteToWideChar(CP_UTF8, 0, raw, (int)n, w, wn);
+    BOOL ok = w && dr_json_spec(w, &pg);
+    sb_add(&b, L"ok=%d rows=%d by=%d\n", ok, pg.nrows, pg.rowsBy);
+    for (int r = 0; r < pg.nrows; r++) {
+      for (int c = 0; c < DS_N; c++)
+        sb_add(&b, L"%s%s%s=%s", c ? L" | " : L"", pg.rows[r].doubt[c] ? L"?" : L"", kDrSpecKey[c], pg.rows[r].c[c]);
+      sb_add(&b, L"\n");
+    }
+    free(w);
+    free(raw);
+  }
+  share_write_ex(out, b.w ? b.w : L"", TRUE);
+  free(b.w);
+  free(pg.rows);
+  ExitProcess(0);
+}
+
 /* проверочная сборка: --drawrec выход.txt файл… — распознать и записать итог */
 static void dr_test(int argc, wchar_t **argv) {
   CoInitializeEx(NULL, COINIT_MULTITHREADED);
