@@ -180,6 +180,7 @@ static void nu_op_line(const NmOp *o, wchar_t *out, int cap) {
   _snwprintf(out, cap, L"%03d %s", nu_num(o), o->op);
   out[cap - 1] = 0;
   if (o->kind == NMK_FACT) tn_cat(out, cap, L" · по факту");
+  else if (o->kind == NMK_TECH) tn_cat(out, cap, L" · Тшт "), nm_catmin(out, cap, o->tsht), tn_cat(out, cap, L" (норма технолога)");
   else if (o->kind == NMK_EST && nm_na(o->tsht)) tn_cat(out, cap, L" · оценки нет");
   else if (o->kind == NMK_EST) tn_cat(out, cap, L" · Тшт ≈ "), nm_catmin(out, cap, o->tsht), tn_cat(out, cap, L" (оценка)");
   else if (nm_na(o->to)) tn_cat(out, cap, L" · нет То");
