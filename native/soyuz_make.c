@@ -728,12 +728,171 @@ typedef struct {
   HWND notify; /* кому WM_SZM_DONE: окно папки или чат (ai_esi.c); NULL — окно папки */
 } SzmRun;
 
+/* Описание — частями (с 2026.10.29, против подвисания клиента): функция выполняется в клиенте
+   «Союза» одним вызовом, и на большой загрузке его окно стоит, пока всё не сохранится. Поэтому
+   мост зовётся несколько раз: сначала изделия, состав, заготовки и чертежи, потом ТП по
+   SZM_PART_TP деталей; между вызовами пауза, чтобы клиент отрисовался. Части — файлы
+   cursorpad-soyuz-N.txt рядом с описанием; отчёты складываются в один. Маленькое описание
+   (одна деталь) идёт одним вызовом, как раньше. */
+#define SZM_PART_TP 3
+
+static wchar_t *szm_read_spec(const wchar_t *path) {
+  HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+  if (h == INVALID_HANDLE_VALUE) return NULL;
+  DWORD sz = GetFileSize(h, NULL), rd = 0;
+  char *u = sz < (1u << 24) ? (char *)malloc(sz + 1) : NULL;
+  if (u) ReadFile(h, u, sz, &rd, NULL);
+  CloseHandle(h);
+  if (!u) return NULL;
+  wchar_t *t = utf8_to_alloc(u + (rd >= 3 && (unsigned char)u[0] == 0xEF ? 3 : 0), rd >= 3 && (unsigned char)u[0] == 0xEF ? rd - 3 : rd);
+  free(u);
+  return t;
+}
+
+static BOOL szm_write_part(const wchar_t *path, const wchar_t *txt) {
+  int len8 = WideCharToMultiByte(CP_UTF8, 0, txt, -1, NULL, 0, NULL, NULL);
+  char *u = (char *)malloc((size_t)len8);
+  if (!u) return FALSE;
+  WideCharToMultiByte(CP_UTF8, 0, txt, -1, u, len8, NULL, NULL);
+  HANDLE h = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+  BOOL ok = h != INVALID_HANDLE_VALUE;
+  if (ok) {
+    DWORD wr;
+    WriteFile(h, "\xEF\xBB\xBF", 3, &wr, NULL);
+    WriteFile(h, u, (DWORD)(len8 - 1), &wr, NULL);
+    CloseHandle(h);
+  }
+  free(u);
+  return ok;
+}
+
+/* описание spec → части (malloc-строки в parts, их число); 0 — делить нечего, идёт как есть */
+static int szm_split_spec(const wchar_t *spec, wchar_t **parts, int cap) {
+  wchar_t *all = szm_read_spec(spec);
+  if (!all) return 0;
+  /* строки ТП — по деталям; остальное (кроме ПАПКА_ТП, она нужна каждой части с ТП) — первая часть */
+  size_t total = wcslen(all);
+  wchar_t *head = (wchar_t *)calloc(total + 64, sizeof(wchar_t)), *tpFolder = NULL;
+  wchar_t (*des)[200] = (wchar_t (*)[200])calloc(400, sizeof(*des));
+  wchar_t **tpOf = (wchar_t **)calloc(400, sizeof(wchar_t *)); /* строки ТП каждой детали */
+  int nd = 0, n = 0;
+  if (head && des && tpOf) {
+    wchar_t *p = all;
+    while (*p) {
+      wchar_t *e = wcspbrk(p, L"\r\n");
+      size_t len = e ? (size_t)(e - p) : wcslen(p);
+      if (!wcsncmp(p, L"ТП\t", 3)) {
+        const wchar_t *d = p + 3, *de = wcschr(d, L'\t');
+        size_t dl = de ? (size_t)(de - d) : len - 3;
+        if (dl > 199) dl = 199;
+        int k = 0;
+        while (k < nd && (wcslen(des[k]) != dl || wcsncmp(des[k], d, dl))) k++;
+        if (k == nd && nd < 400) {
+          memcpy(des[nd], d, dl * sizeof(wchar_t));
+          des[nd][dl] = 0;
+          tpOf[nd] = (wchar_t *)calloc(total + 8, sizeof(wchar_t));
+          nd++;
+        }
+        if (k < nd && tpOf[k]) {
+          size_t l = wcslen(tpOf[k]);
+          memcpy(tpOf[k] + l, p, len * sizeof(wchar_t));
+          wcscpy(tpOf[k] + l + len, L"\r\n");
+        }
+      } else if (!wcsncmp(p, L"ПАПКА_ТП\t", 9)) {
+        tpFolder = (wchar_t *)calloc(len + 4, sizeof(wchar_t));
+        if (tpFolder) memcpy(tpFolder, p, len * sizeof(wchar_t)), wcscpy(tpFolder + len, L"\r\n");
+      } else if (len) {
+        size_t l = wcslen(head);
+        memcpy(head + l, p, len * sizeof(wchar_t));
+        wcscpy(head + l + len, L"\r\n");
+      }
+      p = e ? e : p + len;
+      while (*p == L'\r' || *p == L'\n') p++;
+    }
+    BOOL headHas = FALSE; /* в первой части есть что-то кроме комментариев */
+    for (wchar_t *q = head; *q; q = wcschr(q, L'\n') ? wcschr(q, L'\n') + 1 : q + wcslen(q))
+      if (*q && *q != L'#' && *q != L'\r' && *q != L'\n') headHas = TRUE;
+    if (nd > SZM_PART_TP || (headHas && nd > 1)) {
+      if (headHas && n < cap) {
+        wchar_t *t = (wchar_t *)calloc(wcslen(head) + (tpFolder ? wcslen(tpFolder) : 0) + 8, sizeof(wchar_t));
+        if (t) wcscpy(t, head), tpFolder ? wcscat(t, tpFolder) : (void)0, parts[n++] = t;
+      }
+      for (int i = 0; i < nd && n < cap; i += SZM_PART_TP) {
+        size_t need = 80 + (tpFolder ? wcslen(tpFolder) : 0);
+        for (int k = i; k < nd && k < i + SZM_PART_TP; k++) need += wcslen(tpOf[k]);
+        wchar_t *t = (wchar_t *)calloc(need, sizeof(wchar_t));
+        if (!t) break;
+        wcscpy(t, L"# CursorPad → «Союз»: техпроцессы, часть\r\n");
+        if (tpFolder) wcscat(t, tpFolder);
+        for (int k = i; k < nd && k < i + SZM_PART_TP; k++) wcscat(t, tpOf[k]);
+        parts[n++] = t;
+      }
+    }
+  }
+  for (int k = 0; k < nd; k++) free(tpOf[k]);
+  free(tpOf);
+  free(des);
+  free(head);
+  free(tpFolder);
+  free(all);
+  return n;
+}
+
 static DWORD WINAPI szm_run_thread(LPVOID arg) {
   SzmRun *r = (SzmRun *)arg;
   char *out = NULL, err[200] = "";
   DWORD outn = 0, code = (DWORD)-1;
-  BOOL ok = run_capture(r->cmd, &out, &outn, &code, err, 200);
-  wchar_t *text = ok ? utf8_to_alloc(out, outn) : NULL;
+  BOOL ok;
+  wchar_t *text = NULL;
+  /* путь описания — второй аргумент в кавычках */
+  wchar_t spec[MAX_PATH] = L"";
+  {
+    const wchar_t *q = wcsstr(r->cmd, L"\" \"");
+    if (q) {
+      lstrcpynW(spec, q + 3, MAX_PATH);
+      wchar_t *qe = wcsrchr(spec, L'"');
+      if (qe) *qe = 0;
+    }
+  }
+  wchar_t *parts[200];
+  int np = spec[0] ? szm_split_spec(spec, parts, 200) : 0;
+  if (np > 1) { /* частями: отчёты — в один, код — худший */
+    size_t cap = 4000;
+    text = (wchar_t *)calloc(cap, sizeof(wchar_t));
+    ok = TRUE;
+    code = 0;
+    for (int i = 0; i < np && text; i++) {
+      wchar_t part[MAX_PATH], cmd[MAX_PATH * 2 + 8];
+      _snwprintf(part, MAX_PATH, L"%.*s-%d.txt", (int)(wcslen(spec) - 4), spec, i + 1); /* cursorpad-soyuz-1.txt */
+      part[MAX_PATH - 1] = 0;
+      if (!szm_write_part(part, parts[i])) continue;
+      const wchar_t *qe = wcsstr(r->cmd, L"\" \"");
+      _snwprintf(cmd, MAX_PATH * 2 + 8, L"%.*s \"%s\"", (int)(qe ? qe - r->cmd + 1 : 0), r->cmd, part);
+      char *o = NULL;
+      DWORD on = 0, c = (DWORD)-1;
+      BOOL k = run_capture(cmd, &o, &on, &c, err, 200);
+      wchar_t *t = k ? utf8_to_alloc(o, on) : NULL;
+      free(o);
+      size_t l = wcslen(text), add = (t ? wcslen(t) : 0) + 80;
+      if (l + add + 1 > cap) {
+        wchar_t *nt = (wchar_t *)realloc(text, (cap = l + add + 4000) * sizeof(wchar_t));
+        if (!nt) break;
+        text = nt;
+      }
+      _snwprintf(text + l, cap - l, L"— часть %d из %d —\r\n%s", i + 1, np, t ? t : L"(мост не ответил)\r\n");
+      free(t);
+      if (!k) ok = FALSE;
+      if (c != 0 && (code == 0 || c == 3)) code = c;
+      if (c == 3 || !k) break; /* клиента нет — дальше не зовём */
+      Sleep(600);              /* клиенту — отрисоваться между частями */
+    }
+    for (int i = 0; i < np; i++) free(parts[i]);
+    if (!text) ok = FALSE;
+  } else {
+    for (int i = 0; i < np; i++) free(parts[i]);
+    ok = run_capture(r->cmd, &out, &outn, &code, err, 200);
+    text = ok ? utf8_to_alloc(out, outn) : NULL;
+  }
   size_t extra = 800 + (text ? wcslen(text) : 0);
   wchar_t *rep = (wchar_t *)malloc(extra * sizeof(wchar_t));
   if (rep) {

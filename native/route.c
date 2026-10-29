@@ -911,7 +911,7 @@ static void rt_preform(SQLHDBC dbc, const RtObj *o, CardRow *rows, RtJob *j, RtR
 }
 
 static BOOL rt_looks_des(const wchar_t *s) {
-  /* обозначение: есть цифры и точка или дефис — «АДЕ 3424-1073.00.00.01» */
+  /* обозначение: есть цифры и точка или дефис — «АДЕ 3422-682.01.01» */
   int dig = 0, sep = 0;
   for (; *s; s++) {
     if (iswdigit(*s)) dig++;

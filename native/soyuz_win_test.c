@@ -459,6 +459,29 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
         g_szmFold = NULL;
         free(fl->path), free(fl->pathId), free(fl->tp), free(fl->tpId), free(fl);
       }
+      /* отправка частями (szm_split_spec): ЭСИ отдельно, ТП по 3 детали; одна деталь — целиком */
+      {
+        wchar_t sp[MAX_PATH];
+        _snwprintf(sp, MAX_PATH, L"%ls\\cursorpad-split.txt", g_stDir);
+        wchar_t big[4000] = L"# проверка\r\nПАПКА\tТестовая сборка ЭСИ\r\nПАПКА_ТП\tДля основных ТП\r\nИЗДЕЛИЕ\tТСТ.130.000\tУзел\tСборочные единицы\t\t\r\n";
+        for (int k = 1; k <= 5; k++) {
+          wchar_t line[200];
+          _snwprintf(line, 200, L"ТП\tТСТ.130.00%d\t005\t4110\t31\t\t15\t4\r\nТП\tТСТ.130.00%d\t010\t0200\t31\t\t\t1\r\n", k, k);
+          wcscat(big, line);
+        }
+        szm_write_part(sp, big);
+        wchar_t *parts[20];
+        int np = szm_split_spec(sp, parts, 20);
+        st_check(np == 3 && wcsstr(parts[0], L"ИЗДЕЛИЕ\tТСТ.130.000") && wcsstr(parts[0], L"ПАПКА_ТП\t") && !wcsstr(parts[0], L"ТП\tТСТ.130.001") &&
+                     wcsstr(parts[1], L"ПАПКА_ТП\tДля основных ТП\r\n") && wcsstr(parts[1], L"ТП\tТСТ.130.001\t005") &&
+                     wcsstr(parts[1], L"ТП\tТСТ.130.003\t010") && !wcsstr(parts[1], L"ТСТ.130.004") &&
+                     wcsstr(parts[2], L"ТП\tТСТ.130.004") && wcsstr(parts[2], L"ТП\tТСТ.130.005\t010\t0200"),
+                 L"описание на 5 деталей делится: ЭСИ + папка ТП, потом ТП по 3 и по 2 детали с папкой ТП в каждой части");
+        for (int i = 0; i < np; i++) free(parts[i]);
+        szm_write_part(sp, L"ПАПКА_ТП\tДля основных ТП\r\nТП\tТСТ.130.001\t005\t4110\t31\t\t15\t4\r\n");
+        st_check(szm_split_spec(sp, parts, 20) == 0, L"одна деталь без ЭСИ — одним вызовом, частей нет");
+        DeleteFileW(sp);
+      }
       /* действия из чата (ai_esi.c): команды узнаёт код, пути — из текста */
       {
         wchar_t cmd[600];
@@ -470,6 +493,11 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
                      !esi_chat_cmd(L"есть ли в союзе ТСТ.110.004") && !rt_chat_cmd(L"норма материала по ведомости") &&
                      !prio_chat_cmd(L"какой участок у токарной"),
                  L"чат: «загрузи ЭСИ по чертежам» узнаётся, «выгрузи», «в союз», сверка и вопросы — нет");
+        st_check(ac_is_des(L"АБВГ.711141.001") && ac_is_des(L"ТСТ.100.000") && ac_is_des(L"АДЕ 3424-1073.00.00.01") &&
+                     ac_is_des(L"АБВГ.123456.000СБ") && !ac_is_des(L"2026-10-29") && !ac_is_des(L"ГОСТ 2590-2006") &&
+                     !ac_is_des(L"16К20,") && !ac_is_des(L"4110") && !ac_is_des(L"Токарная") && ac_is_path_start(L"C:\\x") &&
+                     !ac_is_path_start(L"ТСТ.100.000"),
+                 L"кликабельный чат: обозначения узнаются, даты, ГОСТы, коды и слова — нет; путь — по «X:\\»");
         st_check(np == 1 && pl.n >= 1 && wcsstr(pl.p[0], L".png"), L"чат: путь к папке в кавычках найден, её картинки собраны в список");
         st_note(L"     файлов из папки стенда: %d", pl.n);
         free(pl.p);
