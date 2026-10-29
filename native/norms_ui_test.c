@@ -129,6 +129,8 @@ static double nut_v(int k, const wchar_t *par) {
   return o ? nm_v(&o->c, par) : NM_NONE;
 }
 
+static int kT = -1, kD = -1; /* токарная и сверлильная в списке окна */
+
 static BOOL nut_near(double a, double b) { return !nm_na(a) && a > b - 1e-6 && a < b + 1e-6; }
 
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
@@ -169,39 +171,43 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
   tn_route(L"Вал", L"Сталь 45 ГОСТ 1050-2013", L"Ø40h9 Ra 3,2 фаска 1×45° 2 отв. Ø6", &r);
   nm_last_keep(nm_last_new(&r, L"1,8", NULL));
   nu_open();
-  nut_check(g_nuRes && g_nuRes->n == 2 && g_nuRes->op[0].kind == NMK_TURN && g_nuRes->op[1].kind == NMK_DRILL,
-            L"операции маршрута: 010 токарная, 015 сверлильная");
-  nut_check(nm_na(g_nuRes->op[0].to) && wcsstr(g_nuRes->op[0].toNeed, L"длина обработки L") != NULL,
+  for (int i = 0; g_nuRes && i < g_nuRes->n; i++) {
+    if (g_nuRes->op[i].kind == NMK_TURN && kT < 0) kT = i;
+    if (g_nuRes->op[i].kind == NMK_DRILL && kD < 0) kD = i;
+  }
+  nut_check(g_nuRes && g_nuRes->n == r.n && kT >= 0 && kD >= 0, L"в окне — все операции маршрута, среди них токарная и сверлильная");
+  nut_check(g_nuRes->op[0].kind == NMK_EST && !nm_na(g_nuRes->op[0].tsht), L"005 Отрезная — оценка с Тшт");
+  nut_check(nm_na(g_nuRes->op[kT].to) && wcsstr(g_nuRes->op[kT].toNeed, L"длина обработки L") != NULL,
             L"без длины То нет — окно говорит, что нужна L");
-  nut_check(nut_near(nut_v(0, L"σв"), 600), L"σв стали 45 — 600 из перечня материалов");
+  nut_check(nut_near(nut_v(kT, L"σв"), 600), L"σв стали 45 — 600 из перечня материалов");
   nut_shot(L"1-opened.png");
 
   /* L — и То считается по формулам */
-  nut_type(0, L"L", L"120");
-  const NmOp *o = nu_op(0);
+  nut_type(kT, L"L", L"120");
+  const NmOp *o = nu_op(kT);
   double to1 = o ? o->to : NM_NONE;
   nut_check(!nm_na(to1) && o->full, L"L 120 — То по режимам и полная Тшт");
   const NmPar *pv = o ? nm_parc(&o->c, L"V") : NULL;
   nut_check(pv && pv->org == NMO_CALC && pv->v > 50 && pv->v < 300, L"V — по формуле, в разумных пределах");
   wchar_t t[64] = L"";
-  GetWindowTextW(g_nuEdit[nut_row(0, L"V")], t, 64);
+  GetWindowTextW(g_nuEdit[nut_row(kT, L"V")], t, 64);
   nut_check(t[0] && wcscmp(t, pv ? pv->s : L"") == 0, L"поле V показывает расчётную скорость");
   nut_shot(L"2-length.png");
 
   /* своя подача — скорость и То пересчитаны с ней */
-  nut_type(0, L"S", L"0,3");
-  o = nu_op(0);
+  nut_type(kT, L"S", L"0,3");
+  o = nu_op(kT);
   const NmPar *ps = o ? nm_parc(&o->c, L"S") : NULL;
   nut_check(ps && ps->org == NMO_ASK && nut_near(ps->v, 0.3), L"подача 0,3 — «задано»");
   nut_check(o && !nm_na(o->to) && fabs(o->to - to1) > 1e-6, L"То пересчитано с новой подачей");
   nut_shot(L"3-feed.png");
 
   /* сверлильная: глубина и партия (партия — общая) */
-  nut_type(1, L"l", L"12");
-  nut_type(1, L"партия", L"50");
-  nut_check(!nm_na(nu_op(1)->to), L"015: глубина 12 — То сверления");
-  nut_check(nut_near(nut_v(0, L"партия"), 50) && nut_near(nut_v(1, L"партия"), 50), L"партия — обеим операциям");
-  nut_check(!nm_na(nu_op(0)->tshk) && !nm_na(nu_op(1)->tshk), L"с партией — Тшк у обеих");
+  nut_type(kD, L"l", L"12");
+  nut_type(kD, L"партия", L"50");
+  nut_check(!nm_na(nu_op(kD)->to), L"015: глубина 12 — То сверления");
+  nut_check(nut_near(nut_v(kT, L"партия"), 50) && nut_near(nut_v(kD, L"партия"), 50), L"партия — обеим операциям");
+  nut_check(!nm_na(nu_op(kT)->tshk) && !nm_na(nu_op(kD)->tshk), L"с партией — Тшк у обеих");
   nut_shot(L"4-drill.png");
 
   wchar_t line[400];
@@ -212,13 +218,13 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
   wcscat(g_nutReport, txt);
 
   /* стёртое поле — снова как считает CursorPad */
-  nut_type(0, L"S", L"");
-  ps = nm_parc(&nu_op(0)->c, L"S");
+  nut_type(kT, L"S", L"");
+  ps = nm_parc(&nu_op(kT)->c, L"S");
   nut_check(ps && ps->org == NMO_TAB, L"подача стёрта — снова по таблице");
 
   /* сброс — всё как было, То снова нет */
   SendMessageW(g_nuWnd, WM_COMMAND, MAKEWPARAM(ID_NU_RESET, BN_CLICKED), 0);
-  nut_check(nm_na(nu_op(0)->to) && !g_nuBatch[0], L"«Сбросить правки» — как до правок");
+  nut_check(nm_na(nu_op(kT)->to) && !g_nuBatch[0], L"«Сбросить правки» — как до правок");
   nut_shot(L"5-reset.png");
 
   /* «Применить»: нормы в ответе беседы — на месте, без новых сообщений; правки — в вопрос беседы */
@@ -226,10 +232,10 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
   ac_push(1, L"Маршрут обработки — черновик по правилам, проверяет технолог\n010 Токарная.\n015 Сверлильная."
              L"\n\nНормы времени (ОМН; проверяет технолог):\n010 Токарная: Тпз 14 мин · Тшт ≥ 1 мин без машинного То"
              L"\nРежимы: 010 не посчитаны; 015 не посчитаны — изменить · подробно\n\nПосле норм — своё.");
-  nut_type(0, L"L", L"120");
-  nut_type(0, L"S", L"0,3");
-  nut_type(1, L"l", L"12");
-  nut_type(1, L"партия", L"50");
+  nut_type(kT, L"L", L"120");
+  nut_type(kT, L"S", L"0,3");
+  nut_type(kD, L"l", L"12");
+  nut_type(kD, L"партия", L"50");
   int turns = g_acN;
   SendMessageW(g_nuWnd, WM_COMMAND, MAKEWPARAM(ID_NU_CHAT, BN_CLICKED), 0);
   const wchar_t *ans = g_acN ? g_acTurns[g_acN - 1].text : L"";
@@ -241,7 +247,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
             L"в ответе — строка режимов обеих операций");
   nut_check(wcsstr(g_nmLast->ask, L"010: L 120") && wcsstr(g_nmLast->ask, L"015: глубина 12") && !g_nuBatch[0],
             L"правки — в вопросе беседы, в окне сброшены");
-  nut_check(!nm_na(nu_op(0)->to) && nut_near(nut_v(1, L"партия"), 50), L"окно после «Применить» считает то же");
+  nut_check(!nm_na(nu_op(kT)->to) && nut_near(nut_v(kD, L"партия"), 50), L"окно после «Применить» считает то же");
   _snwprintf(txt, 400, L"   ответ: %ls\r\n", wcsstr(ans, L"Режимы:") ? wcsstr(ans, L"Режимы:") : L"?");
   wcscat(g_nutReport, txt);
 

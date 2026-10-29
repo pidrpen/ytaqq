@@ -15,7 +15,7 @@
 #define ID_NU_EDIT 4890 /* + строка */
 #define TIMER_NU_CALC 4885
 #define NU_ROWS 14
-#define NU_OPS 12
+#define NU_OPS NM_OPS
 
 typedef struct {
   const wchar_t *par, *label, *ask; /* параметр norms.c, подпись, слово вопроса («» — значение само слово) */
@@ -179,7 +179,10 @@ static void nu_calc(void) {
 static void nu_op_line(const NmOp *o, wchar_t *out, int cap) {
   _snwprintf(out, cap, L"%03d %s", nu_num(o), o->op);
   out[cap - 1] = 0;
-  if (nm_na(o->to)) tn_cat(out, cap, L" · нет То");
+  if (o->kind == NMK_FACT) tn_cat(out, cap, L" · по факту");
+  else if (o->kind == NMK_EST && nm_na(o->tsht)) tn_cat(out, cap, L" · оценки нет");
+  else if (o->kind == NMK_EST) tn_cat(out, cap, L" · Тшт ≈ "), nm_catmin(out, cap, o->tsht), tn_cat(out, cap, L" (оценка)");
+  else if (nm_na(o->to)) tn_cat(out, cap, L" · нет То");
   else if (!nm_na(o->tsht)) tn_cat(out, cap, o->full ? L" · Тшт " : L" · Тшт ≈ "), nm_catmin(out, cap, o->tsht);
   else tn_cat(out, cap, L" · То "), nm_catmin(out, cap, o->to);
 }

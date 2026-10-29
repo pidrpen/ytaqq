@@ -123,7 +123,8 @@ def check(head, cols, rows):
     for k in ("назначение", "источник"):
         if not head.get(k):
             out.append((None, None, f"нет строки «{k}»"))
-    if not head.get("страница") and not head.get("ссылка") and not head.get("вид"):
+    # у «оценки» (прикидка CursorPad для операций без нормативов) книги нет — сверять не с чем
+    if not head.get("страница") and not head.get("ссылка") and not head.get("вид") and head.get("назначение") != "оценка":
         out.append((None, None, "нет ни «страница», ни «ссылка» — откуда сверять"))
     if not cols:
         out.append((None, None, "нет шапки таблицы (строка «поз.»)"))
