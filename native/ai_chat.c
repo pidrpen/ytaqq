@@ -665,6 +665,9 @@ static void esi_cancel(void);
 static void esi_report(wchar_t *rep);
 static BOOL rt_chat_cmd(const wchar_t *a);
 static BOOL prio_chat_cmd(const wchar_t *a);
+static void ac_text_links(void);                 /* обозначения и пути в ленте — ссылками */
+static BOOL ac_text_link_click(const wchar_t *t); /* щелчок по ним */
+static void ac_des_action(int which);            /* WM_AC_LINK 40…43 */
 #define WM_AC_SZM_DONE (WM_APP + 96) /* = WM_SZM_DONE (soyuz_make.c): ответ «Союза» на отправку из чата */
 static BOOL g_acShowOld, g_acLogTop; /* показать прежние беседы; ленту — с начала */
 
@@ -803,6 +806,7 @@ static void ac_redraw(void) {
       if (top) ac_log_links((int)wcslen(top));
       if (route >= 0) ac_route_links();
       ac_esi_links();
+      ac_text_links();
       ac_norm_links();
       ac_think_links();
       SendMessageW(g_acLog, WM_SETREDRAW, TRUE, 0);
@@ -3383,6 +3387,7 @@ static void ac_log_link(const ENLINK *el) {
     ShellExecuteW(g_acWnd, L"open", t, NULL, NULL, SW_SHOWNORMAL);
     return;
   }
+  if (ac_text_link_click(t)) return; /* путь или обозначение изделия (ai_esi.c) */
   for (size_t i = 0; i < sizeof(kAcLogLinks) / sizeof(kAcLogLinks[0]); i++)
     if (!wcscmp(t, kAcLogLinks[i])) PostMessageW(g_acWnd, WM_AC_LINK, i, 0);
   for (size_t i = 0; i < sizeof(kAcRouteLinks) / sizeof(kAcRouteLinks[0]); i++)
@@ -3435,6 +3440,7 @@ static void ac_log_link_do(WPARAM which) {
     break;
   case 21: esi_detail(); break;
   case 22: esi_cancel(); break;
+  case 40: case 41: case 42: case 43: ac_des_action((int)which); break; /* обозначение в ленте */
   case 11: ac_route_say(L"норма подробно"); break;
   case 12: nu_open(); break;
   case 13: ac_route_excel(); break;

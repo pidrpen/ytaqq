@@ -317,3 +317,173 @@ static BOOL prio_chat_cmd(const wchar_t *a) {
               L"«ЭСИ и ТП» с «Создать ТП» будут брать её первой.");
   return TRUE;
 }
+
+/* ---- кликабельный чат (с 2026.10.29): обозначения изделий и пути — ссылками ----------------------
+   После каждой отрисовки ленты (ac_text_links, последние AC_LINK_SCAN знаков): обозначение вида
+   «АБВГ.123456.001», «ТСТ.100.000», «АДЕ 3424-1073.00.00.01» (ac_is_des: 2–4 буквы, точка или пробел,
+   цифры, хотя бы одна точка; даты и «ГОСТ 2590-2006» — нет) и путь «C:\…» или «\\сервер\…» получают
+   CFE_LINK. Щелчок (ac_text_link_click из ac_log_link): путь — открыть в Проводнике; обозначение —
+   меню у курсора: «Есть ли в Союзе», «Куда входит», «Маршрутная ведомость», «Загрузить ЭСИ» (WM_AC_LINK 40…43,
+   обозначение — в g_acLinkDes). Тот же EN_LINK → WM_AC_LINK, что у строк-кнопок. */
+#define AC_LINK_SCAN 30000
+static wchar_t g_acLinkDes[200];
+
+static BOOL ac_is_letter(wchar_t c) {
+  return (c >= L'A' && c <= L'Z') || (c >= L'a' && c <= L'z') || (c >= 0x400 && c <= 0x4ff);
+}
+
+/* обозначение изделия: 2–4 буквы, «.» или пробел, цифра, дальше цифры/точки/дефисы, хотя бы одна точка после букв */
+static BOOL ac_is_des(const wchar_t *t) {
+  int nl = 0;
+  while (ac_is_letter(t[nl])) nl++;
+  if (nl < 2 || nl > 4) return FALSE;
+  const wchar_t *p = t + nl;
+  if (*p != L'.' && *p != L' ') return FALSE;
+  p++;
+  if (!(*p >= L'0' && *p <= L'9')) return FALSE;
+  int digits = 0, dots = 0;
+  for (; *p; p++) {
+    if (*p >= L'0' && *p <= L'9') digits++;
+    else if (*p == L'.') dots++;
+    else if (*p == L'-') {
+    } else if (ac_is_letter(*p) && !p[1]) { /* «…СБ» — последняя буква */
+    } else if (ac_is_letter(*p) && ac_is_letter(p[1]) && !p[2]) p++;
+    else return FALSE;
+  }
+  return digits >= 5 && dots >= 1;
+}
+
+static BOOL ac_is_path_start(const wchar_t *p) {
+  return (((p[0] >= L'A' && p[0] <= L'Z') || (p[0] >= L'a' && p[0] <= L'z')) && p[1] == L':' && p[2] == L'\\') ||
+         (p[0] == L'\\' && p[1] == L'\\' && ac_is_letter(p[2]));
+}
+
+static void ac_mark_link(LONG a, LONG b) {
+  CHARRANGE cr = {a, b};
+  SendMessageW(g_acLog, EM_EXSETSEL, 0, (LPARAM)&cr);
+  CHARFORMAT2W cf;
+  memset(&cf, 0, sizeof(cf));
+  cf.cbSize = sizeof(cf);
+  cf.dwMask = CFM_LINK;
+  cf.dwEffects = CFE_LINK;
+  SendMessageW(g_acLog, EM_SETCHARFORMAT, SCF_SELECTION, (LPARAM)&cf);
+}
+
+static void ac_text_links(void) {
+  LONG len = GetWindowTextLengthW(g_acLog);
+  LONG from = len > AC_LINK_SCAN ? len - AC_LINK_SCAN : 0;
+  wchar_t *t = (wchar_t *)malloc(((size_t)(len - from) + 2) * sizeof(wchar_t));
+  if (!t) return;
+  TEXTRANGEW tr = {{from, len}, t};
+  LONG got = (LONG)SendMessageW(g_acLog, EM_GETTEXTRANGE, 0, (LPARAM)&tr);
+  if (got <= 0) {
+    free(t);
+    return;
+  }
+  t[got] = 0;
+  static const wchar_t kStop[] = L" \t\r\n,;«»\"'()[]{}<>|";
+  for (LONG i = 0; i < got;) {
+    if (i > 0 && !wcschr(kStop, t[i - 1])) { /* начало слова */
+      i++;
+      continue;
+    }
+    LONG j = i;
+    if (ac_is_path_start(t + i)) { /* путь — до пробела/кавычки, но с пробелами внутри, пока файл существует */
+      while (j < got && t[j] != L'\r' && t[j] != L'\n' && t[j] != L'"' && t[j] != L'\u00bb' && t[j] != L'\t' && t[j] != L';' &&
+             t[j] != L'|')
+        j++;
+      while (j > i && (t[j - 1] == L' ' || t[j - 1] == L'.' || t[j - 1] == L',' || t[j - 1] == L')')) j--;
+      wchar_t path[MAX_PATH];
+      LONG n = j - i < MAX_PATH - 1 ? j - i : MAX_PATH - 1;
+      memcpy(path, t + i, (size_t)n * sizeof(wchar_t));
+      path[n] = 0;
+      while (n && GetFileAttributesW(path) == INVALID_FILE_ATTRIBUTES) { /* хвост-слова после пути */
+        wchar_t *sp = wcsrchr(path, L' ');
+        if (!sp) {
+          n = 0;
+          break;
+        }
+        *sp = 0;
+        n = (LONG)wcslen(path);
+      }
+      if (n > 3) ac_mark_link(from + i, from + i + n);
+      i = j > i ? j : i + 1;
+      continue;
+    }
+    while (j < got && !wcschr(kStop, t[j]) && j - i < 60) j++;
+    if (j - i >= 7 && j - i < 60) {
+      wchar_t w[64];
+      memcpy(w, t + i, (size_t)(j - i) * sizeof(wchar_t));
+      w[j - i] = 0;
+      /* «АДЕ 3424-1073.00.00.01»: буквы, пробел, цифры — слово с пробелом склеиваем */
+      if (ac_is_des(w)) ac_mark_link(from + i, from + j);
+      else if (j < got && t[j] == L' ' && ac_is_letter(t[i]) && !(w[0] >= L'0' && w[0] <= L'9')) {
+        LONG k = j + 1, nl = 0;
+        while (nl < (LONG)wcslen(w) && ac_is_letter(w[nl])) nl++;
+        if (nl == (LONG)wcslen(w) && nl >= 2 && nl <= 4 && t[k] >= L'0' && t[k] <= L'9') {
+          while (k < got && !wcschr(kStop, t[k]) && k - i < 60) k++;
+          wchar_t w2[64];
+          memcpy(w2, t + i, (size_t)(k - i) * sizeof(wchar_t));
+          w2[k - i] = 0;
+          if (ac_is_des(w2)) {
+            ac_mark_link(from + i, from + k);
+            j = k;
+          }
+        }
+      }
+    }
+    i = j > i ? j : i + 1;
+  }
+  free(t);
+}
+
+/* щёлкнули по ссылке в ленте: путь — открыть; обозначение — меню действий. FALSE — не наше */
+static BOOL ac_text_link_click(const wchar_t *t) {
+  if (ac_is_path_start(t)) {
+    if (GetFileAttributesW(t) != INVALID_FILE_ATTRIBUTES) ShellExecuteW(g_acWnd, L"open", t, NULL, NULL, SW_SHOWNORMAL);
+    else ac_status(L"Такого файла или папки уже нет");
+    return TRUE;
+  }
+  if (!ac_is_des(t)) return FALSE;
+  lstrcpynW(g_acLinkDes, t, 200);
+  HMENU m = CreatePopupMenu();
+  AppendMenuW(m, MF_STRING, 40, L"Есть ли в «Союзе» — карточка");
+  AppendMenuW(m, MF_STRING, 41, L"Куда входит");
+  AppendMenuW(m, MF_STRING, 42, L"Маршрутная ведомость");
+  AppendMenuW(m, MF_STRING, 43, L"Загрузить ЭСИ из «Союза» в окно «ЭСИ и ТП»");
+  POINT pt;
+  GetCursorPos(&pt);
+  int cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN | TPM_NONOTIFY, pt.x, pt.y, 0, g_acWnd, NULL);
+  DestroyMenu(m);
+  if (cmd) PostMessageW(g_acWnd, WM_AC_LINK, (WPARAM)cmd, 0);
+  return TRUE;
+}
+
+/* WM_AC_LINK 40…43 — действие над обозначением из ленты */
+static void ac_des_action(int which) {
+  const wchar_t *des = g_acLinkDes;
+  if (!des[0]) return;
+  wchar_t cmd[260];
+  switch (which) {
+  case 40:
+    _snwprintf(cmd, 260, L"есть ли в Союзе %s", des);
+    cmd[259] = 0;
+    ac_route_say(cmd);
+    break;
+  case 41:
+    _snwprintf(cmd, 260, L"куда входит %s", des);
+    cmd[259] = 0;
+    ac_route_say(cmd);
+    break;
+  case 42:
+    route_show();
+    SetWindowTextW(g_rtDes, des);
+    rt_start();
+    break;
+  case 43:
+    package_show(FALSE);
+    SetWindowTextW(g_pkEsiEdit, des);
+    pk_esi_start();
+    break;
+  }
+}
