@@ -6,6 +6,8 @@
   python eval_model.py ... --model my.gguf --mmproj mm.gguf  # любая своя
   python eval_model.py ... --tess-only                      # только Tesseract, без модели
   python eval_model.py ... --answers runs/base.json         # пересчитать без модели
+  python eval_model.py --dump data/dump2 ... --lora draw-lora2.gguf --gab-lora draw-gab-lora.gguf --gab-dump data/dump3
+      # как CursorPad с адаптером габаритов: лист — адаптером чертежей, габариты — вторым вопросом
 
 По умолчанию — только отложенные листы (eval: true в разметке): на них не учат."""
 import argparse
@@ -86,6 +88,8 @@ def main():
     ap.add_argument('--preset', default='qwen3.5-4b')
     ap.add_argument('--model'), ap.add_argument('--mmproj')
     ap.add_argument('--lora', help='адаптер GGUF (draw-lora*.gguf)')
+    ap.add_argument('--gab-lora', help='адаптер габаритов (draw-gab…): второй вопрос по листу, из ответа — только gabarit')
+    ap.add_argument('--gab-dump', help='выгрузка с вопросом третьего поколения (data/dump3) для --gab-lora')
     ap.add_argument('--server', help='llama-server.exe (по умолчанию — CursorPad)')
     ap.add_argument('--tn', default='tn_cli.exe', help='tn_cli.exe, собранный из tn_cli.c (README.md)')
     ap.add_argument('--split', choices=['eval', 'train', 'all'], default='eval')
@@ -111,7 +115,9 @@ def main():
         mmproj = a.mmproj or cpvl.models_dir() / p['dir'] / p['mmproj']
         log = pathlib.Path(a.out).with_suffix('.server.log')
         log.parent.mkdir(parents=True, exist_ok=True)
-        with cpvl.Server(model, mmproj, p.get('server', []), a.lora, a.server, log=log) as srv:
+        loras = [a.lora, a.gab_lora] if a.gab_lora else a.lora
+        gabq = cpvl.load_prompts(a.gab_dump)['sheet'] if a.gab_lora else None
+        with cpvl.Server(model, mmproj, p.get('server', []), loras, a.server, log=log) as srv:
             for k in keep:
                 for tag in cpvl.TAGS:
                     im = sheets[k][tag]
@@ -121,6 +127,16 @@ def main():
                     q = prompts[tag]
                     answers[k][tag] = srv.ask(im, q['q'], q['schema'], q['max_tokens'])
                     print(f'{k[:34]:34} {tag:5} {time.time() - t:5.1f} с  {answers[k][tag][:70]!r}', flush=True)
+                if gabq and sheets[k].get('sheet') is not None and answers[k].get('sheet'):
+                    t = time.time()  # как drawrec.c: второй вопрос адаптеру габаритов, берём только gabarit
+                    g = srv.ask(sheets[k]['sheet'], gabq['q'], gabq['schema'], gabq['max_tokens'], lora_id=1)
+                    try:
+                        j, gj = json.loads(answers[k]['sheet']), json.loads(g)
+                        j['gabarit'] = gj.get('gabarit')
+                        answers[k]['sheet'] = json.dumps(j, ensure_ascii=False)
+                    except ValueError:
+                        pass
+                    print(f'{k[:34]:34} gab   {time.time() - t:5.1f} с  {g[:70]!r}', flush=True)
     if a.tess_only:
         answers = {k: {} for k in keep}
 

@@ -90,6 +90,11 @@ int ai_ask_image_sync(const wchar_t *instruction, const wchar_t *imagePath, DWOR
 /* картинка и вопрос одной репликой, температура 0; schema — JSON-схема ответа или NULL */
 int ai_ask_image_sync_ex(const wchar_t *question, const wchar_t *imagePath, const char *schema, int maxTokens,
                          DWORD timeoutMs, volatile LONG *cancel, wchar_t **answer);
+/* то же с адаптером габаритов (draw-gab…) вместо адаптера чертежей; адаптера нет — AI_ERROR */
+int ai_ask_image_gab_sync(const wchar_t *question, const wchar_t *imagePath, const char *schema, int maxTokens,
+                          DWORD timeoutMs, volatile LONG *cancel, wchar_t **answer);
+/* рядом с моделью адаптер габаритов: лист спрашивают второй раз, из ответа берут только габариты */
+BOOL ai_draw_gab(void);
 
 /* Точки расширения для правил (распознавание чертежа, сопоставление с Союзом).
    Обе — из рабочего потока; ИИ выключен или не ответил — FALSE / 0, правила
