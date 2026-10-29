@@ -1709,6 +1709,12 @@ static BOOL pk_check(BOOL quiet) {
   }
   int nmf = pk_norms_fill(TRUE);
   if (nmf) sb_add(&b, L"• Нормы Тпз/Тшт по таблицам ОМН посчитаны у %d операций (Тшт — только где есть машинное время)\n", nmf);
+  { /* участок не подобрался (заготовка без своей строки в приоритетах, редкая операция) — проверить */
+    int noArea = 0;
+    for (int r = 0; r < op->n; r++)
+      if (xp_cell(op, r, 2)[0] && !xp_cell(op, r, 3)[0] && !pk_is_transport(xp_cell(op, r, 2))) noArea++;
+    if (noArea) sb_add(&b, L"• Операций без участка: %d — проверить (заготовке нужна своя строка в приоритетах)\n", noArea);
+  }
   if (b.w && b.w[0] && !quiet) {
     wchar_t *msg = b.w;
     if (wcslen(msg) > 3000) msg[3000] = 0, wcscat(msg, L"\n…");

@@ -346,7 +346,7 @@ static int szm_write_spec(const wchar_t *path, const wchar_t *folder, const wcha
     l += (size_t)_snwprintf(txt + l, 16000 - l, L"ИЗДЕЛИЕ\t%s\t%s\tДетали\t%s\t\r\n", des, name, mat);
   }
   int n = 0, skipped = 0, seq = 0;
-  wchar_t prevArea[16] = L"";
+  wchar_t prevArea[16] = L"", noArea[200] = L""; /* операции без участка — в замечание «проверить» */
   for (int i = 0; i < g_szR.n; i++) {
     const SoItem *it = &g_szR.it[i];
     if (it->state == SO_SKIP) continue;
@@ -380,6 +380,11 @@ static int szm_write_spec(const wchar_t *path, const wchar_t *folder, const wcha
       n++;
     }
     if (area[0]) lstrcpynW(prevArea, area, 16);
+    else { /* участка нет ни в таблице, ни у аналога — пусто, технологу проверить */
+      size_t nl = wcslen(noArea);
+      _snwprintf(noArea + nl, 200 - nl, L"%s%03d %s", nl ? L", " : L"", (seq + 1) * 5, it->code);
+      noArea[199] = 0;
+    }
     l = wcslen(txt);
     if (l + 400 < 16000)
       _snwprintf(txt + l, 16000 - l, L"ТП\t%s\t%03d\t%s\t%s\t%s\t%s\t%s\r\n", des, ++seq * 5, it->code, area, eq, tpz, tsht);
@@ -387,6 +392,11 @@ static int szm_write_spec(const wchar_t *path, const wchar_t *folder, const wcha
   }
   txt[15999] = 0;
   if (skipped) _snwprintf(note, ncap, L"без кода справочника, в ТП не идут: %d", skipped);
+  if (noArea[0]) {
+    size_t nl = wcslen(note);
+    _snwprintf(note + nl, ncap > (int)nl ? ncap - nl : 0, L"%sбез участка — проверить: %s", nl ? L"; " : L"", noArea);
+    note[ncap - 1] = 0;
+  }
   int len8 = WideCharToMultiByte(CP_UTF8, 0, txt, -1, NULL, 0, NULL, NULL);
   char *u = (char *)malloc((size_t)len8);
   if (!u) return 0;
