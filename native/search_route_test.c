@@ -75,6 +75,24 @@ static void sb(const wchar_t *in, const wchar_t *want, int fixes) {
   printf("»\n");
 }
 
+static void txt(const wchar_t *in, const wchar_t *want, int fixes, const wchar_t *first) {
+  wchar_t s[400], f[60];
+  wcscpy(s, in);
+  int n = dr_text_fix_sb(s, f, 60);
+  g_n++;
+  if (n == fixes && !wcscmp(s, want) && !wcscmp(f, first)) return;
+  g_fail++;
+  printf("FAIL текст «");
+  out8(in);
+  printf("»: %d «", n);
+  out8(s);
+  printf("» первое «");
+  out8(f);
+  printf("», ждали %d «", fixes);
+  out8(want);
+  printf("»\n");
+}
+
 static void dbw(const wchar_t *in, const wchar_t *want) {
   SrWords w;
   wchar_t got[SR_Q] = L"";
@@ -199,6 +217,13 @@ int main(void) {
   sb(L"3424-с6", L"3424-с6", 0);
   sb(L"Ст3с6", L"Ст3с6", 0);
   sb(L"14637-89 С6", L"14637-89 С6", 0);   /* номер ГОСТ — не ядро обозначения */
+  /* то же в тексте F6: только обозначения, латинская «c» — тоже */
+  txt(L"321-23-с632", L"321-23-сб32", 1, L"321-23-сб32");
+  txt(L"Лист 1 АБВГ.123456.000С6 Сборочный чертёж", L"Лист 1 АБВГ.123456.000СБ Сборочный чертёж", 1,
+      L"АБВГ.123456.000СБ");
+  txt(L"Узел 321-23-c632 (латиница)", L"Узел 321-23-сб32 (латиница)", 1, L"321-23-сб32");
+  txt(L"АДЕ 3422-682.01.01\r\nУзел 321-23-с632\r\nс6 листами, С6-ая колонка", L"АДЕ 3422-682.01.01\r\nУзел 321-23-сб32\r\nс6 листами, С6-ая колонка", 1, L"321-23-сб32");
+  txt(L"с6 листами, С6-ая колонка, лист 2 С6, Ст3с6", L"с6 листами, С6-ая колонка, лист 2 С6, Ст3с6", 0, L"");
 
   printf("%d проверок, ошибок: %d\n", g_n, g_fail);
   return g_fail ? 1 : 0;

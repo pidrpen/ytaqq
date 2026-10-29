@@ -21,6 +21,9 @@
    кириллицу («ADE» и «АДЕ»), при сравнении не различаются; пробел, случайно
    вставленный у точки или дефиса между цифрами («3422 - 682»), убирается. */
 
+#include <stdlib.h>
+#include <string.h>
+
 /* ---- шаблон обозначения (общий со штампом, drawrec.c) ----------------------- */
 
 static int dr_isupper_cyr(wchar_t c) { return (c >= L'А' && c <= L'Я') || c == L'Ё'; }
@@ -103,6 +106,34 @@ static inline int dr_des_fix_sb(wchar_t *s) { /* inline: plm_check_test подк
       n++;
     }
   }
+  return n;
+}
+
+/* то же в свободном тексте (F6 «Выделить и прочитать»): правятся только обозначения — dr_des_fix_sb
+   сверяет с шаблоном, обычные «с6 листами», «С6-ая» не трогаются. Латинская «c» перед «6» в обозначении
+   (Tesseract путает алфавиты) — тоже, она становится кириллицей. first — первое поправленное слово */
+static inline int dr_text_fix_sb(wchar_t *t, wchar_t *first, int cap) {
+  if (first && cap) first[0] = 0;
+  size_t len = wcslen(t);
+  wchar_t *c = (wchar_t *)malloc((len + 1) * sizeof(wchar_t));
+  if (!c) return 0;
+  memcpy(c, t, (len + 1) * sizeof(wchar_t));
+  for (size_t i = 0; i + 1 < len; i++)
+    if ((c[i] == L'c' || c[i] == L'C') && c[i + 1] == L'6') c[i] = c[i] == L'c' ? L'с' : L'С';
+  int n = dr_des_fix_sb(c);
+  for (size_t i = 0; n && i + 1 < len; i++) {
+    if (t[i + 1] != L'6' || (c[i + 1] != L'б' && c[i + 1] != L'Б')) continue; /* здесь «6» не тронута */
+    t[i] = c[i], t[i + 1] = c[i + 1];
+    if (first && cap && !first[0]) { /* слово целиком — от пробела до пробела */
+      size_t b = i, e = i + 2;
+      while (b > 0 && t[b - 1] > L' ') b--;
+      while (e < len && t[e] > L' ') e++;
+      size_t k = e - b < (size_t)cap - 1 ? e - b : (size_t)cap - 1;
+      memcpy(first, t + b, k * sizeof(wchar_t));
+      first[k] = 0;
+    }
+  }
+  free(c);
   return n;
 }
 

@@ -5906,8 +5906,9 @@ static void ocr_fix_query(const wchar_t *in, wchar_t *out, int cap) {
       if (ocr_is_digit(out[j])) hasDigit = TRUE;
       j++;
     }
-    if (hasDigit)
-      for (int k = i; k < j; k++) out[k] = ocr_digitize(out[k]);
+    if (hasDigit) /* «б» за «с» — это «сб» обозначения («321-23-сб32»), не шестёрка */
+      for (int k = i; k < j; k++)
+        if (!(out[k] == L'б' && k > 0 && (out[k - 1] == L'с' || out[k - 1] == L'С'))) out[k] = ocr_digitize(out[k]);
     i = j;
   }
 }
@@ -5945,6 +5946,7 @@ static void ocr_find_selected(void) {
   }
   wchar_t fixed[400];
   ocr_fix_query(q, fixed, 400);
+  dr_text_fix_sb(fixed, NULL, 0); /* «321-23-с632» → «321-23-сб32» */
   if (fixed[0] && wcscmp(fixed, q) != 0) {
     /* поправку не прячем: видно, что именно ушло в поиск */
     wchar_t m[440];

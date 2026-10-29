@@ -5482,10 +5482,18 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
   case WM_OCR_DONE: {
     wchar_t *text = (wchar_t *)lParam;
     if (text && text[0]) {
+      /* «б» в «сб» обозначения распознавание отдаёт шестёркой: поправка — в окне, а с ним в буфере,
+         блокноте и поиске; что поправлено — в строке состояния, как поправка поиска */
+      wchar_t first[60];
+      int sb = dr_text_fix_sb(text, first, 60);
       /* только в своё окно: в блокнот — кнопкой «В блокнот», если нужно */
       show_ocr_text(text);
-      wchar_t s[96];
-      _snwprintf(s, 96, L"Распознано (%s) — текст в отдельном окне", g_ocrBy[0] ? g_ocrBy : L"OCR");
+      wchar_t s[200];
+      if (sb)
+        _snwprintf(s, 200, L"Распознано (%s) — с поправкой «6» → «б» в «сб»: %s%s", g_ocrBy[0] ? g_ocrBy : L"OCR",
+                   first, sb > 1 ? L" и ещё" : L"");
+      else
+        _snwprintf(s, 200, L"Распознано (%s) — текст в отдельном окне", g_ocrBy[0] ? g_ocrBy : L"OCR");
       show_status(s);
     } else {
       show_status(g_ocrNote[0] ? g_ocrNote : L"Текст не распознан");
