@@ -116,11 +116,11 @@ static const wchar_t *nm_pre(const wchar_t *s, const wchar_t *w) {
 
 /* есть ли code среди «a; b; c» */
 static int nm_list_has(const wchar_t *list, const wchar_t *code) {
-  wchar_t one[80];
+  wchar_t one[160]; /* названия операций справочника бывают длинные (7509 — 93 знака) */
   for (const wchar_t *p = list; p && *p;) {
     const wchar_t *e = wcschr(p, L';');
     int n = e ? (int)(e - p) : (int)wcslen(p);
-    if (n > 79) n = 79;
+    if (n > 159) n = 159;
     wcsncpy(one, p, (size_t)n);
     one[n] = 0;
     if (nm_eq(one, code)) return 1;
@@ -246,9 +246,10 @@ enum { NMO_NONE, NMO_DEF, NMO_CALC, NMO_TAB, NMO_DRAW, NMO_ASK }; /* по воз
 static const wchar_t *const kNmOrg[] = {L"", L"по умолчанию", L"расчёт", L"по таблице", L"с чертежа", L"задано"};
 
 #define NM_PARS 80
+#define NM_PARS_S 128 /* длина значения параметра */
 typedef struct {
   wchar_t name[24];
-  wchar_t s[64];   /* текстом: код («патрон») или число как записано */
+  wchar_t s[NM_PARS_S]; /* текстом: код («патрон») или число как записано; названия операций — длинные */
   double v;        /* NM_NONE — не число */
   int org;
   wchar_t why[120]; /* откуда, если не очевидно: «заготовка Круг 45» */
@@ -277,8 +278,8 @@ static NmPar *nm_put(NmCtx *c, const wchar_t *name, const wchar_t *s, double v, 
   }
   memset(p, 0, sizeof(*p));
   tn_cpy(p->name, 24, name);
-  if (s) tn_cpy(p->s, 64, s);
-  else if (!nm_na(v)) tn_numstr(v, p->s, 64);
+  if (s) tn_cpy(p->s, NM_PARS_S, s);
+  else if (!nm_na(v)) tn_numstr(v, p->s, NM_PARS_S);
   p->v = v;
   p->org = org;
   if (why) tn_cpy(p->why, 120, why);
@@ -783,7 +784,8 @@ static const wchar_t *const kNmKind[] = {L"", L"токарная", L"сверл�
 
 typedef struct {
   int kind, idx;   /* idx — номер операции в маршруте (с нуля) */
-  wchar_t op[48];
+  wchar_t op[128]; /* как в справочнике операций */
+  wchar_t sub[24]; /* уточнение маршрута: «черновая», «чистовая», «тонкая», «резьба» */
   double to, tv, top, tsht, tpz, tshk;
   int full;        /* в Тшт есть всё: То, Тв, обслуживание */
   wchar_t how[NM_HOW];
@@ -973,7 +975,7 @@ static double nm_clamp(NmJob *j, const wchar_t *par, double v) {
   NmPar *p = nm_par(&j->c, par);
   if (p) {
     p->v = c;
-    tn_numstr(c, p->s, 64);
+    tn_numstr(c, p->s, NM_PARS_S);
     tn_cpy(p->why, 120, L"ограничено пределом Настроек");
   }
   return c;
@@ -1319,7 +1321,7 @@ static long nm_passes(NmJob *j, double h) {
     NmPar *pt = nm_par(&j->c, L"t");
     if (pt) {
       pt->v = h / (double)i;
-      tn_numstr(pt->v, pt->s, 64);
+      tn_numstr(pt->v, pt->s, NM_PARS_S);
       tn_cpy(pt->why, 120, L"припуск h/проходов — предел проходов Настроек");
     }
   }
@@ -1350,7 +1352,7 @@ static double nm_to_turn(NmJob *j) {
       tn_cat(w, 100, L" − ");
       tn_catnum(w, 100, D);
       tn_cat(w, 100, L")/2");
-      if (wcsstr(j->o->op, L"чернов")) tn_cat(w, 100, L", припуск под чистовую не вычтен");
+      if (wcsstr(j->o->op, L"чернов") || !wcscmp(j->o->sub, L"черновая")) tn_cat(w, 100, L", припуск под чистовую не вычтен");
       nm_putv(&j->c, L"h", h, NMO_CALC, w);
     } else if (!nm_lim_def(j, L"h", &h)) {
       nm_req(j, L"h", L"припуск h на сторону (или Ø заготовки)");
@@ -1539,8 +1541,13 @@ static double nm_to_cut(NmJob *j) {
   int m = -1, any = -1;
   /* способ — по операции: «Лазерная резка» — лазер, «Плазменная» — плазма, «Газовая» — газ;
      у «Заготовительной (раскрой)» — первый, у которого в нормах есть скорость */
-  const wchar_t *want = nm_pre(j->o->op, L"Лазерн") ? L"Лазер" : nm_pre(j->o->op, L"Плазмен") ? L"Плазма"
-                        : nm_pre(j->o->op, L"Газов") ? L"Газовая" : NULL;
+  wchar_t *fo = tn_fold(j->o->op, 0);
+  const wchar_t *want = !fo                      ? NULL
+                        : wcsstr(fo, L"лазерн")  ? L"Лазер"
+                        : wcsstr(fo, L"плазмен") ? L"Плазма"
+                        : wcsstr(fo, L"кислород") || wcsstr(fo, L"газов") ? L"Газовая"
+                                                                          : NULL;
+  free(fo);
   if (pk && cut_calc(mat, th, P, pk))
     for (int i = 0; i < pk->n && m < 0; i++)
       if (!cut_na(pk->m[i].num[CN_SPEED]) && pk->m[i].num[CN_SPEED] > 0) {
@@ -1803,13 +1810,14 @@ static void nm_op_calc(NmJob *j) {
 
 /* ---- вход: маршрут, штамп, вопрос ------------------------------------------------- */
 
-static int nm_kind(const wchar_t *op) {
-  if (nm_pre(op, L"Токарная (резьба)") || nm_pre(op, L"Токарная (накатка)")) return NMK_NONE;
+static int nm_kind(const wchar_t *op, const wchar_t *sub) {
+  if (nm_pre(op, L"Токарная (резьба)") || nm_pre(op, L"Токарная (накатка)") || (sub && !wcscmp(sub, L"резьба")))
+    return NMK_NONE;
   if (nm_pre(op, L"Токарная")) return NMK_TURN;
   if (nm_pre(op, L"Сверлильная")) return NMK_DRILL;
   if (nm_pre(op, L"Фрезерная")) return NMK_MILL;
-  if (nm_pre(op, L"Заготовительная (раскрой)") || nm_pre(op, L"Лазерная резка") || nm_pre(op, L"Плазменная резка") ||
-      nm_pre(op, L"Газовая резка"))
+  if (nm_pre(op, L"Термическая резка") || nm_eq(op, L"Раскрой") || nm_pre(op, L"Заготовительная (раскрой)") ||
+      nm_pre(op, L"Лазерная резка") || nm_pre(op, L"Плазменная резка") || nm_pre(op, L"Газовая резка"))
     return NMK_CUT;
   return NMK_NONE;
 }
@@ -2082,8 +2090,10 @@ static void nm_ctx_defaults(const NmBase *b, const TnRoute *r, NmOp *o, NmCtx *c
     nm_put(c, L"отверстие", L"сквозное", NM_NONE, NMO_DEF, NULL);
   }
   /* вид — для таблиц режимов с черновой и чистовой; у одной операции «начисто» его нет */
-  if (wcsstr(o->op, L"чистов") || wcsstr(o->op, L"тонкая")) nm_put(c, L"вид", L"чистовая", NM_NONE, NMO_CALC, NULL);
-  else if (wcsstr(o->op, L"чернов")) nm_put(c, L"вид", L"черновая", NM_NONE, NMO_CALC, NULL);
+  if (wcsstr(o->op, L"чистов") || wcsstr(o->op, L"тонкая") || !wcscmp(o->sub, L"чистовая") || !wcscmp(o->sub, L"тонкая"))
+    nm_put(c, L"вид", L"чистовая", NM_NONE, NMO_CALC, NULL);
+  else if (wcsstr(o->op, L"чернов") || !wcscmp(o->sub, L"черновая"))
+    nm_put(c, L"вид", L"черновая", NM_NONE, NMO_CALC, NULL);
   if (!nm_parc(c, L"способ")) {
     double D = nm_v(c, L"D"), L = nm_v(c, L"L");
     if (o->kind == NMK_TURN) {
@@ -2192,7 +2202,8 @@ static void nm_ask_op(const wchar_t *ask, int num, NmCtx *c) {
 }
 
 /* ---- какие операции нормируются и чем (Настройки → «Нормирование», список операций) ----------
-   Станочные — по ОМН, резка — по нормам резки завода; остальные — оценкой из таблицы «оценка»
+   Названия — как в справочнике операций (techno.c берёт их оттуда по номеру). Станочные — по ОМН,
+   резка — по нормам резки завода; остальные — оценкой из таблицы «оценка»
    (укрупнённо, не ОМН: Тшт = Тшт + на кг·масса, Тпз), термическая и покрытия — по факту (время
    цикла задаёт их технология). Выключенная в Настройках — не нормируется, в ответе одной строкой. */
 enum { NMS_OMN, NMS_CUT, NMS_EST, NMS_FACT };
@@ -2209,31 +2220,32 @@ static NmOpRule g_nmOps[] = {
     {L"Токарная", NMS_OMN, L"ОМН вспомогательного времени (карты 2, 9, 20, 43–47), То — режимы по формулам", 0},
     {L"Сверлильная", NMS_OMN, L"ОМН (карты 9, 10, 25, 43–45, 52), То — режимы по формулам", 0},
     {L"Фрезерная", NMS_OMN, L"ОМН (карты 10, 27, 43–45, 54), То — режимы по формулам", 0},
-    {L"Лазерная резка", NMS_CUT, NM_SRC_CUT, 0},
-    {L"Плазменная резка", NMS_CUT, NM_SRC_CUT, 0},
-    {L"Газовая резка", NMS_CUT, NM_SRC_CUT, 0},
-    {L"Заготовительная (раскрой)", NMS_CUT, NM_SRC_CUT, 0},
+    {L"Термическая резка лазерная", NMS_CUT, NM_SRC_CUT, 0},
+    {L"Термическая резка плазменно-дуговая", NMS_CUT, NM_SRC_CUT, 0},
+    {L"Термическая резка кислородная", NMS_CUT, NM_SRC_CUT, 0},
+    {L"Раскрой", NMS_CUT, NM_SRC_CUT, 0},
     {L"Отрезная", NMS_EST, NM_SRC_EST, 0},
     {L"Токарная (резьба)", NMS_EST, NM_SRC_EST, 0},
-    {L"Токарная (накатка)", NMS_EST, NM_SRC_EST, 0},
-    {L"Токарная (тонкая)", NMS_EST, NM_SRC_EST, 0},
+    {L"Накатка", NMS_EST, NM_SRC_EST, 0},
     {L"Шлифовальная", NMS_EST, NM_SRC_EST, 0},
     {L"Круглошлифовальная", NMS_EST, NM_SRC_EST, 0},
     {L"Плоскошлифовальная", NMS_EST, NM_SRC_EST, 0},
-    {L"Зубофрезерная", NMS_EST, NM_SRC_EST, 0},
-    {L"Долбёжная", NMS_EST, NM_SRC_EST, 0},
-    {L"Электроэрозионная", NMS_EST, NM_SRC_EST, 0},
+    {L"3убофрезерная", NMS_EST, NM_SRC_EST, 0},
+    {L"Долбежная", NMS_EST, NM_SRC_EST, 0},
+    {L"Профильно-вырезная электрофизическая электроэрозионная электроискровая проволочным электродом", NMS_EST,
+     NM_SRC_EST, 0},
     {L"Доводочная", NMS_EST, NM_SRC_EST, 0},
-    {L"Гибочная", NMS_EST, NM_SRC_EST, 0},
-    {L"Штамповочная", NMS_EST, NM_SRC_EST, 0},
-    {L"Сварочная", NMS_EST, NM_SRC_EST, 0},
-    {L"Слесарная (разметка)", NMS_EST, NM_SRC_EST, 0},
+    {L"Гибка", NMS_EST, NM_SRC_EST, 0},
+    {L"Штамповка", NMS_EST, NM_SRC_EST, 0},
+    {L"Сварка", NMS_EST, NM_SRC_EST, 0},
+    {L"Разметка", NMS_EST, NM_SRC_EST, 0},
     {L"Слесарная", NMS_EST, NM_SRC_EST, 0},
-    {L"Маркировочная", NMS_EST, NM_SRC_EST, 0},
-    {L"Контрольная", NMS_EST, NM_SRC_EST, 0},
-    {L"Термическая", NMS_FACT, L"по факту: время печи и цикла — по технологии термообработки", 0},
-    {L"Гальваническая", NMS_FACT, L"по факту: время в ваннах — по технологии покрытия", 0},
-    {L"Окрасочная", NMS_FACT, L"по факту: время сушки — по технологии окраски", 0},
+    {L"Маркирование", NMS_EST, NM_SRC_EST, 0},
+    {L"Контроль", NMS_EST, NM_SRC_EST, 0},
+    {L"Термическая обработка", NMS_FACT, L"по факту: время печи и цикла — по технологии термообработки", 0},
+    {L"Получение покрытий", NMS_FACT, L"по факту: время в ваннах — по технологии покрытия", 0},
+    {L"Цинкование электрохимическое", NMS_FACT, L"по факту: время в ваннах — по технологии покрытия", 0},
+    {L"Получение покрытий органических (лакакрасочных)", NMS_FACT, L"по факту: время сушки — по технологии окраски", 0},
 };
 #define NM_OPRULES ((int)(sizeof(g_nmOps) / sizeof(g_nmOps[0])))
 
@@ -2248,17 +2260,25 @@ static NmOpRule *nm_op_rule(const wchar_t *op) {
   return NULL;
 }
 
+/* название с уточнением маршрута: «Токарная (резьба)» — для правил и строк оценки */
+static void nm_op_key(const wchar_t *op, const wchar_t *sub, wchar_t *out, int cap) {
+  tn_cpy(out, cap, op);
+  if (sub && sub[0]) tn_cat(out, cap, L" ("), tn_cat(out, cap, sub), tn_cat(out, cap, L")");
+}
+
 /* оценка операции без таблиц нормативов: строка таблицы «оценка» по названию операции */
 static void nm_est(NmJob *j) {
   NmOp *o = j->o;
   wchar_t s[400];
   o->to = o->tv = o->top = o->tsht = o->tpz = o->tshk = NM_NONE;
-  const NmOpRule *rule = nm_op_rule(o->op);
+  wchar_t key[160];
+  nm_op_key(o->op, o->sub, key, 160);
+  const NmOpRule *rule = nm_op_rule(key);
   if (o->kind == NMK_FACT) {
     nm_line(j, rule ? rule->src : L"по факту");
     return;
   }
-  nm_put(&j->c, L"операция", o->op, NM_NONE, NMO_CALC, NULL);
+  nm_put(&j->c, L"операция", key, NM_NONE, NMO_CALC, NULL);
   NmHit h;
   if (!nm_find(j->b, L"оценка", &j->c, &h)) {
     tn_cpy(s, 400, L"оценки нет: ");
@@ -2293,8 +2313,10 @@ static void nm_route(const NmBase *b, const TnRoute *r, const wchar_t *mass, con
   NmJob *j = (NmJob *)malloc(sizeof(NmJob));
   if (!j) return;
   for (int i = 0; i < r->n && res->n < NM_OPS; i++) {
-    int kind = nm_kind(r->op[i].op);
-    const NmOpRule *rule = nm_op_rule(r->op[i].op);
+    int kind = nm_kind(r->op[i].op, r->op[i].sub);
+    wchar_t key[160];
+    nm_op_key(r->op[i].op, r->op[i].sub, key, 160);
+    const NmOpRule *rule = nm_op_rule(key);
     if (rule && rule->off) { /* выключено в Настройках */
       tn_item(res->off, 400, r->op[i].op);
       continue;
@@ -2305,7 +2327,8 @@ static void nm_route(const NmBase *b, const TnRoute *r, const wchar_t *mass, con
     memset(o, 0, sizeof(*o));
     o->kind = kind;
     o->idx = i;
-    tn_cpy(o->op, 48, r->op[i].op);
+    tn_cpy(o->op, 128, r->op[i].op);
+    tn_cpy(o->sub, 24, r->op[i].sub);
     memset(j, 0, sizeof(*j));
     j->b = b;
     j->o = o;

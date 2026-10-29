@@ -7,7 +7,10 @@
 #include <string.h>
 #include <wchar.h>
 #include "search_route.c"
+#ifndef OPS_1C_INCLUDED /* справочник операций подключает и techno.c */
+#define OPS_1C_INCLUDED
 #include "ops_1c.h"
+#endif
 #include "techno.c"
 #include "soyuz_ops.c"
 enum { PK_ITEMS, PK_LINKS, PK_OPS, PK_BLANKS, PK_NT }; /* как в export.c */
