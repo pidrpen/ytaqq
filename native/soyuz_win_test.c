@@ -242,7 +242,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
   /* живой маршрут, как в чате */
   static wchar_t txt[9000];
   st_route(txt, 9000);
-  st_check(sz_start(txt) && g_szWnd && g_szR.n == 10, L"маршрут из 10 операций — в очереди, окно открыто");
+  st_check(sz_start(txt) && g_szWnd && g_szR.n == 9, L"маршрут из 9 операций (названия справочника, резьба в токарной) — в очереди, окно открыто");
   st_check(g_szDb == 1, L"база: ищу аналоги");
   wchar_t first[200];
   lstrcpynW(first, g_stClip, 200);
@@ -258,8 +258,9 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
             it->num, it->op, it->code, it->name, it->dir, it->uses, it->guid[0] ? it->guid : L"—", it->from, it->ceh,
             it->equip, it->aTpz, it->aTsht);
   }
-  int iZag = st_find(L"Отрезная"), iTok = st_find(L"Токарная (черновая)"),
-      iShl = st_find(L"Круглошлифовальная"), iOkr = st_find(L"Окрасочная"), iKon = st_find(L"Контрольная");
+  int iZag = st_find(L"Отрезная"), iTok = st_find(L"Токарная"), /* первая из двух токарных */
+      iShl = st_find(L"Круглошлифовальная"), iOkr = st_find(L"Получение покрытий органических (лакакрасочных)"),
+      iKon = st_find(L"Контроль");
   st_check(iZag == 0 && g_szR.it[0].dir && !wcscmp(g_szR.it[0].code, L"4280") && !g_szR.it[0].guid[0],
            L"отрезная первой: справочная 4280 есть, аналога в ТП дома нет — пойдёт текстом");
   st_check(iTok > 0 && g_szR.it[iTok].guid[0] && !wcscmp(g_szR.it[iTok].code, L"4110"), L"токарная: аналог 4110");
@@ -282,12 +283,12 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
       buf[rd] = 0;
       t = rd > 3 ? utf8_to_alloc(buf + 3, rd - 3) : NULL;
     }
-    st_check(n == 10 && t && wcsstr(t, L"ПАПКА\tТестовая сборка ЭСИ\r\n") &&
+    st_check(n == 9 && t && wcsstr(t, L"ПАПКА\tТестовая сборка ЭСИ\r\n") &&
                  wcsstr(t, L"ИЗДЕЛИЕ\tАБВГ.711141.001\tУдлинитель вала\tДетали\t"),
-             L"описание: папка, изделие с обозначением из «Лист:», 10 операций");
+             L"описание: папка, изделие с обозначением из «Лист:», 9 операций");
     st_check(t && wcsstr(t, L"ТП\tАБВГ.711141.001\t010\t4110\t31\t16К20, Токарно-винторезный станок\t15\t4\r\n"),
              L"строка ТП токарной: код 4110, участок 31, станок и нормы аналога");
-    st_check(t && wcsstr(t, L"\t045\t7300\t\t\t\t\r\n"), L"окрасочная без аналога: код есть, участок и нормы пустые");
+    st_check(t && wcsstr(t, L"\t040\t7300\t\t\t\t\r\n"), L"окрасочная без аналога: код есть, участок и нормы пустые");
     /* таблица приоритетов технолога (soyuz_prio.c) важнее аналога: 4110 → участок 32, станок 1К62 */
     {
       wchar_t pp[MAX_PATH];
@@ -644,7 +645,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
   st_check(g_szR.it[iOkr].pasted && g_szR.cur == iKon && !wcscmp(g_stClip, g_szR.it[iKon].guid),
            L"после Ctrl+V текста — контрольная, её GUID в буфере");
   if (g_szR.it[iOkr].dir) {
-    st_newop(g_szR.it[iOkr].dir, ver, L"045");
+    st_newop(g_szR.it[iOkr].dir, ver, L"040");
     st_check(g_szR.it[iOkr].state == SO_DONE && g_szR.cur == iKon, L"окрасочная появилась в ТП — отмечена, буфер на месте");
   }
 
