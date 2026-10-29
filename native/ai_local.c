@@ -777,6 +777,10 @@ static void ai_short_path(wchar_t *p) {
   }
 }
 
+static HINTERNET ai_net_open(void);
+static BOOL ai_get_llama(HINTERNET ses, BOOL gpu);
+static void ai_dl_cancel_clear(void);
+
 /* поднять сервер, если он не идёт. Ждёт загрузки модели до deadline.
    *held — запрос пошёл к своему серверу и записан в g_aiSrvUsers: по концу
    запроса его оттуда снимают (ai_job_run). */
@@ -1004,6 +1008,34 @@ static int ai_server_ensure(DWORD deadline, volatile LONG *cancel, int minimumCo
           break;
         }
         if (strstr_log_port(log)) break; /* порт занят — тот же запуск на другом порту */
+        /* сервер упал сам (0xC0000005 и подобные), журнал пуст — у сборки Vulkan так бывает с
+           драйвером видеокарты или без неё (виртуалка, удалённый стол): -ngl 0 её не спасает,
+           Vulkan подгружается всё равно. Берём сборку для процессора, скачав, если её нет */
+        if (gpu && (code & 0xF0000000u) == 0xC0000000u && ai_load_fail(log) == AI_LF_OTHER) {
+          wchar_t cpuExe[MAX_PATH];
+          BOOL have = ai_server_exe(FALSE, cpuExe) && _wcsicmp(cpuExe, exe);
+          if (!have && !g_aiSrvExe[0]) {
+            ai_log(L"Сборка Vulkan падает при запуске — скачиваю сборку для процессора");
+            HINTERNET ses = ai_net_open();
+            if (ses) {
+              ai_dl_cancel_clear();
+              deadline += 240000; /* скачивание и распаковка не в счёт ожидания модели */
+              have = ai_get_llama(ses, FALSE) && ai_server_exe(FALSE, cpuExe) && _wcsicmp(cpuExe, exe);
+              WinHttpCloseHandle(ses);
+            }
+          }
+          if (have) {
+            lstrcpynW(exe, cpuExe, MAX_PATH);
+            gpu = FALSE;
+            ngl = 0;
+            mmCpu = FALSE;
+            g_aiGpu = FALSE; /* дальше сразу на процессоре; галочку «Видеокарта» можно вернуть */
+            ai_save();
+            lstrcpynW(g_aiRunNote, L"сборка для видеокарты падала при запуске — llama.cpp для процессора", 200);
+            ai_log(L"Перехожу на llama.cpp для процессора: %s", exe);
+            break;
+          }
+        }
         fail = ai_load_fail(log);
         ai_log(L"Причина по журналу: %s", fail == AI_LF_VRAM ? L"не хватило памяти видеокарты"
                                          : fail == AI_LF_RAM  ? L"не хватило оперативной памяти"
@@ -1809,6 +1841,7 @@ typedef struct {
 } AiDl;
 static AiDl g_aiDl;
 static HWND g_aiDlNotify; /* окно Настроек — ему WM_AI_UI */
+static void ai_dl_cancel_clear(void) { g_aiDl.cancel = 0; }
 
 static void ai_dl_say(const wchar_t *fmt, ...) {
   va_list ap;
@@ -2047,7 +2080,19 @@ static DWORD WINAPI ai_lora_thread(LPVOID p) {
       WinHttpCloseHandle(ses);
       return 0;
     }
-    ai_log(L"%s: https://%s%s — ответ %lu, %llu байт, не подошёл", pin->what, kHost[i], path, st, got);
+    char head[100] = "";
+    if (got && got < 4096) { /* вместо файла пришла страница — покажем её начало (фильтр сети?) */
+      HANDLE hf = CreateFileW(part, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+      DWORD rd = 0;
+      if (hf != INVALID_HANDLE_VALUE) {
+        ReadFile(hf, head, sizeof(head) - 1, &rd, NULL);
+        CloseHandle(hf);
+      }
+      for (DWORD j = 0; j < rd; j++) if ((unsigned char)head[j] < 32) head[j] = ' ';
+      head[rd] = 0;
+    }
+    ai_log(L"%s: https://%s%s — ответ %lu, %llu байт, не подошёл%s%hs", pin->what, kHost[i], path, st, got,
+           head[0] ? L". Начало: " : L"", head);
   }
   DeleteFileW(part);
   if (ses) WinHttpCloseHandle(ses);
@@ -2150,10 +2195,14 @@ static BOOL ai_parse_llama(const char *js, BOOL gpu, AiAsset *a, char *names, in
   return FALSE;
 }
 
+#define AI_LLAMA_TAG L"b11699" /* движок, на котором проверены Qwen3.5 и Vulkan (QWEN35.md) */
 static BOOL ai_find_llama(HINTERNET ses, BOOL gpu, AiAsset *a) {
-  static const wchar_t *kApi[2] = {L"/repos/ggml-org/llama.cpp/releases/latest",
+  /* сначала проверенный выпуск (AI_LLAMA_TAG): самый свежий b11982 у пользователя падал
+     при запуске (0xC0000005), а «последний» может быть ещё не собран; затем последний */
+  static const wchar_t *kApi[3] = {L"/repos/ggml-org/llama.cpp/releases/tags/" AI_LLAMA_TAG,
+                                   L"/repos/ggml-org/llama.cpp/releases/latest",
                                    L"/repos/ggml-org/llama.cpp/releases?per_page=8"};
-  for (int k = 0; k < 2; k++) {
+  for (int k = 0; k < 3; k++) {
     char *js = NULL;
     DWORD st = ai_net_get(ses, L"api.github.com", kApi[k], 0, NULL, &js, 16u << 20);
     if (st != 200 || !js) {
