@@ -339,7 +339,7 @@ def des_fix_sb(s):
             continue
         e = i - (s[i - 1] == ' ')
         b = e
-        while b > 0 and (s[b - 1].isdigit() or s[b - 1] in '-.' or _upper(s, b - 1)):
+        while b > 0 and (s[b - 1].isdigit() or s[b - 1] in '-.сб' or _upper(s, b - 1)):
             b -= 1
         if e > 0 and s[e - 1].isdigit() and des_core(''.join(s), b) == e:
             s[i], s[i + 1] = 'С', 'Б'
@@ -347,7 +347,10 @@ def des_fix_sb(s):
 
 
 def has_sb(s):
-    return 'СБ' in des_key(s)
+    """код документа «СБ» (сборочный чертёж) — только в конце, сразу после номера: «АБВГ.123456.000 СБ»,
+    «321-23-сб32СБ». «сб» внутри номера («321-23-сб32») — часть номера: это спецификация (пользователь, 29.10)"""
+    k = des_key(s)
+    return len(k) > 2 and k.endswith('СБ') and k[-3].isdigit()
 
 
 SPEC_KEYS = ('sect', 'fmt', 'zone', 'pos', 'des', 'name', 'qty', 'note')  # drawrec.c kDrSpecKey
