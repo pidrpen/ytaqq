@@ -107,9 +107,11 @@ static int preview(const wchar_t *dir, int dpi) {
     g_cvSubOn = TRUE; g_cvSubShownAt = 0; g_cvSubHover = 0; g_cvSubLevel[0] = 1; g_cvSubLevel[1] = 0; preview_shot(dir, L"7c-link-file", t);
     g_cvSubHover = 1; g_cvSubLevel[0] = 0; g_cvSubLevel[1] = 1; preview_shot(dir, L"7d-link-folder", t);
     g_cvSubOn = FALSE; g_cvSubHover = -1; memset(g_cvSubLevel, 0, sizeof(g_cvSubLevel));
-    g_cvCreate = TRUE; g_cvCount = 4; for (int i = 0; i < 4; i++) g_cvFormats[i] = 20 + i;
+    g_cvCreate = TRUE; g_cvCount = 5; for (int i = 0; i < 4; i++) g_cvFormats[i] = 20 + i;
+    g_cvFormats[4] = 27;
     g_cvHover = -1; memset(g_cvLevel, 0, sizeof(g_cvLevel)); preview_shot(dir, L"11-desktop", t);
-    g_cvHover = 2; g_cvLevel[2] = 1; preview_shot(dir, L"12-desktop-word", t); g_cvCreate = FALSE;
+    g_cvHover = 2; g_cvLevel[2] = 1; preview_shot(dir, L"12-desktop-word", t);
+    g_cvLevel[2] = 0; g_cvHover = 4; g_cvLevel[4] = 1; preview_shot(dir, L"12b-desktop-karta", t); g_cvCreate = FALSE;
     /* ожидание файлов: огонёк, затем объяснение; одни папки */
     g_cvCount = 0; g_cvSelection.count = 0; g_cvPath[0] = 0; g_cvHover = -1; g_cvInHub = FALSE; g_cvRead = CV_READ_FAILED;
     g_cvPendingData = (IDataObject *)1; g_cvEnteredAt = GetTickCount(); preview_shot(dir, L"8-reading", t);
@@ -187,11 +189,19 @@ int wmain(int argc, wchar_t **argv) {
   /* рабочий стол: Shift и протянуть по пустому месту — кольцо «Создать»; отпустить на плитке Word — создать Word */
   cv_hide(); g_cvDown=FALSE; POINT p0={600,400}, p1={640,400};
   cv_gesture(p0,TRUE,TRUE,FALSE,FALSE,TRUE); cv_gesture(p1,TRUE,TRUE,FALSE,FALSE,FALSE);
-  if (!IsWindowVisible(g_cvWnd) || !g_cvCreate || g_cvCount!=4) return 18;
-  CvGeo ring=cv_geo(g_cvSize,1.0f); POINT word={g_cvAt.x+(LONG)ring.c,g_cvAt.y+(LONG)(ring.c+(ring.rin+ring.R)/2)};
+  if (!IsWindowVisible(g_cvWnd) || !g_cvCreate || g_cvCount!=5) return 18;
+  /* середина плитки i: плитка 0 сверху, дальше по часовой */
+  CvGeo ring=cv_geo(g_cvSize,1.0f); double band=(ring.rin+ring.R)/2, a=-1.5707963267948966+2*6.283185307179586/g_cvCount;
+  POINT word={g_cvAt.x+(LONG)(ring.c+cos(a)*band),g_cvAt.y+(LONG)(ring.c+sin(a)*band)};
   cv_gesture(word,TRUE,TRUE,FALSE,FALSE,FALSE); if (g_cvHover!=2) return 19;
   cv_gesture(word,FALSE,TRUE,FALSE,FALSE,FALSE);
   MSG made; if (!PeekMessageW(&made,g_cvWnd,WM_CV_CREATE,WM_CV_CREATE,PM_REMOVE) || made.wParam!=3 || IsWindowVisible(g_cvWnd)) return 20;
+  /* пятая плитка — бланк «Карта заказа» */
+  cv_gesture(p0,TRUE,TRUE,FALSE,FALSE,TRUE); cv_gesture(p1,TRUE,TRUE,FALSE,FALSE,FALSE);
+  a=-1.5707963267948966+4*6.283185307179586/g_cvCount; POINT karta={g_cvAt.x+(LONG)(ring.c+cos(a)*band),g_cvAt.y+(LONG)(ring.c+sin(a)*band)};
+  cv_gesture(karta,TRUE,TRUE,FALSE,FALSE,FALSE); if (g_cvHover!=4) return 30;
+  cv_gesture(karta,FALSE,TRUE,FALSE,FALSE,FALSE);
+  if (!PeekMessageW(&made,g_cvWnd,WM_CV_CREATE,WM_CV_CREATE,PM_REMOVE) || made.wParam!=5 || IsWindowVisible(g_cvWnd)) return 31;
   /* отпустили в центре — ничего не создаётся, кольцо уходит само */
   cv_gesture(p0,TRUE,TRUE,FALSE,FALSE,TRUE); cv_gesture(p1,TRUE,TRUE,FALSE,FALSE,FALSE); cv_gesture(p1,FALSE,TRUE,FALSE,FALSE,FALSE);
   if (PeekMessageW(&made,g_cvWnd,WM_CV_CREATE,WM_CV_CREATE,PM_REMOVE) || IsWindowVisible(g_cvWnd)) return 21;

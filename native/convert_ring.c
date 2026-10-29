@@ -27,8 +27,9 @@ enum { CV_T_IMAGE, CV_T_PDF, CV_T_TEXT, CV_T_ZIP, CV_T_MORE };
 /* shell — образец имени для значка из Проводника (кольцо «Создать»); folder — значок папки */
 typedef struct { wchar_t icon; const wchar_t *label, *title, *note; int tint; const wchar_t *shell; BOOL folder; } CvRingItem;
 /* по номерам действий: 0–3 картинки, 4 PDF, 5 TXT, 6 CSV, 7 ZIP, 8–14 окно параметров, 15 «Ещё»,
-   24 — «Ссылка», 25 и 26 — сегменты её дуги вокруг кольца: «Включая файл» и «До файла» (file_link_ui.c) */
-static const CvRingItem kCvRing[27] = {
+   24 — «Ссылка», 25 и 26 — сегменты её дуги вокруг кольца: «Включая файл» и «До файла» (file_link_ui.c),
+   27 — пятая плитка кольца «Создать»: бланк «Карта заказа» */
+static const CvRingItem kCvRing[28] = {
     {0xEB9F, L"PNG", L"В PNG", L"копия рядом с исходником", CV_T_IMAGE},
     {0xEB9F, L"JPG", L"В JPG", L"копия рядом с исходником", CV_T_IMAGE},
     {0xEB9F, L"BMP", L"В BMP", L"копия рядом с исходником", CV_T_IMAGE},
@@ -55,7 +56,8 @@ static const CvRingItem kCvRing[27] = {
     {0xE80A, L"Excel", L"Книга Excel", L"отпустите — появится на столе", CV_T_TEXT, L"a.xlsx", FALSE},
     {0xE71B, L"Ссылка", L"Ссылка", L"задержите: путь к файлу или к папке", CV_T_ZIP},
     {0xE8A5, L"Включая файл", L"Включая файл", L"путь с именем файла — в буфер", CV_T_ZIP},
-    {0xE8B7, L"До файла", L"До файла", L"папка, где лежит файл, — в буфер", CV_T_ZIP}};
+    {0xE8B7, L"До файла", L"До файла", L"папка, где лежит файл, — в буфер", CV_T_ZIP},
+    {0xE8A5, L"Карта заказа", L"Карта заказа", L"бланк ТИ.21-0025 — появится на столе", CV_T_TEXT, L"a.docx", FALSE}};
 static const COLORREF kCvTint[] = {RGB(8, 145, 178), RGB(220, 38, 38), RGB(22, 163, 74), RGB(217, 119, 6),
                                    RGB(100, 116, 139)};
 

@@ -6,7 +6,7 @@
 #endif
 #define TIMER_CONVERT 1739
 #define WM_CONVERT_DONE (WM_APP + 139)
-#define WM_CV_CREATE (WM_APP + 141) /* wParam — что создать на рабочем столе: 1 папка, 2 TXT, 3 Word, 4 Excel */
+#define WM_CV_CREATE (WM_APP + 141) /* wParam — что создать на рабочем столе: 1 папка, 2 TXT, 3 Word, 4 Excel, 5 карта заказа */
 #define WM_CV_TIFF_MERGE (WM_APP + 142) /* lParam — CvSelection*: в окно «Объединение TIFF / PDF» */
 #define WM_CV_LINK (WM_APP + 144) /* lParam — CvSelection* (malloc), wParam — путь к папке (иначе к файлу): «Ссылка» в буфер */
 static HWND g_cvWnd; /* кольцо; дуга «Ссылки» — в нём же */
@@ -93,12 +93,13 @@ static int cv_hit(POINT point) {
   while (angle < 0) angle += 6.283185307179586;
   return (int)(angle * g_cvCount / 6.283185307179586) % g_cvCount;
 }
-/* create — кольцо «Создать на рабочем столе» (папка, TXT, Word, Excel); иначе ждёт файлы от Проводника */
+/* create — кольцо «Создать на рабочем столе» (папка, TXT, Word, Excel, карта заказа); иначе ждёт файлы от Проводника */
 static void cv_show(POINT point, BOOL create) {
   cv_pending_clear();g_cvSelection.count=0;g_cvPath[0] = 0; g_cvCount = 0; g_cvHover = -1;g_cvInHub=FALSE;g_cvRead=CV_READ_WAIT;g_cvSkipped=0;g_cvLinkSince=0;cv_sub_hide();
   memset(g_cvLevel,0,sizeof(g_cvLevel));
   g_cvCreate=create;
   for (int i=0;create && i<4;i++) g_cvFormats[g_cvCount++]=20+i;
+  if (create) g_cvFormats[g_cvCount++]=27; /* бланк «Карта заказа» */
   g_cvDpi = cv_monitor_dpi(point); g_cvSize = MulDiv(CV_RING_BASE, g_cvDpi, 96); g_cvWin = MulDiv(CV_WIN_BASE, g_cvDpi, 96);
   HMONITOR monitor = MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST);
   MONITORINFO info = {sizeof(info)}; GetMonitorInfoW(monitor, &info);
@@ -120,7 +121,7 @@ static void cv_gesture(POINT point,BOOL down,BOOL shift,BOOL escape,BOOL source,
   g_cvDown = down;
   if (!down) {
     /* рабочий стол: отпустили на плитке, держа Shift, — создать; в центре или без Shift — ничего */
-    if(g_cvCreate&&!g_cvDismissed&&shift&&!escape&&g_cvHover>=0) PostMessageW(g_cvWnd,WM_CV_CREATE,(WPARAM)(g_cvFormats[g_cvHover]-19),0);
+    if(g_cvCreate&&!g_cvDismissed&&shift&&!escape&&g_cvHover>=0) PostMessageW(g_cvWnd,WM_CV_CREATE,(WPARAM)(g_cvFormats[g_cvHover]==27?5:g_cvFormats[g_cvHover]-19),0);
     if(g_cvCreate) cv_hide(); /* здесь нет сброса OLE, ждать нечего */
     g_cvDesktopGesture=FALSE;g_cvDesktopDragged=FALSE;
     if (!g_cvReleased) g_cvReleased = GetTickCount();

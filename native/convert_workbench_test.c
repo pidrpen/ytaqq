@@ -80,8 +80,15 @@ static int cvx_lab(HINSTANCE instance) {
   SendMessageW(g_cvxWnd,WM_COMMAND,IDCANCEL,0);if(IsWindowVisible(g_cvxWnd))return 32;
   /* The exact native creator writes into this isolated profile, never Desktop. */
   wchar_t desktop[MAX_PATH],created[MAX_PATH];swprintf(desktop,MAX_PATH,L"%ls\\desktop",g_dataDir);if(!CreateDirectoryW(desktop,NULL))return 40;
-  for(int kind=1;kind<=4;kind++) {
+  for(int kind=1;kind<=5;kind++) {
     if(!dc_create_at(desktop,kind,created)||!dc_create_at(desktop,kind,created)||!wcsstr(created,L" (2)"))return 41;
+  }
+  { /* «Карта заказа» — ровно бланк из exe, это .docx (ZIP) */
+    HRSRC rs=FindResourceW(g_inst,MAKEINTRESOURCEW(DC_KARTA_RES),RT_RCDATA);WIN32_FILE_ATTRIBUTE_DATA fa;char head[2]={0};DWORD got=0;
+    HANDLE h=CreateFileW(created,GENERIC_READ,FILE_SHARE_READ,NULL,OPEN_EXISTING,0,NULL);
+    if(h!=INVALID_HANDLE_VALUE){ReadFile(h,head,2,&got,NULL);CloseHandle(h);}
+    if(!rs||!GetFileAttributesExW(created,GetFileExInfoStandard,&fa)||fa.nFileSizeLow!=SizeofResource(g_inst,rs)||got!=2||head[0]!='P'||head[1]!='K'||
+       !wcsstr(created,L"Карта заказа (2).docx"))return 53;
   }
   if(dc_create_at(desktop,0,created)||created[0])return 42;
   if(!dc_empty_role(ROLE_SYSTEM_LIST,CHILDID_SELF,TRUE)||dc_empty_role(ROLE_SYSTEM_LISTITEM,1,TRUE)||dc_empty_role(ROLE_SYSTEM_LIST,1,TRUE))return 43;
@@ -98,7 +105,8 @@ static int cvx_lab(HINSTANCE instance) {
   /* пустое место стола: протянули с Shift — кольцо «Создать» у курсора, отпустили на плитке Word — создать Word */
   cv_gesture(start,TRUE,TRUE,FALSE,TRUE,TRUE);cv_gesture(end,TRUE,TRUE,FALSE,FALSE,FALSE);
   if(!IsWindowVisible(g_cvWnd)||!g_cvCreate||!g_cvDesktopDragged)return 46;
-  CvGeo ring=cv_geo(g_cvSize,1.0f);POINT word={g_cvAt.x+(LONG)ring.c,g_cvAt.y+(LONG)(ring.c+(ring.rin+ring.R)/2)};
+  CvGeo ring=cv_geo(g_cvSize,1.0f);double band=(ring.rin+ring.R)/2,a=-1.5707963267948966+2*6.283185307179586/g_cvCount; /* плитка Word — третья */
+  POINT word={g_cvAt.x+(LONG)(ring.c+cos(a)*band),g_cvAt.y+(LONG)(ring.c+sin(a)*band)};
   cv_gesture(word,TRUE,TRUE,FALSE,FALSE,FALSE);cv_gesture(word,FALSE,TRUE,FALSE,FALSE,FALSE);
   if(!PeekMessageW(&gesture,g_cvWnd,WM_CV_CREATE,WM_CV_CREATE,PM_REMOVE)||gesture.wParam!=3||IsWindowVisible(g_cvWnd))return 47;
   cv_gesture(word,FALSE,TRUE,FALSE,FALSE,TRUE);

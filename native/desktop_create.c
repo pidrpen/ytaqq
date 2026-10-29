@@ -27,18 +27,35 @@ static BOOL dc_empty_desktop(POINT point) {
   if(!list&&hit!=root)return FALSE;
   return dc_empty_accessible(point,list);
 }
+/* бланк из exe (RCDATA) — новым файлом; занятое имя не трогает (CREATE_NEW) */
+static BOOL dc_write_rcdata(int id,const wchar_t *path) {
+  HRSRC rs=FindResourceW(g_inst,MAKEINTRESOURCEW(id),RT_RCDATA);
+  HGLOBAL hg=rs?LoadResource(g_inst,rs):NULL;
+  DWORD size=rs?SizeofResource(g_inst,rs):0;const void *data=hg?LockResource(hg):NULL;
+  if(!data||!size){SetLastError(ERROR_RESOURCE_DATA_NOT_FOUND);return FALSE;}
+  HANDLE h=CreateFileW(path,GENERIC_WRITE,0,NULL,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,NULL);
+  if(h==INVALID_HANDLE_VALUE)return FALSE;
+  DWORD written=0;BOOL ok=WriteFile(h,data,size,&written,NULL)&&written==size;
+  DWORD error=GetLastError();CloseHandle(h);
+  if(!ok){DeleteFileW(path);SetLastError(error);}
+  return ok;
+}
+/* «Карта заказа» (Приложение 2, ТИ.21-0025): шаблон собран из заводского бланка
+   (pidrpen/slack, karta-zakaza/make_template.py) — оборот всегда со 2-й страницы */
+#define DC_KARTA_RES 313
 static BOOL dc_create_at(const wchar_t *directory,int kind,wchar_t *out) {
   out[0]=0;
-  if(kind<1||kind>4){SetLastError(ERROR_INVALID_PARAMETER);return FALSE;}
+  if(kind<1||kind>5){SetLastError(ERROR_INVALID_PARAMETER);return FALSE;}
   DWORD attributes=GetFileAttributesW(directory);
   if(attributes==INVALID_FILE_ATTRIBUTES||!(attributes&FILE_ATTRIBUTE_DIRECTORY)){SetLastError(ERROR_PATH_NOT_FOUND);return FALSE;}
   if(wcslen(directory)>MAX_PATH-64){SetLastError(ERROR_FILENAME_EXCED_RANGE);return FALSE;}
-  const wchar_t *names[]={L"Новая папка",L"Новый текст",L"Новый документ",L"Новая таблица"};
-  const wchar_t *extensions[]={L"",L".txt",L".docx",L".xlsx"};
+  const wchar_t *names[]={L"Новая папка",L"Новый текст",L"Новый документ",L"Новая таблица",L"Карта заказа"};
+  const wchar_t *extensions[]={L"",L".txt",L".docx",L".xlsx",L".docx"};
   for(int number=1;number<=9999;number++) {
     if(number==1)swprintf(out,MAX_PATH,L"%ls\\%ls%ls",directory,names[kind-1],extensions[kind-1]);
     else swprintf(out,MAX_PATH,L"%ls\\%ls (%d)%ls",directory,names[kind-1],number,extensions[kind-1]);
-    BOOL ok=kind==1?CreateDirectoryW(out,NULL):ag_write_new(out,L"",kind==2?AG_PLAIN:kind==3?AG_DOCX:AG_XLSX);
+    BOOL ok=kind==1?CreateDirectoryW(out,NULL):kind==5?dc_write_rcdata(DC_KARTA_RES,out):
+            ag_write_new(out,L"",kind==2?AG_PLAIN:kind==3?AG_DOCX:AG_XLSX);
     if(ok)return TRUE;
     DWORD error=GetLastError();if(error!=ERROR_FILE_EXISTS&&error!=ERROR_ALREADY_EXISTS){out[0]=0;SetLastError(error);return FALSE;}
   }
@@ -105,10 +122,10 @@ static void dc_place(const wchar_t *path,POINT at) {
   HANDLE thread=CreateThread(NULL,0,dc_place_thread,job,0,NULL);
   if(thread)CloseHandle(thread);else free(job);
 }
-/* выбор из кольца «Создать» (convert.c): 1 папка, 2 TXT, 3 Word, 4 Excel. Меню больше нет —
+/* выбор из кольца «Создать» (convert.c): 1 папка, 2 TXT, 3 Word, 4 Excel, 5 карта заказа. Меню больше нет —
    оно висело, пока на него не наведёшь; кольцо уходит само, как только отпущена мышь. */
 static void dc_create(int choice,POINT at) {
-  if(choice<1||choice>4)return;
+  if(choice<1||choice>5)return;
   wchar_t desktop[MAX_PATH],path[MAX_PATH],message[600];
   if(FAILED(SHGetFolderPathW(NULL,CSIDL_DESKTOPDIRECTORY,NULL,SHGFP_TYPE_CURRENT,desktop))) {
     show_status(L"Не удалось найти папку рабочего стола.");return;
