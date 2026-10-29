@@ -6,14 +6,14 @@
 #endif
 #define TIMER_CONVERT 1739
 #define WM_CONVERT_DONE (WM_APP + 139)
-#define WM_CV_CREATE (WM_APP + 141) /* wParam — что создать на рабочем столе: 1 папка, 2 TXT, 3 Word, 4 Excel, 5 карта заказа */
+#define WM_CV_CREATE (WM_APP + 141) /* wParam — что создать на столе или в папке Проводника: 1 папка, 2 TXT, 3 Word, 4 Excel, 5 карта заказа */
 #define WM_CV_TIFF_MERGE (WM_APP + 142) /* lParam — CvSelection*: в окно «Объединение TIFF / PDF» */
 #define WM_CV_LINK (WM_APP + 144) /* lParam — CvSelection* (malloc), wParam — путь к папке (иначе к файлу): «Ссылка» в буфер */
 static HWND g_cvWnd; /* кольцо; дуга «Ссылки» — в нём же */
 static BOOL g_cvOle, g_cvRegistered, g_cvWord, g_cvExcel;
 static BOOL g_cvDown, g_cvSource, g_cvDismissed;
 static BOOL g_cvDesktopGesture,g_cvDesktopDragged;
-static BOOL g_cvCreate; /* кольцо «Создать» на пустом месте рабочего стола, без перетаскивания файлов */
+static BOOL g_cvCreate; /* кольцо «Создать» на пустом месте рабочего стола или папки Проводника, без перетаскивания файлов */
 static POINT g_cvOrigin;
 static DWORD g_cvReleased;
 static volatile LONG g_cvBusy;
@@ -93,7 +93,7 @@ static int cv_hit(POINT point) {
   while (angle < 0) angle += 6.283185307179586;
   return (int)(angle * g_cvCount / 6.283185307179586) % g_cvCount;
 }
-/* create — кольцо «Создать на рабочем столе» (папка, TXT, Word, Excel, карта заказа); иначе ждёт файлы от Проводника */
+/* create — кольцо «Создать» на столе или в папке (папка, TXT, Word, Excel, карта заказа); иначе ждёт файлы от Проводника */
 static void cv_show(POINT point, BOOL create) {
   cv_pending_clear();g_cvSelection.count=0;g_cvPath[0] = 0; g_cvCount = 0; g_cvHover = -1;g_cvInHub=FALSE;g_cvRead=CV_READ_WAIT;g_cvSkipped=0;g_cvLinkSince=0;cv_sub_hide();
   memset(g_cvLevel,0,sizeof(g_cvLevel));
@@ -158,7 +158,9 @@ static void cv_tick(void) {
   POINT point;GetCursorPos(&point);BOOL down=(GetAsyncKeyState(VK_LBUTTON)&0x8000)!=0;
   BOOL shift=(GetAsyncKeyState(VK_SHIFT)&0x8000)!=0,empty=FALSE;
 #ifndef CV_RING_TEST
-  if(shift&&down&&!g_cvDown)empty=dc_empty_desktop(point);
+  if(shift&&down&&!g_cvDown){ /* пустое место стола или папки Проводника — кольцо «Создать» */
+    g_dcFolderRoot=NULL;empty=dc_empty_desktop(point)||dc_empty_folder(point,&g_dcFolderRoot);
+  }
 #endif
   BOOL source=down&&!g_cvDown?cv_explorer_at(point):FALSE;
   cv_snap_track(down,shift,point);
@@ -313,7 +315,8 @@ static IDropTargetVtbl g_cvVtbl = {cv_query, cv_addref, cv_release, cv_enter, cv
 static CvDrop g_cvDrop = {{&g_cvVtbl}, 1};
 static LRESULT CALLBACK cv_proc(HWND hwnd, UINT message, WPARAM wp, LPARAM lp) {
 #ifndef CV_RING_TEST
-  if(message==WM_CV_CREATE){dc_create((int)wp,g_cvOrigin);return 0;}
+  if(message==WM_CV_CREATE){dc_create((int)wp,g_cvOrigin,hwnd);return 0;}
+  if(message==WM_CV_CREATED){dc_created((BOOL)wp,(wchar_t*)lp);return 0;}
   if(message==WM_CV_TIFF_MERGE){ /* уже после сброса: окно с вопросом не держит Проводник */
     CvSelection *s=(CvSelection*)lp;wchar_t name[MAX_PATH];const wchar_t *slash=wcsrchr(s->paths[0],L'\\');
     lstrcpynW(name,slash?slash+1:s->paths[0],MAX_PATH);wchar_t *dot=wcsrchr(name,L'.');if(dot)*dot=0;

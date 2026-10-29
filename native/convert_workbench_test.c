@@ -97,7 +97,8 @@ static int cvx_lab(HINSTANCE instance) {
   LVCOLUMNW column={0};column.mask=LVCF_WIDTH;column.cx=280;SendMessageW(list,LVM_INSERTCOLUMNW,0,(LPARAM)&column);
   LVITEMW item={0};item.mask=LVIF_TEXT;item.pszText=L"Тестовый файл";SendMessageW(list,LVM_INSERTITEMW,0,(LPARAM)&item);
   UpdateWindow(probe);POINT blank={200,200};ClientToScreen(list,&blank);
-  if(!dc_empty_accessible(blank,TRUE)||dc_empty_desktop(blank))return 44;
+  HWND folderRoot=(HWND)1; /* не Проводник — не папка, и root обнулён */
+  if(!dc_empty_accessible(blank,TRUE)||dc_empty_desktop(blank)||dc_empty_folder(blank,&folderRoot)||folderRoot)return 44;
   RECT row={LVIR_BOUNDS,0,0,0};SendMessageW(list,LVM_GETITEMRECT,0,(LPARAM)&row);POINT icon={10,(row.top+row.bottom)/2};ClientToScreen(list,&icon);
   if(dc_empty_accessible(icon,TRUE))return 45;
   DestroyWindow(probe);

@@ -1,4 +1,4 @@
-/* Empty desktop Shift gesture. Native, offline creation; no model or Office. */
+/* Empty desktop (or Explorer folder) Shift gesture. Native, offline creation; no model or Office. */
 #include <oleacc.h>
 #include <exdisp.h>
 #ifndef SVSI_POSITIONITEM
@@ -26,6 +26,20 @@ static BOOL dc_empty_desktop(POINT point) {
   GetClassNameW(hit,name,80);BOOL list=!wcscmp(name,L"SysListView32");
   if(!list&&hit!=root)return FALSE;
   return dc_empty_accessible(point,list);
+}
+/* Пустое место в папке Проводника: под мышью вид папки (DirectUIHWND, в классическом виде
+   SysListView32) прямо в SHELLDLL_DefView, а MSAA отвечает самим видом, а не значком или
+   ячейкой. Лента, область навигации и просмотра — другие окна, сюда не попадают.
+   root — окно Проводника; папку его видимой вкладки dc_create берёт уже после жеста. */
+static HWND g_dcFolderRoot; /* жест начат в папке Проводника; NULL — на рабочем столе */
+static BOOL dc_empty_folder(POINT point,HWND *root) {
+  *root=NULL;
+  HWND hit=WindowFromPoint(point),top=hit?GetAncestor(hit,GA_ROOT):NULL,parent=hit?GetParent(hit):NULL;wchar_t name[80];
+  if(!top||!GetClassNameW(top,name,80)||(wcscmp(name,L"CabinetWClass")&&wcscmp(name,L"ExploreWClass")))return FALSE;
+  if(!parent||!GetClassNameW(parent,name,80)||wcscmp(name,L"SHELLDLL_DefView"))return FALSE;
+  if(!GetClassNameW(hit,name,80)||(wcscmp(name,L"DirectUIHWND")&&wcscmp(name,L"SysListView32")))return FALSE;
+  if(!dc_empty_accessible(point,TRUE)&&!dc_empty_accessible(point,FALSE))return FALSE;
+  *root=top;return TRUE;
 }
 /* бланк из exe (RCDATA) — новым файлом; занятое имя не трогает (CREATE_NEW) */
 static BOOL dc_write_rcdata(int id,const wchar_t *path) {
@@ -122,10 +136,73 @@ static void dc_place(const wchar_t *path,POINT at) {
   HANDLE thread=CreateThread(NULL,0,dc_place_thread,job,0,NULL);
   if(thread)CloseHandle(thread);else free(job);
 }
+/* В папке Проводника: папка видимой вкладки (convert_select.c), там же создать и выделить
+   новый значок. Своим потоком — занятый Проводник не держит CursorPad; итог — окну кольца
+   сообщением WM_CV_CREATED (wParam — создано ли, lParam — текст, malloc). Папки без пути
+   на диске («Этот компьютер», библиотеки, Корзина) честно отказывают. */
+#define WM_CV_CREATED (WM_APP + 145)
+static const GUID kDcIID_PersistFolder2 = {0x1ac3d9f0, 0x175c, 0x11d1, {0x95, 0xbe, 0x00, 0x60, 0x97, 0x97, 0xea, 0x4f}};
+static IShellBrowser *cv_find_browser(IShellWindows *windows, HWND root, BOOL desktop);
+typedef struct { int kind; HWND root, notify; } DcFolderJob;
+static DWORD WINAPI dc_folder_thread(void *parameter) {
+  DcFolderJob job=*(DcFolderJob*)parameter;free(parameter);
+  wchar_t dir[MAX_PATH]={0},path[MAX_PATH]={0};BOOL found=FALSE,created=FALSE;DWORD error=0;
+  if(SUCCEEDED(CoInitializeEx(NULL,COINIT_APARTMENTTHREADED))) {
+    IShellWindows *windows=NULL;IShellBrowser *browser=NULL;IShellView *view=NULL;IFolderView *folder=NULL;
+    IPersistFolder2 *persist=NULL;PIDLIST_ABSOLUTE current=NULL;
+    found=SUCCEEDED(CoCreateInstance(&kDcCLSID_ShellWindows,NULL,CLSCTX_ALL,&kDcIID_ShellWindows,(void**)&windows))&&windows&&
+          (browser=cv_find_browser(windows,job.root,FALSE))&&
+          SUCCEEDED(browser->lpVtbl->QueryActiveShellView(browser,&view))&&view&&
+          SUCCEEDED(view->lpVtbl->QueryInterface(view,&kDcIID_FolderView,(void**)&folder))&&folder&&
+          SUCCEEDED(folder->lpVtbl->GetFolder(folder,&kDcIID_PersistFolder2,(void**)&persist))&&persist&&
+          SUCCEEDED(persist->lpVtbl->GetCurFolder(persist,&current))&&current&&SHGetPathFromIDListW(current,dir)&&dir[0];
+    if(found) {
+      created=dc_create_at(dir,job.kind,path);error=GetLastError();
+      PIDLIST_ABSOLUTE full=NULL;
+      if(created) {
+        SHChangeNotify(job.kind==1?SHCNE_MKDIR:SHCNE_CREATE,SHCNF_PATHW|SHCNF_FLUSH,path,NULL);
+        if(SUCCEEDED(SHParseDisplayName(path,NULL,&full,0,NULL))&&full)
+          for(int attempt=0;attempt<12;attempt++) { /* значок появляется в виде не сразу после уведомления */
+            Sleep(attempt?150:50);
+            if(SUCCEEDED(view->lpVtbl->SelectItem(view,ILFindLastID(full),SVSI_SELECT|SVSI_DESELECTOTHERS|SVSI_ENSUREVISIBLE|SVSI_FOCUSED)))break;
+          }
+      }
+      if(full)CoTaskMemFree(full);
+    }
+    if(current)CoTaskMemFree(current);
+    if(persist)persist->lpVtbl->Release(persist);
+    if(folder)folder->lpVtbl->Release(folder);
+    if(view)view->lpVtbl->Release(view);
+    if(browser)browser->lpVtbl->Release(browser);
+    if(windows)windows->lpVtbl->Release(windows);
+    CoUninitialize();
+  }
+  wchar_t *text=(wchar_t*)malloc(700*sizeof(wchar_t));if(!text)return 0;
+  if(created)swprintf(text,700,L"%ls",path);
+  else if(!found)swprintf(text,700,L"В этой папке Проводника создать нельзя: у неё нет пути на диске.");
+  else swprintf(text,700,L"Не удалось создать в папке %ls. Ошибка Windows %lu.",dir,error);
+  if(!PostMessageW(job.notify,WM_CV_CREATED,created,(LPARAM)text))free(text);
+  return 0;
+}
+static void dc_created(BOOL created,wchar_t *text) {
+  wchar_t message[760];
+  if(created){swprintf(message,760,L"Создано: %ls",text);show_status(message);upd_balloon(6,L"CursorPad: создано в папке",text);}
+  else show_status(text);
+  free(text);
+}
 /* выбор из кольца «Создать» (convert.c): 1 папка, 2 TXT, 3 Word, 4 Excel, 5 карта заказа. Меню больше нет —
-   оно висело, пока на него не наведёшь; кольцо уходит само, как только отпущена мышь. */
-static void dc_create(int choice,POINT at) {
+   оно висело, пока на него не наведёшь; кольцо уходит само, как только отпущена мышь.
+   Жест в папке Проводника (g_dcFolderRoot) — создать там; notify — окно кольца для итога. */
+static void dc_create(int choice,POINT at,HWND notify) {
   if(choice<1||choice>5)return;
+  HWND root=g_dcFolderRoot;g_dcFolderRoot=NULL;
+  if(root&&IsWindow(root)) {
+    DcFolderJob *job=(DcFolderJob*)malloc(sizeof(*job));if(!job)return;
+    job->kind=choice;job->root=root;job->notify=notify;
+    HANDLE thread=CreateThread(NULL,0,dc_folder_thread,job,0,NULL);
+    if(thread)CloseHandle(thread);else{free(job);show_status(L"Не удалось создать: Windows не дала запустить поток.");}
+    return;
+  }
   wchar_t desktop[MAX_PATH],path[MAX_PATH],message[600];
   if(FAILED(SHGetFolderPathW(NULL,CSIDL_DESKTOPDIRECTORY,NULL,SHGFP_TYPE_CURRENT,desktop))) {
     show_status(L"Не удалось найти папку рабочего стола.");return;
