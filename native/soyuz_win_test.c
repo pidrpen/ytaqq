@@ -152,6 +152,17 @@ static void st_shot_wnd(const wchar_t *name, HWND wnd) {
   DeleteDC(mem);
 }
 
+/* участок операции по таблице приоритетов (строка группы — статический буфер, берём сразу) */
+static wchar_t g_stGrp[8][80]; /* восемь буферов по кругу — чтобы несколько ответов жили в одной st_note */
+static int g_stGrpI;
+static const wchar_t *st_grp_area(const wchar_t *op, const wchar_t *eq) {
+  const SzPrio *p = szp_find_eq(op, eq);
+  wchar_t *out = g_stGrp[g_stGrpI++ & 7];
+  lstrcpynW(out, p ? p->area[0] : L"-", 80);
+  return out;
+}
+static BOOL st_grp(const wchar_t *op, const wchar_t *eq, const wchar_t *want) { return !wcscmp(st_grp_area(op, eq), want); }
+
 static int st_find(const wchar_t *op) {
   for (int i = 0; i < g_szR.n; i++)
     if (!wcscmp(g_szR.it[i].op, op)) return i;
@@ -283,12 +294,13 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
       buf[rd] = 0;
       t = rd > 3 ? utf8_to_alloc(buf + 3, rd - 3) : NULL;
     }
-    st_check(n == 9 && t && wcsstr(t, L"ПАПКА\tТестовая сборка ЭСИ\r\n") &&
+    st_check(n >= 9 && t && wcsstr(t, L"ПАПКА\tТестовая сборка ЭСИ\r\n") &&
                  wcsstr(t, L"ИЗДЕЛИЕ\tАБВГ.711141.001\tУдлинитель вала\tДетали\t"),
-             L"описание: папка, изделие с обозначением из «Лист:», 9 операций");
-    st_check(t && wcsstr(t, L"ТП\tАБВГ.711141.001\t010\t4110\t31\t16К20, Токарно-винторезный станок\t15\t4\r\n"),
-             L"строка ТП токарной: код 4110, участок 31, станок и нормы аналога");
-    st_check(t && wcsstr(t, L"\t040\t7300\t\t\t\t\r\n"), L"окрасочная без аналога: код есть, участок и нормы пустые");
+             L"описание: папка, изделие с обозначением из «Лист:», 9 операций и транспортирования между участками групп");
+    st_check(t && wcsstr(t, L"\t4110\t12\t16К20, Токарно-винторезный станок\t15\t4\r\n"),
+             L"строка ТП токарной: код 4110, участок 12 (группа МЕХОБРАБОТКА по умолчанию важнее аналога на 31), станок и нормы аналога");
+    st_check(t && wcsstr(t, L"\t7300\t\t\t\t\r\n") && wcsstr(note, L"без участка — проверить") && wcsstr(note, L" 7300"),
+             L"окрасочная без аналога и без группы: код есть, участок и нормы пустые, в отчёте «без участка — проверить»");
     /* таблица приоритетов технолога (soyuz_prio.c) важнее аналога: 4110 → участок 32, станок 1К62 */
     {
       wchar_t pp[MAX_PATH];
@@ -306,8 +318,28 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
       const SzPrio *pm = szp_find(L"4130 Шлифовальная");
       st_check(pr && pr->n == 1 && !wcscmp(pr->area[0], L"32") && !wcscmp(pr->equip[0], L"1К62") &&
                    szp_find(L"Сверлильная (отв.)") && szp_find(L"4210") && !szp_find(L"7300") && pm &&
-                   !wcscmp(pm->area[0], L"12") && !pm->equip[0][0] && !szp_find(L"0200 Контроль"),
-               L"таблица приоритетов: 4110 → 32/1К62, «Сверлильная» и 4210 — одна строка; МЕХОБРАБОТКА 12 — шлифовальной, не контролю");
+                   !wcscmp(pm->area[0], L"32") && !pm->equip[0][0] && !szp_find(L"0200 Контроль"),
+               L"таблица приоритетов: 4110 → 32/1К62, «Сверлильная» и 4210 — одна строка; шлифовальной — 32 (группа ШЛИФОВАЛЬНЫЕ), контролю — ничего");
+      { /* группы участков дописались в файл человека (в нём была одна МЕХОБРАБОТКА), его строки целы */
+        wchar_t *pt = share_read(pp);
+        st_check(pt && wcsstr(pt, L"\nЗАГОТОВКА\t31\t") && wcsstr(pt, L"\nЧПУ\t32\t") && wcsstr(pt, L"\nСБОРКА\t12\t") &&
+                     wcsstr(pt, L"МЕХОБРАБОТКА\t12\r\n4110\t32\t1К62") && !wcsstr(pt, L"\nМЕХОБРАБОТКА\t12\t#"),
+                 L"группы участков дописаны в конец таблицы технолога, его МЕХОБРАБОТКА и строки операций не тронуты");
+        free(pt);
+        /* строка группы — один статический буфер (szp_find_eq), поэтому участок сравнивается сразу */
+        st_note(L"     группы: 4280 «%ls», 2129 «%ls», 4260 «%ls», 4152 «%ls», 4233 «%ls», 4260+ЧПУ «%ls», 8809 «%ls», 9171 «%ls»",
+                st_grp_area(L"4280 Отрезная", NULL), st_grp_area(L"2129 Гибка", NULL), st_grp_area(L"4260 Фрезерная", NULL),
+                st_grp_area(L"4152 Зубодолбежная", NULL), st_grp_area(L"4233 Токарная с ЧПУ", NULL),
+                st_grp_area(L"4260 Фрезерная", L"6Р13Ф3 с ЧПУ"), st_grp_area(L"8809 Слесарно-сборочная", NULL),
+                st_grp_area(L"9171 Термическая резка лазерная", NULL));
+        st_check(st_grp(L"4280 Отрезная", NULL, L"31") && st_grp(L"2129 Гибка", NULL, L"31") && st_grp(L"4260 Фрезерная", NULL, L"12") &&
+                     st_grp(L"4152 Зубодолбежная", NULL, L"32") && st_grp(L"4233 Токарная с ЧПУ", NULL, L"32") &&
+                     st_grp(L"4260 Фрезерная", L"6Р13Ф3 с ЧПУ", L"32") && st_grp(L"8809 Слесарно-сборочная", NULL, L"12") &&
+                     st_grp(L"9171 Термическая резка лазерная", NULL, L"31") && !szp_find(L"9000 Сварка") &&
+                     !szp_find(L"7300 Получение покрытий"),
+                 L"группы: заготовка и гибка → 31; зубодолбёжная, ЧПУ (по операции и по станку) → 32; фрезерная и сборка → 12; "
+                 L"сварке и покрытиям участка нет");
+      }
       int n2 = szm_write_spec(spec, L"Тестовая сборка ЭСИ", L"", g_szR.des, TRUE, note, 200);
       wchar_t *t2 = NULL;
       HANDLE h2 = CreateFileW(spec, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
@@ -320,12 +352,12 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
       }
       int ntr = 0;
       for (const wchar_t *q = t2; q && (q = wcsstr(q, L"\t0401\t")) != NULL; q += 6) ntr++;
-      st_check(n2 > 10 && t2 && wcsstr(t2, L"\t005\t4280\t\t\t\t\r\n") && !wcsstr(t2, L"\t010\t0401\t") &&
-                   wcsstr(t2, L"\t010\t4110\t32\t1К62\t15\t4\r\n") && wcsstr(t2, L"\t4210\t31\t2Н135\t10\t4\r\n") &&
-                   wcsstr(t2, L"\t0401\t12\t\t\t\r\n") && wcsstr(t2, L"\t4130\t12\t") && ntr >= 3 &&
-                   wcsstr(note, L"без участка — проверить: 005 4280") && !szp_find(L"4280 Отрезная") && !szp_find(L"9171 Термическая резка лазерная"),
-               L"«Создать ТП»: отрезная не мехобработка — участок пуст и в отчёте «без участка — проверить»; приоритет перекрыл аналог "
-               L"(4110 → 32/1К62, 4210 → 31, 4130 → 12 мехобработка); «0401 Транспортирование» перед каждой сменой участка, номера по порядку");
+      st_check(n2 > 10 && t2 && wcsstr(t2, L"\t005\t4280\t31\t\t\t\r\n") && wcsstr(t2, L"\t010\t0401\t32\t\t\t\r\n") &&
+                   wcsstr(t2, L"\t015\t4110\t32\t1К62\t15\t4\r\n") && wcsstr(t2, L"\t4210\t31\t2Н135\t10\t4\r\n") &&
+                   wcsstr(t2, L"\t0401\t32\t\t\t\r\n") && wcsstr(t2, L"\t4130\t32\t") && ntr >= 3 &&
+                   wcsstr(note, L"без участка — проверить") && wcsstr(note, L" 7300") && !wcsstr(note, L" 4280"),
+               L"«Создать ТП»: отрезная → 31 (ЗАГОТОВКА), приоритет перекрыл аналог (4110 → 32/1К62, 4210 → 31), шлифовальная → 32 "
+               L"(ШЛИФОВАЛЬНЫЕ); «0401 Транспортирование» перед каждой сменой участка, номера по порядку");
       st_note(L"     транспортирований в описании: %d", ntr);
       free(t2);
     }
@@ -422,6 +454,31 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
                      !wcscmp(xp_cell(ot, lastTr, 3), L"5 Сборочный участок") && !wcscmp(xp_cell(ot, lastTr, 1), L"030"),
                  L"транспортирование: перед фрезерной на 12 и в конце на «5 Сборочный участок» (№ 030), фрезерная на 12 по МЕХОБРАБОТКЕ");
         st_check(pk_transport_fill() == 0, L"повторный вызов транспортирований не добавляет");
+        { /* примеры: вал — отрезная, фрезерная, круглошлифовальная (31 → 12 → 32); сварная сборка — отрезная,
+             слесарно-сборочная (31 → 12); участки — от групп таблицы, транспортирование — при каждой смене */
+          int b0 = ot->n;
+          xp_row(ot), pk_put(ot, b0, 0, L"ТСТ.140.001"), pk_put(ot, b0, 1, L"005"), pk_put(ot, b0, 2, L"4280 Отрезная");
+          xp_row(ot), pk_put(ot, b0 + 1, 0, L"ТСТ.140.001"), pk_put(ot, b0 + 1, 1, L"010"), pk_put(ot, b0 + 1, 2, L"4260 Фрезерная");
+          xp_row(ot), pk_put(ot, b0 + 2, 0, L"ТСТ.140.001"), pk_put(ot, b0 + 2, 1, L"015"), pk_put(ot, b0 + 2, 2, L"4131 Круглошлифовальная");
+          xp_row(ot), pk_put(ot, b0 + 3, 0, L"ТСТ.140.000"), pk_put(ot, b0 + 3, 1, L"005"), pk_put(ot, b0 + 3, 2, L"4280 Отрезная");
+          xp_row(ot), pk_put(ot, b0 + 4, 0, L"ТСТ.140.000"), pk_put(ot, b0 + 4, 1, L"010"), pk_put(ot, b0 + 4, 2, L"8809 Слесарно-сборочная");
+          pk_equip_fill();
+          int trn2 = pk_transport_fill();
+          int a31 = 0, a12 = 0, a32 = 0, tr2 = 0, rowsVal = 0, rowsAsm = 0;
+          for (int r = b0; r < ot->n; r++) {
+            const wchar_t *des = xp_cell(ot, r, 0), *op = xp_cell(ot, r, 2), *ar = xp_cell(ot, r, 3);
+            BOOL val = !wcscmp(des, L"ТСТ.140.001");
+            rowsVal += val, rowsAsm += !val;
+            if (pk_is_transport(op)) tr2++;
+            else if (!wcsncmp(ar, L"31", 2)) a31++;
+            else if (!wcsncmp(ar, L"12", 2)) a12++;
+            else if (!wcsncmp(ar, L"32", 2)) a32++;
+          }
+          st_check(trn2 == 3 && a31 == 2 && a12 == 2 && a32 == 1 && tr2 == 3 && rowsVal == 5 && rowsAsm == 3,
+                   L"вал 31 → 12 → 32 и сварная сборка 31 → 12: участки от групп, транспортирование перед каждой сменой (3)");
+          st_note(L"     строк вала %d (операций 3 + транспортирований 2), сборки %d (2 + 1); участки 31/12/32: %d/%d/%d", rowsVal, rowsAsm, a31, a12, a32);
+          while (ot->n > b0) pk_del_row(ot, ot->n - 1); /* чужие строки — прочь, дальше стенд считает семь строк */
+        }
         for (int r = 0; r < ot->n; r++)
           if (!_wcsicmp(xp_cell(ot, r, 0), L"ТСТ.110.004"))
             st_note(L"     %ls %ls · %ls · %ls", xp_cell(ot, r, 1), xp_cell(ot, r, 2), xp_cell(ot, r, 3), xp_cell(ot, r, 4));
@@ -509,6 +566,16 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
       {
         wchar_t cmd[600];
         _snwprintf(cmd, 600, L"загрузи ЭСИ по чертежам «%ls» и в Союз", g_stDir);
+        { /* в папке стенда гарантированно есть картинка: снимки окон могут не успеть (или не сняться на невидимом столе) */
+          wchar_t smp[MAX_PATH];
+          _snwprintf(smp, MAX_PATH, L"%ls\\0-sample.png", g_stDir);
+          HANDLE hs = CreateFileW(smp, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+          if (hs != INVALID_HANDLE_VALUE) {
+            DWORD wrs;
+            WriteFile(hs, "\x89PNG\r\n\x1a\n", 8, &wrs, NULL);
+            CloseHandle(hs);
+          }
+        }
         TmPaths pl = {0};
         int np = esi_paths(cmd, &pl);
         st_check(esi_chat_cmd(L"загрузи ЭСИ по чертежам C:\\Чертежи") && esi_chat_cmd(L"Заведи эси в Союз по этим чертежам") &&
@@ -516,6 +583,17 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
                      !esi_chat_cmd(L"есть ли в союзе ТСТ.110.004") && !rt_chat_cmd(L"норма материала по ведомости") &&
                      !prio_chat_cmd(L"какой участок у токарной"),
                  L"чат: «загрузи ЭСИ по чертежам» узнаётся, «выгрузи», «в союз», сверка и вопросы — нет");
+        { /* правило «СБ» (пользователь 29.10): «321-23-сб32» — спецификация, «321-23-сб32СБ» — сборочный чертёж той же сборки */
+          wchar_t d2[PP_CELL], n2[PP_CELL], c2[8];
+          int doc1 = -1, doc2 = -1, doc3 = -1;
+          BOOL f1 = pp_file_title_code(L"Z:\\x\\321-23-сб32 Рама.pdf", d2, n2, &doc1, c2);
+          BOOL s1 = f1 && doc1 == 0 && !wcscmp(d2, L"321-23-сб32") && !wcscmp(n2, L"Рама");
+          BOOL f2 = pp_file_title_code(L"Z:\\x\\321-23-сб32СБ Рама.pdf", d2, n2, &doc2, c2);
+          BOOL s2 = f2 && doc2 == 1 && !wcscmp(d2, L"321-23-сб32") && !wcscmp(c2, L"СБ");
+          BOOL f3 = pp_file_title_code(L"Z:\\x\\321-23-сб32СБ-1.tif", d2, n2, &doc3, c2);
+          BOOL s3 = f3 && doc3 == 1 && !wcscmp(d2, L"321-23-сб32") && !n2[0];
+          st_check(s1 && s2 && s3, L"«СБ»: «321-23-сб32» — не сборочный чертёж (спецификация/сборка), «321-23-сб32СБ» и «…СБ-1» — СБ сборки 321-23-сб32");
+        }
         st_check(ac_is_des(L"АБВГ.711141.001") && ac_is_des(L"ТСТ.100.000") && ac_is_des(L"АДЕ 3422-682.01.01") &&
                      ac_is_des(L"АБВГ.123456.000СБ") && !ac_is_des(L"2026-10-29") && !ac_is_des(L"ГОСТ 2590-2006") &&
                      !ac_is_des(L"16К20,") && !ac_is_des(L"4110") && !ac_is_des(L"Токарная") && ac_is_path_start(L"C:\\x") &&

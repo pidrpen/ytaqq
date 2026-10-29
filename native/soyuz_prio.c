@@ -24,8 +24,31 @@ typedef struct {
 
 static SzPrio *g_szp;
 static int g_szpN;
-static wchar_t g_szpMech[80]; /* «МЕХОБРАБОТКА<Tab>12»: участок всех операций резанием без своей строки */
-static SzPrio g_szpMechRow;   /* та же настройка в виде строки таблицы — что отдаёт szp_find */
+/* Группы операций → участок по умолчанию (с 2026.10.29, правило пользователя): строки-«классы» той же
+   таблицы, как раньше одна МЕХОБРАБОТКА. Проверяются по порядку — первая подошедшая выигрывает:
+   ЗАГОТОВКА (отрезные 4280…4287, термическая резка 9170…9177, раскрой 0104, заготовительная 0110) → 31;
+   ГИБКА (2129 гибка, 2172 штамповка вальцовкой, 6079 вальцевание, «гиб…», «вальцев…») → 31;
+   ЧПУ (4231…4239, «с ЧПУ», обрабатывающий центр — по операции или по станку) → 32;
+   ШЛИФОВАЛЬНЫЕ (4130…4149: все шлифовальные, заточная) → 32; ЗУБООБРАБОТКА (4150…4162, «зубо…») → 32;
+   МЕХОБРАБОТКА (остальное резание 4100…4299: токарная, фрезерная, сверлильная, расточная…) → 12;
+   СБОРКА (8800…8899: сборка, слесарно-сборочная) → 12. Операции без группы и без своей строки
+   (контроль, сварка, покрытия…) участка от таблицы не получают.
+   Файла нет — группы действуют с этими участками (и попадают в шаблон); файл есть, а строк групп в нём
+   нет (и нет закомментированных) — они дописываются в конец, строки человека не трогаются. */
+enum { SZP_G_ZAG, SZP_G_GIB, SZP_G_CNC, SZP_G_SHLIF, SZP_G_ZUBO, SZP_G_MECH, SZP_G_SBOR, SZP_G_N };
+static const wchar_t *const kSzpGroupKey[SZP_G_N] = {L"ЗАГОТОВКА", L"ГИБКА", L"ЧПУ", L"ШЛИФОВАЛЬНЫЕ",
+                                                     L"ЗУБООБРАБОТКА", L"МЕХОБРАБОТКА", L"СБОРКА"};
+static const wchar_t *const kSzpGroupArea[SZP_G_N] = {L"31", L"31", L"32", L"32", L"32", L"12", L"12"};
+static const wchar_t *const kSzpGroupNote[SZP_G_N] = {
+    L"заготовка: отрезная 4280…4287, термическая резка 9171/9176/9172, раскрой 0104, заготовительная 0110",
+    L"гибка 2129, штамповка вальцовкой 2172, вальцевание 6079",
+    L"операции с ЧПУ 4231…4239 и любая операция, у которой станок «с ЧПУ» или обрабатывающий центр",
+    L"все шлифовальные 4130…4149 (круглошлифовальная, плоскошлифовальная…), заточная",
+    L"зубообработка 4150…4162: зубодолбёжная, зубофрезерная, зубошлифовальная…",
+    L"остальная мехобработка 4100…4299: токарная, фрезерная, сверлильная, расточная…",
+    L"сборка 8800…8899: сборка, слесарно-сборочная"};
+static wchar_t g_szpGroup[SZP_G_N][80]; /* участок группы; пусто — группа выключена */
+static SzPrio g_szpGroupRow;            /* группа в виде строки таблицы — что отдаёт szp_find */
 static FILETIME g_szpStamp; /* файл перечитывается, когда менялся */
 static BOOL g_szpLoaded;
 static HWND g_szpWnd, g_szpEdit;
@@ -52,10 +75,15 @@ static const wchar_t kSzpTemplate[] =
     L"# Строка: операция (код 4110 или название)\tучасток\tстанок\t[участок 2\tстанок 2 …] — поля через Tab.\r\n"
     L"# Участок — код («31») или как в «Союзе» («31 Механический участок 31»); станок — как в справочнике.\r\n"
     L"# Пары — по убыванию предпочтения: если участок операции уже задан, берётся пара с этим участком.\r\n"
-    L"# МЕХОБРАБОТКА\t12 — все операции резанием (токарная, фрезерная, сверлильная, шлифовальная…)\r\n"
-    L"#   на участок 12, если у операции нет своей строки; уберите «#», чтобы включить, и смените номер.\r\n"
-    L"#   Заготовка (отрезная 4280, термическая резка 9171/9176/9172) сюда не идёт — ей нужна своя строка.\r\n"
-    L"# Пример (уберите «#» в начале, чтобы строка заработала):\r\n"
+    L"# Группы — участок по умолчанию для операций без своей строки (правьте номера; «#» впереди — выключить):\r\n"
+    L"ЗАГОТОВКА\t31\t# отрезная 4280…4287, термическая резка 9171/9176/9172, раскрой 0104, заготовительная 0110\r\n"
+    L"ГИБКА\t31\t# гибка 2129, штамповка вальцовкой 2172, вальцевание 6079\r\n"
+    L"ЧПУ\t32\t# операции с ЧПУ 4231…4239 и любая операция со станком «с ЧПУ» или обрабатывающим центром\r\n"
+    L"ШЛИФОВАЛЬНЫЕ\t32\t# все шлифовальные 4130…4149, заточная\r\n"
+    L"ЗУБООБРАБОТКА\t32\t# зубодолбёжная, зубофрезерная, зубошлифовальная… 4150…4162\r\n"
+    L"МЕХОБРАБОТКА\t12\t# остальное резание 4100…4299: токарная, фрезерная, сверлильная, расточная\r\n"
+    L"СБОРКА\t12\t# сборка 8800…8899, слесарно-сборочная\r\n"
+    L"# Пример строки операции (уберите «#» в начале, чтобы строка заработала):\r\n"
     L"# 4110\t31\t16К20, Токарно-винторезный станок\t32\t1К62\r\n"
     L"# Сверлильная\t31\t2Н135\r\n";
 
@@ -86,30 +114,48 @@ static void szp_load(void) {
   szp_path(p);
   WIN32_FILE_ATTRIBUTE_DATA fa;
   BOOL have = g_dataDir[0] && GetFileAttributesExW(p, GetFileExInfoStandard, &fa);
-  if (!have) {
+  if (!have) { /* файла нет — группы с участками по умолчанию, строк операций нет */
     g_szpN = 0;
     g_szpLoaded = TRUE;
     memset(&g_szpStamp, 0, sizeof(g_szpStamp));
+    for (int g = 0; g < SZP_G_N; g++) lstrcpynW(g_szpGroup[g], kSzpGroupArea[g], 80);
     return;
   }
   if (g_szpLoaded && !memcmp(&fa.ftLastWriteTime, &g_szpStamp, sizeof(FILETIME))) return;
   g_szpStamp = fa.ftLastWriteTime;
   g_szpLoaded = TRUE;
   g_szpN = 0;
-  g_szpMech[0] = 0;
+  memset(g_szpGroup, 0, sizeof(g_szpGroup));
+  BOOL seen[SZP_G_N] = {0}; /* строка группы есть в файле — хоть и закомментированная (так выключают) */
   if (!g_szp) g_szp = (SzPrio *)calloc(SZP_MAX, sizeof(SzPrio));
   wchar_t *t = g_szp ? share_read(p) : NULL;
   if (!t) return;
   wchar_t *pp = t, *line;
   while ((line = share_next_line(&pp)) != NULL && g_szpN < SZP_MAX) {
     while (*line == L' ') line++;
-    if (!*line || *line == L'#') continue;
+    if (*line == L'#') {
+      const wchar_t *q = line + 1;
+      while (*q == L' ') q++;
+      for (int g = 0; g < SZP_G_N; g++) {
+        size_t kl = wcslen(kSzpGroupKey[g]);
+        if (!_wcsnicmp(q, kSzpGroupKey[g], kl) && (q[kl] == L'\t' || q[kl] == L' ' || !q[kl])) seen[g] = TRUE;
+      }
+      continue;
+    }
+    if (!*line) continue;
     wchar_t *f[2 + SZP_PAIRS * 2];
     int n = share_split(line, f, 2 + SZP_PAIRS * 2);
-    if (n >= 2 && !_wcsicmp(f[0], L"МЕХОБРАБОТКА")) { /* настройка, не операция */
-      const wchar_t *a = f[1];
+    int grp = -1;
+    for (int g = 0; g < SZP_G_N && grp < 0; g++)
+      if (!_wcsicmp(f[0], kSzpGroupKey[g])) grp = g;
+    if (grp >= 0) { /* группа, не операция: «ЗАГОТОВКА<Tab>31[<Tab># пояснение]» */
+      seen[grp] = TRUE;
+      const wchar_t *a = n >= 2 ? f[1] : L"";
       while (*a == L' ') a++;
-      lstrcpynW(g_szpMech, a, 80);
+      lstrcpynW(g_szpGroup[grp], a, 80);
+      wchar_t *hash = wcschr(g_szpGroup[grp], L'#');
+      if (hash) *hash = 0;
+      for (int k = (int)wcslen(g_szpGroup[grp]); k > 0 && g_szpGroup[grp][k - 1] == L' '; k--) g_szpGroup[grp][k - 1] = 0;
       continue;
     }
     if (n < 3) continue;
@@ -129,6 +175,33 @@ static void szp_load(void) {
     if (r->n && (r->code >= 0 || r->name[0])) g_szpN++;
   }
   free(t);
+  /* групп в файле нет (у кого таблица старая) — дописать их в конец с участками по умолчанию; строки
+     человека не трогаются; закомментированная группа — его выбор, не дописывается */
+  wchar_t add[1600] = L"";
+  for (int g = 0; g < SZP_G_N; g++) {
+    if (seen[g]) continue;
+    lstrcpynW(g_szpGroup[g], kSzpGroupArea[g], 80);
+    size_t l = wcslen(add);
+    if (!l) wcscpy(add, L"\r\n# Группы — участок по умолчанию для операций без своей строки (дописано CursorPad 2026.10.29):\r\n");
+    l = wcslen(add);
+    _snwprintf(add + l, 1600 - l, L"%s\t%s\t# %s\r\n", kSzpGroupKey[g], kSzpGroupArea[g], kSzpGroupNote[g]);
+    add[1599] = 0;
+  }
+  if (add[0]) {
+    HANDLE h = CreateFileW(p, FILE_APPEND_DATA, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h != INVALID_HANDLE_VALUE) {
+      int len8 = WideCharToMultiByte(CP_UTF8, 0, add, -1, NULL, 0, NULL, NULL);
+      char *u = (char *)malloc((size_t)len8);
+      if (u) {
+        DWORD wrn;
+        WideCharToMultiByte(CP_UTF8, 0, add, -1, u, len8, NULL, NULL);
+        WriteFile(h, u, (DWORD)(len8 - 1), &wrn, NULL);
+        free(u);
+      }
+      CloseHandle(h);
+      if (GetFileAttributesExW(p, GetFileExInfoStandard, &fa)) g_szpStamp = fa.ftLastWriteTime; /* не перечитывать зря */
+    }
+  }
 }
 
 /* операция резанием: коды 4100…4279 справочника (обработка резанием) или название. Заготовка —
@@ -150,9 +223,27 @@ static BOOL szp_is_mech(long code, const wchar_t *key) {
   return FALSE;
 }
 
-/* строка таблицы для операции («4110 Токарная», «4110», «Токарная (черновая)»); нет своей, но это
-   операция резанием и задана МЕХОБРАБОТКА — строка с этим участком; NULL — нет */
-static const SzPrio *szp_find(const wchar_t *op) {
+static BOOL szp_has(const wchar_t *s, const wchar_t *stem) { return s && s[0] && wcsstr(s, stem) != NULL; }
+
+/* группа операции (SZP_G_*) по коду, ключу названия и станку (строчные); -1 — ни одна */
+static int szp_group_of(long code, const wchar_t *key, const wchar_t *equipLow) {
+  if (szp_is_cut(code, key) || code == 104 || code == 110 || szp_has(key, L"заготовит")) return SZP_G_ZAG;
+  if (code == 2129 || code == 2172 || code == 6079 || szp_has(key, L"гиб") || szp_has(key, L"вальцев") || szp_has(key, L"вальцовк"))
+    return SZP_G_GIB;
+  if ((code >= 4231 && code <= 4239) || szp_has(key, L"чпу") || szp_has(key, L"обрабатывающ") || szp_has(equipLow, L"чпу") ||
+      szp_has(equipLow, L"обрабатывающий центр"))
+    return SZP_G_CNC;
+  if ((code >= 4130 && code <= 4149) || szp_has(key, L"шлифовальн") || szp_has(key, L"заточн")) return SZP_G_SHLIF;
+  if ((code >= 4150 && code <= 4162) || szp_has(key, L"зубо")) return SZP_G_ZUBO;
+  if (szp_is_mech(code, key)) return SZP_G_MECH;
+  if ((code >= 8800 && code <= 8899) || szp_has(key, L"сборк") || szp_has(key, L"сборочн")) return SZP_G_SBOR;
+  return -1;
+}
+
+/* строка таблицы для операции («4110 Токарная», «4110», «Токарная (черновая)»); нет своей — строка
+   её группы (ЗАГОТОВКА, ЧПУ, МЕХОБРАБОТКА…) с участком группы; equip — станок операции (для ЧПУ);
+   NULL — нет */
+static const SzPrio *szp_find_eq(const wchar_t *op, const wchar_t *equip) {
   if (!op || !op[0]) return NULL;
   szp_load();
   long code = szp_code_of(op);
@@ -160,16 +251,25 @@ static const SzPrio *szp_find(const wchar_t *op) {
   szp_key(op, key, 80);
   for (int i = 0; i < g_szpN; i++)
     if ((code >= 0 && g_szp[i].code == code) || (key[0] && !wcscmp(g_szp[i].name, key))) return &g_szp[i];
-  if (g_szpMech[0] && szp_is_mech(code, key)) {
-    memset(&g_szpMechRow, 0, sizeof(g_szpMechRow));
-    g_szpMechRow.code = -1;
-    lstrcpynW(g_szpMechRow.name, L"мехобработка", 80);
-    lstrcpynW(g_szpMechRow.area[0], g_szpMech, 80);
-    g_szpMechRow.n = 1;
-    return &g_szpMechRow;
+  wchar_t eq[200] = L"";
+  if (equip && equip[0]) {
+    lstrcpynW(eq, equip, 200);
+    CharLowerBuffW(eq, (DWORD)wcslen(eq));
+  }
+  int g = szp_group_of(code, key, eq);
+  if (g >= 0 && g_szpGroup[g][0]) {
+    memset(&g_szpGroupRow, 0, sizeof(g_szpGroupRow));
+    g_szpGroupRow.code = -1;
+    lstrcpynW(g_szpGroupRow.name, kSzpGroupKey[g], 80);
+    CharLowerBuffW(g_szpGroupRow.name, (DWORD)wcslen(g_szpGroupRow.name));
+    lstrcpynW(g_szpGroupRow.area[0], g_szpGroup[g], 80);
+    g_szpGroupRow.n = 1;
+    return &g_szpGroupRow;
   }
   return NULL;
 }
+
+static inline const SzPrio *szp_find(const wchar_t *op) { return szp_find_eq(op, NULL); } /* inline: в сборке зовут szp_find_eq */
 
 /* код участка — число в начале («31 Механический участок 31» → «31»; «Цех 3 · 31 …» — после « · ») */
 static void szp_area_code(const wchar_t *s, wchar_t *out, int cap) {

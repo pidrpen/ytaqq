@@ -420,7 +420,7 @@ static int szm_write_spec(const wchar_t *path, const wchar_t *folder, const wcha
     szm_area_code(it->ceh, area, 16);
     wchar_t eqSrc[200];
     lstrcpynW(eqSrc, it->equip, 200);
-    const SzPrio *pr = szp_find(it->code); /* таблица технолога (soyuz_prio.c) важнее аналога из ТП завода */
+    const SzPrio *pr = szp_find_eq(it->code, it->equip); /* таблица технолога (soyuz_prio.c) важнее аналога из ТП завода */
     int pk = szp_pick(pr, NULL);
     if (pk >= 0) {
       if (pr->area[pk][0]) szp_area_code(pr->area[pk], area, 16);

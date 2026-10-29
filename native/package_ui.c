@@ -515,7 +515,7 @@ static int pk_equip_for(const wchar_t *op, const wchar_t *area, wchar_t *out, in
    подбора по базе; код участка из таблицы — как в «Союзе», если справочник уже прочитан.
    1 — что-то подставлено */
 static int pk_prio_row(XpTable *t, int r) {
-  const SzPrio *p = szp_find(xp_cell(t, r, 2));
+  const SzPrio *p = szp_find_eq(xp_cell(t, r, 2), xp_cell(t, r, 4)); /* станок — для группы ЧПУ */
   int k = szp_pick(p, xp_cell(t, r, 3));
   if (k < 0) return 0;
   int set = 0;
