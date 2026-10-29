@@ -295,15 +295,17 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
       if (hp != INVALID_HANDLE_VALUE) {
         DWORD wr;
         WriteFile(hp, "\xEF\xBB\xBF", 3, &wr, NULL);
-        const char *body = "# проверка\r\n4110\t32\t1\xD0\x9A""62\r\n\xD0\xA1\xD0\xB2\xD0\xB5\xD1\x80\xD0\xBB\xD0\xB8\xD0\xBB\xD1\x8C\xD0\xBD\xD0\xB0\xD1\x8F\t31\t2\xD0\x9D""135\r\n";
+        const char *body = "# проверка\r\n\xD0\x9C\xD0\x95\xD0\xA5\xD0\x9E\xD0\x91\xD0\xA0\xD0\x90\xD0\x91\xD0\x9E\xD0\xA2\xD0\x9A\xD0\x90\t12\r\n4110\t32\t1\xD0\x9A""62\r\n\xD0\xA1\xD0\xB2\xD0\xB5\xD1\x80\xD0\xBB\xD0\xB8\xD0\xBB\xD1\x8C\xD0\xBD\xD0\xB0\xD1\x8F\t31\t2\xD0\x9D""135\r\n";
         WriteFile(hp, body, (DWORD)strlen(body), &wr, NULL);
         CloseHandle(hp);
       }
       g_szpLoaded = FALSE;
       const SzPrio *pr = szp_find(L"4110 Токарная");
+      const SzPrio *pm = szp_find(L"4130 Шлифовальная");
       st_check(pr && pr->n == 1 && !wcscmp(pr->area[0], L"32") && !wcscmp(pr->equip[0], L"1К62") &&
-                   szp_find(L"Сверлильная (отв.)") && szp_find(L"4210") && !szp_find(L"7300"),
-               L"таблица приоритетов: 4110 → 32/1К62, «Сверлильная» и 4210 — одна строка, 7300 нет");
+                   szp_find(L"Сверлильная (отв.)") && szp_find(L"4210") && !szp_find(L"7300") && pm &&
+                   !wcscmp(pm->area[0], L"12") && !pm->equip[0][0] && !szp_find(L"0200 Контроль"),
+               L"таблица приоритетов: 4110 → 32/1К62, «Сверлильная» и 4210 — одна строка; МЕХОБРАБОТКА 12 — шлифовальной, не контролю");
       int n2 = szm_write_spec(spec, L"Тестовая сборка ЭСИ", L"", g_szR.des, TRUE, note, 200);
       wchar_t *t2 = NULL;
       HANDLE h2 = CreateFileW(spec, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
@@ -314,9 +316,14 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
         CloseHandle(h2);
         t2 = rd2 > 3 ? utf8_to_alloc(buf2 + 3, rd2 - 3) : NULL;
       }
-      st_check(n2 == 10 && t2 && wcsstr(t2, L"ТП\tАБВГ.711141.001\t010\t4110\t32\t1К62\t15\t4\r\n") &&
-                   wcsstr(t2, L"\t030\t4210\t31\t2Н135\t10\t4\r\n"),
-               L"«Создать ТП»: приоритет перекрыл участок и станок аналога у 4110 и 4210, нормы аналога остались");
+      int ntr = 0;
+      for (const wchar_t *q = t2; q && (q = wcsstr(q, L"\t0401\t")) != NULL; q += 6) ntr++;
+      st_check(n2 > 10 && t2 && wcsstr(t2, L"\t005\t0110\t31\t\t5\t1\r\n") && wcsstr(t2, L"\t010\t0401\t32\t\t\t\r\n") &&
+                   wcsstr(t2, L"\t015\t4110\t32\t1К62\t15\t4\r\n") && wcsstr(t2, L"\t4210\t31\t2Н135\t10\t4\r\n") &&
+                   wcsstr(t2, L"\t0401\t12\t\t\t\r\n") && wcsstr(t2, L"\t4130\t12\t") && ntr >= 4,
+               L"«Создать ТП»: приоритет перекрыл аналог (4110 → 32/1К62, 4210 → 31, 4130 → 12 мехобработка); «0401 Транспортирование» "
+               L"перед каждой сменой участка, номера по порядку");
+      st_note(L"     транспортирований в описании: %d", ntr);
       free(t2);
     }
     /* окно «Пакет для загрузки в PLM» → «В Союз…»: три листа — в строки описания (package_ui.c) */
@@ -387,6 +394,34 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
         int nf = pk_norms_fill(TRUE);
         st_check(nf >= 1 && xp_cell(&g_pk[PK_OPS], 2, 5)[0], L"у сверлильной без норм появился Тпз по таблицам ОМН");
         st_note(L"     нормы сверлильной: Тпз «%ls», Тшт «%ls»", xp_cell(&g_pk[PK_OPS], 2, 5), xp_cell(&g_pk[PK_OPS], 2, 6));
+        /* смена участка и конец маршрута: фрезерная без участка — на 12 (МЕХОБРАБОТКА), деталь входит в
+           ТСТ.120.000, у которой первая операция на «5 Сборочный участок» */
+        wchar_t **w4 = xp_row(&g_pk[PK_OPS]);
+        (void)w4;
+        pk_put(&g_pk[PK_OPS], 3, 0, L"ТСТ.110.004");
+        pk_put(&g_pk[PK_OPS], 3, 1, L"020");
+        pk_put(&g_pk[PK_OPS], 3, 2, L"4260 Фрезерная");
+        w4 = xp_row(&g_pk[PK_OPS]);
+        pk_put(&g_pk[PK_OPS], 4, 0, L"ТСТ.120.000");
+        pk_put(&g_pk[PK_OPS], 4, 1, L"005");
+        pk_put(&g_pk[PK_OPS], 4, 2, L"8800 Слесарно-сборочная");
+        pk_put(&g_pk[PK_OPS], 4, 3, L"5 Сборочный участок");
+        pk_equip_fill();
+        int trn = pk_transport_fill();
+        XpTable *ot = &g_pk[PK_OPS];
+        int nTr = 0, lastTr = -1, frez = -1;
+        for (int r = 0; r < ot->n; r++)
+          if (!_wcsicmp(xp_cell(ot, r, 0), L"ТСТ.110.004")) {
+            if (pk_is_transport(xp_cell(ot, r, 2))) nTr++, lastTr = r;
+            if (!wcsncmp(xp_cell(ot, r, 2), L"4260", 4)) frez = r;
+          }
+        st_check(trn == 2 && nTr == 2 && frez >= 0 && !wcscmp(xp_cell(ot, frez, 3), L"12") && lastTr >= 0 &&
+                     !wcscmp(xp_cell(ot, lastTr, 3), L"5 Сборочный участок") && !wcscmp(xp_cell(ot, lastTr, 1), L"030"),
+                 L"транспортирование: перед фрезерной на 12 и в конце на «5 Сборочный участок» (№ 030), фрезерная на 12 по МЕХОБРАБОТКЕ");
+        st_check(pk_transport_fill() == 0, L"повторный вызов транспортирований не добавляет");
+        for (int r = 0; r < ot->n; r++)
+          if (!_wcsicmp(xp_cell(ot, r, 0), L"ТСТ.110.004"))
+            st_note(L"     %ls %ls · %ls · %ls", xp_cell(ot, r, 1), xp_cell(ot, r, 2), xp_cell(ot, r, 3), xp_cell(ot, r, 4));
         wchar_t pp2[MAX_PATH];
         szp_path(pp2);
         DeleteFileW(pp2);
@@ -440,7 +475,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
       st_check(g_pkEditCtl == g_pkCombo && SendMessageW(g_pkCombo, CB_GETCOUNT, 0, 0) == 1, L"правка «Участка» — список из базы");
       st_shot_wnd(L"9-package.png", g_pkWnd);
       pk_edit_end(FALSE);
-      st_check(ListView_GetItemCount(g_pkList) == 3, L"в таблице листа «Операции» три строки");
+      st_check(ListView_GetItemCount(g_pkList) == 7, L"в таблице листа «Операции» семь строк (с транспортированиями и сборкой)");
       pk_to_soyuz();
       for (int t = 0; t < 100 && SendMessageW(g_szmCombo, CB_GETCOUNT, 0, 0) == 0; t++) st_pump(100);
       int nf = (int)SendMessageW(g_szmCombo, CB_GETCOUNT, 0, 0);
