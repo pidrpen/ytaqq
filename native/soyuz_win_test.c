@@ -484,6 +484,26 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
         szm_write_part(sp, L"ПАПКА_ТП\tДля основных ТП\r\nТП\tТСТ.130.001\t005\t4110\t31\t\t15\t4\r\n");
         st_check(szm_split_spec(sp, parts, 20) == 0, L"одна деталь без ЭСИ — одним вызовом, частей нет");
         DeleteFileW(sp);
+        /* пакет 1.0.0.7: версия из строки «ПАКЕТ», ход работы из файла .progress */
+        g_szmPkgVer = 0;
+        st_check(szm_ver_num(L"1.0.0.7") == SZM_VER(1, 0, 0, 7) && szm_ver_num(L"1.0.0.10") > szm_ver_num(L"1.0.0.7") &&
+                     szm_ver_num(L"2.0") > szm_ver_num(L"1.9.9.9") && !szm_ver_num(L"ВЕРСИЯ 3") &&
+                     szm_pkg_line(L"ПАКЕТ\t1.0.0.7\r\nВЕРСИЯ\t3\r\nПАПКА\tx\r\n") == SZM_VER(1, 0, 0, 7) &&
+                     g_szmPkgVer == SZM_VER(1, 0, 0, 7) && !szm_pkg_line(L"ВЕРСИЯ\t3\r\nПАПКА\tx\r\n") &&
+                     g_szmPkgVer == SZM_VER(1, 0, 0, 7),
+                 L"версия пакета: «ПАКЕТ\t1.0.0.7» в ответе запоминается, старый ответ без строки её не сбрасывает");
+        {
+          wchar_t pp[MAX_PATH], pt[400] = L"";
+          _snwprintf(pp, MAX_PATH, L"%ls\\cursorpad-split.txt.progress", g_stDir);
+          st_check(!szm_progress_text(pp, pt, 400), L"файла хода нет — текста нет");
+          szm_write_part(pp, L"12\t40\tТП ТСТ.130.004");
+          BOOL okp = szm_progress_text(pp, pt, 400);
+          st_check(okp && !wcscmp(pt, L"12 из 40: ТП ТСТ.130.004"), L"ход работы из файла: «12 из 40: ТП …»");
+          szm_write_part(pp, L"0\t0\tищу обозначения в «Союзе»: 7");
+          st_check(szm_progress_text(pp, pt, 400) && !wcscmp(pt, L"ищу обозначения в «Союзе»: 7"), L"ход без счёта — одной строкой");
+          DeleteFileW(pp);
+        }
+        g_szmPkgVer = 0;
       }
       /* действия из чата (ai_esi.c): команды узнаёт код, пути — из текста */
       {
