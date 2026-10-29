@@ -30,7 +30,18 @@
 #define ID_PK_ESI 313   /* «Из Союза» — изделие с составом из базы «Союза» */
 #define ID_PK_ESIDES 314
 #define ID_PK_DRAW 315 /* «Чертежи…» — файлы из архива к изделиям */
+#define ID_PK_ASM 316  /* «+ Сборка» — строка сборки: на неё бросают чертежи её состава */
+/* строка быстрого ТП над листом «Операции»: деталь, операция (печатать — список сужается),
+   участок, станок, «+ Операция» (Enter) — номер 005, 010… сам */
+#define ID_PK_QPART 317
+#define ID_PK_QOP 318
+#define ID_PK_QAREA 319
+#define ID_PK_QEQUIP 320
+#define ID_PK_QADD 321
 #define WM_PK_ESI (WM_APP + 99) /* lParam — RtJob*, освобождает окно */
+/* чертежи, брошенные мышью (pk_stamp.c): штамп читает рабочий поток */
+#define WM_PK_STAMP (WM_APP + 96)   /* lParam — PkStRes*, освобождает окно */
+#define WM_PK_STAMPGO (WM_APP + 95) /* читается следующий файл */
 
 /* Справочники для выпадающих списков листа «Операции» (с 2026.10.28): операции — из 1С
    (kOps1c, зашиты), участки и станки — из базы «Союза» (soyuz_make.c, szm_dicts_start:
@@ -40,6 +51,8 @@ typedef struct {
   int na, ne;
   wchar_t (*area)[200];  /* «31 Механический участок 31» */
   wchar_t (*equip)[200]; /* «16К20, Токарно-винторезный станок» */
+  int nm;
+  wchar_t (*mfg)[200];   /* значения «Признака изготовления», какие есть в базе: «Покупное»… */
   wchar_t err[300];
 } SzmDicts;
 static SzmDicts g_szmDicts;
@@ -66,6 +79,15 @@ static BOOL g_pkLoaded;
 static HWND g_pkEsiEdit, g_pkHelp;
 static volatile LONG g_pkEsiBusy, g_pkEsiCancel;
 static wchar_t g_pkCur[200]; /* выбранная позиция: к ней — вставленные операции и заготовка */
+static volatile LONG g_pkStGen; /* «Очистить» — недочитанные чертежи (pk_stamp.c) мимо */
+static HWND g_pkQPart, g_pkQOp, g_pkQArea, g_pkQEquip; /* строка быстрого ТП (лист «Операции») */
+static BOOL g_pkQShown, g_pkQBusy;
+static wchar_t g_pkQLastArea[200], g_pkQLastEquip[200]; /* участок и станок — для следующей операции, в черновике */
+static void pk_layout(void);
+static void pk_stamp_drop(HWND hwnd, HDROP hd); /* pk_stamp.c: бросили файлы — читать штампы */
+static void pk_stamp_done(void *res);           /* pk_stamp.c: WM_PK_STAMP */
+static void pk_stamp_progress(void);            /* pk_stamp.c: WM_PK_STAMPGO */
+static void pk_stamp_pick(void);                /* pk_stamp.c: выбрать файлы чертежей — как бросить их */
 
 /* Строки, пришедшие из «Союза» («Из Союза»): изделие и связь там уже есть. Пока строка как
    была — в «Союз» не идёт (у изделия функция выровняла бы наименование, пустое стёрла бы);
@@ -215,6 +237,12 @@ static void pk_draft_save(void) {
     sb_field(&b, g_pkCur);
     sb_add(&b, L"\n");
   }
+  if (g_pkQLastArea[0] || g_pkQLastEquip[0]) { /* «qa» — участок и станок строки быстрого ТП */
+    sb_add(&b, L"qa");
+    sb_field(&b, g_pkQLastArea);
+    sb_field(&b, g_pkQLastEquip);
+    sb_add(&b, L"\n");
+  }
   wchar_t p[MAX_PATH];
   pk_draft_path(p);
   if (b.w) share_write_ex(p, b.w, TRUE);
@@ -235,6 +263,7 @@ static void pk_draft_load(void) {
     if (n >= 3 && !wcscmp(f[0], L"si")) pk_soy_add_item(f[1], f[2], n > 3 && f[3][0] == L'1');
     if (n >= 3 && !wcscmp(f[0], L"sl")) pk_soy_add_link(f[1], f[2]);
     if (n >= 2 && !wcscmp(f[0], L"cur")) lstrcpynW(g_pkCur, f[1], 200);
+    if (n >= 2 && !wcscmp(f[0], L"qa")) lstrcpynW(g_pkQLastArea, f[1], 200), lstrcpynW(g_pkQLastEquip, n > 2 ? f[2] : L"", 200);
     if (n < 2 || f[0][0] < L'0' || f[0][0] >= L'0' + PK_NT || f[0][1]) continue;
     int k = f[0][0] - L'0';
     wchar_t **w = xp_row(&g_pk[k]);
@@ -246,6 +275,7 @@ static void pk_draft_load(void) {
 
 /* ---- таблица окна ---- */
 static void pk_tabs(void) {
+  if (g_pkQPart && (g_pkSheet == PK_OPS) != g_pkQShown) pk_layout(); /* строка быстрого ТП — только у «Операций» */
   for (int k = 0; k < PK_NT; k++) {
     wchar_t s[60];
     _snwprintf(s, 60, L"%s%s · %d", k == g_pkSheet ? L"● " : L"", kPkSheets[k].name, g_pk[k].n);
@@ -341,12 +371,13 @@ static LRESULT CALLBACK PkEditProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
 
 /* список для столбца: 2 — операции 1С, 3 — участки, 4 — станки (лист «Операции»); 10 — обозначения
    из «Изделий» (деталь операции и заготовки, сборка и входящее: к какой позиции ЭСИ); 11 — виды
-   изделий, как в «Союзе»; иначе -1 */
+   изделий, как в «Союзе»; 12 — признак изготовления (значения из базы); иначе -1 */
 static int pk_combo_kind(int sheet, int c) {
   if (sheet == PK_OPS && c >= 2 && c <= 4) return c;
   if ((sheet == PK_OPS || sheet == PK_BLANKS) && c == 0) return 10;
   if (sheet == PK_LINKS && c <= 1) return 10;
   if (sheet == PK_ITEMS && c == 2) return 11;
+  if (sheet == PK_ITEMS && c == 6) return 12;
   return -1;
 }
 
@@ -369,6 +400,10 @@ static void pk_combo_fill(int kind) {
     }
   else if (kind == 11)
     for (int i = 0; pk_kind_name(i); i++) SendMessageW(g_pkCombo, CB_ADDSTRING, 0, (LPARAM)pk_kind_name(i));
+  else if (kind == 12) { /* как в базе; базы нет — «Покупное», функция «Союза» сверит по началу слова */
+    for (int i = 0; i < g_szmDicts.nm; i++) SendMessageW(g_pkCombo, CB_ADDSTRING, 0, (LPARAM)g_szmDicts.mfg[i]);
+    if (!g_szmDicts.nm) SendMessageW(g_pkCombo, CB_ADDSTRING, 0, (LPARAM)L"Покупное");
+  }
   SendMessageW(g_pkCombo, WM_SETREDRAW, TRUE, 0);
   SendMessageW(g_pkCombo, CB_SETDROPPEDWIDTH, (WPARAM)PKS(360), 0);
 }
@@ -446,6 +481,217 @@ static void pk_add_row(void) {
   pk_fill(FALSE);
   pk_changed();
   pk_edit_begin(t->n - 1, first[0] ? 1 : 0);
+}
+
+/* «+ Сборка»: строка сборки в «Изделиях» — обозначение впишут или даст её чертёж СБ, а чертежи,
+   брошенные на эту строку, лягут в её состав (pk_stamp.c) */
+static void pk_add_asm(void) {
+  if (g_pkEditRow >= 0) pk_edit_end(TRUE);
+  if (g_pkSheet != PK_ITEMS) {
+    g_pkSheet = PK_ITEMS;
+    pk_fill(TRUE);
+  }
+  XpTable *t = &g_pk[PK_ITEMS];
+  if (!xp_row(t)) return;
+  pk_put(t, t->n - 1, 2, L"Сборочные единицы");
+  pk_fill(FALSE);
+  pk_changed();
+  ListView_SetItemState(g_pkList, -1, 0, LVIS_SELECTED);
+  ListView_SetItemState(g_pkList, t->n - 1, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+  ListView_EnsureVisible(g_pkList, t->n - 1, FALSE);
+  pk_status(L"Сборка: впишите обозначение и наименование или бросьте на строку её СБ (спецификацию — с составом). "
+            L"Чертежи деталей, брошенные на эту строку, лягут в её состав");
+  pk_edit_begin(t->n - 1, 0);
+}
+
+/* ---- строка быстрого ТП (лист «Операции») ---- */
+
+/* операция по тому, что напечатали: «Токарная», «ток», «4110» → «4110 Токарная» из справочника
+   1С; одно совпадение по началу кода или слова — оно, иначе первое по вхождению; нет — как есть */
+static void pk_q_resolve(const wchar_t *in, wchar_t *out, int cap) {
+  wchar_t low[200];
+  lstrcpynW(low, in, 200);
+  CharLowerBuffW(low, (DWORD)wcslen(low));
+  int first = -1, pre = -1, npre = 0;
+  for (int i = 0; i < OPS_1C_N; i++) {
+    wchar_t n[200];
+    lstrcpynW(n, kOps1c[i].name, 200);
+    CharLowerBuffW(n, (DWORD)wcslen(n));
+    if (!wcscmp(n, low)) {
+      lstrcpynW(out, kOps1c[i].name, cap);
+      return;
+    }
+    if (!wcsncmp(n, low, wcslen(low)) || !wcsncmp(n + 5, low, wcslen(low))) pre = pre < 0 ? i : pre, npre++;
+    if (first < 0 && wcsstr(n, low)) first = i;
+  }
+  int k = npre == 1 ? pre : first;
+  lstrcpynW(out, low[0] && k >= 0 ? kOps1c[k].name : in, cap);
+}
+
+/* список операций — по напечатанному (пусто — весь справочник) */
+static void pk_q_filter(void) {
+  if (g_pkQBusy || !g_pkQOp) return;
+  g_pkQBusy = TRUE;
+  wchar_t t[200], low[200];
+  GetWindowTextW(g_pkQOp, t, 200);
+  DWORD s0 = 0, s1 = 0;
+  SendMessageW(g_pkQOp, CB_GETEDITSEL, (WPARAM)&s0, (LPARAM)&s1);
+  lstrcpynW(low, t, 200);
+  CharLowerBuffW(low, (DWORD)wcslen(low));
+  SendMessageW(g_pkQOp, WM_SETREDRAW, FALSE, 0);
+  SendMessageW(g_pkQOp, CB_RESETCONTENT, 0, 0);
+  int n = 0;
+  for (int i = 0; i < OPS_1C_N && n < 300; i++) {
+    wchar_t nm[200];
+    lstrcpynW(nm, kOps1c[i].name, 200);
+    CharLowerBuffW(nm, (DWORD)wcslen(nm));
+    if (!low[0] || wcsstr(nm, low)) SendMessageW(g_pkQOp, CB_ADDSTRING, 0, (LPARAM)kOps1c[i].name), n++;
+  }
+  SendMessageW(g_pkQOp, WM_SETREDRAW, TRUE, 0);
+  if (low[0] && n && !SendMessageW(g_pkQOp, CB_GETDROPPEDSTATE, 0, 0)) {
+    SendMessageW(g_pkQOp, CB_SHOWDROPDOWN, TRUE, 0);
+    SetCursor(LoadCursorW(NULL, IDC_ARROW)); /* раскрытый список прячет курсор мыши */
+  } else if (!n && SendMessageW(g_pkQOp, CB_GETDROPPEDSTATE, 0, 0)) {
+    SendMessageW(g_pkQOp, CB_SHOWDROPDOWN, FALSE, 0); /* нет такой — пустой список не нужен */
+  }
+  SetWindowTextW(g_pkQOp, t); /* раскрытие и очистка списка трогают поле — вернуть напечатанное */
+  SendMessageW(g_pkQOp, CB_SETEDITSEL, 0, MAKELPARAM(s0, s1));
+  InvalidateRect(g_pkQOp, NULL, TRUE);
+  g_pkQBusy = FALSE;
+}
+
+/* списки детали, участка и станка — при раскрытии: изделия и справочники могли поменяться */
+static void pk_q_list(HWND cb) {
+  wchar_t t[200];
+  GetWindowTextW(cb, t, 200);
+  SendMessageW(cb, CB_RESETCONTENT, 0, 0);
+  if (cb == g_pkQPart) {
+    for (int r = 0; r < g_pk[PK_ITEMS].n; r++) {
+      const wchar_t *d = xp_cell(&g_pk[PK_ITEMS], r, 0);
+      if (d[0] && !pk_kind_noname(xp_cell(&g_pk[PK_ITEMS], r, 2)) &&
+          SendMessageW(cb, CB_FINDSTRINGEXACT, (WPARAM)-1, (LPARAM)d) == CB_ERR)
+        SendMessageW(cb, CB_ADDSTRING, 0, (LPARAM)d);
+    }
+  } else if (cb == g_pkQArea) {
+    for (int i = 0; i < g_szmDicts.na; i++) SendMessageW(cb, CB_ADDSTRING, 0, (LPARAM)g_szmDicts.area[i]);
+  } else if (cb == g_pkQEquip) {
+    for (int i = 0; i < g_szmDicts.ne; i++) SendMessageW(cb, CB_ADDSTRING, 0, (LPARAM)g_szmDicts.equip[i]);
+  }
+  SetWindowTextW(cb, t);
+}
+
+static void pk_q_trim(wchar_t *s) {
+  wchar_t *b = s;
+  while (*b == L' ') b++;
+  if (b != s) memmove(s, b, (wcslen(b) + 1) * sizeof(wchar_t));
+  size_t n = wcslen(s);
+  while (n && s[n - 1] == L' ') s[--n] = 0;
+}
+
+/* «+ Операция» (Enter): строка в «Операции» с номером на 5 больше последнего у этой детали */
+static void pk_q_add(void) {
+  wchar_t part[200], op[200], area[200], eq[200];
+  GetWindowTextW(g_pkQPart, part, 200);
+  GetWindowTextW(g_pkQOp, op, 200);
+  GetWindowTextW(g_pkQArea, area, 200);
+  GetWindowTextW(g_pkQEquip, eq, 200);
+  pk_q_trim(part), pk_q_trim(op), pk_q_trim(area), pk_q_trim(eq);
+  if (!part[0]) {
+    pk_status(L"Сначала деталь — выберите в списке слева или впишите обозначение");
+    SetFocus(g_pkQPart);
+    return;
+  }
+  if (!op[0]) {
+    pk_status(L"Операция — начните печатать название или номер («ток», «4110»), Enter — в ТП");
+    SetFocus(g_pkQOp);
+    return;
+  }
+  wchar_t name[200];
+  pk_q_resolve(op, name, 200);
+  XpTable *t = &g_pk[PK_OPS];
+  int last = 0, cnt = 0;
+  for (int r = 0; r < t->n; r++)
+    if (!_wcsicmp(xp_cell(t, r, 0), part)) {
+      int v = _wtoi(xp_cell(t, r, 1));
+      if (v > last) last = v;
+      cnt++;
+    }
+  wchar_t num[8];
+  _snwprintf(num, 8, L"%03d", last + 5);
+  num[7] = 0;
+  wchar_t **w = xp_row(t);
+  if (!w) return;
+  xp_set(w, 0, part);
+  xp_set(w, 1, num);
+  xp_set(w, 2, name);
+  xp_set(w, 3, area);
+  xp_set(w, 4, eq);
+  lstrcpynW(g_pkQLastArea, area, 200);
+  lstrcpynW(g_pkQLastEquip, eq, 200);
+  lstrcpynW(g_pkCur, part, 200);
+  if (g_pkSheet == PK_OPS) {
+    pk_fill(FALSE);
+    ListView_EnsureVisible(g_pkList, t->n - 1, FALSE);
+  }
+  pk_changed();
+  g_pkQBusy = TRUE; /* очистка поля — не фильтр */
+  SetWindowTextW(g_pkQOp, L"");
+  g_pkQBusy = FALSE;
+  pk_q_filter();
+  SetFocus(g_pkQOp);
+  pk_status(L"ТП «%s»: операций %d, последняя — %s %s%s. Печатайте следующую; «В Союз…» создаст ТП и привяжет к детали",
+            part, cnt + 1, num, name, wcscmp(name, op) && !wcschr(op, L' ') ? L" (из справочника 1С)" : L"");
+}
+
+/* Enter в полях строки быстрого ТП — «+ Операция»; в раскрытом списке — сперва выбранное */
+static LRESULT CALLBACK PkQProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+  WNDPROC old = (WNDPROC)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+  HWND cb = GetParent(hwnd);
+  if (msg == WM_CHAR && (wParam == L'\r' || wParam == L'\n' || wParam == L'\t')) return 0; /* без писка */
+  if (msg == WM_KEYDOWN && wParam == VK_TAB) { /* Tab / Shift+Tab — по полям строки по кругу */
+    HWND f[4] = {g_pkQPart, g_pkQOp, g_pkQArea, g_pkQEquip};
+    int i = 0;
+    while (i < 4 && f[i] != cb) i++;
+    if (SendMessageW(cb, CB_GETDROPPEDSTATE, 0, 0)) SendMessageW(cb, CB_SHOWDROPDOWN, FALSE, 0);
+    SetFocus(f[(i + (GetKeyState(VK_SHIFT) < 0 ? 3 : 1)) % 4]);
+    return 0;
+  }
+  if (msg == WM_KEYDOWN && wParam == VK_RETURN) {
+    if (SendMessageW(cb, CB_GETDROPPEDSTATE, 0, 0)) {
+      int sel = (int)SendMessageW(cb, CB_GETCURSEL, 0, 0);
+      wchar_t t[200] = L"";
+      if (sel >= 0 && SendMessageW(cb, CB_GETLBTEXTLEN, (WPARAM)sel, 0) < 200)
+        SendMessageW(cb, CB_GETLBTEXT, (WPARAM)sel, (LPARAM)t);
+      g_pkQBusy = TRUE;
+      SendMessageW(cb, CB_SHOWDROPDOWN, FALSE, 0);
+      if (t[0]) SetWindowTextW(cb, t);
+      g_pkQBusy = FALSE;
+      if (cb != g_pkQOp) { /* в списке детали, участка, станка Enter — только выбрать */
+        SetFocus(g_pkQOp);
+        return 0;
+      }
+    }
+    pk_q_add();
+    return 0;
+  }
+  return CallWindowProcW(old, hwnd, msg, wParam, lParam);
+}
+
+static HWND pk_q_combo(int id, const wchar_t *cue) {
+  HWND cb = CreateWindowExW(0, L"COMBOBOX", L"", WS_CHILD | WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWN | CBS_AUTOHSCROLL, 0, 0,
+                            10, 10, g_pkWnd, (HMENU)(INT_PTR)id, g_inst, NULL);
+  if (!cb) return NULL;
+  if (g_fontBody) SendMessageW(cb, WM_SETFONT, (WPARAM)g_fontBody, FALSE);
+  SendMessageW(cb, CB_SETCUEBANNER, 0, (LPARAM)cue);
+  SendMessageW(cb, CB_SETDROPPEDWIDTH, (WPARAM)PKS(340), 0);
+  COMBOBOXINFO ci;
+  memset(&ci, 0, sizeof(ci));
+  ci.cbSize = sizeof(ci);
+  if (GetComboBoxInfo(cb, &ci) && ci.hwndItem) {
+    SendMessageW(ci.hwndItem, EM_SETCUEBANNER, TRUE, (LPARAM)cue); /* и при фокусе: строка вводится подряд */
+    SetWindowLongPtrW(ci.hwndItem, GWLP_USERDATA, (LONG_PTR)SetWindowLongPtrW(ci.hwndItem, GWLP_WNDPROC, (LONG_PTR)PkQProc));
+  }
+  return cb;
 }
 
 static void pk_delete_selected(void) {
@@ -569,6 +815,20 @@ static void pk_find_drawings(void) {
   pk_status(L"Чертежи из архива: нашлось %d, нет в архиве %d%s — лист «Изделия», столбец «Чертёж (файл)»; другой файл — "
             L"двойной щелчок по ячейке",
             found, miss, had ? L", у остальных уже был" : L"");
+}
+
+/* «Чертежи…»: файлы выбрать (штамп прочитает ИИ, как при перетаскивании) или найти в архиве */
+static void pk_draw_menu(void) {
+  HMENU m = CreatePopupMenu();
+  if (!m) return;
+  AppendMenuW(m, MF_STRING, 1, L"Выбрать файлы чертежей… — штамп прочитает ИИ (на выделенную строку: сборка — в состав)");
+  AppendMenuW(m, MF_STRING, 2, L"Найти в архиве по обозначениям — к изделиям без файла");
+  RECT r;
+  GetWindowRect(GetDlgItem(g_pkWnd, ID_PK_DRAW), &r);
+  int cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_LEFTALIGN | TPM_BOTTOMALIGN, r.left, r.top, 0, g_pkWnd, NULL);
+  DestroyMenu(m);
+  if (cmd == 1) pk_stamp_pick();
+  if (cmd == 2) pk_find_drawings();
 }
 
 static void pk_from_export(void) {
@@ -723,6 +983,8 @@ static void pk_help(void) {
       L"  Материал      наименование материала в сортаменте целиком, как в «Союзе»:\r\n"
       L"                «Круг 40 ГОСТ 2590-2006 / Сталь 45 ГОСТ 1050-2013». Нет такого — изделие без материала.\r\n"
       L"  Масса, кг     по желанию.\r\n"
+      L"  Признак изготовления  по желанию: «Покупное»… — выбор списком (значения из базы «Союза», если есть вход);\r\n"
+      L"                можно поставить и изделию «Из Союза». Нужна функция пакета 1.0.0.3.\r\n"
       L"  Чертёж (файл) по желанию: файл ляжет к изделию подлинником, как «Загрузить подлинники с локального\r\n"
       L"                диска» (нужна новая функция пакета). «Чертежи…» — найти в архиве по обозначениям.\r\n"
       L"  Папка         куда создать новые изделия — выбирается в окне «В Союз…»; должна быть: папок CursorPad не создаёт.\r\n\r\n"
@@ -739,6 +1001,18 @@ static void pk_help(void) {
       L"  ТП создаётся с версией 1 «В разработке», вариантом «Основной», признаком «основной ТП» и вносится\r\n"
       L"  в карточку ТП детали. Если у детали ТП уже есть — новый не создаётся (такие позиции «Проверить» назовёт).\r\n"
       L"  Папка для ТП — в окне «В Союз…»; пусто — «Для основных ТП».\r\n\r\n"
+      L"ЧЕРТЕЖИ МЫШЬЮ\r\n"
+      L"  Перетащите в окно чертежи (PDF, TIF, PNG, JPG; папку — все картинки в ней): обозначение и наименование\r\n"
+      L"  со штампа читает мини-ИИ с картинками (если включён; иначе Tesseract — сверьте), файл ложится в «Чертёж».\r\n"
+      L"  Не прочиталось (КОМПАС, DWG, без штампа) — из имени файла «АБВГ.123456.002 Корпус.pdf».\r\n"
+      L"  На пустое место — новые изделия; один чертёж на строку детали — в эту строку.\r\n"
+      L"  Сборка: «+ Сборка» (или любая строка вида «Сборочные единицы»), и бросайте на её строку чертежи —\r\n"
+      L"  лягут в её состав по 1 шт (количество — на листе «Состав»). Её СБ даёт ей обозначение и наименование,\r\n"
+      L"  спецификация — ещё и весь состав. На листе «Состав» — бросок на строку кладёт в сборку этой строки.\r\n\r\n"
+      L"ТП БЫСТРО — лист «Операции», строка над таблицей: деталь (выбранная позиция — сама), операция — начните\r\n"
+      L"  печатать («ток», «4110»), список сузится; участок и станок остаются для следующей; Tab — к следующему\r\n"
+      L"  полю. Enter или «+ Операция» — строка с номером 005, 010…; потом «В Союз…» — ТП создастся в папке ТП\r\n"
+      L"  и привяжется к детали.\r\n\r\n"
       L"КАК БЫСТРО ВСТАВИТЬ\r\n"
       L"  Ctrl+V или «Вставить» понимает: таблицу Excel и Word с шапкой (столбцы в любом порядке: «Обозн.», «Кол.»,\r\n"
       L"  «№ опер.», «Станок», «Тшт, ч»…), спецификацию с разделами, маршрут из чата ИИ, операции строками\r\n"
@@ -779,6 +1053,14 @@ static BOOL pk_check(BOOL quiet) {
         errs++;
         break;
       }
+    const wchar_t *mfg = xp_cell(it, r, 6); /* признак: список из базы есть — значение из него */
+    if (des[0] && mfg[0] && g_szmDicts.nm) {
+      BOOL known = FALSE;
+      for (int i = 0; i < g_szmDicts.nm && !known; i++) known = !_wcsicmp(g_szmDicts.mfg[i], mfg);
+      if (!known)
+        sb_add(&b, L"• Изделия, строка %d: признака изготовления «%s» в базе нет — функция возьмёт похожий по началу или "
+                   L"напишет в отчёт\n", r + 1, mfg);
+    }
     if (!des[0] || pk_row_from_soyuz(PK_ITEMS, r)) continue;
     /* вид — как в «Союзе» («Деталь» → «Детали»); у сборки из «Состава» пустой вид — «Сборочные единицы» */
     wchar_t kind[80];
@@ -956,13 +1238,28 @@ static int pk_soyuz_text(wchar_t **out, wchar_t *note, int ncap, PkSent *st) {
       sb_add(&b, L"\r\n");
       st->draws++;
     }
-    if (pk_row_from_soyuz(PK_ITEMS, r)) continue;
+    const wchar_t *mfg = xp_cell(it, r, 6);
+    if (pk_row_from_soyuz(PK_ITEMS, r)) {
+      /* из «Союза»: идёт, только если ему поставили признак изготовления — с наименованием оттуда
+         (пустое функция поняла бы как «стереть») */
+      PkSoyItem *si = pk_soy_item(des);
+      if (!mfg[0] || !si || !si->name[0]) continue;
+      sb_add(&b, L"ИЗДЕЛИЕ");
+      sb_field(&b, des);
+      sb_field(&b, si->name);
+      for (int c = 2; c < 5; c++) sb_field(&b, xp_cell(it, r, c));
+      sb_field(&b, mfg);
+      sb_add(&b, L"\r\n");
+      st->items++;
+      continue;
+    }
     if (!xp_cell(it, r, 1)[0] && !pk_kind_noname(xp_cell(it, r, 2))) {
       noName++;
       continue;
     }
     sb_add(&b, L"ИЗДЕЛИЕ");
     for (int c = 0; c < 5; c++) sb_field(&b, xp_cell(it, r, c));
+    sb_field(&b, mfg); /* признак изготовления: «Покупное»… — функция ставит значение списка по названию */
     sb_add(&b, L"\r\n");
     st->items++;
   }
@@ -1047,6 +1344,7 @@ static void pk_clear(void) {
   xp_package_free(g_pk);
   pk_soy_clear();
   g_pkCur[0] = 0;
+  InterlockedIncrement(&g_pkStGen); /* недочитанные чертежи — мимо */
   pk_init();
   pk_fill(FALSE);
   pk_changed();
@@ -1069,12 +1367,33 @@ static void pk_layout(void) {
   MoveWindow(g_pkEsiEdit, x, y + PKS(3), PKS(170), h - PKS(6), TRUE);
   int foot = rc.bottom - PKS(TOOL_FOOT_H), by = foot + (PKS(TOOL_FOOT_H) - PKS(30)) / 2;
   int ly = PANEL_TITLE_H + PKS(86);
+  /* лист «Операции»: над таблицей — строка быстрого ТП */
+  g_pkQShown = g_pkSheet == PK_OPS;
+  if (g_pkQPart) {
+    int gap = PKS(6), wPart = PKS(170), wOp = PKS(250), wArea = PKS(230), wBtn = PKS(116);
+    int wEq = rc.right - pad * 2 - wPart - wOp - wArea - wBtn - gap * 4;
+    if (wEq < PKS(100)) wEq = PKS(100);
+    HWND q[] = {g_pkQPart, g_pkQOp, g_pkQArea, g_pkQEquip, GetDlgItem(g_pkWnd, ID_PK_QADD)};
+    int qw[] = {wPart, wOp, wArea, wEq, wBtn}, qx = pad;
+    for (int i = 0; i < 5; i++) {
+      if (i < 4) MoveWindow(q[i], qx, ly, qw[i], PKS(320), TRUE);
+      else MoveWindow(q[i], qx, ly - PKS(1), qw[i], PKS(27), TRUE);
+      ShowWindow(q[i], g_pkQShown ? SW_SHOW : SW_HIDE);
+      qx += qw[i] + gap;
+    }
+    if (g_pkQShown) {
+      wchar_t t[200];
+      GetWindowTextW(g_pkQPart, t, 200);
+      if (!t[0] && g_pkCur[0]) SetWindowTextW(g_pkQPart, g_pkCur); /* выбранная позиция — деталь ТП */
+      ly += PKS(34);
+    }
+  }
   MoveWindow(g_pkList, pad, ly, rc.right - pad * 2, foot - PKS(26) - ly, TRUE);
   /* подвал (с 2026.10.21): правка строк — слева, главное «Сохранить» — справа */
-  static const int ids[] = {ID_PK_ADD, ID_PK_DEL, ID_PK_PASTE, ID_PK_CHECK, ID_PK_DRAW, ID_PK_CLEAR, ID_PK_HELP, ID_PK_SOYUZ};
-  static const int w[] = {84, 84, 140, 96, 90, 86, 100, 96};
+  static const int ids[] = {ID_PK_ADD, ID_PK_ASM, ID_PK_DEL, ID_PK_PASTE, ID_PK_CHECK, ID_PK_DRAW, ID_PK_CLEAR, ID_PK_HELP, ID_PK_SOYUZ};
+  static const int w[] = {84, 88, 80, 88, 90, 90, 84, 96, 90};
   x = PKS(16);
-  for (int i = 0; i < 8; i++) {
+  for (int i = 0; i < 9; i++) {
     MoveWindow(GetDlgItem(g_pkWnd, ids[i]), x, by, PKS(w[i]), PKS(30), TRUE);
     x += PKS(w[i] + 8);
   }
@@ -1096,8 +1415,8 @@ static void pk_paint(HWND hwnd, HDC hdc) {
   RECT st = {pad, PANEL_TITLE_H + PKS(56), rc.right - pad, PANEL_TITLE_H + PKS(82)};
   DrawTextW(hdc,
             g_pkStatus[0] ? g_pkStatus
-                          : L"Ctrl+V — вставить таблицу, спецификацию, маршрут. F2 — править. «Из Союза» — ЭСИ с составом, "
-                            L"ТП — к выбранной позиции. «Что нужно?» — какие данные.",
+                          : L"Перетащите чертежи — штамп прочитает ИИ; на строку сборки — в её состав. Ctrl+V — таблица, "
+                            L"маршрут. «Из Союза» — ЭСИ с составом. «Что нужно?» — какие данные.",
             -1, &st, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 }
 
@@ -1165,7 +1484,7 @@ static LRESULT CALLBACK PkProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
     return panel_hittest(hwnd, lParam);
   case WM_GETMINMAXINFO: {
     MINMAXINFO *mm = (MINMAXINFO *)lParam;
-    mm->ptMinTrackSize.x = PKS(1050); /* восемь кнопок подвала и «Сохранить»; вверху — листы и «Из Союза» */
+    mm->ptMinTrackSize.x = PKS(1080); /* девять кнопок подвала и «Сохранить»; вверху — листы и «Из Союза» */
     mm->ptMinTrackSize.y = PKS(360);
     return 0;
   }
@@ -1201,6 +1520,14 @@ static LRESULT CALLBACK PkProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
       else pk_add_row(); /* по пустому месту — новая строка */
       return 0;
     }
+    /* строка «Операций» — её деталь в строку быстрого ТП: дописывать этот ТП */
+    if (nh->hwndFrom == g_pkList && nh->code == LVN_ITEMCHANGED && g_pkSheet == PK_OPS && g_pkQPart) {
+      NMLISTVIEW *lv = (NMLISTVIEW *)lParam;
+      if (lv->iItem >= 0 && lv->iItem < g_pk[PK_OPS].n && (lv->uNewState & LVIS_SELECTED) && !(lv->uOldState & LVIS_SELECTED)) {
+        const wchar_t *d = xp_cell(&g_pk[PK_OPS], lv->iItem, 0);
+        if (d[0]) SetWindowTextW(g_pkQPart, d);
+      }
+    }
     /* выбрали позицию в «Изделиях» — к ней пойдут вставленные операции и заготовка */
     if (nh->hwndFrom == g_pkList && nh->code == LVN_ITEMCHANGED && g_pkSheet == PK_ITEMS) {
       NMLISTVIEW *lv = (NMLISTVIEW *)lParam;
@@ -1210,8 +1537,11 @@ static LRESULT CALLBACK PkProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
         if (d[0] && _wcsicmp(d, g_pkCur)) {
           lstrcpynW(g_pkCur, d, 200);
           PkSoyItem *si = pk_soy_item(d);
-          pk_status(L"Выбрано: %s%s — вставленные операции (Ctrl+V) и заготовка пойдут к нему", d,
-                    si ? (si->tp ? L" (из «Союза», ТП уже есть)" : L" (из «Союза», без ТП)") : L"");
+          pk_status(L"Выбрано: %s%s — %s", d,
+                    si ? (si->tp ? L" (из «Союза», ТП уже есть)" : L" (из «Союза», без ТП)") : L"",
+                    !_wcsicmp(xp_cell(&g_pk[PK_ITEMS], lv->iItem, 2), L"Сборочные единицы") || pk_is_parent(d)
+                        ? L"сборка: чертежи, брошенные на её строку, лягут в её состав"
+                        : L"вставленные операции (Ctrl+V) и заготовка пойдут к нему");
         }
       }
     }
@@ -1221,6 +1551,15 @@ static LRESULT CALLBACK PkProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
   case WM_PK_ESI:
     if (lParam) pk_esi_done((RtJob *)lParam);
     return 0;
+  case WM_DROPFILES: /* чертежи мышью: штамп → строка; на строку сборки — в её состав */
+    pk_stamp_drop(hwnd, (HDROP)wParam);
+    return 0;
+  case WM_PK_STAMP:
+    if (lParam) pk_stamp_done((void *)lParam);
+    return 0;
+  case WM_PK_STAMPGO:
+    pk_stamp_progress();
+    return 0;
   case WM_RT_PROGRESS:
     if (g_pkEsiBusy) pk_status(L"Читаю из «Союза»: позиций %d…", (int)wParam);
     return 0;
@@ -1229,11 +1568,13 @@ static LRESULT CALLBACK PkProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
     if (d) {
       free(g_szmDicts.area);
       free(g_szmDicts.equip);
+      free(g_szmDicts.mfg);
       g_szmDicts = *d;
       free(d);
       g_pkComboCol = -1; /* список заполнить заново */
       if (g_szmDicts.err[0]) pk_status(L"Справочники из базы не прочитаны: %s — участки и станки вписывайте руками", g_szmDicts.err);
-      else pk_status(L"Из базы «Союза»: участков %d, станков %d — выбор в столбцах листа «Операции»", g_szmDicts.na, g_szmDicts.ne);
+      else pk_status(L"Из базы «Союза»: участков %d, станков %d, признаков изготовления %d — выбор списком в ячейках",
+                     g_szmDicts.na, g_szmDicts.ne, g_szmDicts.nm);
     }
     return 0;
   }
@@ -1253,6 +1594,11 @@ static LRESULT CALLBACK PkProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
       pk_fill(TRUE);
     }
     if (id == ID_PK_ADD) pk_add_row();
+    if (id == ID_PK_ASM) pk_add_asm();
+    if (id == ID_PK_QADD) pk_q_add();
+    if (id == ID_PK_QOP && HIWORD(wParam) == CBN_EDITCHANGE) pk_q_filter();
+    if ((id == ID_PK_QPART || id == ID_PK_QAREA || id == ID_PK_QEQUIP) && HIWORD(wParam) == CBN_DROPDOWN)
+      pk_q_list((HWND)lParam);
     if (id == ID_PK_DEL) pk_delete_selected();
     if (id == ID_PK_PASTE) pk_paste();
     if (id == ID_PK_FROMXP) pk_from_export();
@@ -1262,7 +1608,7 @@ static LRESULT CALLBACK PkProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
     if (id == ID_PK_SOYUZ) pk_to_soyuz();
     if (id == ID_PK_HELP) pk_help();
     if (id == ID_PK_ESI) pk_esi_start();
-    if (id == ID_PK_DRAW) pk_find_drawings();
+    if (id == ID_PK_DRAW) pk_draw_menu();
     return 0;
   }
   case WM_KEYDOWN:
@@ -1297,7 +1643,7 @@ static void package_show(BOOL fill) {
     int w = PKS(1100), h = PKS(640);
     if (w > wa.right - wa.left - 40) w = wa.right - wa.left - 40;
     if (h > wa.bottom - wa.top - 40) h = wa.bottom - wa.top - 40;
-    g_pkWnd = CreateWindowExW(WS_EX_APPWINDOW | WS_EX_TOPMOST, L"CursorPadPackage", L"ЭСИ и ТП — CursorPad",
+    g_pkWnd = CreateWindowExW(WS_EX_APPWINDOW | WS_EX_TOPMOST | WS_EX_ACCEPTFILES, L"CursorPadPackage", L"ЭСИ и ТП — CursorPad",
                               WS_POPUP | WS_THICKFRAME | WS_CLIPCHILDREN | WS_SYSMENU | WS_MINIMIZEBOX,
                               wa.left + (wa.right - wa.left - w) / 2 + PKS(30), wa.top + (wa.bottom - wa.top - h) / 2 + PKS(30),
                               w, h, NULL, NULL, g_inst, NULL);
@@ -1315,14 +1661,20 @@ static void package_show(BOOL fill) {
     SendMessageW(g_pkEsiEdit, EM_SETCUEBANNER, FALSE, (LPARAM)L"обозначение в «Союзе»");
     g_pkEsiOld = (WNDPROC)SetWindowLongPtrW(g_pkEsiEdit, GWLP_WNDPROC, (LONG_PTR)PkEsiProc);
     mk_btn(g_pkWnd, L"+ Строка", ID_PK_ADD);
+    mk_btn(g_pkWnd, L"+ Сборка", ID_PK_ASM);
     mk_btn(g_pkWnd, L"Удалить", ID_PK_DEL);
-    mk_btn(g_pkWnd, L"Вставить (Ctrl+V)", ID_PK_PASTE);
+    mk_btn(g_pkWnd, L"Вставить", ID_PK_PASTE);
     mk_btn(g_pkWnd, L"Проверить", ID_PK_CHECK);
     mk_btn(g_pkWnd, L"Чертежи…", ID_PK_DRAW);
     mk_btn(g_pkWnd, L"Сохранить пакет…", ID_PK_SAVE);
     mk_btn(g_pkWnd, L"Очистить", ID_PK_CLEAR);
     mk_btn(g_pkWnd, L"Что нужно?", ID_PK_HELP);
     mk_btn(g_pkWnd, L"В Союз…", ID_PK_SOYUZ);
+    g_pkQPart = pk_q_combo(ID_PK_QPART, L"деталь (обозначение)");
+    g_pkQOp = pk_q_combo(ID_PK_QOP, L"операция: печатайте «ток», «4110»… Enter");
+    g_pkQArea = pk_q_combo(ID_PK_QAREA, L"участок");
+    g_pkQEquip = pk_q_combo(ID_PK_QEQUIP, L"оборудование (по желанию)");
+    mk_btn(g_pkWnd, L"+ Операция", ID_PK_QADD);
     g_pkList = CreateWindowExW(0, WC_LISTVIEWW, L"", WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP | LVS_REPORT |
                                                        LVS_SHOWSELALWAYS | WS_CLIPCHILDREN,
                                0, 0, 10, 10, g_pkWnd, NULL, g_inst, NULL);
@@ -1333,6 +1685,11 @@ static void package_show(BOOL fill) {
       g_pkLoaded = TRUE;
       pk_draft_load();
     }
+    SetWindowTextW(g_pkQArea, g_pkQLastArea); /* участок и станок — как в прошлый раз */
+    SetWindowTextW(g_pkQEquip, g_pkQLastEquip);
+    g_pkQBusy = TRUE;
+    pk_q_filter(); /* весь справочник операций */
+    g_pkQBusy = FALSE;
     pk_fill(TRUE);
     pk_layout();
   }

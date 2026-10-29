@@ -51,47 +51,114 @@ static BOOL log_window(HWND *pw, HWND owner, const wchar_t *title, int w, int h)
 
 static void szm_pref_path(wchar_t *p) { _snwprintf(p, MAX_PATH, L"%s\\soyuz.txt", g_dataDir), p[MAX_PATH - 1] = 0; }
 
-/* последние папки — из soyuz.txt (UTF-8): первая строка — для изделий, вторая — для ТП */
-static void szm_pref_load(wchar_t *folder, wchar_t *tpFolder, int cap) {
-  folder[0] = tpFolder[0] = 0;
+/* последние папки — в soyuz.txt (UTF-8): первая строка — для изделий, вторая — для ТП, дальше —
+   недавние, свежие сверху: «И<TAB>путь» и «Т<TAB>путь» (они встают в начало списков окна) */
+#define SZM_RECENT 6
+typedef struct {
+  wchar_t cur[2][SZM_PATH];
+  wchar_t rec[2][SZM_RECENT][SZM_PATH];
+  int nrec[2];
+} SzmPrefs;
+
+static void szm_pref_load(SzmPrefs *pf) {
+  memset(pf, 0, sizeof(*pf));
   wchar_t p[MAX_PATH];
   szm_pref_path(p);
   HANDLE h = CreateFileW(p, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
   if (h == INVALID_HANDLE_VALUE) return;
-  char buf[2400];
+  enum { CAP = 16384 };
+  char *buf = (char *)malloc(CAP);
+  wchar_t *w = (wchar_t *)malloc(CAP * sizeof(wchar_t));
   DWORD n = 0;
-  ReadFile(h, buf, sizeof(buf) - 1, &n, NULL);
+  if (buf && w) ReadFile(h, buf, CAP - 1, &n, NULL);
   CloseHandle(h);
-  buf[n] = 0;
-  char *s = buf;
-  if (n >= 3 && (unsigned char)s[0] == 0xEF) s += 3;
-  char *e = strpbrk(s, "\r\n");
-  char *second = NULL;
-  if (e) {
-    *e++ = 0;
-    while (*e == '\r' || *e == '\n') e++;
-    second = e;
-    char *e2 = strpbrk(second, "\r\n");
-    if (e2) *e2 = 0;
+  if (buf && w) {
+    buf[n] = 0;
+    char *s = buf;
+    if (n >= 3 && (unsigned char)s[0] == 0xEF) s += 3;
+    if (!MultiByteToWideChar(CP_UTF8, 0, s, -1, w, CAP)) w[0] = 0;
+    w[CAP - 1] = 0;
+    wchar_t *ln = w;
+    for (int line = 0; ln && *ln; line++) {
+      wchar_t *e = wcspbrk(ln, L"\r\n");
+      wchar_t c = e ? *e : 0;
+      if (e) *e++ = 0;
+      if (line < 2) lstrcpynW(pf->cur[line], ln, SZM_PATH);
+      else {
+        int k = ln[0] == L'И' ? 0 : ln[0] == L'Т' ? 1 : -1;
+        if (k >= 0 && ln[1] == L'\t' && ln[2] && pf->nrec[k] < SZM_RECENT) lstrcpynW(pf->rec[k][pf->nrec[k]++], ln + 2, SZM_PATH);
+      }
+      if (c == L'\r' && *e == L'\n') e++;
+      ln = e;
+    }
   }
-  MultiByteToWideChar(CP_UTF8, 0, s, -1, folder, cap);
-  if (second) MultiByteToWideChar(CP_UTF8, 0, second, -1, tpFolder, cap);
+  free(buf);
+  free(w);
+}
+
+/* новая папка — первой в недавних, повтор (без регистра) уходит; старый файл (две строки) — его
+   папка тоже в недавние */
+static void szm_pref_push(SzmPrefs *pf, int k, const wchar_t *path) {
+  wchar_t keep[SZM_RECENT + 1][SZM_PATH];
+  int n = 0;
+  if (path[0]) lstrcpynW(keep[n++], path, SZM_PATH);
+  for (int i = -1; i < pf->nrec[k] && n < SZM_RECENT; i++) {
+    const wchar_t *old = i < 0 ? pf->cur[k] : pf->rec[k][i];
+    if (!old[0] || (i < 0 && pf->nrec[k])) continue;
+    BOOL dup = FALSE;
+    for (int j = 0; j < n && !dup; j++) dup = !_wcsicmp(keep[j], old);
+    if (!dup) lstrcpynW(keep[n++], old, SZM_PATH);
+  }
+  for (int i = 0; i < n; i++) lstrcpynW(pf->rec[k][i], keep[i], SZM_PATH);
+  pf->nrec[k] = n;
+  if (path[0]) lstrcpynW(pf->cur[k], path, SZM_PATH);
 }
 
 static void szm_pref_save(const wchar_t *folder, const wchar_t *tpFolder) {
-  wchar_t p[MAX_PATH], line[SZM_PATH * 2 + 8];
+  SzmPrefs *pf = (SzmPrefs *)malloc(sizeof(SzmPrefs));
+  enum { CAP = 16384 };
+  wchar_t *line = (wchar_t *)malloc(CAP * sizeof(wchar_t));
+  char *u = (char *)malloc(CAP * 3);
+  if (!pf || !line || !u) {
+    free(pf), free(line), free(u);
+    return;
+  }
+  szm_pref_load(pf);
+  szm_pref_push(pf, 0, folder);
+  szm_pref_push(pf, 1, tpFolder);
+  int at = _snwprintf(line, CAP, L"%s\r\n%s\r\n", folder, tpFolder);
+  for (int k = 0; k < 2; k++)
+    for (int i = 0; at > 0 && at < CAP && i < pf->nrec[k]; i++) {
+      int m = _snwprintf(line + at, CAP - at, L"%s\t%s\r\n", k ? L"Т" : L"И", pf->rec[k][i]);
+      at = m < 0 ? -1 : at + m;
+    }
+  line[CAP - 1] = 0;
+  int n = at > 0 ? WideCharToMultiByte(CP_UTF8, 0, line, -1, u, CAP * 3, NULL, NULL) : 0;
+  wchar_t p[MAX_PATH];
   szm_pref_path(p);
-  _snwprintf(line, SZM_PATH * 2 + 8, L"%s\r\n%s\r\n", folder, tpFolder);
-  line[SZM_PATH * 2 + 7] = 0;
-  char u[2400];
-  int n = WideCharToMultiByte(CP_UTF8, 0, line, -1, u, 2396, NULL, NULL);
-  if (n <= 0) return;
-  HANDLE h = CreateFileW(p, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-  if (h == INVALID_HANDLE_VALUE) return;
-  DWORD wr;
-  WriteFile(h, "\xEF\xBB\xBF", 3, &wr, NULL);
-  WriteFile(h, u, (DWORD)strlen(u), &wr, NULL);
-  CloseHandle(h);
+  HANDLE h = n > 0 ? CreateFileW(p, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL) : INVALID_HANDLE_VALUE;
+  if (h != INVALID_HANDLE_VALUE) {
+    DWORD wr;
+    WriteFile(h, "\xEF\xBB\xBF", 3, &wr, NULL);
+    WriteFile(h, u, (DWORD)strlen(u), &wr, NULL);
+    CloseHandle(h);
+  }
+  free(pf), free(line), free(u);
+}
+
+/* список папок окна: недавние сверху (из пришедшего списка — если он есть), за ними остальные */
+static void szm_fill_combo(HWND cb, const SzmPrefs *pf, int k, wchar_t (*a)[SZM_PATH], int n) {
+  wchar_t cur[SZM_PATH];
+  GetWindowTextW(cb, cur, SZM_PATH);
+  SendMessageW(cb, CB_RESETCONTENT, 0, 0);
+  for (int r = 0; r < pf->nrec[k]; r++) {
+    BOOL in = n <= 0;
+    for (int i = 0; i < n && !in; i++) in = !_wcsicmp(a[i], pf->rec[k][r]);
+    if (in) SendMessageW(cb, CB_ADDSTRING, 0, (LPARAM)pf->rec[k][r]);
+  }
+  for (int i = 0; a && i < n; i++)
+    if (SendMessageW(cb, CB_FINDSTRINGEXACT, (WPARAM)-1, (LPARAM)a[i]) == CB_ERR) SendMessageW(cb, CB_ADDSTRING, 0, (LPARAM)a[i]);
+  SetWindowTextW(cb, cur);
 }
 
 /* Мост: soyuz_bridge из plm.txt; иначе cp-soyuz.exe рядом с CursorPad.exe; иначе — из самого
@@ -392,7 +459,7 @@ static DWORD WINAPI szm_dicts_thread(LPVOID arg) {
   }
   /* участок: Code и Name — «31 Механический участок 31»; станок: EquipmentModel и Name — как
      ToString() объекта в клиенте: «16К20, Токарно-винторезный станок» (так его ищет функция) */
-  static const wchar_t *const kq[2] = {
+  static const wchar_t *const kq[3] = {
       L"SELECT TOP 900 o.InfoObjectId, ISNULL(CAST(cd.ShortText AS NVARCHAR(40)),N''), CAST(o.Name AS NVARCHAR(200)), 0, 0 "
       L"FROM InfoObjects AS o WITH(NOLOCK) JOIN Templates AS t WITH(NOLOCK) ON t.TemplateId=o.TemplateId AND t.NameKey=N'Area' "
       L"OUTER APPLY (SELECT TOP 1 c.ShortText FROM InfoObjectAttributes AS c WITH(NOLOCK) JOIN NameKeys AS nk WITH(NOLOCK) "
@@ -402,9 +469,16 @@ static DWORD WINAPI szm_dicts_thread(LPVOID arg) {
       L"FROM InfoObjects AS o WITH(NOLOCK) JOIN Templates AS t WITH(NOLOCK) ON t.TemplateId=o.TemplateId AND t.NameKey=N'Equipment' "
       L"OUTER APPLY (SELECT TOP 1 c.ShortText FROM InfoObjectAttributes AS c WITH(NOLOCK) JOIN NameKeys AS nk WITH(NOLOCK) "
       L"ON nk.NameKeyId=c.NameKeyId AND nk.Value=N'EquipmentModel' WHERE c.OwnerId=o.InfoObjectId AND c.Outdated=0) AS md "
-      L"WHERE o.Erased=0 ORDER BY md.ShortText, o.Name"};
-  for (int q = 0; q < 2; q++) {
+      L"WHERE o.Erased=0 ORDER BY md.ShortText, o.Name",
+      /* «Признак изготовления» (ManufacturingSign, перечисление): какие значения стоят у изделий базы */
+      L"SELECT TOP 40 0, N'', CAST(nv.NameUI AS NVARCHAR(200)), 0, 0 "
+      L"FROM InfoObjectAttributes AS a WITH(NOLOCK) JOIN NameKeys AS nk WITH(NOLOCK) "
+      L"ON nk.NameKeyId=a.NameKeyId AND nk.Value=N'ManufacturingSign' "
+      L"JOIN NamedValues AS nv WITH(NOLOCK) ON nv.NamedValueId=a.Link "
+      L"WHERE a.Outdated=0 AND a.DataType=11 GROUP BY CAST(nv.NameUI AS NVARCHAR(200)) ORDER BY 3"};
+  for (int q = 0; q < 3; q++) {
     int n = card_query(dbc, kq[q], rows, CARD_ROWS, err, 300);
+    if (n < 0 && q == 2) break; /* признака нет в этой базе — списки участков и станков остаются */
     if (n < 0) {
       lstrcpynW(d->err, err, 300);
       break;
@@ -421,7 +495,8 @@ static DWORD WINAPI szm_dicts_thread(LPVOID arg) {
       if (arr[k][0]) k++;
     }
     if (q == 0) d->area = arr, d->na = k;
-    else d->equip = arr, d->ne = k;
+    else if (q == 1) d->equip = arr, d->ne = k;
+    else d->mfg = arr, d->nm = k;
   }
   SQLDisconnect(dbc);
 done:
@@ -431,6 +506,7 @@ done:
   if (d && (!notify || !IsWindow(notify) || !PostMessageW(notify, WM_SZM_DICTS, 0, (LPARAM)d))) {
     free(d->area);
     free(d->equip);
+    free(d->mfg);
     free(d);
   }
   return 0;
@@ -699,15 +775,12 @@ static LRESULT CALLBACK SzmProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
       BOOL use = f->client ? f->n > 0 : !g_szmClientList;
       if (use) {
         if (f->client) g_szmClientList = TRUE;
-        HWND cb[2] = {g_szmCombo, g_szmTpCombo};
-        for (int k = 0; k < 2; k++) {
-          wchar_t cur[SZM_PATH];
-          GetWindowTextW(cb[k], cur, SZM_PATH);
-          SendMessageW(cb[k], CB_RESETCONTENT, 0, 0);
-          int n = k ? f->ntp : f->n;
-          wchar_t(*a)[SZM_PATH] = k ? f->tp : f->path;
-          for (int i = 0; a && i < n; i++) SendMessageW(cb[k], CB_ADDSTRING, 0, (LPARAM)a[i]);
-          SetWindowTextW(cb[k], cur);
+        SzmPrefs *pf = (SzmPrefs *)malloc(sizeof(SzmPrefs));
+        if (pf) {
+          szm_pref_load(pf);
+          szm_fill_combo(g_szmCombo, pf, 0, f->path, f->n);
+          szm_fill_combo(g_szmTpCombo, pf, 1, f->tp, f->ntp);
+          free(pf);
         }
       }
       wchar_t m[500];
@@ -836,10 +909,15 @@ static void szm_show(void) {
   ShowWindow(g_szmDes, route ? SW_SHOW : SW_HIDE);
   ShowWindow(g_szmChk, route ? SW_SHOW : SW_HIDE); /* в режиме текста изделия уже перечислены в описании */
   szm_layout();
-  wchar_t last[SZM_PATH], lastTp[SZM_PATH];
-  szm_pref_load(last, lastTp, SZM_PATH);
-  SetWindowTextW(g_szmCombo, last);
-  SetWindowTextW(g_szmTpCombo, lastTp);
+  SzmPrefs *pf = (SzmPrefs *)malloc(sizeof(SzmPrefs));
+  if (pf) { /* последняя папка — в поле, недавние — в списке, пока не пришёл список из «Союза» */
+    szm_pref_load(pf);
+    SetWindowTextW(g_szmCombo, pf->cur[0]);
+    SetWindowTextW(g_szmTpCombo, pf->cur[1]);
+    szm_fill_combo(g_szmCombo, pf, 0, NULL, 0);
+    szm_fill_combo(g_szmTpCombo, pf, 1, NULL, 0);
+    free(pf);
+  }
   if (route) SetWindowTextW(g_szmDes, g_szR.des);
   SetWindowTextW(g_szmWnd, route ? L"Создать ТП в «Союзе» — CursorPad" : L"В «Союз» из «ЭСИ и ТП» — CursorPad");
   EnableWindow(GetDlgItem(g_szmWnd, ID_SZM_OK), !g_szmBusy);

@@ -4854,6 +4854,7 @@ static void create_settings(HWND owner) {
 #include "convert.c" /* Shift-drag conversion ring; real OLE drop target */
 #include "file_link_ui.c" /* плитка «Ссылка» кольца Shift: путь к файлу или к папке — в буфер */
 #include "ai_file_ask.c" /* «прочитай / переведи файл» в чате: Tesseract и исполнитель конвертера — после convert.c */
+#include "pk_stamp.c" /* чертежи мышью в окно «ЭСИ и ТП»: штамп → строка, сборка → состав (после ai_file_ask.c: PDF) */
 #include "tools.c" /* после нардов: автообновление смотрит, не открыты ли они */
 
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -5775,7 +5776,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
       if (n == 4) route_show();
       if (n == 5) nardy_show();
       if (n == 6) shashki_show();
-      if (n == 7) package_show(FALSE);
+      if (n == 7) package_show(FALSE), pk_stamp_test_drop(); /* CP_PKDROP — бросок чертежей без мыши */
       if (n == 8) morskoy_show();
       if (n == 9) shahmaty_show();
     }
