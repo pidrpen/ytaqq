@@ -78,7 +78,7 @@ static int dr_des_core(const wchar_t *s, int i) {
    «….000СБ». По «СБ» сборочный чертёж отличают от спецификации, а «с632» и шаблону не подходит.
    Правится, только если выходит обозначение: за дефисом — когда с «сб» сходится ядро
    (dr_des_core), в хвосте-шифре — когда перед «С6» стоит ядро целиком. Сколько поправлено */
-static int dr_des_fix_sb(wchar_t *s) {
+static inline int dr_des_fix_sb(wchar_t *s) { /* inline: plm_check_test подключает файл без неё */
   int n = 0;
   for (int i = 1; s[i] && s[i + 1]; i++) {
     if ((s[i] != L'с' && s[i] != L'С') || s[i + 1] != L'6') continue;
