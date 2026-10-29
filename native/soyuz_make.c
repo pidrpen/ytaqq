@@ -47,6 +47,11 @@ static SzmFolders *g_szmFold; /* последний принятый списо�
 static HWND g_szmWnd, g_szmCombo, g_szmTpCombo, g_szmDes, g_szmChk, g_szmStatus, g_szmLog;
 static volatile LONG g_szmBusy, g_szmGen, g_szmListBusy;
 static int g_szmPkgNew;   /* функция в клиенте: 1 — новая (папки, чертежи), -1 — старая, 0 — не знаем */
+static wchar_t g_szmRoot[2][SZM_PATH]; /* папка под сборку (soyuz_asmfolder.c): корни, выбранные человеком (изделия, ТП) */
+static BOOL g_szmAuto[2];              /* в поле стоит наше предложение (человек его не правил) */
+static BOOL g_szmSetting;              /* текст в поле ставим сами — уведомления поля не считать правкой */
+static BOOL g_szmMkDirs;               /* в описание — «СОЗДАТЬ_ПАПКИ<Tab>1» (функция 1.0.0.8 досоздаёт уровни) */
+static void szm_propose(void);         /* soyuz_asmfolder.c: предложение папок сборки — в поля и строку состояния */
 static unsigned g_szmPkgVer; /* версия пакета в клиенте по строке «ПАКЕТ\t1.0.0.7» отчёта (szm_ver_num); 0 — до 1.0.0.7 или не знаем */
 #define SZM_VER(a, b, c, d) (((unsigned)(a) << 24) | ((unsigned)(b) << 16) | ((unsigned)(c) << 8) | (unsigned)(d))
 
@@ -1071,6 +1076,7 @@ static int szm_write_text(const wchar_t *path, const wchar_t *folder, const wcha
                      items ? fold : L"", items && fold[0] ? L"\r\n" : L"", tpf[0] ? L"ПАПКА_ТП\t" : L"", tpf,
                      tpf[0] ? L"\r\n" : L"");
   if (l < 0) l = 0;
+  if (g_szmMkDirs && (size_t)l + 24 < cap) l += _snwprintf(txt + l, cap - l, L"СОЗДАТЬ_ПАПКИ\t1\r\n"); /* папка сборки — новая */
   for (const wchar_t *p = t; *p;) { /* строки — по одной: ЧЕРТЕЖ старой функции не отдаём */
     const wchar_t *e = wcschr(p, L'\n');
     size_t n = e ? (size_t)(e - p) + 1 : wcslen(p);
@@ -1234,7 +1240,8 @@ static void szm_go(void) {
     return;
   }
   if (dropped) _snwprintf(note, 200, L"чертежи (%d) не идут: функция «Союза» старая", dropped);
-  szm_pref_save(folder, tpFolder);
+  /* запоминаются корни, а не папка сборки: в следующий раз предложение считается от них */
+  szm_pref_save(g_szmAuto[0] && g_szmRoot[0][0] ? g_szmRoot[0] : folder, g_szmAuto[1] && g_szmRoot[1][0] ? g_szmRoot[1] : tpFolder);
   SzmRun *r = (SzmRun *)calloc(1, sizeof(SzmRun));
   if (!r) return;
   _snwprintf(r->cmd, sizeof(r->cmd) / sizeof(wchar_t), L"\"%s\" \"%s\"", bridge, spec);
@@ -1372,6 +1379,7 @@ static LRESULT CALLBACK SzmProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         wchar_t kind;
         long id;
         if (szm_link_parse(cur, &kind, &id)) szm_folder_note(cur, 0);
+        szm_propose(); /* теперь известно, как устроены папки, — предложение для сборки */
         return 0;
       }
     }
@@ -1402,6 +1410,8 @@ static LRESULT CALLBACK SzmProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
   case WM_COMMAND:
     if ((LOWORD(wParam) == ID_SZM_FOLDER || LOWORD(wParam) == ID_SZM_TPFOLDER) &&
         (HIWORD(wParam) == CBN_EDITCHANGE || HIWORD(wParam) == CBN_SELCHANGE)) {
+      if (g_szmSetting) return 0;                             /* текст поставили мы сами */
+      g_szmAuto[LOWORD(wParam) == ID_SZM_TPFOLDER] = FALSE; /* человек поправил поле — его выбор важнее предложения */
       HWND cb = (HWND)lParam;
       wchar_t t[SZM_PATH];
       if (HIWORD(wParam) == CBN_SELCHANGE) {
@@ -1499,20 +1509,30 @@ static void szm_show(void) {
   SzmPrefs *pf = (SzmPrefs *)malloc(sizeof(SzmPrefs));
   if (pf) { /* последняя папка — в поле, недавние — в списке, пока не пришёл список из «Союза» */
     szm_pref_load(pf);
+    g_szmSetting = TRUE;
     SetWindowTextW(g_szmCombo, pf->cur[0]);
     SetWindowTextW(g_szmTpCombo, pf->cur[1]);
+    g_szmSetting = FALSE;
     szm_fill_combo(g_szmCombo, pf, 0, NULL, 0);
     szm_fill_combo(g_szmTpCombo, pf, 1, NULL, 0);
+    lstrcpynW(g_szmRoot[0], pf->cur[0], SZM_PATH); /* корни для папки сборки — последние выбранные */
+    lstrcpynW(g_szmRoot[1], pf->cur[1], SZM_PATH);
     free(pf);
   }
+  g_szmAuto[0] = g_szmAuto[1] = TRUE;
+  g_szmMkDirs = FALSE;
   if (route) SetWindowTextW(g_szmDes, g_szR.des);
   {
     wchar_t clip[SZM_PATH]; /* ссылка PLM на папку в буфере — она и нужна */
     if (szm_clip_link(clip, SZM_PATH)) {
+      g_szmSetting = TRUE;
       SetWindowTextW(g_szmCombo, clip);
+      g_szmSetting = FALSE;
+      lstrcpynW(g_szmRoot[0], clip, SZM_PATH);
       szm_folder_note(clip, 0);
     }
   }
+  szm_propose(); /* сборке — своя папка в корне (список папок мог остаться с прошлого раза) */
   SetWindowTextW(g_szmWnd, route ? L"Создать ТП в «Союзе» — CursorPad" : L"В «Союз» из «ЭСИ и ТП» — CursorPad");
   EnableWindow(GetDlgItem(g_szmWnd, ID_SZM_OK), !g_szmBusy);
   InvalidateRect(g_szmWnd, NULL, TRUE);

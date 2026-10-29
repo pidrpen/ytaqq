@@ -4964,6 +4964,7 @@ static void create_settings(HWND owner) {
 #include "soyuz_ui.c"   /* окно «В Союз»: буфер по операции, аналоги и слежение в базе */
 #include "soyuz_auto.c" /* «Вставить сам»: пункт меню клиента через UI Automation */
 #include "soyuz_make.c" /* «Создать ТП»: деталь и ТП функцией пакета «CursorPad — Союз» через мост */
+#include "soyuz_asmfolder.c" /* папка под сборку: код и группа из обозначения, имя как у соседних папок */
 #include "drawrec_ui.c" /* окно «Распознать чертёж» */
 #include "drawrec_sort.c" /* «Разложить по папкам»: имена по штампу, копия, журнал, отмена */
 #include "ai_chat.c" /* «Спросить ИИ»: чат с локальной моделью, после окон чертежа */

@@ -107,6 +107,37 @@ static void esi_start(const wchar_t *a) {
   ac_status(L"ЭСИ: читаю чертежи…");
 }
 
+/* строка карточки «Куда ляжет: ЭСИ → …; ТП → …» по описанию окна и последним папкам; FALSE — сборки нет */
+static BOOL esi_folders_line(wchar_t *out, int cap) {
+  out[0] = 0;
+  wchar_t *text = NULL, note[200];
+  PkSent sent;
+  memset(&sent, 0, sizeof(sent));
+  pk_soyuz_text(&text, note, 200, &sent);
+  if (!text) return FALSE;
+  wchar_t des[200], nm[200];
+  BOOL has = szm_head_asm(text, des, 200, nm, 200);
+  if (has) {
+    SzmPrefs *pf = (SzmPrefs *)calloc(1, sizeof(SzmPrefs));
+    wchar_t folder[SZM_PATH] = L"", tp[SZM_PATH] = L"";
+    if (pf) szm_pref_load(pf), lstrcpynW(folder, pf->cur[0], SZM_PATH), lstrcpynW(tp, pf->cur[1], SZM_PATH), free(pf);
+    SzmAsmFolder pr[2];
+    BOOL mk = FALSE;
+    if (!g_szmFold || !folder[0])
+      _snwprintf(out, cap, L"Куда ляжет: сборке %s положена своя папка в выбранной папке «Союза» — «В Союз» откроет окно с предложением.", des);
+    else if (szm_propose_text(text, folder, tp, pr, &mk)) {
+      wchar_t a[SZM_PATH + 80] = L"", b[SZM_PATH + 80] = L"";
+      if (pr[0].path[0]) szm_prop_line(&pr[0], L"ЭСИ", a, SZM_PATH + 80);
+      if (pr[1].path[0]) szm_prop_line(&pr[1], L"ТП", b, SZM_PATH + 80);
+      _snwprintf(out, cap, L"Куда ляжет: %s%s%s%s", a, a[0] && b[0] ? L"; " : L"", b,
+                 mk && g_szmPkgVer < SZM_VER(1, 0, 0, 8) ? L" — но пакет в клиенте старее 1.0.0.8 и папок не создаёт" : L" — поменять можно в «Проверить подробно» → «В Союз…»");
+    }
+    out[cap - 1] = 0;
+  }
+  free(text);
+  return out[0] != 0;
+}
+
 /* очередь чтения кончилась (pk_stamp_done, последний файл) — карточка в чат */
 static void esi_card(void) {
   g_esiChat = FALSE;
@@ -131,6 +162,10 @@ static void esi_card(void) {
                      AC_ESI_HEAD L" готово: изделий %d (сборок %d, деталей %d, документов %d), состав — %d строк, "
                      L"операций %d у %d деталей (транспортирований %d), заготовок %d.",
                      it->n, asm_, det, doc, ln->n, op->n, parts, tr, bl->n);
+  { /* куда ляжет: папка сборки по правилу (soyuz_asmfolder.c) от последних выбранных папок */
+    wchar_t fl[2 * SZM_PATH + 200];
+    if (esi_folders_line(fl, 2 * SZM_PATH + 200)) l += _snwprintf(t + l, 1800 - l, L"\n%s", fl);
+  }
   if (g_pksNoDes || noDes)
     l += _snwprintf(t + l, 1800 - l, L"\nБез обозначения: %d — штамп не прочитался, впишите в «Проверить подробно».", noDes ? noDes : g_pksNoDes);
   if (g_pksDoubt[0]) l += _snwprintf(t + l, 1800 - l, L"\nПроверьте обозначения: %ls.", g_pksDoubt);
@@ -211,8 +246,38 @@ static void esi_send(void) {
                 L"«копировать ссылку в PLM» на папку) и нажмите «Создать».");
     return;
   }
+  /* сборке — своя папка (soyuz_asmfolder.c): списка папок ещё нет — показать предложение в окне */
+  wchar_t des[200], nm[200];
+  BOOL hasAsm = szm_head_asm(text, des, 200, nm, 200);
+  if (hasAsm && folder[0] && !g_szmFold) {
+    wchar_t label[240];
+    _snwprintf(label, 240, L"В «Союз»: изделий %d, состав %d, операций %d", sent.items, g_pk[PK_LINKS].n, n);
+    label[239] = 0;
+    szm_open_text(text, label);
+    free(text);
+    ac_push(1, L"Сборке положена своя папка в «Союзе» — проверьте предложение в открывшемся окне (папки спрашиваются у клиента) "
+                L"и нажмите «Создать».");
+    return;
+  }
+  wchar_t root0[SZM_PATH], root1[SZM_PATH];
+  lstrcpynW(root0, folder, SZM_PATH);
+  lstrcpynW(root1, tp, SZM_PATH);
+  SzmAsmFolder pr[2];
+  BOOL mk = FALSE, used = FALSE;
+  if (hasAsm && szm_propose_text(text, folder, tp, pr, &mk)) {
+    if (mk && g_szmPkgVer < SZM_VER(1, 0, 0, 8)) {
+      ac_push(1, L"Пакет «CursorPad — Союз» в клиенте старее 1.0.0.8 — папку под сборку он не создаст, изделия лягут в выбранную папку.");
+      mk = FALSE;
+    } else {
+      if (pr[0].path[0]) lstrcpynW(folder, pr[0].path, SZM_PATH), used = TRUE;
+      if (pr[1].path[0]) lstrcpynW(tp, pr[1].path, SZM_PATH), used = TRUE;
+    }
+  }
+  g_szmMkDirs = mk;
   wchar_t msg[500];
   BOOL ok = szm_send_text(text, folder, tp, g_acWnd, msg, 500);
+  g_szmMkDirs = FALSE;
+  if (ok && used) szm_pref_save(root0, root1); /* последними остаются корни, не папка сборки */
   free(text);
   ac_push(1, msg);
   if (ok) ac_status(L"Передаю в «Союз»…");
