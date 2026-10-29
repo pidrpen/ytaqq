@@ -37,8 +37,10 @@ typedef struct {
   int n, ntp;
   wchar_t (*path)[SZM_PATH]; /* папки для изделий */
   wchar_t (*tp)[SZM_PATH];   /* папки для ТП */
+  long *pathId, *tpId;       /* их номера контейнеров (C.<id> в ссылке PLM); 0 — неизвестен */
   wchar_t err[300];
 } SzmFolders;
+static SzmFolders *g_szmFold; /* последний принятый список — для ссылок PLM на папку (szm_link_path) */
 
 static HWND g_szmWnd, g_szmCombo, g_szmTpCombo, g_szmDes, g_szmChk, g_szmStatus, g_szmLog;
 static volatile LONG g_szmBusy, g_szmGen, g_szmListBusy;
@@ -159,6 +161,113 @@ static void szm_fill_combo(HWND cb, const SzmPrefs *pf, int k, wchar_t (*a)[SZM_
   for (int i = 0; a && i < n; i++)
     if (SendMessageW(cb, CB_FINDSTRINGEXACT, (WPARAM)-1, (LPARAM)a[i]) == CB_ERR) SendMessageW(cb, CB_ADDSTRING, 0, (LPARAM)a[i]);
   SetWindowTextW(cb, cur);
+}
+
+/* ---- папка по ссылке PLM (с 2026.10.29) --------------------------------------------------
+   В клиенте «Союза» у папки есть «копировать ссылку в PLM»: «pmsz-plm:сервер[…]:4450/C.18122».
+   Такую ссылку (или «C.18122», «#18122») можно вставить в поле папки; CursorPad находит папку
+   по номеру в присланном списке (ПАПКА_ID из клиента, пакет 1.0.0.6, или ContainerId из базы
+   SQL) и показывает короткое имя и путь целиком. Нет в списке — ссылка уходит функции как
+   есть: с 1.0.0.6 она сама ищет папку по номеру. Ссылка в буфере обмена при открытии окна
+   подставляется сама. */
+
+/* «pmsz-plm:…/C.18122», «C.18122», «#18122» → вид (L'C' — папка, L'I' — объект) и номер; FALSE — не ссылка */
+static void szm_status(const wchar_t *t);
+
+static BOOL szm_link_parse(const wchar_t *s, wchar_t *kind, long *id) {
+  while (*s == L' ') s++;
+  BOOL plm = !_wcsnicmp(s, L"pmsz-plm:", 9), hash = *s == L'#';
+  if (wcschr(s, L'\\')) return FALSE; /* путь по именам */
+  const wchar_t *tail = wcsrchr(s, L'/');
+  tail = tail ? tail + 1 : (hash ? s + 1 : s);
+  const wchar_t *dot = wcschr(tail, L'.');
+  *kind = L'C';
+  if (dot) {
+    if (dot == tail || dot - tail > 3) return FALSE;
+    for (const wchar_t *q = tail; q < dot; q++)
+      if (!((*q >= L'A' && *q <= L'Z') || (*q >= L'a' && *q <= L'z'))) return FALSE;
+    *kind = (wchar_t)towupper(*tail);
+    tail = dot + 1;
+  } else if (!plm && !hash) return FALSE; /* «31» — имя папки, не ссылка */
+  if (!(*tail >= L'0' && *tail <= L'9')) return FALSE;
+  wchar_t *end = NULL;
+  *id = wcstol(tail, &end, 10);
+  while (end && *end == L' ') end++;
+  return *id > 0 && end && !*end;
+}
+
+/* путь папки по номеру из последнего списка (изделия — k 0, ТП — k 1; -1 — оба); NULL — нет */
+static const wchar_t *szm_link_path(long id, int k) {
+  if (!g_szmFold || !id) return NULL;
+  for (int pass = 0; pass < 2; pass++) {
+    if (k >= 0 && pass != k) continue;
+    long *ids = pass ? g_szmFold->tpId : g_szmFold->pathId;
+    int n = pass ? g_szmFold->ntp : g_szmFold->n;
+    for (int i = 0; ids && i < n; i++)
+      if (ids[i] == id) return pass ? g_szmFold->tp[i] : g_szmFold->path[i];
+  }
+  return NULL;
+}
+
+/* что в поле папки: ссылка — найденный путь (или ссылка как есть, если списка нет); путь — как есть */
+static void szm_folder_resolve(const wchar_t *typed, int k, wchar_t *out, int cap) {
+  wchar_t kind;
+  long id;
+  lstrcpynW(out, typed, cap);
+  if (!szm_link_parse(typed, &kind, &id) || kind != L'C') return;
+  const wchar_t *p = szm_link_path(id, k);
+  if (p) lstrcpynW(out, p, cap);
+  else _snwprintf(out, cap, L"C.%ld", id), out[cap - 1] = 0; /* функция 1.0.0.6 найдёт по номеру сама */
+}
+
+/* подпись под полем: короткое имя и путь целиком, с переносом */
+static void szm_folder_note(const wchar_t *typed, int k) {
+  wchar_t t[SZM_PATH], m[SZM_PATH + 200], kind;
+  long id;
+  lstrcpynW(t, typed, SZM_PATH);
+  size_t l = wcslen(t);
+  while (l && (t[l - 1] == L' ' || t[l - 1] == L'\\')) t[--l] = 0;
+  if (!t[0]) return;
+  if (szm_link_parse(t, &kind, &id)) {
+    if (kind != L'C') {
+      _snwprintf(m, SZM_PATH + 200, L"Это ссылка на объект (%lc.%ld), а не на папку — в клиенте «Союза» скопируйте ссылку на папку.",
+                 kind, id);
+    } else {
+      const wchar_t *p = szm_link_path(id, k);
+      if (p) {
+        const wchar_t *shortName = wcsrchr(p, L'\\');
+        shortName = shortName ? shortName + 1 : p;
+        _snwprintf(m, SZM_PATH + 200, L"Папка по ссылке C.%ld: «%s» — %s", id, shortName, p);
+      } else
+        _snwprintf(m, SZM_PATH + 200, L"Папка по ссылке C.%ld: в присланном списке её нет — «Союз» найдёт её по номеру сам "
+                                       L"(нужен пакет «CursorPad — Союз» 1.0.0.6).",
+                   id);
+    }
+  } else {
+    const wchar_t *shortName = wcsrchr(t, L'\\');
+    shortName = shortName ? shortName + 1 : t;
+    _snwprintf(m, SZM_PATH + 200, L"Папка: «%s» — %s", shortName, t);
+  }
+  m[SZM_PATH + 199] = 0;
+  szm_status(m);
+}
+
+/* ссылка PLM на папку в буфере обмена — в поле, если оно пустое или там старая папка */
+static BOOL szm_clip_link(wchar_t *out, int cap) {
+  out[0] = 0;
+  if (!IsClipboardFormatAvailable(CF_UNICODETEXT) || !OpenClipboard(NULL)) return FALSE;
+  HANDLE h = GetClipboardData(CF_UNICODETEXT);
+  const wchar_t *p = h ? (const wchar_t *)GlobalLock(h) : NULL;
+  if (p) {
+    lstrcpynW(out, p, cap);
+    GlobalUnlock(h);
+  }
+  CloseClipboard();
+  wchar_t *nl = wcspbrk(out, L"\r\n");
+  if (nl) *nl = 0;
+  wchar_t kind;
+  long id;
+  return out[0] && !_wcsnicmp(out, L"pmsz-plm:", 9) && szm_link_parse(out, &kind, &id) && kind == L'C';
 }
 
 /* Мост: soyuz_bridge из plm.txt; иначе cp-soyuz.exe рядом с CursorPad.exe; иначе — из самого
@@ -354,7 +463,9 @@ static DWORD WINAPI szm_folders_thread(LPVOID arg) {
         if (c[k].id == c[i].parent) tpRoot = k;
   f->path = (wchar_t (*)[SZM_PATH])calloc(SZM_MAX, sizeof(*f->path));
   f->tp = (wchar_t (*)[SZM_PATH])calloc(SZM_MAX, sizeof(*f->tp));
-  for (int i = 0; i < nc && f->path && f->tp; i++) {
+  f->pathId = (long *)calloc(SZM_MAX, sizeof(long));
+  f->tpId = (long *)calloc(SZM_MAX, sizeof(long));
+  for (int i = 0; i < nc && f->path && f->tp && f->pathId && f->tpId; i++) {
     if (!c[i].name[0]) continue;
     BOOL inTp = FALSE;
     wchar_t p[SZM_PATH];
@@ -372,12 +483,13 @@ static DWORD WINAPI szm_folders_thread(LPVOID arg) {
       lstrcpynW(p, q, SZM_PATH);
       par = c[k].parent;
     }
-    if (c[i].folderLike && f->n < SZM_MAX) lstrcpynW(f->path[f->n++], p, SZM_PATH);
-    if (inTp && f->ntp < SZM_MAX) lstrcpynW(f->tp[f->ntp++], p, SZM_PATH);
+    if (c[i].folderLike && f->n < SZM_MAX) f->pathId[f->n] = c[i].id, lstrcpynW(f->path[f->n++], p, SZM_PATH);
+    if (inTp && f->ntp < SZM_MAX) f->tpId[f->ntp] = c[i].id, lstrcpynW(f->tp[f->ntp++], p, SZM_PATH);
   }
-  /* по алфавиту — вложенные рядом с родителем */
+  /* по алфавиту — вложенные рядом с родителем (номера — вместе с путями) */
   for (int pass = 0; pass < 2; pass++) {
     wchar_t(*a)[SZM_PATH] = pass ? f->tp : f->path;
+    long *ids = pass ? f->tpId : f->pathId;
     int n = pass ? f->ntp : f->n;
     for (int i = 1; a && i < n; i++)
       for (int k = i; k > 0 && _wcsicmp(a[k - 1], a[k]) > 0; k--) {
@@ -385,6 +497,9 @@ static DWORD WINAPI szm_folders_thread(LPVOID arg) {
         memcpy(t, a[k], sizeof(t));
         memcpy(a[k], a[k - 1], sizeof(t));
         memcpy(a[k - 1], t, sizeof(t));
+        long ti = ids[k];
+        ids[k] = ids[k - 1];
+        ids[k - 1] = ti;
       }
   }
   SQLDisconnect(dbc);
@@ -396,6 +511,8 @@ done:
   if (!g_szmWnd || !PostMessageW(g_szmWnd, WM_SZM_FOLDERS, 0, (LPARAM)f)) {
     free(f->path);
     free(f->tp);
+    free(f->pathId);
+    free(f->tpId);
     free(f);
   }
   return 0;
@@ -426,11 +543,21 @@ static DWORD WINAPI szm_client_folders_thread(LPVOID arg) {
   else if (text) {
     f->path = (wchar_t (*)[SZM_PATH])calloc(SZM_MAX, sizeof(*f->path));
     f->tp = (wchar_t (*)[SZM_PATH])calloc(SZM_MAX, sizeof(*f->tp));
+    f->pathId = (long *)calloc(SZM_MAX, sizeof(long));
+    f->tpId = (long *)calloc(SZM_MAX, sizeof(long));
     wchar_t *p = text, *line;
-    while (f->path && f->tp && (line = share_next_line(&p)) != NULL) {
+    while (f->path && f->tp && f->pathId && f->tpId && (line = share_next_line(&p)) != NULL) {
       if (!wcsncmp(line, L"ПАПКА\t", 6) && f->n < SZM_MAX) lstrcpynW(f->path[f->n++], line + 6, SZM_PATH);
       else if (!wcsncmp(line, L"ПАПКА_ТП\t", 9) && f->ntp < SZM_MAX) lstrcpynW(f->tp[f->ntp++], line + 9, SZM_PATH);
-      else if (!wcsncmp(line, L"ОШИБКА", 6)) lstrcpynW(f->err, line, 300);
+      else if (!wcsncmp(line, L"ПАПКА_ID\tC.", 11)) { /* пакет 1.0.0.6: номер папки — к только что присланному пути */
+        long id = wcstol(line + 11, NULL, 10);
+        const wchar_t *pth = wcschr(line + 11, L'\t');
+        if (pth && id) {
+          pth++;
+          if (f->n && !wcscmp(f->path[f->n - 1], pth)) f->pathId[f->n - 1] = id;
+          if (f->ntp && !wcscmp(f->tp[f->ntp - 1], pth)) f->tpId[f->ntp - 1] = id;
+        }
+      } else if (!wcsncmp(line, L"ОШИБКА", 6)) lstrcpynW(f->err, line, 300);
     }
     if (!f->n && !f->err[0]) lstrcpynW(f->err, L"клиент не прислал папок", 300);
   } else lstrcpynW(f->err, L"пустой ответ клиента", 300);
@@ -439,6 +566,8 @@ static DWORD WINAPI szm_client_folders_thread(LPVOID arg) {
   if (!g_szmWnd || !PostMessageW(g_szmWnd, WM_SZM_FOLDERS, 0, (LPARAM)f)) {
     free(f->path);
     free(f->tp);
+    free(f->pathId);
+    free(f->tpId);
     free(f);
   }
   return 0;
@@ -704,6 +833,15 @@ static void szm_go(void) {
     wchar_t *f = k ? tpFolder : folder;
     size_t l = wcslen(f);
     while (l && (f[l - 1] == L' ' || f[l - 1] == L'\\')) f[--l] = 0;
+    wchar_t kind;
+    long id;
+    if (szm_link_parse(f, &kind, &id) && kind != L'C') {
+      szm_status(L"В поле папки ссылка на объект, а не на папку — скопируйте в клиенте ссылку на папку.");
+      return;
+    }
+    wchar_t r[SZM_PATH];
+    szm_folder_resolve(f, k, r, SZM_PATH); /* ссылка PLM → путь из списка (или C.<номер> для функции) */
+    lstrcpynW(f, r, SZM_PATH);
   }
   if (newPart && !folder[0]) {
     szm_status(textMode ? L"Укажите папку «Союза», куда создать изделия." : L"Укажите папку «Союза», куда создать деталь.");
@@ -786,7 +924,7 @@ static void szm_layout(void) {
     MoveWindow(g_szmChk, pad, y, w, SZS(24), TRUE);
     y += SZS(30);
   }
-  MoveWindow(g_szmStatus, pad, y, w, SZS(48), TRUE);
+  MoveWindow(g_szmStatus, pad, y, w, SZS(66), TRUE); /* три строки: путь папки целиком, с переносом */
   int by = rc.bottom - SZS(42), bw = SZS(120);
   MoveWindow(GetDlgItem(g_szmWnd, ID_SZM_OK), rc.right - pad - bw * 2 - SZS(8), by, bw, SZS(30), TRUE);
   MoveWindow(GetDlgItem(g_szmWnd, ID_SZM_CANCEL), rc.right - pad - bw, by, bw, SZS(30), TRUE);
@@ -865,8 +1003,18 @@ static LRESULT CALLBACK SzmProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                    g_plmDatabase[0] ? g_plmDatabase : L"по умолчанию", g_sqlHost, f->n, f->ntp);
       m[499] = 0;
       if (m[0]) szm_status(m);
+      if (use) { /* список остаётся — по нему находятся папки по ссылке PLM */
+        if (g_szmFold) free(g_szmFold->path), free(g_szmFold->tp), free(g_szmFold->pathId), free(g_szmFold->tpId), free(g_szmFold);
+        g_szmFold = f;
+        wchar_t cur[SZM_PATH];
+        GetWindowTextW(g_szmCombo, cur, SZM_PATH);
+        wchar_t kind;
+        long id;
+        if (szm_link_parse(cur, &kind, &id)) szm_folder_note(cur, 0);
+        return 0;
+      }
     }
-    if (f) free(f->path), free(f->tp);
+    if (f) free(f->path), free(f->tp), free(f->pathId), free(f->tpId);
     free(f);
     return 0;
   }
@@ -888,6 +1036,18 @@ static LRESULT CALLBACK SzmProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     return 0;
   }
   case WM_COMMAND:
+    if ((LOWORD(wParam) == ID_SZM_FOLDER || LOWORD(wParam) == ID_SZM_TPFOLDER) &&
+        (HIWORD(wParam) == CBN_EDITCHANGE || HIWORD(wParam) == CBN_SELCHANGE)) {
+      HWND cb = (HWND)lParam;
+      wchar_t t[SZM_PATH];
+      if (HIWORD(wParam) == CBN_SELCHANGE) {
+        int sel = (int)SendMessageW(cb, CB_GETCURSEL, 0, 0);
+        if (sel >= 0) SendMessageW(cb, CB_GETLBTEXT, (WPARAM)sel, (LPARAM)t);
+        else t[0] = 0;
+      } else GetWindowTextW(cb, t, SZM_PATH);
+      szm_folder_note(t, LOWORD(wParam) == ID_SZM_TPFOLDER);
+      return 0;
+    }
     switch (LOWORD(wParam)) {
     case ID_SZM_OK: szm_go(); return 0;
     case ID_SZM_CANCEL: ShowWindow(hwnd, SW_HIDE); return 0;
@@ -961,7 +1121,7 @@ static void szm_show(void) {
     mk_btn(g_szmWnd, L"Закрыть", ID_SZM_CANCEL);
   }
   /* высота — по режиму: по маршруту есть ещё «ТП к изделию» и галочка */
-  int w = SZS(680), h = route ? SZS(372) : SZS(282), x = 0, y = 0;
+  int w = SZS(680), h = route ? SZS(392) : SZS(302), x = 0, y = 0;
   RECT pr;
   HWND beside = g_szWnd && IsWindowVisible(g_szWnd) ? g_szWnd : g_pkWnd; /* у окна «В Союз» или у окна пакета */
   if (beside && GetWindowRect(beside, &pr)) {
@@ -982,6 +1142,13 @@ static void szm_show(void) {
     free(pf);
   }
   if (route) SetWindowTextW(g_szmDes, g_szR.des);
+  {
+    wchar_t clip[SZM_PATH]; /* ссылка PLM на папку в буфере — она и нужна */
+    if (szm_clip_link(clip, SZM_PATH)) {
+      SetWindowTextW(g_szmCombo, clip);
+      szm_folder_note(clip, 0);
+    }
+  }
   SetWindowTextW(g_szmWnd, route ? L"Создать ТП в «Союзе» — CursorPad" : L"В «Союз» из «ЭСИ и ТП» — CursorPad");
   EnableWindow(GetDlgItem(g_szmWnd, ID_SZM_OK), !g_szmBusy);
   InvalidateRect(g_szmWnd, NULL, TRUE);
