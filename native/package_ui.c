@@ -2237,7 +2237,8 @@ static LRESULT CALLBACK PkProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
 }
 
 /* fill — сразу заполнить из собранной выгрузки (кнопка в окне выгрузки) */
-static void package_show(BOOL fill) {
+/* окно — без показа: действия из чата (ai_esi.c) кладут строки в скрытое */
+static void pk_create(void) {
   if (!g_pkWnd) {
     HDC s = GetDC(NULL);
     g_pkS = s ? GetDeviceCaps(s, LOGPIXELSX) / 96.0f : 1.0f;
@@ -2310,6 +2311,11 @@ static void package_show(BOOL fill) {
     pk_fill(TRUE);
     pk_layout();
   }
+}
+
+static void package_show(BOOL fill) {
+  pk_create();
+  if (!g_pkWnd) return;
   ShowWindow(g_pkWnd, IsIconic(g_pkWnd) ? SW_RESTORE : SW_SHOWNORMAL);
   SetForegroundWindow(g_pkWnd);
   SetFocus(g_pkList);

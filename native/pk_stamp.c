@@ -82,6 +82,8 @@ static int g_pksOrphN;
 /* операции сразу по чертежу детали: галочка в «Чертежи…» (package.ini); итог для строки состояния */
 static BOOL g_pkAiOps = TRUE, g_pkAiOpsRead;
 static int g_pksOps, g_pksOpsParts, g_pksOpsHad, g_pksOpsNo;
+static BOOL g_esiChat;        /* чтение запущено из чата (ai_esi.c): по последнему файлу — карточка в чат */
+static void esi_card(void);   /* ai_esi.c */
 /* маршрут скана без обозначения: впишут обозначение — операции лягут к нему (по файлу строки) */
 typedef struct {
   wchar_t file[MAX_PATH];
@@ -562,6 +564,7 @@ static void pk_stamp_done(void *p) {
     pk_fill(FALSE);
     pk_changed();
     BOOL last = r->i == r->n - 1;
+    if (last && g_esiChat) esi_card();
     if (r->opsOnly) pks_ops_status();
     else
       pks_status(r->note[0] ? r->note : last && !dr_vl_ok() && g_pksBy[1]

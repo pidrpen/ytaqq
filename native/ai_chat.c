@@ -653,6 +653,19 @@ static const wchar_t *const kAcLogLinks[] = {L"вернуть", L"показат
 /* под последним ответом-маршрутом — строка-кнопки (ac_route_do); номера WM_AC_LINK — с 10 */
 #define AC_ROUTE_ACTIONS L"Действия:   В Союз   ·   Подробно   ·   Режимы   ·   Excel"
 static const wchar_t *const kAcRouteLinks[] = {L"В Союз", L"Подробно", L"Режимы", L"Excel"};
+/* действия из чата для ЭСИ и «Союза» — ai_esi.c (после pk_stamp.c): карточка «ЭСИ по чертежам» с
+   кнопками «В Союз» (10, та же, что у маршрута: решает ac_esi_last) · «Проверить подробно» (21) · «Отмена» (22) */
+static BOOL esi_chat_cmd(const wchar_t *a);
+static void esi_start(const wchar_t *a);
+static BOOL ac_esi_last(void);
+static void ac_esi_links(void);
+static void esi_send(void);
+static void esi_detail(void);
+static void esi_cancel(void);
+static void esi_report(wchar_t *rep);
+static BOOL rt_chat_cmd(const wchar_t *a);
+static BOOL prio_chat_cmd(const wchar_t *a);
+#define WM_AC_SZM_DONE (WM_APP + 96) /* = WM_SZM_DONE (soyuz_make.c): ответ «Союза» на отправку из чата */
 static BOOL g_acShowOld, g_acLogTop; /* показать прежние беседы; ленту — с начала */
 
 static void ac_rtf_new_line(AcRtf *b) {
@@ -789,6 +802,7 @@ static void ac_redraw(void) {
       SendMessageW(g_acLog, EM_STREAMIN, SF_RTF, (LPARAM)&stream);
       if (top) ac_log_links((int)wcslen(top));
       if (route >= 0) ac_route_links();
+      ac_esi_links();
       ac_norm_links();
       ac_think_links();
       SendMessageW(g_acLog, WM_SETREDRAW, TRUE, 0);
@@ -2716,6 +2730,19 @@ static void ac_send(void) {
     free(in);
     return;
   }
+  /* действия для «Союза» из чата — код, без модели (ai_esi.c): ЭСИ по чертежам, ведомость, приоритеты участков */
+  if (esi_chat_cmd(a)) {
+    SetWindowTextW(g_acIn, L"");
+    ac_push(0, a);
+    esi_start(a);
+    free(in);
+    return;
+  }
+  if (rt_chat_cmd(a) || prio_chat_cmd(a)) {
+    SetWindowTextW(g_acIn, L"");
+    free(in);
+    return;
+  }
   if (g_acId || g_agActive || g_acWebOn || ac_pc_busy() || ac_fq_busy()) {
     free(in);
     return;
@@ -3360,6 +3387,8 @@ static void ac_log_link(const ENLINK *el) {
     if (!wcscmp(t, kAcLogLinks[i])) PostMessageW(g_acWnd, WM_AC_LINK, i, 0);
   for (size_t i = 0; i < sizeof(kAcRouteLinks) / sizeof(kAcRouteLinks[0]); i++)
     if (!wcscmp(t, kAcRouteLinks[i])) PostMessageW(g_acWnd, WM_AC_LINK, 10 + i, 0);
+  if (!wcscmp(t, L"Проверить подробно")) PostMessageW(g_acWnd, WM_AC_LINK, 21, 0); /* карточка ЭСИ (ai_esi.c) */
+  if (!wcscmp(t, L"Отмена")) PostMessageW(g_acWnd, WM_AC_LINK, 22, 0);
   if (!wcscmp(t, L"изменить")) PostMessageW(g_acWnd, WM_AC_LINK, 14, 0); /* строка «Режимы: …» под нормами */
   if (!wcscmp(t, L"подробно")) PostMessageW(g_acWnd, WM_AC_LINK, 15, 0);
   for (size_t i = 0; i < sizeof(kAcThinkLinks) / sizeof(kAcThinkLinks[0]); i++)
@@ -3400,7 +3429,12 @@ static void ac_log_link_do(WPARAM which) {
     ac_redraw();
     break;
   case 3: ac_clear_ask(); break;
-  case 10: ac_route_say(L"в союз"); break;
+  case 10: /* «В Союз»: под карточкой ЭСИ — отправка листов, под маршрутом — окно «В Союз» */
+    if (ac_esi_last()) esi_send();
+    else ac_route_say(L"в союз");
+    break;
+  case 21: esi_detail(); break;
+  case 22: esi_cancel(); break;
   case 11: ac_route_say(L"норма подробно"); break;
   case 12: nu_open(); break;
   case 13: ac_route_excel(); break;
@@ -3706,6 +3740,9 @@ static LRESULT CALLBACK AcProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
   }
   case WM_AC_LINK:
     ac_log_link_do(wParam);
+    return 0;
+  case WM_AC_SZM_DONE: /* ответ «Союза» на отправку из чата (ai_esi.c) */
+    esi_report((wchar_t *)lParam);
     return 0;
   case WM_AC_NOTE:
     if (lParam) ac_status((const wchar_t *)lParam), free((void *)lParam);
