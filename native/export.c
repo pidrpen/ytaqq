@@ -1069,19 +1069,24 @@ static void xp_build(XpJob *x) {
    загрузки…» — из собранной выгрузки: состав, изделия и операции похожего
    изделия, чтобы поменять обозначения и загрузить как новое. */
 
-enum { PK_ITEMS, PK_LINKS, PK_OPS, PK_NT };
+/* «Заготовки» и столбец «Чертёж (файл)» (с 2026.10.29) — только для «В Союз…»: команда PLM
+   ищет листы и столбцы по началу названия, лишние пропускает */
+enum { PK_ITEMS, PK_LINKS, PK_OPS, PK_BLANKS, PK_NT };
 static const wchar_t *const kPkItemsHead[] = {L"Обозначение", L"Наименование", L"Вид изделия", L"Материал",
-                                              L"Масса, кг"};
-static const int kPkItemsW[] = {26, 34, 18, 40, 10};
+                                              L"Масса, кг",    L"Чертёж (файл)"};
+static const int kPkItemsW[] = {26, 34, 18, 40, 10, 40};
 static const wchar_t *const kPkLinksHead[] = {L"Сборка", L"Входящее", L"Кол-во", L"Позиция"};
 static const int kPkLinksW[] = {26, 26, 9, 9};
 static const wchar_t *const kPkOpsHead[] = {L"Обозначение", L"№ опер.", L"Операция", L"Участок",
                                             L"Оборудование", L"Тпз, мин", L"Тшт, мин"};
 static const int kPkOpsW[] = {26, 8, 30, 20, 34, 9, 9};
+static const wchar_t *const kPkBlanksHead[] = {L"Деталь", L"Материал заготовки", L"Норма, кг", L"Размеры, мм"};
+static const int kPkBlanksW[] = {26, 44, 9, 22};
 static const XpSheetDef kPkSheets[PK_NT] = {
     {L"Изделия", XP_N(kPkItemsHead), kPkItemsHead, kPkItemsW},
     {L"Состав", XP_N(kPkLinksHead), kPkLinksHead, kPkLinksW},
     {L"Операции", XP_N(kPkOpsHead), kPkOpsHead, kPkOpsW},
+    {L"Заготовки", XP_N(kPkBlanksHead), kPkBlanksHead, kPkBlanksW},
 };
 
 static BOOL xp_seen2(XpTable *t, const wchar_t *a, const wchar_t *b) {

@@ -970,25 +970,27 @@ static LRESULT dr_list_draw(NMLVCUSTOMDRAW *cd) {
 
 /* ---- в пакет PLM и в Союз ---------------------------------------------------------- */
 
+/* вид изделия — как в «Союзе» (NameUI вида): раздел спецификации и есть он; «Документация» — мимо */
 static const wchar_t *dr_kind_of(const wchar_t *sect) {
-  static const struct {
-    const wchar_t *sect, *kind;
-  } k[] = {{L"Сборочные единицы", L"Сборочная единица"}, {L"Детали", L"Деталь"},
-           {L"Стандартные изделия", L"Стандартное изделие"}, {L"Прочие изделия", L"Прочее изделие"},
-           {L"Материалы", L"Материал"}, {L"Комплекты", L"Комплект"}, {L"Комплексы", L"Комплекс"}};
+  static const wchar_t *const k[] = {L"Сборочные единицы", L"Детали",    L"Стандартные изделия", L"Прочие изделия",
+                                     L"Материалы",         L"Комплекты", L"Комплексы"};
   for (size_t i = 0; i < sizeof(k) / sizeof(k[0]); i++)
-    if (!_wcsicmp(sect, k[i].sect)) return k[i].kind;
+    if (!_wcsicmp(sect, k[i])) return k[i];
   return L"";
 }
 
 static BOOL dr_is_docs(const wchar_t *sect) { return !_wcsicmp(sect, L"Документация"); }
 
 /* количество в CSV и пакет: «0,1» — как есть, пусто — 1 у изделий с обозначением */
+/* file — сам распознанный лист: он и привяжется к изделию в «Союзе» подлинником (столбец «Чертёж») */
 static void dr_pk_item(const wchar_t *des, const wchar_t *name, const wchar_t *kind, const wchar_t *mat,
-                       const wchar_t *mass) {
+                       const wchar_t *mass, const wchar_t *file) {
   if (!des[0]) return;
   for (int r = 0; r < g_pk[PK_ITEMS].n; r++)
-    if (!_wcsicmp(xp_cell(&g_pk[PK_ITEMS], r, 0), des)) return; /* уже есть в пакете */
+    if (!_wcsicmp(xp_cell(&g_pk[PK_ITEMS], r, 0), des)) {
+      if (file[0] && !xp_cell(&g_pk[PK_ITEMS], r, 5)[0]) pk_put(&g_pk[PK_ITEMS], r, 5, file);
+      return; /* уже есть в пакете */
+    }
   wchar_t **w = xp_row(&g_pk[PK_ITEMS]);
   if (!w) return;
   xp_set(w, 0, des);
@@ -996,6 +998,7 @@ static void dr_pk_item(const wchar_t *des, const wchar_t *name, const wchar_t *k
   xp_set(w, 2, kind);
   xp_set(w, 3, mat);
   xp_set(w, 4, mass);
+  xp_set(w, 5, file);
 }
 
 static void dr_to_package(void) {
@@ -1006,15 +1009,16 @@ static void dr_to_package(void) {
   for (int i = 0; i < g_drn; i++) {
     DrPage *pg = &g_dri[i].pg;
     if (!pg->done || !pg->f[DF_DES][0]) continue;
-    if (pg->type == DRT_DRAW) dr_pk_item(pg->f[DF_DES], pg->f[DF_NAME], L"Деталь", pg->f[DF_MAT], pg->f[DF_MASS]);
+    if (pg->type == DRT_DRAW)
+      dr_pk_item(pg->f[DF_DES], pg->f[DF_NAME], L"Детали", pg->f[DF_MAT], pg->f[DF_MASS], pg->path);
     if (pg->type != DRT_SPEC) continue;
-    if (pg->f[DF_NAME][0]) dr_pk_item(pg->f[DF_DES], pg->f[DF_NAME], L"Сборочная единица", L"", L"");
+    if (pg->f[DF_NAME][0]) dr_pk_item(pg->f[DF_DES], pg->f[DF_NAME], L"Сборочные единицы", L"", L"", pg->path);
     for (int r = 0; r < pg->nrows; r++) {
       DrSpecRow *s = &pg->rows[r];
       if (dr_is_docs(s->c[DS_SECT])) continue;
       const wchar_t *child = s->c[DS_DES][0] ? s->c[DS_DES] : s->c[DS_NAME];
       if (!child[0]) continue;
-      if (s->c[DS_DES][0]) dr_pk_item(s->c[DS_DES], s->c[DS_NAME], dr_kind_of(s->c[DS_SECT]), L"", L"");
+      if (s->c[DS_DES][0]) dr_pk_item(s->c[DS_DES], s->c[DS_NAME], dr_kind_of(s->c[DS_SECT]), L"", L"", L"");
       if (xp_seen2(&g_pk[PK_LINKS], pg->f[DF_DES], child)) continue;
       wchar_t **w = xp_row(&g_pk[PK_LINKS]);
       if (!w) break;

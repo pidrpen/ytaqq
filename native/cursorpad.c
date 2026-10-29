@@ -4832,6 +4832,8 @@ static void create_settings(HWND owner) {
 #include "std.c"        /* справочник ГОСТ/DIN/ISO: разбор таблиц и поиск */
 #include "std_files.c"  /* его таблицы с диска пользователя (CursorPad-std) */
 #include "soyuz_ops.c"  /* маршрут → операции ТП «Союза»: разбор, коды справочника, сверка */
+#include "pk_paste.c"    /* «Вставить» окна «ЭСИ и ТП»: что бы ни скопировали — строки по листам */
+#include "pk_paste_ui.c" /* его раскладка по листам окна (package_ui.c) */
 #include "soyuz_ui.c"   /* окно «В Союз»: буфер по операции, аналоги и слежение в базе */
 #include "soyuz_auto.c" /* «Вставить сам»: пункт меню клиента через UI Automation */
 #include "soyuz_make.c" /* «Создать ТП»: деталь и ТП функцией пакета «CursorPad — Союз» через мост */

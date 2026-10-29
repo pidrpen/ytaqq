@@ -270,7 +270,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
     st_check(g_szR.mat[0] && g_szR.blank[0], L"из маршрута взяты материал и заготовка детали");
     wchar_t spec[MAX_PATH], note[200];
     _snwprintf(spec, MAX_PATH, L"%ls\\cursorpad-soyuz.txt", g_stDir);
-    int n = szm_write_spec(spec, L"Тестовая сборка ЭСИ", TRUE, note, 200);
+    int n = szm_write_spec(spec, L"Тестовая сборка ЭСИ", L"", g_szR.des, TRUE, note, 200);
     wchar_t *t = NULL;
     HANDLE h = CreateFileW(spec, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
     if (h != INVALID_HANDLE_VALUE) {
@@ -313,7 +313,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
       pk_put(&g_pk[PK_OPS], 1, 2, L"Какая-то неизвестная");
       (void)w;
       wchar_t *pt = NULL, pnote[200];
-      int pn = pk_soyuz_text(&pt, pnote, 200);
+      PkSent sent;
+      int pn = pk_soyuz_text(&pt, pnote, 200, &sent);
       st_check(pn == 1 && pt && wcsstr(pt, L"ИЗДЕЛИЕ\tТСТ.120.000\tУзел пробный\tСборочные единицы\t\t\r\n") &&
                    wcsstr(pt, L"СОСТАВ\tТСТ.120.000\tТСТ.110.004\t2\t\r\n") &&
                    wcsstr(pt, L"ТП\tТСТ.110.004\t5\t4110\t31\t16К20, Токарно-винторезный станок\t15\t4\r\n") &&
@@ -321,6 +322,25 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
                L"пакет → описание: изделие, состав, код 4110 по названию «Токарная», участок 31; неизвестная — пропущена");
       if (pt) st_note(L"     %ls", pt);
       free(pt);
+      /* с 2026.10.29: строки из «Союза» («Из Союза») не уходят, заготовка и чертёж — уходят */
+      pk_soy_add_item(L"ТСТ.120.000", L"Узел пробный", FALSE);
+      pk_soy_add_link(L"ТСТ.120.000", L"ТСТ.110.004");
+      w = xp_row(&g_pk[PK_BLANKS]);
+      pk_put(&g_pk[PK_BLANKS], 0, 0, L"ТСТ.110.004");
+      pk_put(&g_pk[PK_BLANKS], 0, 1, L"Круг 40 ГОСТ 2590-2006 / Сталь 45 ГОСТ 1050-2013");
+      pk_put(&g_pk[PK_BLANKS], 0, 2, L"3,1");
+      pk_put(&g_pk[PK_BLANKS], 0, 3, L"D=40;L=265");
+      pk_put(&g_pk[PK_ITEMS], 0, 5, L"C:\\Чертежи\\ТСТ.120.000.pdf");
+      pt = NULL;
+      pk_soyuz_text(&pt, pnote, 200, &sent);
+      st_check(pt && !wcsstr(pt, L"ИЗДЕЛИЕ\t") && !wcsstr(pt, L"СОСТАВ\t") &&
+                   wcsstr(pt, L"ЗАГОТОВКА\tТСТ.110.004\tКруг 40 ГОСТ 2590-2006 / Сталь 45 ГОСТ 1050-2013\t3,1\tD=40;L=265\r\n") &&
+                   wcsstr(pt, L"ЧЕРТЕЖ\tТСТ.120.000\tC:\\Чертежи\\ТСТ.120.000.pdf\r\n") && sent.blanks == 1 && sent.draws == 1,
+               L"из «Союза» — не уходит; заготовка и чертёж — строками ЗАГОТОВКА и ЧЕРТЕЖ");
+      free(pt);
+      pk_soy_clear();
+      pk_del_row(&g_pk[PK_BLANKS], 0);
+      pk_put(&g_pk[PK_ITEMS], 0, 5, NULL);
       /* окно пакета с этими же строками и «В Союз…» → окно папки: справочники и папки — из базы */
       package_show(FALSE);
       szm_dicts_start(g_pkWnd);
