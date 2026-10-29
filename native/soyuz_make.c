@@ -725,6 +725,7 @@ static void szm_dicts_start(HWND notify) {
 
 typedef struct {
   wchar_t cmd[MAX_PATH * 2 + 8];
+  HWND notify; /* кому WM_SZM_DONE: окно папки или чат (ai_esi.c); NULL — окно папки */
 } SzmRun;
 
 static DWORD WINAPI szm_run_thread(LPVOID arg) {
@@ -752,9 +753,10 @@ static DWORD WINAPI szm_run_thread(LPVOID arg) {
   }
   free(text);
   free(out);
+  HWND to = r->notify ? r->notify : g_szmWnd;
   free(r);
   InterlockedExchange(&g_szmBusy, 0);
-  if (!g_szmWnd || !PostMessageW(g_szmWnd, WM_SZM_DONE, 0, (LPARAM)rep)) free(rep);
+  if (!to || !IsWindow(to) || !PostMessageW(to, WM_SZM_DONE, 0, (LPARAM)rep)) free(rep);
   return 0;
 }
 
@@ -809,6 +811,56 @@ static int szm_write_text(const wchar_t *path, const wchar_t *folder, const wcha
   } else n = -1;
   free(u);
   return n;
+}
+
+/* Из чата (ai_esi.c): готовые строки описания — мостом в клиент без окна папки; ответ WM_SZM_DONE —
+   в notify. Папки — как даны (последние из soyuz.txt). msg — что сказать в чат; FALSE — не ушло */
+static BOOL szm_send_text(const wchar_t *text, const wchar_t *folder, const wchar_t *tpFolder, HWND notify, wchar_t *msg,
+                          int cap) {
+  if (g_szmBusy) {
+    lstrcpynW(msg, L"«Союз» ещё занят прошлой отправкой — подождите ответа.", cap);
+    return FALSE;
+  }
+  wchar_t bridge[MAX_PATH];
+  int why = szm_bridge(bridge, MAX_PATH);
+  if (why) {
+    lstrcpynW(msg,
+              why == 1   ? L"В plm.txt указан мост soyuz_bridge, но такого файла нет."
+              : why == 2 ? L"В этой сборке CursorPad нет моста cp-soyuz.exe."
+                         : L"Не удалось положить мост cp-soyuz.exe в папку данных (антивирус или запрет записи). "
+                           L"Ручной путь: «ЭСИ и ТП» → «Ещё ▾» → «Сохранить пакет…».",
+              cap);
+    return FALSE;
+  }
+  free(g_szmText);
+  g_szmText = _wcsdup(text);
+  wchar_t spec[MAX_PATH];
+  _snwprintf(spec, MAX_PATH, L"%s\\cursorpad-soyuz.txt", g_dataDir);
+  int dropped = 0;
+  int n = szm_write_text(spec, folder, tpFolder, &dropped);
+  if (n < 0) {
+    lstrcpynW(msg, n == -2 ? L"В «Союз» подать нечего." : L"Не удалось записать описание в папку данных.", cap);
+    return FALSE;
+  }
+  if (folder[0] || tpFolder[0]) szm_pref_save(folder, tpFolder);
+  SzmRun *r = (SzmRun *)calloc(1, sizeof(SzmRun));
+  if (!r) return FALSE;
+  _snwprintf(r->cmd, sizeof(r->cmd) / sizeof(wchar_t), L"\"%s\" \"%s\"", bridge, spec);
+  r->notify = notify;
+  InterlockedExchange(&g_szmBusy, 1);
+  HANDLE th = CreateThread(NULL, 0, szm_run_thread, r, 0, NULL);
+  if (!th) {
+    free(r);
+    InterlockedExchange(&g_szmBusy, 0);
+    lstrcpynW(msg, L"Не удалось запустить мост.", cap);
+    return FALSE;
+  }
+  CloseHandle(th);
+  _snwprintf(msg, cap, L"Передаю в «Союз»: операций %d%s — папка «%s»%s. Ответ клиента появится здесь.", n,
+             dropped ? L" (чертежи не идут: функция в клиенте старая)" : L"", folder[0] ? folder : L"не задана",
+             tpFolder[0] ? L", ТП — в свою папку" : L"");
+  msg[cap - 1] = 0;
+  return TRUE;
 }
 
 static void szm_go(void) {

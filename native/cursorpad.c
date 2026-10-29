@@ -4982,6 +4982,7 @@ static void create_settings(HWND owner) {
 #include "file_link_ui.c" /* плитка «Ссылка» кольца Shift: путь к файлу или к папке — в буфер */
 #include "ai_file_ask.c" /* «прочитай / переведи файл» в чате: Tesseract и исполнитель конвертера — после convert.c */
 #include "pk_stamp.c" /* чертежи мышью в окно «ЭСИ и ТП»: штамп → строка, сборка → состав (после ai_file_ask.c: PDF) */
+#include "ai_esi.c"   /* действия из чата: «загрузи ЭСИ по чертежам», «выгрузи МВ», «приоритет участков» */
 #include "tools.c" /* после нардов: автообновление смотрит, не открыты ли они */
 
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {

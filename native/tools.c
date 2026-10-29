@@ -38,7 +38,7 @@ typedef struct {
   int kind;     /* 0 — пункт, 1 — заголовок раздела, 2 — опасный (красный), 3 — пока не работает (серый) */
 } MoreItem;
 
-enum { MORE_OCR = 20, MORE_NARDY, MORE_CHANGES, MORE_CLEAR, MORE_LAYOUT, MORE_MSG, MORE_ROUTE, MORE_SHASHKI, MORE_EXPORT, MORE_PACKAGE, MORE_MATCH, MORE_DRAWREC, MORE_AICHAT, MORE_CONVERT, MORE_MORSKOY, MORE_MEMORY, MORE_SHAHMATY };
+enum { MORE_OCR = 20, MORE_NARDY, MORE_CHANGES, MORE_CLEAR, MORE_LAYOUT, MORE_MSG, MORE_ROUTE, MORE_SHASHKI, MORE_EXPORT, MORE_PACKAGE, MORE_MATCH, MORE_DRAWREC, MORE_AICHAT, MORE_CONVERT, MORE_MORSKOY, MORE_MEMORY, MORE_SHAHMATY, MORE_ESI };
 static const MoreItem kMore[] = {
     {0, L"Расчёты и чертежи", NULL, 0, 1},
     {1, L"Расчёт резки и газов", NULL, 0xE8C6, 0},
@@ -51,6 +51,7 @@ static const MoreItem kMore[] = {
     {0, L"PLM", NULL, 0, 1},
     {MORE_ROUTE, L"Маршрутная ведомость", NULL, 0xE8FD, 0},     /* с 2026.09.23.45: из PLM в Excel */
     {MORE_EXPORT, L"Выгрузка из PLM", NULL, 0xE896, 0},        /* с 2026.09.23.78: ЭСИ, ТП, извещения */
+    {MORE_ESI, L"Загрузить ЭСИ в Союз", NULL, 0xE8A5, 0},            /* с 2026.10.29: выбрать чертежи — и сразу в окно ЭСИ */
     {MORE_PACKAGE, L"ЭСИ и ТП: пакет или сразу в Союз", NULL, 0xE898, 0}, /* с .80: ЭСИ, состав, ТП; с 2026.10.28 — «В Союз…» */
     {MORE_MATCH, L"Сопоставить с Союзом", NULL, 0xE8AB, 0},     /* с 2026.10.16.1: Excel ↔ Союз */
     {0, L"ИИ", NULL, 0, 1},
@@ -162,6 +163,12 @@ static void tools_menu(HWND owner, HWND btn) {
   else if (cmd == MORE_ROUTE) route_show();
   else if (cmd == MORE_EXPORT) export_show();
   else if (cmd == MORE_PACKAGE) package_show(FALSE);
+  else if (cmd == MORE_ESI) { /* чертежи → окно «ЭСИ и ТП» со штампами, составом и операциями → «В Союз…» */
+    package_show(FALSE);
+    pks_ops_pref();
+    g_pkAiOps = TRUE;
+    pk_stamp_pick();
+  }
   else if (cmd == MORE_MATCH) match_show();
   else if (cmd == MORE_DRAWREC) drawrec_show();
   else if (cmd == MORE_CONVERT) cvx_show();

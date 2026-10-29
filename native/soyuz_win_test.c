@@ -459,6 +459,21 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
         g_szmFold = NULL;
         free(fl->path), free(fl->pathId), free(fl->tp), free(fl->tpId), free(fl);
       }
+      /* действия из чата (ai_esi.c): команды узнаёт код, пути — из текста */
+      {
+        wchar_t cmd[600];
+        _snwprintf(cmd, 600, L"загрузи ЭСИ по чертежам «%ls» и в Союз", g_stDir);
+        TmPaths pl = {0};
+        int np = esi_paths(cmd, &pl);
+        st_check(esi_chat_cmd(L"загрузи ЭСИ по чертежам C:\\Чертежи") && esi_chat_cmd(L"Заведи эси в Союз по этим чертежам") &&
+                     esi_chat_cmd(L"чертежи в союз") && !esi_chat_cmd(L"выгрузи ЭСИ из союза") && !esi_chat_cmd(L"в союз") &&
+                     !esi_chat_cmd(L"есть ли в союзе ТСТ.110.004") && !rt_chat_cmd(L"норма материала по ведомости") &&
+                     !prio_chat_cmd(L"какой участок у токарной"),
+                 L"чат: «загрузи ЭСИ по чертежам» узнаётся, «выгрузи», «в союз», сверка и вопросы — нет");
+        st_check(np == 1 && pl.n >= 1 && wcsstr(pl.p[0], L".png"), L"чат: путь к папке в кавычках найден, её картинки собраны в список");
+        st_note(L"     файлов из папки стенда: %d", pl.n);
+        free(pl.p);
+      }
       package_show(FALSE);
       szm_dicts_start(g_pkWnd);
       for (int t = 0; t < 100 && !g_szmDicts.na && !g_szmDicts.err[0]; t++) st_pump(100);
