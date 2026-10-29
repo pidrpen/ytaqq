@@ -956,7 +956,7 @@ static void dr_page_text(const DrWords *ws, int page, const wchar_t *sep, wchar_
 /* шаблон обозначения (dr_des_core и его буквы-цифры) — в search_route.c: по нему же
    поле поиска узнаёт обозначение в запросе */
 
-/* короткое обозначение без точек «3424-895» — только за буквенным кодом («АДЕ 3424-895»):
+/* короткое обозначение без точек «3422-682» — только за буквенным кодом («АДЕ 3422-682»):
    без кода это номер ГОСТ; code — начало буквенного кода, «ГОСТ 1050-13» и «ОСТ …» не берём */
 static int dr_des_short(const wchar_t *s, int code, int i) {
   static const wchar_t *const std[] = {L"ГОСТ ", L"ОСТ ", L"СТБ ", L"СТО ", L"СТП ", L"ТУ "};
@@ -1073,7 +1073,7 @@ static BOOL dr_find_des(const wchar_t *text, wchar_t *out, int cap) {
     if (!dr_isdig(fx[i]) && !dr_isupper_cyr(fx[i])) continue;
     if (i > 0 && (dr_isdig(fx[i - 1]) || dr_isupper_cyr(fx[i - 1]) || fx[i - 1] == L'.')) continue;
     int e = dr_des_core(fx, i);
-    /* «АДЕ 3424-895»: короткое — только за буквенным кодом */
+    /* «АДЕ 3422-682»: короткое — только за буквенным кодом */
     if (e < 0 && i >= 3 && fx[i - 1] == L' ' && dr_isupper_cyr(fx[i - 2])) {
       int q = i - 1;
       while (q > 0 && dr_isupper_cyr(fx[q - 1])) q--;
