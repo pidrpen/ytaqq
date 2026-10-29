@@ -839,7 +839,7 @@ static void pp_desc(PpCtx *x, PpRow *rows, int n) {
     if (k == 1) {
       wchar_t kind[80];
       pp_kind(c, kind, 80);
-      pp_emit(x, PK_ITEMS, a, b, kind, d, e, NULL, pp_at(r, 6)); /* шестое — признак изготовления */
+      pp_emit(x, PK_ITEMS, a, b, kind, d, e, NULL, pp_at(r, 6)); /* шестое — признак покупки */
     } else if (k == 2) {
       if (!x->out->assembly[0]) tn_cpy(x->out->assembly, PP_CELL, a);
       pp_emit(x, PK_LINKS, a, b, c, d, NULL, NULL, NULL);

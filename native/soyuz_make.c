@@ -470,10 +470,10 @@ static DWORD WINAPI szm_dicts_thread(LPVOID arg) {
       L"OUTER APPLY (SELECT TOP 1 c.ShortText FROM InfoObjectAttributes AS c WITH(NOLOCK) JOIN NameKeys AS nk WITH(NOLOCK) "
       L"ON nk.NameKeyId=c.NameKeyId AND nk.Value=N'EquipmentModel' WHERE c.OwnerId=o.InfoObjectId AND c.Outdated=0) AS md "
       L"WHERE o.Erased=0 ORDER BY md.ShortText, o.Name",
-      /* «Признак изготовления» (ManufacturingSign, перечисление): какие значения стоят у изделий базы */
+      /* «Признак покупки» (PurchasedKind у конфигурации изделия, перечисление): какие значения есть в базе */
       L"SELECT TOP 40 0, N'', CAST(nv.NameUI AS NVARCHAR(200)), 0, 0 "
       L"FROM InfoObjectAttributes AS a WITH(NOLOCK) JOIN NameKeys AS nk WITH(NOLOCK) "
-      L"ON nk.NameKeyId=a.NameKeyId AND nk.Value=N'ManufacturingSign' "
+      L"ON nk.NameKeyId=a.NameKeyId AND nk.Value=N'PurchasedKind' "
       L"JOIN NamedValues AS nv WITH(NOLOCK) ON nv.NamedValueId=a.Link "
       L"WHERE a.Outdated=0 AND a.DataType=11 GROUP BY CAST(nv.NameUI AS NVARCHAR(200)) ORDER BY 3"};
   for (int q = 0; q < 3; q++) {
@@ -483,8 +483,14 @@ static DWORD WINAPI szm_dicts_thread(LPVOID arg) {
       lstrcpynW(d->err, err, 300);
       break;
     }
-    wchar_t(*arr)[200] = (wchar_t(*)[200])calloc((size_t)(n > 0 ? n : 1), sizeof(*arr));
-    if (!arr) break;
+    size_t cnt = (size_t)(n > 0 ? n : 1);
+    wchar_t(*arr)[200] = (wchar_t(*)[200])calloc(cnt, sizeof(*arr));
+    long *ids = q < 2 ? (long *)calloc(cnt, sizeof(long)) : NULL;
+    wchar_t(*codes)[40] = q == 0 ? (wchar_t(*)[40])calloc(cnt, sizeof(*codes)) : NULL;
+    if (!arr || (q < 2 && !ids) || (q == 0 && !codes)) {
+      free(arr), free(ids), free(codes);
+      break;
+    }
     int k = 0;
     for (int i = 0; i < n; i++) {
       const wchar_t *a = rows[i].s1, *b = rows[i].s2;
@@ -492,11 +498,56 @@ static DWORD WINAPI szm_dicts_thread(LPVOID arg) {
       if (a[0] && !wcsncmp(b, a, wcslen(a))) lstrcpynW(arr[k], b, 200);
       else if (a[0]) _snwprintf(arr[k], 200, q ? L"%s, %s" : L"%s %s", a, b), arr[k][199] = 0;
       else lstrcpynW(arr[k], b, 200);
-      if (arr[k][0]) k++;
+      if (!arr[k][0]) continue;
+      if (ids) ids[k] = rows[i].n1;
+      if (codes) lstrcpynW(codes[k], a, 40);
+      k++;
     }
-    if (q == 0) d->area = arr, d->na = k;
-    else if (q == 1) d->equip = arr, d->ne = k;
-    else d->mfg = arr, d->nm = k;
+    if (q == 0) d->area = arr, d->areaId = ids, d->areaCode = codes, d->na = k;
+    else if (q == 1) d->equip = arr, d->equipId = ids, d->ne = k;
+    else d->buy = arr, d->nb = k;
+  }
+  /* какой станок ставят на операцию с этим кодом на этом участке: типовые операции и свежие
+     30000 операций ТП, по каждой паре участок+код — два самых частых станка. Долго или не вышло —
+     без подбора, руками */
+  if (!d->err[0] && d->ne) {
+    g_qTimeout = 40;
+    static const wchar_t kFit[] =
+        L"SELECT TOP 900 x.A, x.V, N'', x.E, x.S FROM (SELECT g.A, g.V, g.E, g.S, "
+        L"ROW_NUMBER() OVER (PARTITION BY g.A, g.V ORDER BY g.S DESC) AS rn FROM ("
+        L"SELECT ISNULL(ar.L,0) AS A, cd.V AS V, eq.L AS E, SUM(CASE WHEN o.T=1 THEN 1000 ELSE 1 END) AS S "
+        L"FROM (SELECT TOP 30000 io.InfoObjectId AS Id, CASE WHEN t.NameKey=N'TypesOperation' THEN 1 ELSE 0 END AS T "
+        L"FROM InfoObjects AS io WITH(NOLOCK) JOIN Templates AS t WITH(NOLOCK) ON t.TemplateId=io.TemplateId "
+        L"AND t.NameKey IN (N'TSOperation',N'TypesOperation') WHERE io.Erased=0 ORDER BY T DESC, io.DateModified DESC) AS o "
+        L"CROSS APPLY (SELECT TOP 1 l.Link AS D FROM InfoObjectAttributes AS l WITH(NOLOCK) JOIN NameKeys AS nkl WITH(NOLOCK) "
+        L"ON nkl.NameKeyId=l.NameKeyId AND nkl.Value=N'Operation' WHERE l.OwnerId=o.Id AND l.Outdated=0 "
+        L"AND ISNULL(l.Link,0)<>0 AND ISNULL(l.CollectionElementId,0)=0) AS dl "
+        L"CROSS APPLY (SELECT TOP 1 COALESCE(NULLIF(LTRIM(RTRIM(CAST(c.ShortText AS NVARCHAR(40)))),N''), "
+        L"CONVERT(NVARCHAR(40), c.IntegerNumber), CONVERT(NVARCHAR(40), c.LongNumber)) AS V "
+        L"FROM InfoObjectAttributes AS c WITH(NOLOCK) JOIN NameKeys AS nkc WITH(NOLOCK) ON nkc.NameKeyId=c.NameKeyId "
+        L"AND nkc.Value=N'Code' WHERE c.OwnerId=dl.D AND c.Outdated=0 AND ISNULL(c.CollectionElementId,0)=0) AS cd "
+        L"OUTER APPLY (SELECT TOP 1 a.Link AS L FROM InfoObjectAttributes AS a WITH(NOLOCK) JOIN NameKeys AS nka WITH(NOLOCK) "
+        L"ON nka.NameKeyId=a.NameKeyId AND nka.Value=N'ActualOperation' WHERE a.OwnerId=o.Id AND a.Outdated=0 "
+        L"AND ISNULL(a.Link,0)<>0) AS ao "
+        L"OUTER APPLY (SELECT TOP 1 a.Link AS L FROM InfoObjectAttributes AS a WITH(NOLOCK) JOIN NameKeys AS nka WITH(NOLOCK) "
+        L"ON nka.NameKeyId=a.NameKeyId AND nka.Value=N'Area' WHERE a.OwnerId IN (o.Id, ISNULL(ao.L,0)) AND a.Outdated=0 "
+        L"AND a.DataType=6 AND ISNULL(a.Link,0)<>0) AS ar "
+        L"CROSS APPLY (SELECT DISTINCT e.Link AS L FROM InfoObjectAttributes AS e WITH(NOLOCK) JOIN NameKeys AS nke WITH(NOLOCK) "
+        L"ON nke.NameKeyId=e.NameKeyId AND nke.Value=N'Equipment' WHERE e.OwnerId IN (o.Id, ISNULL(ao.L,0)) "
+        L"AND e.Outdated=0 AND e.DataType=6 AND ISNULL(e.Link,0)<>0) AS eq "
+        L"WHERE cd.V IS NOT NULL GROUP BY ISNULL(ar.L,0), cd.V, eq.L) AS g) AS x WHERE x.rn<=2 ORDER BY x.S DESC";
+    int n = card_query(dbc, kFit, rows, CARD_ROWS, err, 300);
+    if (n > 0 && (d->fit = (SzmFit *)calloc((size_t)n, sizeof(SzmFit))) != NULL)
+      for (int i = 0; i < n; i++) {
+        const wchar_t *v = rows[i].s1;
+        while (*v == L' ') v++;
+        if (*v < L'0' || *v > L'9') continue;
+        SzmFit *f = &d->fit[d->nf++];
+        f->area = rows[i].n1;
+        f->code = wcstol(v, NULL, 10);
+        f->equip = rows[i].n2;
+        f->score = rows[i].n3;
+      }
   }
   SQLDisconnect(dbc);
 done:
@@ -506,7 +557,11 @@ done:
   if (d && (!notify || !IsWindow(notify) || !PostMessageW(notify, WM_SZM_DICTS, 0, (LPARAM)d))) {
     free(d->area);
     free(d->equip);
-    free(d->mfg);
+    free(d->areaId);
+    free(d->equipId);
+    free(d->areaCode);
+    free(d->buy);
+    free(d->fit);
     free(d);
   }
   return 0;

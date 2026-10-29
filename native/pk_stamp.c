@@ -61,6 +61,14 @@ typedef struct {
 } PkStPend;
 static PkStPend g_pksPend[64];
 static int g_pksPendN;
+/* скан без обозначения, брошенный на сборку: впишут обозначение — встанет в её состав (по файлу
+   строки: номера строк сдвигаются, файл — нет) */
+typedef struct {
+  wchar_t file[MAX_PATH], parent[200];
+  int parentRow;
+} PkStOrphan;
+static PkStOrphan g_pksOrph[64];
+static int g_pksOrphN;
 
 /* ---- чтение (рабочий поток) ------------------------------------------------------------ */
 
@@ -298,6 +306,12 @@ static void pks_apply(PkStRes *r) {
       lstrcpynW(g_pksPend[g_pksPendN++].child, des, DR_CELL);
       g_pksWait++;
     }
+  } else if (row != r->parentRow && (parent[0] || r->parentRow >= 0) && r->file[0] &&
+             g_pksOrphN < (int)(sizeof(g_pksOrph) / sizeof(g_pksOrph[0]))) {
+    PkStOrphan *o = &g_pksOrph[g_pksOrphN++];
+    lstrcpynW(o->file, r->file, MAX_PATH);
+    lstrcpynW(o->parent, r->parent, 200);
+    o->parentRow = r->parentRow;
   }
   /* спецификация: её состав — сразу в «Состав», новые позиции — в «Изделия» */
   for (int k = 0; k < r->nrows && des[0]; k++) {
@@ -315,6 +329,42 @@ static void pks_apply(PkStRes *r) {
     if (pks_link(des, s->des, s->qty, s->pos)) g_pksLinks++;
   }
   if (r->nrows) lstrcpynW(g_pksParent, des, 200);
+}
+
+/* обозначение в «Изделиях» вписали руками: сборка — её состав из ждавших; скан без обозначения —
+   в состав сборки, на которую его бросили */
+static void pk_stamp_typed(int row) {
+  XpTable *it = &g_pk[PK_ITEMS];
+  if (row < 0 || row >= it->n || !xp_cell(it, row, 0)[0]) return;
+  int was = g_pksLinks;
+  pks_pend_flush(row);
+  const wchar_t *des = xp_cell(it, row, 0), *file = xp_cell(it, row, 5);
+  wchar_t parent[200] = L"";
+  for (int i = 0; file[0] && i < g_pksOrphN; i++) {
+    if (_wcsicmp(g_pksOrph[i].file, file)) continue;
+    PkStOrphan o = g_pksOrph[i];
+    g_pksOrph[i] = g_pksOrph[--g_pksOrphN];
+    lstrcpynW(parent, o.parent[0] ? o.parent : o.parentRow >= 0 && o.parentRow < it->n ? xp_cell(it, o.parentRow, 0) : L"",
+              200);
+    if (parent[0]) {
+      if (pks_link(parent, des, L"1", L"")) g_pksLinks++;
+    } else if (o.parentRow >= 0 && g_pksPendN < (int)(sizeof(g_pksPend) / sizeof(g_pksPend[0]))) {
+      g_pksPend[g_pksPendN].row = o.parentRow;
+      lstrcpynW(g_pksPend[g_pksPendN++].child, des, DR_CELL);
+      g_pksWait++;
+      pk_status(L"«%s» встанет в состав сборки, когда у неё будет обозначение", des);
+    }
+    if (g_pksNoDes > 0) g_pksNoDes--;
+    break;
+  }
+  if (g_pksLinks > was)
+    pk_status(L"В состав «%s»: %d — см. лист «Состав»", parent[0] ? parent : des, g_pksLinks - was);
+}
+
+/* «Очистить»: ждать больше нечего */
+static void pk_stamp_forget(void) {
+  g_pksPendN = g_pksOrphN = 0;
+  g_pksWait = 0;
 }
 
 /* итог — в строку состояния */
@@ -486,6 +536,36 @@ static void pk_stamp_pick(void) {
 #ifdef SET_TEST
 /* проверка без мыши: CP_PKDROP="строка|файл|файл…" — бросок на строку листа (-1 — пустое место) */
 static void pk_stamp_test_drop(void) {
+  /* CP_PKFIT="код участка|участок|станок|код операции" — справочник «Союза» без базы: подбор станка */
+  const wchar_t *fit = _wgetenv(L"CP_PKFIT");
+  if (fit && !g_szmDicts.na) {
+    wchar_t f[4][200] = {L"", L"", L"", L""};
+    for (int k = 0, i = 0; k < 4; k++) {
+      int j = 0;
+      while (fit[i] && fit[i] != L'|' && j < 199) f[k][j++] = fit[i++];
+      f[k][j] = 0;
+      if (fit[i] == L'|') i++;
+    }
+    g_szmDicts.area = (wchar_t(*)[200])calloc(1, sizeof(*g_szmDicts.area));
+    g_szmDicts.equip = (wchar_t(*)[200])calloc(1, sizeof(*g_szmDicts.equip));
+    g_szmDicts.areaCode = (wchar_t(*)[40])calloc(1, sizeof(*g_szmDicts.areaCode));
+    g_szmDicts.areaId = (long *)calloc(1, sizeof(long));
+    g_szmDicts.equipId = (long *)calloc(1, sizeof(long));
+    g_szmDicts.fit = (SzmFit *)calloc(1, sizeof(SzmFit));
+    if (g_szmDicts.area && g_szmDicts.equip && g_szmDicts.areaCode && g_szmDicts.areaId && g_szmDicts.equipId &&
+        g_szmDicts.fit) {
+      _snwprintf(g_szmDicts.area[0], 200, L"%ls %ls", f[0], f[1]);
+      lstrcpynW(g_szmDicts.areaCode[0], f[0], 40);
+      lstrcpynW(g_szmDicts.equip[0], f[2], 200);
+      g_szmDicts.areaId[0] = 101, g_szmDicts.equipId[0] = 201;
+      g_szmDicts.fit[0].area = 101, g_szmDicts.fit[0].equip = 201, g_szmDicts.fit[0].score = 1000;
+      g_szmDicts.fit[0].code = wcstol(f[3], NULL, 10);
+      g_szmDicts.na = g_szmDicts.ne = g_szmDicts.nf = 1;
+      g_szmDictsAsked = TRUE;
+      pk_changed();
+      pk_fill(FALSE);
+    }
+  }
   const wchar_t *e = _wgetenv(L"CP_PKDROP"); /* широкая: getenv в Wine отдаёт ANSI и портит кириллицу */
   if (!e || !g_pkWnd) return;
   wchar_t w[4096];

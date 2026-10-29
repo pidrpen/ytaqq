@@ -1910,7 +1910,7 @@ static const CardLabel kCardLabels[] = {
     {L"ECNDocument", L"Извещение"},
     {L"TSOperation", L"Операция"},
     {L"Items", L"Позиции"},
-    {L"PurchasedKind", L"Вид покупного"},
+    {L"PurchasedKind", L"Признак покупки"},
     {L"TechPurchasedKind", L"Вид покупного (тех.)"},
     {L"ComponentOfTheTooling", L"Составляющая оснастки"},
     {L"ManufacturingSign", L"Признак изготовления"},
