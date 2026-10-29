@@ -9,10 +9,13 @@
 
 #define ID_NL_FACTORY 4895
 #define ID_NL_OP 4940 /* + номер правила операции (g_nmOps) — галочка «нормировать» */
+#define ID_NL_HEAT 4930 /* + 0 — порог массы, 1 — Тшт до порога, 2 — тяжелее (норма технолога на ТО) */
 #define ID_NL_EDIT 4900 /* + параметр·3 + столбец: 0 — от, 1 — до, 2 — по умолчанию */
 
 static HWND g_nlEdit[NM_LIMS][3];
-static HWND g_nlFactory, g_nlOp[NM_OPRULES];
+static HWND g_nlFactory, g_nlOp[NM_OPRULES], g_nlHeat[3];
+static const wchar_t *const kNlHeatKey[3] = {L"limit", L"light", L"heavy"};
+static double *nl_heat(int c) { return c == 0 ? &g_nmHeat.limit : c == 1 ? &g_nmHeat.light : &g_nmHeat.heavy; }
 static BOOL g_nlFill; /* поля заполняет код: EN_CHANGE — не правка */
 static wchar_t g_nlTitle[NM_LIMS][64], g_nlDesc[NM_LIMS][96]; /* подписи строк: раскладка хранит указатели */
 static const wchar_t *const kNlCol[3] = {L"min", L"max", L"def"};
@@ -46,6 +49,13 @@ static void nl_load(void) {
       if (!v[0]) *nl_cell(k, c) = NM_NONE;
       else if (nm_num(v, &x, &e)) *nl_cell(k, c) = x;
     }
+  g_nmHeat = (NmHeat)NM_HEAT0;
+  for (int c = 0; c < 3; c++) { /* [heat] limit=1 light=2 heavy=3 — норма технолога на термическую */
+    double x;
+    const wchar_t *e;
+    GetPrivateProfileStringW(L"heat", kNlHeatKey[c], L"", v, 64, p);
+    if (v[0] && nm_num(v, &x, &e)) *nl_heat(c) = x;
+  }
   for (int k = 0; k < NM_OPRULES; k++) { /* [ops] Токарная=1 — нормировать; 0 — нет */
     GetPrivateProfileStringW(L"ops", g_nmOps[k].op, L"1", v, 64, p);
     g_nmOps[k].off = !wcscmp(v, L"0");
@@ -63,6 +73,11 @@ static void nl_save(void) {
     CloseHandle(f);
   }
   for (int k = 0; k < NM_OPRULES; k++) WritePrivateProfileStringW(L"ops", g_nmOps[k].op, g_nmOps[k].off ? L"0" : L"1", p);
+  for (int c = 0; c < 3; c++) {
+    _snwprintf(v, 64, L"%g", *nl_heat(c));
+    v[63] = 0;
+    WritePrivateProfileStringW(L"heat", kNlHeatKey[c], v, p);
+  }
   for (int k = 0; k < NM_LIMS; k++)
     for (int c = 0; c < 3; c++) {
       double x = *nl_cell(k, c);
@@ -76,6 +91,11 @@ static void nl_save(void) {
 
 static void nl_refresh(void) {
   g_nlFill = TRUE;
+  for (int c = 0; c < 3; c++) {
+    wchar_t v[48];
+    tn_numstr(*nl_heat(c), v, 48);
+    if (g_nlHeat[c]) SetWindowTextW(g_nlHeat[c], v);
+  }
   for (int k = 0; k < NM_OPRULES; k++)
     if (g_nlOp[k]) SendMessageW(g_nlOp[k], BM_SETCHECK, g_nmOps[k].off ? BST_UNCHECKED : BST_CHECKED, 0);
   for (int k = 0; k < NM_LIMS; k++)
@@ -105,6 +125,12 @@ static void nl_create(HWND p) {
     }
   }
   g_nlFactory = mk_btn(p, L"Заводские пределы", ID_NL_FACTORY);
+  for (int c = 0; c < 3; c++) {
+    g_nlHeat[c] = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL | ES_CENTER, 0, -4000,
+                                  70, 26, p, (HMENU)(INT_PTR)(ID_NL_HEAT + c), NULL, NULL);
+    SendMessageW(g_nlHeat[c], WM_SETFONT, (WPARAM)g_fontBody, TRUE);
+    SendMessageW(g_nlHeat[c], EM_SETLIMITTEXT, 12, 0);
+  }
   for (int k = 0; k < NM_OPRULES; k++) {
     g_nlOp[k] = CreateWindowExW(0, L"BUTTON", L"нормировать", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 0, -4000, 130, 26, p,
                                 (HMENU)(INT_PTR)(ID_NL_OP + k), NULL, NULL);
@@ -138,6 +164,13 @@ static void nl_layout(int btnH) {
   static const int cw = 130;
   for (int k = 0; k < NM_OPRULES; k++) sd_row(g_nmOps[k].op, g_nmOps[k].src, &g_nlOp[k], &cw, 1, btnH);
   sd_card_end();
+  sd_group(L"Термическая обработка — норма технолога");
+  sd_card_begin();
+  static const int hw = 92;
+  sd_row(L"Порог массы детали, кг", L"масса со штампа чертежа; до порога включительно — «лёгкая»", &g_nlHeat[0], &hw, 1, btnH);
+  sd_row(L"Тшт до порога, мин", L"детали до порога массы", &g_nlHeat[1], &hw, 1, btnH);
+  sd_row(L"Тшт тяжелее порога, мин", L"и когда масса не прочитана — тогда в ответе «проверить»", &g_nlHeat[2], &hw, 1, btnH);
+  sd_card_end();
 }
 
 /* подписи столбцов над полями первой строки */
@@ -160,6 +193,20 @@ static BOOL nl_command(HWND hwnd, int id, int code) {
     nm_lim_factory();
     nl_save();
     nl_refresh();
+    return TRUE;
+  }
+  if (id >= ID_NL_HEAT && id < ID_NL_HEAT + 3) {
+    if (code == EN_CHANGE && !g_nlFill) {
+      wchar_t v[48];
+      double x;
+      const wchar_t *e;
+      GetWindowTextW(g_nlHeat[id - ID_NL_HEAT], v, 48);
+      const wchar_t *t = nm_skipsp(v);
+      if (nm_num(t, &x, &e) && !*nm_skipsp(e) && x > 0) { /* пусто и недописанное — не трогаем */
+        *nl_heat(id - ID_NL_HEAT) = x;
+        nl_save();
+      }
+    }
     return TRUE;
   }
   if (id >= ID_NL_OP && id < ID_NL_OP + NM_OPRULES) {

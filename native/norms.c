@@ -779,8 +779,10 @@ static double nm_step(const wchar_t *row, double x, int *low) {
 
 /* ---- расчёт операции -------------------------------------------------------------- */
 
-enum { NMK_NONE, NMK_TURN, NMK_DRILL, NMK_MILL, NMK_CUT, NMK_EST, NMK_FACT }; /* EST — оценка, FACT — по факту */
-static const wchar_t *const kNmKind[] = {L"", L"токарная", L"сверлильная", L"фрезерная", L"резка", L"оценка", L"по факту"};
+/* EST — оценка, FACT — по факту, TECH — норма технолога (Тшт по массе детали, Настройки) */
+enum { NMK_NONE, NMK_TURN, NMK_DRILL, NMK_MILL, NMK_CUT, NMK_EST, NMK_FACT, NMK_TECH };
+static const wchar_t *const kNmKind[] = {L"", L"токарная", L"сверлильная", L"фрезерная", L"резка", L"оценка",
+                                         L"по факту", L"норма технолога"};
 
 typedef struct {
   int kind, idx;   /* idx — номер операции в маршруте (с нуля) */
@@ -2206,7 +2208,15 @@ static void nm_ask_op(const wchar_t *ask, int num, NmCtx *c) {
    резка — по нормам резки завода; остальные — оценкой из таблицы «оценка»
    (укрупнённо, не ОМН: Тшт = Тшт + на кг·масса, Тпз), термическая и покрытия — по факту (время
    цикла задаёт их технология). Выключенная в Настройках — не нормируется, в ответе одной строкой. */
-enum { NMS_OMN, NMS_CUT, NMS_EST, NMS_FACT };
+enum { NMS_OMN, NMS_CUT, NMS_EST, NMS_FACT, NMS_TECH };
+
+/* норма технолога на термическую обработку: Тшт по массе детали — до порога одна, тяжелее другая;
+   массы нет — как у тяжёлой, с пометкой. Цифры — Настройки → «Нормирование» (norms.ini [heat]) */
+typedef struct {
+  double limit, light, heavy; /* кг; мин до порога включительно; мин тяжелее */
+} NmHeat;
+#define NM_HEAT0 {1, 2, 3} /* как сказал технолог: до 1 кг — 2 мин, тяжелее — 3 */
+static NmHeat g_nmHeat = NM_HEAT0;
 typedef struct {
   const wchar_t *op; /* как в маршруте; «Токарная» — и черновая, и чистовая */
   int how;
@@ -2242,7 +2252,7 @@ static NmOpRule g_nmOps[] = {
     {L"Слесарная", NMS_EST, NM_SRC_EST, 0},
     {L"Маркирование", NMS_EST, NM_SRC_EST, 0},
     {L"Контроль", NMS_EST, NM_SRC_EST, 0},
-    {L"Термическая обработка", NMS_FACT, L"по факту: время печи и цикла — по технологии термообработки", 0},
+    {L"Термическая обработка", NMS_TECH, L"норма технолога: Тшт по массе детали (до порога и тяжелее — Настройки)", 0},
     {L"Получение покрытий", NMS_FACT, L"по факту: время в ваннах — по технологии покрытия", 0},
     {L"Цинкование электрохимическое", NMS_FACT, L"по факту: время в ваннах — по технологии покрытия", 0},
     {L"Получение покрытий органических (лакакрасочных)", NMS_FACT, L"по факту: время сушки — по технологии окраски", 0},
@@ -2276,6 +2286,27 @@ static void nm_est(NmJob *j) {
   const NmOpRule *rule = nm_op_rule(key);
   if (o->kind == NMK_FACT) {
     nm_line(j, rule ? rule->src : L"по факту");
+    return;
+  }
+  if (o->kind == NMK_TECH) { /* норма технолога: по массе детали со штампа */
+    double m = nm_v(&j->c, L"масса");
+    o->tsht = nm_na(m) || m > g_nmHeat.limit ? g_nmHeat.heavy : g_nmHeat.light;
+    tn_cpy(s, 400, L"Тшт ");
+    tn_catnum(s, 400, o->tsht);
+    tn_cat(s, 400, L" мин — норма технолога: ");
+    if (nm_na(m)) {
+      tn_cat(s, 400, L"масса не прочитана — проверить; взято как для деталей тяжелее ");
+      tn_catnum(s, 400, g_nmHeat.limit);
+      tn_cat(s, 400, L" кг");
+    } else {
+      tn_cat(s, 400, L"масса ");
+      tn_catnum(s, 400, m);
+      tn_cat(s, 400, m > g_nmHeat.limit ? L" кг — тяжелее " : L" кг — до ");
+      tn_catnum(s, 400, g_nmHeat.limit);
+      tn_cat(s, 400, L" кг включительно");
+    }
+    tn_cat(s, 400, L" (Настройки → Нормирование)");
+    nm_line(j, s);
     return;
   }
   nm_put(&j->c, L"операция", key, NM_NONE, NMO_CALC, NULL);
@@ -2321,7 +2352,7 @@ static void nm_route(const NmBase *b, const TnRoute *r, const wchar_t *mass, con
       tn_item(res->off, 400, r->op[i].op);
       continue;
     }
-    if (!kind) kind = rule && rule->how == NMS_FACT ? NMK_FACT : NMK_EST;
+    if (!kind) kind = !rule ? NMK_EST : rule->how == NMS_FACT ? NMK_FACT : rule->how == NMS_TECH ? NMK_TECH : NMK_EST;
     if (!b->n && kind != NMK_CUT) continue; /* без таблиц — только То резки по нормам завода */
     NmOp *o = &res->op[res->n++];
     memset(o, 0, sizeof(*o));
@@ -2335,7 +2366,7 @@ static void nm_route(const NmBase *b, const TnRoute *r, const wchar_t *mass, con
     j->res = res;
     nm_ask_op(ask, (i + 1) * 5, &j->c);
     nm_ctx_sheet(r, mass, &j->c);
-    if (kind == NMK_EST || kind == NMK_FACT) {
+    if (kind == NMK_EST || kind == NMK_FACT || kind == NMK_TECH) {
       double q;
       if (nm_na(nm_v(&j->c, L"партия"))) nm_lim_def(j, L"партия", &q);
       nm_est(j);
@@ -2359,6 +2390,13 @@ static void nm_catmin(wchar_t *out, int cap, double v) {
 static int nm_head_est(const NmOp *o, wchar_t *out, int cap) {
   if (o->kind == NMK_FACT) {
     tn_cat(out, cap, L"по факту (не нормируется)");
+    return 1;
+  }
+  if (o->kind == NMK_TECH) {
+    tn_cat(out, cap, L"Тшт ");
+    nm_catmin(out, cap, o->tsht);
+    tn_cat(out, cap, nm_na(nm_v(&o->c, L"масса")) ? L" (норма технолога; масса не прочитана — проверить)"
+                                                   : L" (норма технолога)");
     return 1;
   }
   if (o->kind != NMK_EST) return 0;
