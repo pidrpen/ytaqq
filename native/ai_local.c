@@ -899,8 +899,10 @@ static int ai_server_ensure(DWORD deadline, volatile LONG *cancel, int minimumCo
   }
   for (int attempt = 0; attempt < 6 && rc != AI_OK; attempt++) {
     int port = AI_PORT0 + (attempt % 4) * 7;
-    /* exe, модель, проектор и адаптер — до MAX_PATH каждый, остальное ключи и фраза предела размышления */
-#define AI_CMD_CAP (MAX_PATH * 4 + 600)
+    /* exe, модель, проектор и три адаптера — до MAX_PATH каждый, остальное ключи и фраза предела размышления.
+       Было на один адаптер: с тремя и длинным путём к данным хвост команды обрезался, и сервер
+       получал путь адаптера вместе с «--lora-init-without-apply» */
+#define AI_CMD_CAP (MAX_PATH * 6 + 600)
     wchar_t cmd[AI_CMD_CAP], wkey[40];
     MultiByteToWideChar(CP_UTF8, 0, g_aiKey, -1, wkey, 40);
     int n = _snwprintf(cmd, AI_CMD_CAP,
@@ -1876,9 +1878,13 @@ static DWORD ai_net_get(HINTERNET ses, const wchar_t *host, const wchar_t *path,
                                            WINHTTP_FLAG_SECURE)
                       : NULL;
   if (req) {
-    wchar_t hdr[160] = L"Accept: */*\r\nAccept-Encoding: identity\r\n";
+    /* GitHub API: файл из репозитория (…/contents/…) — как есть, без JSON; один Accept, иначе API
+       выбирает JSON сам */
+    wchar_t hdr[200] = L"Accept-Encoding: identity\r\n";
+    wcscat(hdr, !wcsstr(host, L"api.github.com")  ? L"Accept: */*\r\n"
+                : wcsstr(path, L"/contents/") ? L"Accept: application/vnd.github.raw\r\n"
+                                              : L"Accept: application/vnd.github+json\r\n");
     if (from) _snwprintf(hdr + wcslen(hdr), 100, L"Range: bytes=%llu-\r\n", from);
-    if (wcsstr(host, L"api.github.com")) wcscat(hdr, L"Accept: application/vnd.github+json\r\n");
     DWORD lvl = WINHTTP_AUTOLOGON_SECURITY_LEVEL_LOW; /* прокси завода — от имени пользователя Windows */
     WinHttpSetOption(req, WINHTTP_OPTION_AUTOLOGON_POLICY, &lvl, sizeof(lvl));
     if (!(WinHttpSendRequest(req, hdr, (DWORD)-1L, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
@@ -2048,59 +2054,148 @@ static BOOL ai_fetch(HINTERNET ses, const wchar_t *host, const wchar_t *path, co
   return FALSE;
 }
 
-/* закреплённые адаптеры: чертежи, габариты и инструменты агента — каждый качается раз за запуск программы */
+/* закреплённые адаптеры: чертежи, габариты и инструменты агента — качаются раз за запуск программы,
+   одним потоком по очереди; что не скачалось — одной строкой в журнал */
 typedef struct {
   const AiFile *file;
   const wchar_t *what;
-  volatile LONG tried;
+  volatile LONG tried, want; /* want — ждёт потока ai_lora_thread */
   wchar_t dest[MAX_PATH];
 } AiLoraPin;
 static AiLoraPin g_aiLoraPins[3] = {{&kAiDrawLora, L"Адаптер чертежей"}, {&kAiDrawGabLora, L"Адаптер габаритов чертежа"},
                                     {&kAiToolLora, L"Адаптер инструментов агента"}};
 
-static DWORD WINAPI ai_lora_thread(LPVOID p) {
-  AiLoraPin *pin = (AiLoraPin *)p;
+/* что пришло вместо адаптера: догадка — ответ функции, начало ответа — в head (для журнала). На заводском
+   ПК raw.githubusercontent.com и github.com отвечали 200 и 441–447 байтами вместо 42 МБ */
+static const wchar_t *ai_lora_why(const wchar_t *part, wchar_t head[400]) {
+  char b[400], low[400];
+  DWORD n = 0;
+  HANDLE h = CreateFileW(part, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+  if (h != INVALID_HANDLE_VALUE) {
+    ReadFile(h, b, sizeof(b) - 1, &n, NULL);
+    CloseHandle(h);
+  }
+  b[n] = 0;
+  for (DWORD i = 0; i <= n; i++) low[i] = (char)tolower((unsigned char)b[i]);
+  BOOL gguf = n >= 4 && !memcmp(b, "GGUF", 4);
+  const wchar_t *kind = !n                                                 ? L"пустой ответ"
+                        : !strncmp(b, "version https://git-lfs", 23)       ? L"указатель Git LFS вместо файла"
+                        : gguf                                             ? L"файл адаптера оборван"
+                        : strstr(low, "<html") || strstr(low, "<!doctype") ? L"веб-страница вместо файла — похоже, его не пропустил прокси или фильтр сети"
+                                                                           : L"не файл адаптера";
+  head[0] = 0;
+  if (n && !gguf) { /* страница прокси бывает и не в UTF-8; конец мог разрезать букву */
+    int k = 0;
+    for (int cut = 0; cut < 4 && k <= 0 && (int)n > cut; cut++)
+      k = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, b, (int)n - cut, head, 399);
+    if (k <= 0) k = MultiByteToWideChar(1251, 0, b, (int)n, head, 399);
+    head[k > 0 ? k : 0] = 0;
+    int w = 0;
+    for (int i = 0; head[i]; i++) {
+      wchar_t c = head[i] < 32 ? L' ' : head[i];
+      if (c == L' ' && (!w || head[w - 1] == L' ')) continue;
+      head[w++] = c;
+    }
+    head[w] = 0;
+  }
+  return kind;
+}
+
+/* GET адаптера в файл. Стенд (SET_TEST): CP_LORA_STUB — файл-заглушка вместо ответа
+   raw.githubusercontent.com и github.com (как страница прокси на заводе), CP_LORA_STUB_ALL — и GitHub API */
+static DWORD ai_lora_net(HINTERNET ses, const wchar_t *host, const wchar_t *path, HANDLE f) {
+#ifdef SET_TEST
+  wchar_t stub[MAX_PATH];
+  if (GetEnvironmentVariableW(L"CP_LORA_STUB", stub, MAX_PATH) &&
+      (wcscmp(host, L"api.github.com") || GetEnvironmentVariableW(L"CP_LORA_STUB_ALL", NULL, 0))) {
+    char b[4096];
+    DWORD n = 0, w = 0;
+    HANDLE s = CreateFileW(stub, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (s == INVALID_HANDLE_VALUE) return 0;
+    ReadFile(s, b, sizeof(b), &n, NULL);
+    CloseHandle(s);
+    WriteFile(f, b, n, &w, NULL);
+    return 200;
+  }
+#endif
+  return ai_net_get(ses, host, path, 0, f, NULL, 0);
+}
+
+/* скачать адаптер: raw.githubusercontent.com; GitHub API — отдаёт файл как есть и бывает открыт там,
+   где raw подменяет прокси (на заводском ПК api.github.com отвечал, а raw — нет); github.com/raw.
+   why — причина первой неудачи; seen — начало ответа, уже записанное в журнал (одинаковое — один раз) */
+static BOOL ai_lora_get(HINTERNET ses, AiLoraPin *pin, wchar_t *why, int cap, wchar_t seen[400]) {
   const AiFile *a = pin->file;
-  static const wchar_t *kHost[2] = {L"raw.githubusercontent.com", L"github.com"};
-  wchar_t part[MAX_PATH + 8], path[400];
+  static const wchar_t *kHost[3] = {L"raw.githubusercontent.com", L"api.github.com", L"github.com"};
+  wchar_t part[MAX_PATH + 8], path[400], w[600], head[400];
   _snwprintf(part, MAX_PATH + 8, L"%s.part", pin->dest);
-  HINTERNET ses = ai_net_open();
-  for (int i = 0; ses && i < 2; i++) {
-    _snwprintf(path, 400, i ? L"/%s/raw/%s/%s" : L"/%s/%s/%s", a->repo, a->rev, a->file);
+  why[0] = 0;
+  for (int i = 0; i < 3; i++) {
+    if (i == 1) _snwprintf(path, 400, L"/repos/%s/contents/%s?ref=%s", a->repo, a->file, a->rev);
+    else _snwprintf(path, 400, i ? L"/%s/raw/%s/%s" : L"/%s/%s/%s", a->repo, a->rev, a->file);
+    head[0] = 0;
     HANDLE f = CreateFileW(part, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (f == INVALID_HANDLE_VALUE) break;
-    DWORD st = ai_net_get(ses, kHost[i], path, 0, f, NULL, 0);
+    if (f == INVALID_HANDLE_VALUE) {
+      _snwprintf(why, cap, L"не создать %s (код %lu)", part, GetLastError());
+      break;
+    }
+    DWORD st = ai_lora_net(ses, kHost[i], path, f);
     CloseHandle(f);
     ULONGLONG got = ai_file_size(part);
     InterlockedExchangeAdd64(&g_aiDl.done, -(LONGLONG)got); /* счётчик — только для «Скачать» */
     char sha[65];
-    if (st == 200 && got == a->size && ai_sha256(part, sha) && !_stricmp(sha, a->sha) &&
-        MoveFileExW(part, pin->dest, MOVEFILE_REPLACE_EXISTING)) {
-      ai_log(L"%s скачан: %s — включится при следующем запуске модели", pin->what, pin->dest);
-      WinHttpCloseHandle(ses);
-      return 0;
+    BOOL sumOk = st == 200 && got == a->size && ai_sha256(part, sha) && !_stricmp(sha, a->sha);
+    if (sumOk && MoveFileExW(part, pin->dest, MOVEFILE_REPLACE_EXISTING)) {
+      ai_log(L"%s скачан (%s): %s — включится при следующем запуске модели", pin->what, kHost[i], pin->dest);
+      return TRUE;
     }
-    char head[100] = "";
-    if (got && got < 4096) { /* вместо файла пришла страница — покажем её начало (фильтр сети?) */
-      HANDLE hf = CreateFileW(part, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
-      DWORD rd = 0;
-      if (hf != INVALID_HANDLE_VALUE) {
-        ReadFile(hf, head, sizeof(head) - 1, &rd, NULL);
-        CloseHandle(hf);
-      }
-      for (DWORD j = 0; j < rd; j++) if ((unsigned char)head[j] < 32) head[j] = ' ';
-      head[rd] = 0;
+    if (sumOk) _snwprintf(w, 600, L"не переименовать в %s (код %lu)", pin->dest, GetLastError());
+    else if (st == 200 && got == a->size) lstrcpynW(w, L"размер тот, а контрольная сумма другая", 600);
+    else if (st == 200) lstrcpynW(w, ai_lora_why(part, head), 600);
+    else if (st == 1) lstrcpynW(w, L"не записать на диск", 600);
+    else if (st) _snwprintf(w, 600, L"HTTP %lu", st);
+    else lstrcpynW(w, L"нет ответа или обрыв связи", 600);
+    w[599] = 0;
+    if (!why[0]) lstrcpynW(why, w, cap);
+    if (st == 200 && got != a->size && head[0] && wcscmp(head, seen)) {
+      lstrcpynW(seen, head, 400);
+      _snwprintf(w + wcslen(w), 600 - wcslen(w), L"; начало ответа: «%s»", head);
+      w[599] = 0;
     }
-    ai_log(L"%s: https://%s%s — ответ %lu, %llu байт, не подошёл%s%hs", pin->what, kHost[i], path, st, got,
-           head[0] ? L". Начало: " : L"", head);
+    ai_log(L"%s: https://%s%s — ответ %lu, %llu байт из %llu: %s", pin->what, kHost[i], path, st, got, a->size, w);
   }
   DeleteFileW(part);
+  return FALSE;
+}
+
+static DWORD WINAPI ai_lora_thread(LPVOID p) {
+  (void)p;
+  HINTERNET ses = ai_net_open();
+  wchar_t miss[200] = L"", why[600] = L"", w[600], seen[400] = L"";
+  for (size_t k = 0; k < sizeof(g_aiLoraPins) / sizeof(g_aiLoraPins[0]); k++) {
+    AiLoraPin *pin = &g_aiLoraPins[k];
+    if (!InterlockedExchange(&pin->want, 0)) continue;
+    BOOL ok = FALSE;
+    if (ses) ok = ai_lora_get(ses, pin, w, 600, seen);
+    else _snwprintf(w, 600, L"нет WinHTTP (код %lu)", GetLastError());
+    if (ok) continue;
+    size_t m = wcslen(miss);
+    _snwprintf(miss + m, 200 - m, L"%s%s", m ? L", " : L"", pin->what);
+    miss[199] = 0;
+    if (m) CharLowerBuffW(miss + m + 2, 1); /* «Адаптер …» в середине списка — со строчной */
+    if (!why[0]) lstrcpynW(why, w, 600);
+  }
+  if (miss[0])
+    ai_log(L"Не скачались: %s (%s). ИИ работает без них — чертежи и шаги агента идут моделью без дообучения; "
+           L"снова попробую при следующем запуске программы",
+           miss, why);
   if (ses) WinHttpCloseHandle(ses);
   return 0;
 }
 
 /* модель уровня есть, а закреплённого адаптера рядом нет — скачать в фоне, раз за запуск программы */
 static void ai_lora_kick(const wchar_t *model) {
+  BOOL any = FALSE;
   for (size_t k = 0; k < sizeof(g_aiLoraPins) / sizeof(g_aiLoraPins[0]); k++) {
     AiLoraPin *pin = &g_aiLoraPins[k];
     const AiFile *a = pin->file;
@@ -2113,7 +2208,11 @@ static void ai_lora_kick(const wchar_t *model) {
     /* закреплённого адаптера ещё нет (прежнее поколение рядом не в счёт) — скачать */
     if (ai_file_size(dest) == a->size || InterlockedExchange(&pin->tried, 1)) continue;
     lstrcpynW(pin->dest, dest, MAX_PATH);
-    HANDLE t = CreateThread(NULL, 0, ai_lora_thread, pin, 0, NULL);
+    InterlockedExchange(&pin->want, 1);
+    any = TRUE;
+  }
+  if (any) {
+    HANDLE t = CreateThread(NULL, 0, ai_lora_thread, NULL, 0, NULL);
     if (t) CloseHandle(t);
   }
 }
@@ -2509,6 +2608,65 @@ static void ai_dltest(const wchar_t *out, int tier, BOOL gpu) {
   g_aiGpu = gpu;
   g_aiDl.active = 1;
   HANDLE th = CreateThread(NULL, 0, ai_dltest_thread, NULL, 0, NULL);
+  if (th) CloseHandle(th);
+}
+
+/* --aistart отчёт данные: запуск ИИ, как на заводском ПК, в папке данные (ai\llama-vk — падающий
+   llama-server.exe, модель «Среднего» в ai\models). Ответ, журнал и ai.txt; после второго запуска
+   сервера адаптеры не качаются снова. Адаптеры — заглушкой CP_LORA_STUB (ai_lora_net) или из сети */
+static DWORD WINAPI ai_starttest_thread(LPVOID p) {
+  (void)p;
+  for (int run = 1; run <= 2; run++) {
+    wchar_t *a = NULL;
+    char u[600];
+    DWORD t0 = GetTickCount();
+    int st = ai_ask_sync(L"Отвечай одним словом.", L"Столица России?", 300000, NULL, &a);
+    WideCharToMultiByte(CP_UTF8, 0, a ? a : L"(null)", -1, u, sizeof(u), NULL, NULL);
+    ai_rep("ask%d: st=%d ms=%lu gpu=%d draw=%d gab=%d tool=%d answer=%s\n", run, st, GetTickCount() - t0, g_aiGpu,
+           g_aiDrawLoraId, g_aiDrawGabId, g_aiToolLoraId, u);
+    free(a);
+    for (DWORD w0 = GetTickCount(); run == 1 && GetTickCount() - w0 < 600000; Sleep(500)) { /* адаптеры — в фоне */
+      BOOL busy = FALSE;
+      for (size_t k = 0; k < sizeof(g_aiLoraPins) / sizeof(g_aiLoraPins[0]); k++)
+        busy |= g_aiLoraPins[k].want || (g_aiLoraPins[k].tried && ai_file_size(g_aiLoraPins[k].dest) != g_aiLoraPins[k].file->size);
+      AcquireSRWLockShared(&g_aiLogLock);
+      BOOL said = wcsstr(g_aiLog, L"Не скачались") != NULL;
+      ReleaseSRWLockShared(&g_aiLogLock);
+      if (!busy || said) break;
+    }
+    ai_server_stop(); /* второй запуск сервера — как следующий запрос после перезапуска */
+  }
+  wchar_t p2[MAX_PATH];
+  _snwprintf(p2, MAX_PATH, L"%s\\ai.txt", g_dataDir);
+  char t[600] = "";
+  HANDLE h = CreateFileW(p2, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+  if (h != INVALID_HANDLE_VALUE) {
+    DWORD n = 0;
+    ReadFile(h, t, sizeof(t) - 1, &n, NULL);
+    t[n] = 0;
+    CloseHandle(h);
+  }
+  static char lg[40000];
+  AcquireSRWLockShared(&g_aiLogLock);
+  WideCharToMultiByte(CP_UTF8, 0, g_aiLog, -1, lg, sizeof(lg), NULL, NULL);
+  ReleaseSRWLockShared(&g_aiLogLock);
+  ai_rep("ai.txt:\n%s\nlog:\n%s\nDONE\n", t, lg);
+  ai_shutdown();
+  ExitProcess(0);
+  return 0;
+}
+
+static void ai_starttest(const wchar_t *out, const wchar_t *data) {
+  lstrcpynW(g_aiTestOut, out, MAX_PATH);
+  lstrcpynW(g_dataDir, data, MAX_PATH); /* ai.txt, сборки и модель — только в папке стенда */
+  g_aiOn = TRUE;
+  g_aiProvider = 0;
+  g_aiTier = AI_DRAW_LORA_TIER;
+  g_aiCtx = 4096;
+  g_aiGpu = TRUE;
+  g_aiModel[0] = g_aiSrvExe[0] = g_aiExtHost[0] = 0;
+  g_aiExtPort = 0;
+  HANDLE th = CreateThread(NULL, 0, ai_starttest_thread, NULL, 0, NULL);
   if (th) CloseHandle(th);
 }
 
