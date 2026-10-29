@@ -242,7 +242,9 @@ def build_sections(r, ds, want, tr):
     secs = []
     if r.random() < 0.95:
         d = [item(fmt=r.choices(['А1', 'А2', 'А3', 'А4'], [20, 30, 35, 15])[0], name='Сборочный чертёж',
-                  des=ds.A if ds.style == 'sb' and r.random() < 0.7 else f'{ds.A} СБ')]
+                  # код «СБ» — в конце, после номера; у заводской манеры «321-23-сб32» «сб» — часть номера
+                  # самой спецификации, её сборочный чертёж — «321-23-сб32СБ» (пользователь, 29.10)
+                  des=f'{ds.A}СБ' if ds.style == 'sb' or r.random() < 0.5 else f'{ds.A} СБ')]
         if r.random() < 0.12:
             d.append(item(fmt=r.choice(['А3', 'А4']), des=f'{ds.A} Э3', name='Схема электрическая принципиальная'))
         if r.random() < 0.10:
