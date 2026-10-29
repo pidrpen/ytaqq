@@ -287,6 +287,38 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
     st_check(t && wcsstr(t, L"ТП\tАБВГ.711141.001\t010\t4110\t31\t16К20, Токарно-винторезный станок\t15\t4\r\n"),
              L"строка ТП токарной: код 4110, участок 31, станок и нормы аналога");
     st_check(t && wcsstr(t, L"\t045\t7300\t\t\t\t\r\n"), L"окрасочная без аналога: код есть, участок и нормы пустые");
+    /* таблица приоритетов технолога (soyuz_prio.c) важнее аналога: 4110 → участок 32, станок 1К62 */
+    {
+      wchar_t pp[MAX_PATH];
+      szp_path(pp);
+      HANDLE hp = CreateFileW(pp, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+      if (hp != INVALID_HANDLE_VALUE) {
+        DWORD wr;
+        WriteFile(hp, "\xEF\xBB\xBF", 3, &wr, NULL);
+        const char *body = "# проверка\r\n4110\t32\t1\xD0\x9A""62\r\n\xD0\xA1\xD0\xB2\xD0\xB5\xD1\x80\xD0\xBB\xD0\xB8\xD0\xBB\xD1\x8C\xD0\xBD\xD0\xB0\xD1\x8F\t31\t2\xD0\x9D""135\r\n";
+        WriteFile(hp, body, (DWORD)strlen(body), &wr, NULL);
+        CloseHandle(hp);
+      }
+      g_szpLoaded = FALSE;
+      const SzPrio *pr = szp_find(L"4110 Токарная");
+      st_check(pr && pr->n == 1 && !wcscmp(pr->area[0], L"32") && !wcscmp(pr->equip[0], L"1К62") &&
+                   szp_find(L"Сверлильная (отв.)") && szp_find(L"4210") && !szp_find(L"7300"),
+               L"таблица приоритетов: 4110 → 32/1К62, «Сверлильная» и 4210 — одна строка, 7300 нет");
+      int n2 = szm_write_spec(spec, L"Тестовая сборка ЭСИ", L"", g_szR.des, TRUE, note, 200);
+      wchar_t *t2 = NULL;
+      HANDLE h2 = CreateFileW(spec, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+      if (h2 != INVALID_HANDLE_VALUE) {
+        char buf2[16000];
+        DWORD rd2 = 0;
+        ReadFile(h2, buf2, sizeof(buf2) - 1, &rd2, NULL);
+        CloseHandle(h2);
+        t2 = rd2 > 3 ? utf8_to_alloc(buf2 + 3, rd2 - 3) : NULL;
+      }
+      st_check(n2 == 10 && t2 && wcsstr(t2, L"ТП\tАБВГ.711141.001\t010\t4110\t32\t1К62\t15\t4\r\n") &&
+                   wcsstr(t2, L"\t030\t4210\t31\t2Н135\t10\t4\r\n"),
+               L"«Создать ТП»: приоритет перекрыл участок и станок аналога у 4110 и 4210, нормы аналога остались");
+      free(t2);
+    }
     /* окно «Пакет для загрузки в PLM» → «В Союз…»: три листа — в строки описания (package_ui.c) */
     {
       xp_package_free(g_pk);
@@ -315,7 +347,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
       wchar_t *pt = NULL, pnote[200];
       PkSent sent;
       int pn = pk_soyuz_text(&pt, pnote, 200, &sent);
-      st_check(pn == 1 && pt && wcsstr(pt, L"ИЗДЕЛИЕ\tТСТ.120.000\tУзел пробный\tСборочные единицы\t\t\r\n") &&
+      st_check(pn == 1 && pt && wcsstr(pt, L"ИЗДЕЛИЕ\tТСТ.120.000\tУзел пробный\tСборочные единицы\t\t\t") &&
                    wcsstr(pt, L"СОСТАВ\tТСТ.120.000\tТСТ.110.004\t2\t\r\n") &&
                    wcsstr(pt, L"ТП\tТСТ.110.004\t5\t4110\t31\t16К20, Токарно-винторезный станок\t15\t4\r\n") &&
                    wcsstr(pnote, L"без кода справочника: 1"),
@@ -342,6 +374,24 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
       pk_del_row(&g_pk[PK_BLANKS], 0);
       pk_put(&g_pk[PK_ITEMS], 0, 5, NULL);
       /* окно пакета с этими же строками и «В Союз…» → окно папки: справочники и папки — из базы */
+      /* пустая операция: участок и станок — из таблицы приоритетов, Тпз — по таблицам ОМН (pk_norms.c) */
+      {
+        wchar_t **w3 = xp_row(&g_pk[PK_OPS]);
+        (void)w3;
+        pk_put(&g_pk[PK_OPS], 2, 0, L"ТСТ.110.004");
+        pk_put(&g_pk[PK_OPS], 2, 1, L"015");
+        pk_put(&g_pk[PK_OPS], 2, 2, L"4210 Сверлильная");
+        int pf = pk_equip_fill();
+        st_check(pf >= 1 && !wcscmp(xp_cell(&g_pk[PK_OPS], 2, 3), L"31") && !wcscmp(xp_cell(&g_pk[PK_OPS], 2, 4), L"2Н135"),
+                 L"пустой сверлильной участок 31 и станок 2Н135 — из таблицы приоритетов");
+        int nf = pk_norms_fill(TRUE);
+        st_check(nf >= 1 && xp_cell(&g_pk[PK_OPS], 2, 5)[0], L"у сверлильной без норм появился Тпз по таблицам ОМН");
+        st_note(L"     нормы сверлильной: Тпз «%ls», Тшт «%ls»", xp_cell(&g_pk[PK_OPS], 2, 5), xp_cell(&g_pk[PK_OPS], 2, 6));
+        wchar_t pp2[MAX_PATH];
+        szp_path(pp2);
+        DeleteFileW(pp2);
+        g_szpLoaded = FALSE;
+      }
       package_show(FALSE);
       szm_dicts_start(g_pkWnd);
       for (int t = 0; t < 100 && !g_szmDicts.na && !g_szmDicts.err[0]; t++) st_pump(100);
@@ -358,7 +408,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
       st_check(g_pkEditCtl == g_pkCombo && SendMessageW(g_pkCombo, CB_GETCOUNT, 0, 0) == 1, L"правка «Участка» — список из базы");
       st_shot_wnd(L"9-package.png", g_pkWnd);
       pk_edit_end(FALSE);
-      st_check(ListView_GetItemCount(g_pkList) == 2, L"в таблице листа «Операции» две строки");
+      st_check(ListView_GetItemCount(g_pkList) == 3, L"в таблице листа «Операции» три строки");
       pk_to_soyuz();
       for (int t = 0; t < 100 && SendMessageW(g_szmCombo, CB_GETCOUNT, 0, 0) == 0; t++) st_pump(100);
       int nf = (int)SendMessageW(g_szmCombo, CB_GETCOUNT, 0, 0);

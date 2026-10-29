@@ -41,6 +41,8 @@
 #define ID_PK_QALL 322  /* «Все детали» / «Эта деталь»: на листе «Операции» — весь лист или ТП одной детали */
 #define ID_PK_QUP 323   /* ▲ ▼ — выделенную операцию выше или ниже в ТП её детали */
 #define ID_PK_QDOWN 324
+#define ID_PK_MORE 325 /* «Ещё ▾» — редкое: строки, выгрузка, пакет .xlsx, приоритеты, очистка */
+#define ID_PK_PRIO 326 /* «Приоритеты операций…» — таблица технолога (soyuz_prio.c) */
 #define WM_PK_ESI (WM_APP + 99) /* lParam — RtJob*, освобождает окно */
 /* чертежи, брошенные мышью (pk_stamp.c): штамп читает рабочий поток */
 #define WM_PK_STAMP (WM_APP + 96)   /* lParam — PkStRes*, освобождает окно */
@@ -74,6 +76,7 @@ static SzmDicts g_szmDicts;
 static BOOL g_szmDictsAsked;
 static void szm_open_text(const wchar_t *text, const wchar_t *label); /* soyuz_make.c */
 static void szm_dicts_start(HWND notify);                               /* soyuz_make.c */
+static int pk_norms_fill(BOOL quiet); /* pk_norms.c: пустые Тпз/Тшт — по таблицам ОМН */
 /* «Вставить»: разбор (pk_paste.c) и раскладка по листам — pk_paste_ui.c, после маршрута (techno.c) */
 static int pk_paste_text(const wchar_t *text, int sheet, const wchar_t *assembly, const wchar_t *part, int *show,
                          wchar_t *msg, int cap);
@@ -508,17 +511,50 @@ static int pk_equip_for(const wchar_t *op, const wchar_t *area, wchar_t *out, in
 
 /* пустое оборудование операций — подобранным; нет и участка (операции по чертежу, маршрут из чата) —
    участок того же станка: где эта операция чаще всего стоит в ТП завода. Сколько подставлено */
+/* участок и станок пустой операции — из таблицы приоритетов технолога (soyuz_prio.c), она важнее
+   подбора по базе; код участка из таблицы — как в «Союзе», если справочник уже прочитан.
+   1 — что-то подставлено */
+static int pk_prio_row(XpTable *t, int r) {
+  const SzPrio *p = szp_find(xp_cell(t, r, 2));
+  int k = szp_pick(p, xp_cell(t, r, 3));
+  if (k < 0) return 0;
+  int set = 0;
+  if (!xp_cell(t, r, 3)[0] && p->area[k][0]) {
+    const wchar_t *a = p->area[k];
+    wchar_t c[16];
+    szp_area_code(a, c, 16);
+    for (int i = 0; c[0] && g_szmDicts.areaCode && i < g_szmDicts.na; i++)
+      if (!_wcsicmp(g_szmDicts.areaCode[i], c)) {
+        a = g_szmDicts.area[i];
+        break;
+      }
+    pk_put(t, r, 3, a);
+    set = 1;
+  }
+  if (!xp_cell(t, r, 4)[0] && p->equip[k][0]) {
+    pk_put(t, r, 4, p->equip[k]);
+    set = 1;
+  }
+  return set;
+}
+
 static int pk_equip_fill(void) {
   XpTable *t = &g_pk[PK_OPS];
   int n = 0;
-  for (int r = 0; r < t->n && g_szmDicts.nf; r++) {
-    if (xp_cell(t, r, 4)[0] || pk_row_from_soyuz(PK_OPS, r)) continue;
-    wchar_t eq[200];
-    long aid;
-    if (!pk_equip_for(xp_cell(t, r, 2), xp_cell(t, r, 3), eq, 200, &aid)) continue;
-    pk_put(t, r, 4, eq);
-    for (int i = 0; !xp_cell(t, r, 3)[0] && g_szmDicts.areaId && i < g_szmDicts.na; i++)
-      if (g_szmDicts.areaId[i] == aid) pk_put(t, r, 3, g_szmDicts.area[i]);
+  for (int r = 0; r < t->n; r++) {
+    if (pk_row_from_soyuz(PK_OPS, r)) continue;
+    int did = pk_prio_row(t, r); /* сначала таблица технолога */
+    if (!xp_cell(t, r, 4)[0] && g_szmDicts.nf) {
+      wchar_t eq[200];
+      long aid;
+      if (pk_equip_for(xp_cell(t, r, 2), xp_cell(t, r, 3), eq, 200, &aid)) {
+        pk_put(t, r, 4, eq);
+        for (int i = 0; !xp_cell(t, r, 3)[0] && g_szmDicts.areaId && i < g_szmDicts.na; i++)
+          if (g_szmDicts.areaId[i] == aid) pk_put(t, r, 3, g_szmDicts.area[i]);
+        did = 1;
+      }
+    }
+    if (!did) continue;
     if (g_pkSheet == PK_OPS && g_pkList) pk_set_item(r);
     n++;
   }
@@ -528,8 +564,19 @@ static int pk_equip_fill(void) {
 static void pk_changed(void) {
   pk_buy_fill(FALSE);
   pk_equip_fill();
+  pk_norms_fill(TRUE); /* новые операции — сразу с Тпз/Тшт по таблицам ОМН */
   pk_tabs();
   pk_draft_save();
+}
+
+/* таблицу приоритетов сохранили (soyuz_prio.c): пересмотреть пустые участки и станки */
+static void pk_prio_changed(void) {
+  if (!g_pkWnd) return;
+  int n = pk_equip_fill();
+  pk_tabs();
+  pk_draft_save();
+  if (g_pkSheet == PK_OPS) pk_fill(FALSE);
+  pk_status(L"Приоритеты операций применены: участок или станок подставлен у %d операций", n);
 }
 
 /* ---- правка ячейки поверх таблицы ---- */
@@ -1534,6 +1581,8 @@ static BOOL pk_check(BOOL quiet) {
     pk_fill(FALSE);
     pk_changed();
   }
+  int nmf = pk_norms_fill(TRUE);
+  if (nmf) sb_add(&b, L"• Нормы Тпз/Тшт по таблицам ОМН посчитаны у %d операций (Тшт — только где есть машинное время)\n", nmf);
   if (b.w && b.w[0] && !quiet) {
     wchar_t *msg = b.w;
     if (wcslen(msg) > 3000) msg[3000] = 0, wcscat(msg, L"\n…");
@@ -1743,9 +1792,7 @@ static void pk_layout(void) {
   place_panel_close(g_pkWnd);
   for (int k = 0; k < PK_NT; k++) MoveWindow(GetDlgItem(g_pkWnd, ID_PK_TAB + k), pad + k * PKS(132), y, PKS(126), h, TRUE);
   /* справа: обозначение и «Из Союза» — изделие с составом из базы, «Из выгрузки…» — образец */
-  int x = rc.right - pad - PKS(120);
-  MoveWindow(GetDlgItem(g_pkWnd, ID_PK_FROMXP), x, y, PKS(120), h, TRUE);
-  x -= PKS(8 + 100);
+  int x = rc.right - pad - PKS(100);
   MoveWindow(GetDlgItem(g_pkWnd, ID_PK_ESI), x, y, PKS(100), h, TRUE);
   x -= PKS(6 + 170);
   MoveWindow(g_pkEsiEdit, x, y + PKS(3), PKS(170), h - PKS(6), TRUE);
@@ -1772,14 +1819,17 @@ static void pk_layout(void) {
   }
   MoveWindow(g_pkList, pad, ly, rc.right - pad * 2, foot - PKS(26) - ly, TRUE);
   /* подвал (с 2026.10.21): правка строк — слева, главное «Сохранить» — справа */
-  static const int ids[] = {ID_PK_ADD, ID_PK_ASM, ID_PK_DEL, ID_PK_PASTE, ID_PK_CHECK, ID_PK_DRAW, ID_PK_CLEAR, ID_PK_HELP, ID_PK_SOYUZ};
-  static const int w[] = {84, 88, 80, 88, 90, 90, 84, 96, 90};
+  /* один путь (с 2026.10.29): чертежи → «Проверить» → «В Союз…»; редкое — в меню «Ещё ▾» */
+  static const int ids[] = {ID_PK_DRAW, ID_PK_PASTE, ID_PK_CHECK, ID_PK_MORE};
+  static const int w[] = {104, 100, 104, 90};
   x = PKS(16);
-  for (int i = 0; i < 9; i++) {
+  for (int i = 0; i < 4; i++) {
     MoveWindow(GetDlgItem(g_pkWnd, ids[i]), x, by, PKS(w[i]), PKS(30), TRUE);
     x += PKS(w[i] + 8);
   }
-  MoveWindow(GetDlgItem(g_pkWnd, ID_PK_SAVE), rc.right - PKS(16) - PKS(170), by, PKS(170), PKS(30), TRUE);
+  static const int hidden[] = {ID_PK_ADD, ID_PK_ASM, ID_PK_DEL, ID_PK_CLEAR, ID_PK_HELP, ID_PK_FROMXP, ID_PK_SAVE};
+  for (int i = 0; i < 7; i++) ShowWindow(GetDlgItem(g_pkWnd, hidden[i]), SW_HIDE);
+  MoveWindow(GetDlgItem(g_pkWnd, ID_PK_SOYUZ), rc.right - PKS(16) - PKS(170), by, PKS(170), PKS(30), TRUE);
   InvalidateRect(g_pkWnd, NULL, FALSE); /* карточка и подвал — по новому размеру */
 }
 
@@ -1797,8 +1847,8 @@ static void pk_paint(HWND hwnd, HDC hdc) {
   RECT st = {pad, PANEL_TITLE_H + PKS(56), rc.right - pad, PANEL_TITLE_H + PKS(82)};
   DrawTextW(hdc,
             g_pkStatus[0] ? g_pkStatus
-                          : L"Перетащите чертежи — штамп прочитает ИИ; на строку сборки — в её состав. Ctrl+V — таблица, "
-                            L"маршрут. «Из Союза» — ЭСИ с составом. «Что нужно?» — какие данные.",
+                          : L"Чертежи — мышью в окно или «Чертежи…» (штамп и операции прочитает ИИ), затем «Проверить» и "
+                            L"«В Союз…». Строки, пакет .xlsx, приоритеты операций — в «Ещё ▾».",
             -1, &st, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 }
 
@@ -2023,6 +2073,28 @@ static LRESULT CALLBACK PkProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
     if (id == ID_PK_CLEAR) pk_clear();
     if (id == ID_PK_SOYUZ) pk_to_soyuz();
     if (id == ID_PK_HELP) pk_help();
+    if (id == ID_PK_PRIO) szp_edit(hwnd);
+    if (id == ID_PK_MORE) { /* редкое — меню у кнопки; выбранное уходит тем же WM_COMMAND */
+      HMENU m = CreatePopupMenu();
+      AppendMenuW(m, MF_STRING, ID_PK_ADD, L"+ Строка\tInsert");
+      AppendMenuW(m, MF_STRING, ID_PK_ASM, L"+ Сборка");
+      AppendMenuW(m, MF_STRING, ID_PK_DEL, L"Удалить выделенные\tDelete");
+      AppendMenuW(m, MF_SEPARATOR, 0, NULL);
+      AppendMenuW(m, MF_STRING, ID_PK_FROMXP, L"Из выгрузки из PLM…");
+      AppendMenuW(m, MF_STRING, ID_PK_SAVE, L"Сохранить пакет .xlsx для «Загрузить ЭСИ из CursorPad»…");
+      AppendMenuW(m, MF_SEPARATOR, 0, NULL);
+      AppendMenuW(m, MF_STRING, ID_PK_PRIO, L"Приоритеты операций: участок и станок…");
+      AppendMenuW(m, MF_STRING, ID_PK_HELP, L"Что нужно «Союзу»?");
+      AppendMenuW(m, MF_SEPARATOR, 0, NULL);
+      AppendMenuW(m, MF_STRING, ID_PK_CLEAR, L"Очистить все листы…");
+      RECT br;
+      GetWindowRect(GetDlgItem(hwnd, ID_PK_MORE), &br);
+      int cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_LEFTALIGN | TPM_BOTTOMALIGN | TPM_NONOTIFY, br.left, br.top, 0,
+                               hwnd, NULL);
+      DestroyMenu(m);
+      if (cmd) PostMessageW(hwnd, WM_COMMAND, (WPARAM)cmd, 0);
+      return 0;
+    }
     if (id == ID_PK_ESI) pk_esi_start();
     if (id == ID_PK_DRAW) pk_draw_menu();
     return 0;
@@ -2086,6 +2158,7 @@ static void package_show(BOOL fill) {
     mk_btn(g_pkWnd, L"Очистить", ID_PK_CLEAR);
     mk_btn(g_pkWnd, L"Что нужно?", ID_PK_HELP);
     mk_btn(g_pkWnd, L"В Союз…", ID_PK_SOYUZ);
+    mk_btn(g_pkWnd, L"Ещё ▾", ID_PK_MORE);
     g_pkQPart = pk_q_combo(ID_PK_QPART, L"деталь (обозначение)");
     g_pkQOp = pk_q_combo(ID_PK_QOP, L"операция: печатайте «ток», «4110»… Enter");
     g_pkQArea = pk_q_combo(ID_PK_QAREA, L"участок");

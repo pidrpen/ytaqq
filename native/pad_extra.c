@@ -4394,6 +4394,7 @@ done:
 #include "route.c" /* маршрутная ведомость: тем же путём по PLM, что карточка */
 #include "export.c" /* выгрузка из PLM: каркас на обходе ведомости */
 #include "share.c"
+#include "soyuz_prio.c" /* приоритет «операция → участок, станок» технолога: таблица и её окно */
 #include "route_ui.c"
 #include "export_ui.c"
 #include "package_ui.c" /* пакет для загрузки ЭСИ, состава и ТП в PLM */

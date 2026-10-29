@@ -2860,7 +2860,7 @@ static void draw_pad_button(const DRAWITEMSTRUCT *dis) {
                  id == 4722 || id == 4725 || /* «Сохранить…» в «Что помнит ИИ» (ai_memory.c) */
                  id == 4842 ||               /* «Дальше» в окне «В Союз» (soyuz_ui.c) */
                  id == 4882 ||               /* «Применить» в окне «Режимы» (norms_ui.c) */
-                 id == ID_XP_SAVE || id == ID_PK_SAVE; /* главное действие в подвале окон PLM */
+                 id == ID_XP_SAVE || id == ID_PK_SOYUZ; /* главное действие в подвале окон PLM */
   BOOL quiet = id == ID_CLOSE || id == ID_MIN || id == ID_PANEL_CLOSE || id == ID_PANEL_MIN;
   COLORREF fill, fg, bd;
   /* рыцарская тема рисует кнопки целиком по-своему; кнопка выбора
@@ -4827,6 +4827,7 @@ static void create_settings(HWND owner) {
 #include "techno.c"     /* маршрут обработки по чертежу: правила технолога */
 #include "tables_seed.c"  /* встроенные таблицы (ОМН, стандарты) — в папку пользователя, с обновлением */
 #include "norms.c"      /* нормы времени операций маршрута по таблицам ОМН (после резки и маршрута) */
+#include "pk_norms.c"  /* нормы Тпз/Тшт операций окна «ЭСИ и ТП» тем же norms.c */
 #include "norms_set.c"  /* Настройки → «Нормирование»: пределы режимов резания */
 #include "cut_ask.c"    /* расход на резку по вопросу словами: чат и инструмент агента cut_calc */
 #include "std.c"        /* справочник ГОСТ/DIN/ISO: разбор таблиц и поиск */

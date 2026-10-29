@@ -246,6 +246,14 @@ static int szm_write_spec(const wchar_t *path, const wchar_t *folder, const wcha
     }
     wchar_t area[16], tpz[32] = L"", tsht[32] = L"";
     szm_area_code(it->ceh, area, 16);
+    wchar_t eqSrc[200];
+    lstrcpynW(eqSrc, it->equip, 200);
+    const SzPrio *pr = szp_find(it->code); /* таблица технолога (soyuz_prio.c) важнее аналога из ТП завода */
+    int pk = szp_pick(pr, NULL);
+    if (pk >= 0) {
+      if (pr->area[pk][0]) szp_area_code(pr->area[pk], area, 16);
+      if (pr->equip[pk][0]) lstrcpynW(eqSrc, pr->equip[pk], 200);
+    }
     double pz = it->tpz >= 0 ? it->tpz : it->aTpz, sh = it->tsht >= 0 ? it->tsht : it->aTsht;
     if (pz > 0) tn_numstr(pz, tpz, 32);
     if (sh > 0) tn_numstr(sh, tsht, 32);
@@ -254,7 +262,7 @@ static int szm_write_spec(const wchar_t *path, const wchar_t *folder, const wcha
     for (wchar_t *c = tsht; *c; c++)
       if (*c == L',') *c = L'.';
     wchar_t eq[200] = L"";
-    szm_tsv(eq, 200, it->equip);
+    szm_tsv(eq, 200, eqSrc);
     l = wcslen(txt);
     if (l + 400 < 16000)
       _snwprintf(txt + l, 16000 - l, L"ТП\t%s\t%s\t%s\t%s\t%s\t%s\t%s\r\n", des, it->num, it->code, area, eq, tpz, tsht);
