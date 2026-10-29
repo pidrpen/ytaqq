@@ -1663,7 +1663,8 @@ static BOOL dr_img_part(const DrImg *m, int x0, int y0, int x1, int y1, int zoom
   return TRUE;
 }
 
-/* картинку — во временный BMP и спросить модель; ответ — free(). tag — имя вопроса для выгрузки */
+/* картинку — во временный BMP и спросить модель; ответ — free(). tag — имя вопроса для выгрузки;
+   «gab» — вопрос адаптеру габаритов (ai_ask_image_gab_sync), остальные — адаптеру чертежей */
 static wchar_t *dr_vl_ask(const DrImg *im, const wchar_t *tag, const wchar_t *question, const char *schema,
                           int maxTokens) {
   wchar_t tmp[MAX_PATH], p[MAX_PATH];
@@ -1691,7 +1692,9 @@ static wchar_t *dr_vl_ask(const DrImg *im, const wchar_t *tag, const wchar_t *qu
   _snwprintf(p, MAX_PATH, L"%scursorpad-vl-%lu-%ld.bmp", tmp, GetCurrentThreadId(), InterlockedIncrement(&seq));
   p[MAX_PATH - 1] = 0;
   wchar_t *ans = NULL;
-  if (dr_save_bmp(im, p) && ai_ask_image_sync_ex(question, p, schema, maxTokens, 240000, NULL, &ans) != AI_OK) {
+  BOOL gab = !wcscmp(tag, L"gab");
+  if (dr_save_bmp(im, p) && (gab ? ai_ask_image_gab_sync(question, p, schema, maxTokens, 240000, NULL, &ans)
+                                 : ai_ask_image_sync_ex(question, p, schema, maxTokens, 240000, NULL, &ans)) != AI_OK) {
     free(ans);
     ans = NULL;
   }
@@ -1921,6 +1924,14 @@ static void dr_vl_read(const DrImg *m, const DrStamp *s, DrPage *pg, BOOL sheet)
         if (gen >= 3) dr_json_gabarit(a, pg->vlText, 4096);
         if (el) dr_json_elements(a, pg->vlText, 4096);
       }
+      free(a);
+    }
+    /* габариты отдельно: адаптер второго поколения читает лист, адаптер габаритов (v2.5) отвечает
+       на вопрос третьего поколения, и из его ответа берутся только габариты. Замер 29.10 на 22
+       отложенных листах: всё как у v2, габариты верно 38 из 50 (у v2 их не было) */
+    if (gen == 2 && pg->vlText && ai_draw_gab()) {
+      a = dr_vl_ask(&im, L"gab", kDrVlSheetQEl3, kDrVlSheetSchemaEl3, 1400);
+      if (a) dr_json_gabarit(a, pg->vlText, 4096);
       free(a);
     }
     dr_img_free(&im);

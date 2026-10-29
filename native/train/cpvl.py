@@ -264,9 +264,13 @@ class Server:
     def __init__(self, model, mmproj, args=(), lora=None, exe=None, port=8391, ctx=8192, log=None):
         self.cmd = [str(exe or default_server()), '-m', str(model), '--mmproj', str(mmproj), '--host', '127.0.0.1',
                     '--port', str(port), '-c', str(ctx), '-np', '1', '-ngl', '99', *args]
-        if lora:
-            self.cmd += ['--lora', str(lora), '--lora-init-without-apply']
-        self.lora = bool(lora)
+        # lora — путь или список путей; номер адаптера — порядок, как у CursorPad (ai_local.c)
+        loras = [x for x in (lora if isinstance(lora, (list, tuple)) else [lora]) if x]
+        for x in loras:
+            self.cmd += ['--lora', str(x)]
+        if loras:
+            self.cmd += ['--lora-init-without-apply']
+        self.lora = len(loras)
         self.url = f'http://127.0.0.1:{port}'
         self.log = log
         self.p = None
@@ -283,7 +287,8 @@ class Server:
                 with urllib.request.urlopen(self.url + '/health', timeout=5) as r:
                     if r.status == 200:
                         if self.lora:  # как CursorPad: общий вес 0, запросы с чертежом просят 1
-                            req = urllib.request.Request(self.url + '/lora-adapters', b'[{"id":0,"scale":0.0}]',
+                            zero = json.dumps([{'id': i, 'scale': 0.0} for i in range(self.lora)]).encode()
+                            req = urllib.request.Request(self.url + '/lora-adapters', zero,
                                                          {'Content-Type': 'application/json'})
                             urllib.request.urlopen(req, timeout=30).read()
                         return self
@@ -300,8 +305,9 @@ class Server:
             except subprocess.TimeoutExpired:
                 self.p.kill()
 
-    def ask(self, image, question, schema=None, max_tokens=200, timeout=600):
-        """ai_ask_image_sync_ex: картинка и вопрос в одной реплике, температура 0"""
+    def ask(self, image, question, schema=None, max_tokens=200, timeout=600, lora_id=0):
+        """ai_ask_image_sync_ex: картинка и вопрос в одной реплике, температура 0; lora_id — какой
+        адаптер с весом 1 (остальные — 0)"""
         data = pathlib.Path(image).read_bytes()
         ext = pathlib.Path(image).suffix.lower()
         mime = 'image/bmp' if ext == '.bmp' else 'image/jpeg' if ext in ('.jpg', '.jpeg') else 'image/png'
@@ -314,7 +320,7 @@ class Server:
             body['response_format'] = {'type': 'json_schema', 'json_schema': {'name': 'r', 'strict': True,
                                                                               'schema': schema}}
         if self.lora:
-            body['lora'] = [{'id': 0, 'scale': 1.0}]
+            body['lora'] = [{'id': lora_id, 'scale': 1.0}]
         req = urllib.request.Request(self.url + '/v1/chat/completions', json.dumps(body).encode('utf-8'),
                                      {'Content-Type': 'application/json'})
         with urllib.request.urlopen(req, timeout=timeout) as r:
