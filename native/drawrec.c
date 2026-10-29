@@ -1040,6 +1040,12 @@ static void dr_norm_des(const wchar_t *in, wchar_t *out, int cap) {
   ocr_fix_query(t, out, cap);
   for (int i = 0; out[i]; i++)
     if (out[i] >= 0xE000 && out[i] <= 0xE003) out[i] = L"сСбБ"[out[i] - 0xE000];
+  /* «б» в «СБ» распознавание (и Tesseract, и модель) часто отдаёт цифрой: «321-23-с632» */
+  if (wcsstr(out, L"с6") || wcsstr(out, L"С6")) {
+    wchar_t was[DR_CELL];
+    lstrcpynW(was, out, DR_CELL);
+    if (dr_des_fix_sb(out)) ai_log(L"Обозначение: «%s» → «%s» — «б» в «СБ» было прочитано как «6»", was, out);
+  }
   /* код документа «ЗК» после точки: «.3 К», «.3К» → «.ЗК» */
   for (int i = 1; out[i]; i++)
     if (out[i - 1] == L'.' && (out[i] == L'3' || out[i] == L'З')) {
