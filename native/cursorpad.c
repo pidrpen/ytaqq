@@ -3661,7 +3661,7 @@ typedef struct {
   int kind;
   const wchar_t *text;
 } SetDeco;
-#define SET_DECO_N 96
+#define SET_DECO_N 256 /* «Нормирование» со списком операций — около 140 */
 static SetDeco g_setDeco[SET_DECO_N];
 static int g_setDecoN;
 static int g_sy;              /* куда класть дальше по высоте */
