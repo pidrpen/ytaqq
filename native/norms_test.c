@@ -517,6 +517,78 @@ static void test_cut(NmBase *b) {
   if (g_verbose) out8(txt), printf("\n\n");
 }
 
+/* Тпз есть только у токарных, у остальных пусто; контроль — без норм вовсе */
+static int tpz_only_turn(const NmResult *res) {
+  int good = 1;
+  for (int i = 0; i < res->n; i++) {
+    const NmOp *o = &res->op[i];
+    good &= nm_pre(o->op, L"Токарная") ? !nm_na(o->tpz) && o->tpz > 0 : nm_na(o->tpz) && nm_na(o->tshk);
+    good &= wcscmp(o->op, L"Контроль") != 0;
+  }
+  return good && wcsstr(res->off, L"Контроль") != NULL;
+}
+
+static const NmOp *op_at(const NmResult *res, int idx) {
+  for (int i = 0; i < res->n; i++)
+    if (res->op[i].idx == idx) return &res->op[i];
+  return NULL;
+}
+
+/* класс операции (правило технолога 30.10): Тпз — только у мехобработки, заготовительные и
+   вспомогательные — только Тшт, контроль — без норм; класс меняется в Настройках */
+static void test_classes(NmBase *b) {
+  static TnRoute r;
+  static NmResult res;
+  /* как окно «ЭСИ и ТП»: только названия операций и масса */
+  static const wchar_t *const ops[] = {L"Отрезная", L"Токарная", L"Термическая обработка", L"Слесарная",
+                                       L"Токарная", L"Слесарная", L"Маркирование", L"Контроль"};
+  memset(&r, 0, sizeof(r));
+  for (int i = 0; i < 8; i++) tn_cpy(r.op[r.n++].op, 128, ops[i]);
+  nm_route(b, &r, L"2,4", NULL, &res);
+  ok("вал по названиям: Тпз только у токарных, контроль без норм", res.n == 7 && tpz_only_turn(&res));
+  const NmOp *cut = op_at(&res, 0), *heat = op_at(&res, 2), *fit = op_at(&res, 3);
+  ok("Тшт у заготовительной и вспомогательных есть", cut && heat && fit && !nm_na(cut->tsht) && heat->tsht == 3 &&
+                                                         !nm_na(fit->tsht));
+  if (fit) near("слесарная: оценка 1,5 + 0,3·2,4, без Тпз", fit->tsht, 1.5 + 0.3 * 2.4);
+  /* тот же вал маршрутом по листу: отрезная, токарная, термическая, слесарная, токарная, …, контроль */
+  TnRoute *tr = (TnRoute *)calloc(1, sizeof(TnRoute));
+  tn_route(L"Вал", L"Сталь 45 ГОСТ 1050-2013", L"Ø40h7\nØ50\n1x45°\nRa 3,2\n1. 28...32 HRC\n", tr);
+  nm_route(b, tr, L"2,4", L"L 120", &res);
+  ok("вал по листу: Тпз только у токарных", tpz_only_turn(&res));
+  if (g_verbose) {
+    static wchar_t txt[24000];
+    txt[0] = 0;
+    nm_text_brief(b, &res, L"", txt, 24000);
+    out8(txt);
+    printf("\n\n");
+  }
+  free(tr);
+  /* класс меняется в Настройках */
+  nm_op_rule(L"Слесарная")->cls = NMC_FULL;
+  nm_op_rule(L"Токарная")->cls = NMC_TSHT;
+  nm_op_rule(L"Контроль")->cls = NMC_TSHT;
+  nm_route(b, &r, L"2,4", NULL, &res);
+  fit = op_at(&res, 3);
+  const NmOp *turn = op_at(&res, 1), *ctl = op_at(&res, 7);
+  ok("слесарная «Тпз и Тшт» — Тпз из оценки", fit && fit->tpz == 3);
+  ok("токарная «только Тшт» — без Тпз и без строки Тпз", turn && nm_na(turn->tpz) && !wcsstr(turn->how, L"Тпз"));
+  ok("контроль «только Тшт» — оценка", ctl && nm_na(ctl->tpz) && !res.off[0]);
+  if (ctl) near("контроль: 1 + 0,1·2,4", ctl->tsht, 1.24);
+  for (int k = 0; k < NM_OPRULES; k++) g_nmOps[k].cls = g_nmOps[k].cls0;
+  /* классы по умолчанию и операции не из списка */
+  ok("по умолчанию: станочные — Тпз и Тшт, резка — только Тшт, контроль — без норм",
+     nm_op_rule(L"Фрезерная")->cls == NMC_FULL && nm_op_rule(L"Круглошлифовальная")->cls == NMC_FULL &&
+         nm_op_rule(L"Термическая резка лазерная")->cls == NMC_TSHT && nm_op_rule(L"Гибка")->cls == NMC_TSHT &&
+         nm_op_rule(L"Сварка")->cls == NMC_TSHT && nm_op_rule(L"Контроль")->cls == NMC_NONE);
+  ok("не из списка: код мехобработки — Тпз и Тшт, отрезной — только Тшт",
+     nm_op_class(NULL, L"Расточная", NMK_NONE, L"4210") == NMC_FULL &&
+         nm_op_class(NULL, L"Отрезная дисковая", NMK_NONE, L"4282") == NMC_TSHT &&
+         nm_op_class(NULL, L"Токарно-револьверная", NMK_TURN, L"") == NMC_FULL);
+  ok("не из списка: «Контрольная» — без норм, прочее — только Тшт",
+     nm_op_class(NULL, L"Контрольная", NMK_NONE, L"") == NMC_NONE &&
+         nm_op_class(NULL, L"Упаковка", NMK_NONE, L"") == NMC_TSHT);
+}
+
 /* весь путь: текст листа → маршрут techno.c → нормы */
 static void test_route(NmBase *b) {
   static TnRoute r;
@@ -534,22 +606,21 @@ static void test_route(NmBase *b) {
   for (int i = 0; i < res.n; i++)
     if (res.op[i].kind == NMK_TURN && turn < 0) turn = i;
   ok("в маршруте вала есть токарная с нормой", turn >= 0 && res.op[turn].full);
-  /* Тшт — у каждой операции маршрута: ОМН, резка или оценка; «по факту» — без цифр */
-  int all = res.n == r.n;
+  /* Тшт — у каждой операции маршрута: ОМН, резка или оценка; «по факту» — без цифр; контроль — без норм */
+  int all = res.n + (wcsstr(res.off, L"Контроль") != NULL) == r.n;
   for (int i = 0; i < res.n; i++)
     all &= res.op[i].kind == NMK_FACT || res.op[i].kind == NMK_EST ? 1 : !nm_na(res.op[i].tsht);
   ok("каждая операция маршрута — в нормах", all);
   ok("заготовка из прутка — «Отрезная», оценка", res.op[0].kind == NMK_EST && !wcscmp(res.op[0].op, L"Отрезная"));
   near("оценка отрезной: 1 + 0,2·2,4", res.op[0].tsht, 1.48);
-  near("Тпз оценки", res.op[0].tpz, 5);
+  ok("отрезная — заготовительная: Тпз не нужен", nm_na(res.op[0].tpz) && nm_na(res.op[0].tshk));
   has("оценка — пометка проверить", res.op[0].how, L"Тшт ≈ 1 + 0,2·2,4 = 1,48 мин — оценка, проверить");
   static wchar_t txt[24000];
   txt[0] = 0;
   nm_text_brief(b, &res, L"", txt, 24000);
-  has("коротко: оценка", txt, L"005 Отрезная: Тпз 5 мин · Тшт ≈ 1,48 мин (оценка, проверить)");
-  /* термообработка и зачистка после неё — нормы технолога; выключенная в Настройках — одной строкой */
+  has("коротко: оценка без Тпз", txt, L"005 Отрезная: Тшт ≈ 1,48 мин (оценка, проверить)");
+  /* термообработка и зачистка после неё — нормы технолога; контроль — без норм, одной строкой */
   tn_route(L"Вал", L"Сталь 45 ГОСТ 1050-2013", L"Ø40h7\nØ50\n1x45°\nRa 6,3\n1. 28...32 HRC\n", &r);
-  nm_op_rule(L"Контроль")->off = 1;
   nm_route(b, &r, L"2,4", L"L 120", &res);
   int heat = -1, ctl = 0;
   for (int i = 0; i < res.n; i++) {
@@ -562,13 +633,16 @@ static void test_route(NmBase *b) {
          res.op[heat + 1].tsht == 0.5);
   if (heat >= 0 && heat + 1 < res.n)
     has("разбор зачистки", res.op[heat + 1].how, L"Тшт 0,5 мин — норма технолога: зачистка после термической обработки");
-  ok("выключенная — не в нормах", !ctl && wcsstr(res.off, L"Контроль"));
+  ok("контроль — без норм, не в нормах", !ctl && wcsstr(res.off, L"Контроль"));
   txt[0] = 0;
   nm_text_brief(b, &res, L"", txt, 24000);
   has("коротко: норма технолога", txt, L" Термическая обработка: Тшт 3 мин (норма технолога)");
   has("коротко: зачистка после ТО", txt, L" Слесарная: Тшт 0,5 мин (норма технолога)");
-  has("коротко: выключенные", txt, L"\nНе нормируются (выключены в Настройках): Контроль");
-  nm_op_rule(L"Контроль")->off = 0;
+  has("коротко: без норм", txt, L"\nБез норм (Настройки → Нормирование): Контроль");
+  txt[0] = 0;
+  nm_text(b, &res, L"", txt, 24000);
+  has("полный текст: без норм", txt, L"\nБез норм (Настройки → Нормирование): Контроль");
+  test_classes(b);
   /* слесарная маршрута сразу за закалкой — зачистка к ней: оценка + 0,5 */
   tn_route(L"Палец", L"Сталь 45 ГОСТ 1050-2013", L"Ø20\nØ16\nRa 6,3\n1. 38...42 HRC\n", &r);
   nm_route(b, &r, L"2,4", L"L 60", &res);

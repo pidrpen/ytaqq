@@ -781,6 +781,9 @@ static double nm_step(const wchar_t *row, double x, int *low) {
 
 /* EST — оценка, FACT — по факту, TECH — норма технолога (Тшт по массе детали, Настройки) */
 enum { NMK_NONE, NMK_TURN, NMK_DRILL, NMK_MILL, NMK_CUT, NMK_EST, NMK_FACT, NMK_TECH };
+/* класс операции — что у неё нормируется (правило технолога 30.10): мехобработка — Тпз и Тшт;
+   заготовительные и вспомогательные — только Тшт (Тпз не нужен); контроль — без норм */
+enum { NMC_FULL, NMC_TSHT, NMC_NONE };
 static const wchar_t *const kNmKind[] = {L"", L"токарная", L"сверлильная", L"фрезерная", L"резка", L"оценка",
                                          L"по факту", L"норма технолога"};
 
@@ -790,6 +793,7 @@ typedef struct {
   wchar_t sub[24]; /* уточнение маршрута: «черновая», «чистовая», «тонкая», «резьба» */
   double to, tv, top, tsht, tpz, tshk;
   int full;        /* в Тшт есть всё: То, Тв, обслуживание */
+  int cls;         /* NMC_FULL — с Тпз; NMC_TSHT — только Тшт (класс операции, Настройки) */
   wchar_t how[NM_HOW];
   NmCtx c;         /* параметры после расчёта — что взято и откуда (окно «Режимы») */
   wchar_t toNeed[200]; /* без чего не посчиталось машинное То */
@@ -804,7 +808,7 @@ typedef struct {
   wchar_t need[800];  /* что уточнить — сводно */
   wchar_t miss[800];  /* каких таблиц нет вовсе */
   wchar_t skip[400];  /* какие операции не нормируются пока */
-  wchar_t off[400];   /* выключены в Настройках — не нормируются */
+  wchar_t off[400];   /* класс «без норм» (контроль; Настройки) — одной строкой */
   int cutUsed;        /* брали скорость из норм резки завода */
 } NmResult;
 
@@ -1777,7 +1781,7 @@ static void nm_op_calc(NmJob *j) {
   o->full = !nm_na(o->to) && okTv && okObs;
   /* подготовительно-заключительное */
   double pz = 0, pzx = 0;
-  if (nm_look_pref(j, L"пз", L"Тпз", o->kind != NMK_CUT, &pz)) {
+  if (o->cls == NMC_FULL && nm_look_pref(j, L"пз", L"Тпз", o->kind != NMK_CUT, &pz)) { /* только Тшт — без Тпз */
     /* дополнительное Тпз — по каждому коду из «доп»: «резьба; люнет» */
     const NmPar *dp = nm_parc(&j->c, L"доп");
     wchar_t list[64], one[64], lab[80];
@@ -2207,7 +2211,8 @@ static void nm_ask_op(const wchar_t *ask, int num, NmCtx *c) {
    Названия — как в справочнике операций (techno.c берёт их оттуда по номеру). Станочные — по ОМН,
    резка — по нормам резки завода; остальные — оценкой из таблицы «оценка»
    (укрупнённо, не ОМН: Тшт = Тшт + на кг·масса, Тпз), термическая и покрытия — по факту (время
-   цикла задаёт их технология). Выключенная в Настройках — не нормируется, в ответе одной строкой. */
+   цикла задаёт их технология). Класс операции (Настройки) — Тпз и Тшт, только Тшт или без норм;
+   операции «без норм» в ответе одной строкой. */
 enum { NMS_OMN, NMS_CUT, NMS_EST, NMS_FACT, NMS_TECH };
 
 /* норма технолога на термическую обработку: Тшт по массе детали — до порога одна, тяжелее другая;
@@ -2222,41 +2227,48 @@ typedef struct {
   const wchar_t *op; /* как в маршруте; «Токарная» — и черновая, и чистовая */
   int how;
   const wchar_t *src;
-  int off;
+  int cls0, cls; /* класс: как при установке и выбранный в Настройках (norms.ini [ops]) */
 } NmOpRule;
 
-#define NM_SRC_CUT L"нормы резки завода (скорость), ОМН на газовую резку (Тпз, обслуживание)"
+#define NM_SRC_CUT L"нормы резки завода (скорость), ОМН на газовую резку (обслуживание)"
 #define NM_SRC_EST L"оценка CursorPad, не ОМН (таблица «оценка»: Тшт + на кг·масса, Тпз) — проверить"
+#define NM_R(op, how, src, cls) {op, how, src, cls, cls}
+/* классы — правило технолога: Тпз только у мехобработки (токарные, сверлильные, фрезерные,
+   шлифовальные, зубообработка, электроэрозия); заготовительные (резка, отрезная, гибка, штамповка —
+   участок заготовки) и вспомогательные (слесарная, разметка, маркирование, сварка, термическая,
+   покрытия) — только Тшт; контроль — без норм */
 static NmOpRule g_nmOps[] = {
-    {L"Токарная", NMS_OMN, L"ОМН вспомогательного времени (карты 2, 9, 20, 43–47), То — режимы по формулам", 0},
-    {L"Сверлильная", NMS_OMN, L"ОМН (карты 9, 10, 25, 43–45, 52), То — режимы по формулам", 0},
-    {L"Фрезерная", NMS_OMN, L"ОМН (карты 10, 27, 43–45, 54), То — режимы по формулам", 0},
-    {L"Термическая резка лазерная", NMS_CUT, NM_SRC_CUT, 0},
-    {L"Термическая резка плазменно-дуговая", NMS_CUT, NM_SRC_CUT, 0},
-    {L"Термическая резка кислородная", NMS_CUT, NM_SRC_CUT, 0},
-    {L"Раскрой", NMS_CUT, NM_SRC_CUT, 0},
-    {L"Отрезная", NMS_EST, NM_SRC_EST, 0},
-    {L"Токарная (резьба)", NMS_EST, NM_SRC_EST, 0},
-    {L"Накатка", NMS_EST, NM_SRC_EST, 0},
-    {L"Шлифовальная", NMS_EST, NM_SRC_EST, 0},
-    {L"Круглошлифовальная", NMS_EST, NM_SRC_EST, 0},
-    {L"Плоскошлифовальная", NMS_EST, NM_SRC_EST, 0},
-    {L"3убофрезерная", NMS_EST, NM_SRC_EST, 0},
-    {L"Долбежная", NMS_EST, NM_SRC_EST, 0},
-    {L"Профильно-вырезная электрофизическая электроэрозионная электроискровая проволочным электродом", NMS_EST,
-     NM_SRC_EST, 0},
-    {L"Доводочная", NMS_EST, NM_SRC_EST, 0},
-    {L"Гибка", NMS_EST, NM_SRC_EST, 0},
-    {L"Штамповка", NMS_EST, NM_SRC_EST, 0},
-    {L"Сварка", NMS_EST, NM_SRC_EST, 0},
-    {L"Разметка", NMS_EST, NM_SRC_EST, 0},
-    {L"Слесарная", NMS_EST, NM_SRC_EST, 0},
-    {L"Маркирование", NMS_EST, NM_SRC_EST, 0},
-    {L"Контроль", NMS_EST, NM_SRC_EST, 0},
-    {L"Термическая обработка", NMS_TECH, L"норма технолога: Тшт по массе детали (до порога и тяжелее — Настройки)", 0},
-    {L"Получение покрытий", NMS_FACT, L"по факту: время в ваннах — по технологии покрытия", 0},
-    {L"Цинкование электрохимическое", NMS_FACT, L"по факту: время в ваннах — по технологии покрытия", 0},
-    {L"Получение покрытий органических (лакакрасочных)", NMS_FACT, L"по факту: время сушки — по технологии окраски", 0},
+    NM_R(L"Токарная", NMS_OMN, L"ОМН вспомогательного времени (карты 2, 9, 20, 43–47), То — режимы по формулам", NMC_FULL),
+    NM_R(L"Сверлильная", NMS_OMN, L"ОМН (карты 9, 10, 25, 43–45, 52), То — режимы по формулам", NMC_FULL),
+    NM_R(L"Фрезерная", NMS_OMN, L"ОМН (карты 10, 27, 43–45, 54), То — режимы по формулам", NMC_FULL),
+    NM_R(L"Термическая резка лазерная", NMS_CUT, NM_SRC_CUT, NMC_TSHT),
+    NM_R(L"Термическая резка плазменно-дуговая", NMS_CUT, NM_SRC_CUT, NMC_TSHT),
+    NM_R(L"Термическая резка кислородная", NMS_CUT, NM_SRC_CUT, NMC_TSHT),
+    NM_R(L"Раскрой", NMS_CUT, NM_SRC_CUT, NMC_TSHT),
+    NM_R(L"Отрезная", NMS_EST, NM_SRC_EST, NMC_TSHT),
+    NM_R(L"Токарная (резьба)", NMS_EST, NM_SRC_EST, NMC_FULL),
+    NM_R(L"Накатка", NMS_EST, NM_SRC_EST, NMC_FULL),
+    NM_R(L"Шлифовальная", NMS_EST, NM_SRC_EST, NMC_FULL),
+    NM_R(L"Круглошлифовальная", NMS_EST, NM_SRC_EST, NMC_FULL),
+    NM_R(L"Плоскошлифовальная", NMS_EST, NM_SRC_EST, NMC_FULL),
+    NM_R(L"3убофрезерная", NMS_EST, NM_SRC_EST, NMC_FULL),
+    NM_R(L"Долбежная", NMS_EST, NM_SRC_EST, NMC_FULL),
+    NM_R(L"Профильно-вырезная электрофизическая электроэрозионная электроискровая проволочным электродом", NMS_EST,
+         NM_SRC_EST, NMC_FULL),
+    NM_R(L"Доводочная", NMS_EST, NM_SRC_EST, NMC_FULL),
+    NM_R(L"Гибка", NMS_EST, NM_SRC_EST, NMC_TSHT),
+    NM_R(L"Штамповка", NMS_EST, NM_SRC_EST, NMC_TSHT),
+    NM_R(L"Сварка", NMS_EST, NM_SRC_EST, NMC_TSHT),
+    NM_R(L"Разметка", NMS_EST, NM_SRC_EST, NMC_TSHT),
+    NM_R(L"Слесарная", NMS_EST, NM_SRC_EST, NMC_TSHT),
+    NM_R(L"Маркирование", NMS_EST, NM_SRC_EST, NMC_TSHT),
+    NM_R(L"Контроль", NMS_EST, L"контроль не нормируется: ни Тпз, ни Тшт", NMC_NONE),
+    NM_R(L"Термическая обработка", NMS_TECH, L"норма технолога: Тшт по массе детали (до порога и тяжелее — Настройки)",
+         NMC_TSHT),
+    NM_R(L"Получение покрытий", NMS_FACT, L"по факту: время в ваннах — по технологии покрытия", NMC_TSHT),
+    NM_R(L"Цинкование электрохимическое", NMS_FACT, L"по факту: время в ваннах — по технологии покрытия", NMC_TSHT),
+    NM_R(L"Получение покрытий органических (лакакрасочных)", NMS_FACT, L"по факту: время сушки — по технологии окраски",
+         NMC_TSHT),
 };
 #define NM_OPRULES ((int)(sizeof(g_nmOps) / sizeof(g_nmOps[0])))
 
@@ -2269,6 +2281,17 @@ static NmOpRule *nm_op_rule(const wchar_t *op) {
     if (e && e[0] == L' ' && e[1] == L'(') return &g_nmOps[k];
   }
   return NULL;
+}
+
+/* класс операции: по правилу из списка; нет в списке — станочная или код мехобработки по
+   справочнику (41xx–42xx, кроме отрезных 4280…4287) — Тпз и Тшт, «Контрол…» — без норм,
+   прочее — только Тшт */
+static int nm_op_class(const NmOpRule *rule, const wchar_t *op, int kind, const wchar_t *code) {
+  if (rule) return rule->cls;
+  if (kind == NMK_TURN || kind == NMK_DRILL || kind == NMK_MILL) return NMC_FULL;
+  if (nm_pre(op, L"Контрол")) return NMC_NONE;
+  long c = code && code[0] ? wcstol(code, NULL, 10) : 0;
+  return c >= 4100 && c <= 4299 && !(c >= 4280 && c <= 4287) ? NMC_FULL : NMC_TSHT;
 }
 
 /* название с уточнением маршрута: «Токарная (резьба)» — для правил и строк оценки */
@@ -2332,7 +2355,7 @@ static void nm_est(NmJob *j) {
   if (nm_na(a)) return;
   if (nm_na(k)) k = 0;
   o->tsht = a + (nm_na(m) ? 0 : k * m);
-  o->tpz = nm_na(pz) ? NM_NONE : pz;
+  o->tpz = nm_na(pz) || o->cls != NMC_FULL ? NM_NONE : pz; /* Тпз — только у мехобработки */
   tn_cpy(s, 400, L"Тшт ≈ ");
   tn_catnum(s, 400, a);
   if (k != 0 && !nm_na(m)) tn_cat(s, 400, L" + "), tn_catnum(s, 400, k), tn_cat(s, 400, L"·"), tn_catnum(s, 400, m);
@@ -2366,7 +2389,8 @@ static void nm_route(const NmBase *b, const TnRoute *r, const wchar_t *mass, con
     wchar_t key[160];
     nm_op_key(r->op[i].op, r->op[i].sub, key, 160);
     const NmOpRule *rule = nm_op_rule(key);
-    if (rule && rule->off) { /* выключено в Настройках */
+    int cls = nm_op_class(rule, r->op[i].op, kind, r->op[i].code);
+    if (cls == NMC_NONE) { /* без норм (контроль) — ни Тпз, ни Тшт */
       tn_item(res->off, 400, r->op[i].op);
       continue;
     }
@@ -2377,6 +2401,7 @@ static void nm_route(const NmBase *b, const TnRoute *r, const wchar_t *mass, con
     memset(o, 0, sizeof(*o));
     o->kind = kind;
     o->idx = i;
+    o->cls = cls;
     tn_cpy(o->op, 128, r->op[i].op);
     tn_cpy(o->sub, 24, r->op[i].sub);
     memset(j, 0, sizeof(*j));
@@ -2480,7 +2505,7 @@ static void nm_text(const NmBase *b, const NmResult *res, const wchar_t *dir, wc
     tn_cat(out, cap, o->how);
   }
   if (res->skip[0]) tn_cat(out, cap, L"\nПока не нормируются: "), tn_cat(out, cap, res->skip);
-  if (res->off[0]) tn_cat(out, cap, L"\nНе нормируются (выключены в Настройках): "), tn_cat(out, cap, res->off);
+  if (res->off[0]) tn_cat(out, cap, L"\nБез норм (Настройки → Нормирование): "), tn_cat(out, cap, res->off);
   if (res->miss[0]) tn_cat(out, cap, L"\nНет таблиц: "), tn_cat(out, cap, res->miss);
   if (res->nused) {
     tn_cat(out, cap, L"\nИсточники:");
@@ -2614,7 +2639,7 @@ static void nm_text_brief(const NmBase *b, const NmResult *res, const wchar_t *d
     if (!first) tn_cat(out, cap, L" — оценка, проверить)");
   }
   if (res->skip[0]) tn_cat(out, cap, L"\nПока не нормируются: "), tn_cat(out, cap, res->skip);
-  if (res->off[0]) tn_cat(out, cap, L"\nНе нормируются (выключены в Настройках): "), tn_cat(out, cap, res->off);
+  if (res->off[0]) tn_cat(out, cap, L"\nБез норм (Настройки → Нормирование): "), tn_cat(out, cap, res->off);
   if (b->err[0]) tn_cat(out, cap, L"\nНе прочитаны таблицы: "), tn_cat(out, cap, b->err);
   nm_modes_line(res, out, cap);
 }
