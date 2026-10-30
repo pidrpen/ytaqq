@@ -49,6 +49,8 @@
 #define ID_PK_SOYALL 330     /* меню «В Союз…» (с 2026.10.30): всё сразу */
 #define ID_PK_SOYESI 331     /*   только ЭСИ — изделия, состав, чертежи */
 #define ID_PK_SOYTP 332      /*   только ТП — операции и заготовки к изделиям, уже заведённым в «Союзе» */
+#define ID_PK_QCRAFT 333     /* строка быстрого ТП: профессия (с 2026.10.30) */
+#define PK_OP_CRAFT 7        /* лист «Операции»: столбец «Профессия» — последний (kPkOpsHead) */
 #define WM_PK_ESI (WM_APP + 99) /* lParam — RtJob*, освобождает окно */
 /* чертежи, брошенные мышью (pk_stamp.c): штамп читает рабочий поток */
 #define WM_PK_STAMP (WM_APP + 96)   /* lParam — PkStRes*, освобождает окно */
@@ -78,6 +80,13 @@ typedef struct {
   SzmFit *fit;
   int naf;     /* участок операции по коду, и без станка (с 30.10): equip 0 */
   SzmFit *afit;
+  int nc;                /* профессии (с 2026.10.30): «19149, Токарь» — как DisplayedName профессии в «Союзе» */
+  wchar_t (*craft)[200];
+  long *craftId;
+  int ncf;     /* профессия к операции на участке — из ТП завода и типовых: equip — InfoObjectId профессии */
+  SzmFit *cfit;
+  int nco;     /* операции профессии в справочнике (CraftOperations): equip — профессия, area 0, score 0 */
+  SzmFit *cops;
   wchar_t err[300];
 } SzmDicts;
 static SzmDicts g_szmDicts;
@@ -106,7 +115,7 @@ static HWND g_pkEsiEdit, g_pkHelp;
 static volatile LONG g_pkEsiBusy, g_pkEsiCancel;
 static wchar_t g_pkCur[200]; /* выбранная позиция: к ней — вставленные операции и заготовка */
 static volatile LONG g_pkStGen; /* «Очистить» — недочитанные чертежи (pk_stamp.c) мимо */
-static HWND g_pkQPart, g_pkQOp, g_pkQArea, g_pkQEquip; /* строка быстрого ТП (лист «Операции») */
+static HWND g_pkQPart, g_pkQOp, g_pkQArea, g_pkQEquip, g_pkQCraft; /* строка быстрого ТП (лист «Операции») */
 static BOOL g_pkQShown, g_pkQBusy;
 static wchar_t g_pkQLastArea[200], g_pkQLastEquip[200]; /* участок — для следующей операции, в черновике (станок —
                                                            только из старых черновиков) */
@@ -545,6 +554,85 @@ static int pk_equip_for(const wchar_t *op, const wchar_t *area, wchar_t *out, in
   return best != NULL;
 }
 
+static BOOL pk_area_dict(const wchar_t *typed, wchar_t *out, int cap);
+
+/* равны без учёта регистра — и кириллица (_wcsicmp — только латиница); длина -1 — до конца строки */
+static BOOL pk_ieq(const wchar_t *a, int al, const wchar_t *b, int bl) {
+  return CompareStringW(LOCALE_USER_DEFAULT, NORM_IGNORECASE, a, al, b, bl) == CSTR_EQUAL;
+}
+
+/* Профессия справочника «Союза» по вписанному (с 2026.10.30): строка целиком («19149, Токарь») → код → название
+   после кода («Токарь») → начало названия («ток»). В out — как в справочнике. FALSE — нет (или справочник не
+   прочитан) */
+static BOOL pk_craft_dict(const wchar_t *typed, wchar_t *out, int cap) {
+  out[0] = 0;
+  if (!typed || !g_szmDicts.craft) return FALSE;
+  while (*typed == L' ') typed++;
+  wchar_t w[200];
+  lstrcpynW(w, typed, 200);
+  size_t l = wcslen(w);
+  while (l && w[l - 1] == L' ') w[--l] = 0;
+  if (!l) return FALSE;
+  int hit = -1;
+  for (int i = 0; i < g_szmDicts.nc && hit < 0; i++)
+    if (pk_ieq(g_szmDicts.craft[i], -1, w, -1)) hit = i;
+  for (int pass = 0; pass < 2 && hit < 0; pass++)
+    for (int i = 0; i < g_szmDicts.nc && hit < 0; i++) {
+      const wchar_t *c = g_szmDicts.craft[i], *nm = wcsstr(c, L", "), *name = nm ? nm + 2 : c;
+      size_t cl = nm ? (size_t)(nm - c) : 0;
+      if (!pass && ((cl == l && pk_ieq(c, (int)l, w, (int)l)) || (nm && pk_ieq(name, -1, w, -1)))) hit = i; /* код или название */
+      if (pass && wcslen(name) >= l && pk_ieq(name, (int)l, w, (int)l)) hit = i;                          /* начало названия */
+    }
+  if (hit < 0) return FALSE;
+  lstrcpynW(out, g_szmDicts.craft[hit], cap);
+  return TRUE;
+}
+
+/* профессия к операции (с 2026.10.30): какую в ТП завода и типовых ставят на эту операцию на этом участке, потом —
+   на любом участке, потом — первая профессия, у которой эта операция в списке операций справочника. FALSE — нет */
+static BOOL pk_craft_for(const wchar_t *op, const wchar_t *area, wchar_t *out, int cap) {
+  out[0] = 0;
+  long code = op && op[0] ? pk_op_code(op) : -1;
+  if (code < 0 || !g_szmDicts.nc) return FALSE;
+  long aid = 0;
+  wchar_t full[200];
+  if (area && area[0] && pk_area_dict(area, full, 200))
+    for (int i = 0; i < g_szmDicts.na && !aid && g_szmDicts.areaId; i++)
+      if (!wcscmp(g_szmDicts.area[i], full)) aid = g_szmDicts.areaId[i];
+  long craft = 0;
+  for (int pass = 0; pass < 2 && !craft; pass++) {
+    const SzmFit *best = NULL;
+    for (int i = 0; i < g_szmDicts.ncf; i++) {
+      const SzmFit *f = &g_szmDicts.cfit[i];
+      if (f->code == code && (pass || (aid && f->area == aid)) && (!best || f->score > best->score)) best = f;
+    }
+    if (best) craft = best->equip;
+  }
+  for (int i = 0; i < g_szmDicts.nco && !craft; i++)
+    if (g_szmDicts.cops[i].code == code) craft = g_szmDicts.cops[i].equip;
+  for (int i = 0; craft && i < g_szmDicts.nc; i++)
+    if (g_szmDicts.craftId[i] == craft) {
+      lstrcpynW(out, g_szmDicts.craft[i], cap);
+      return TRUE;
+    }
+  return FALSE;
+}
+
+/* пустая профессия операций — подобранной (и у транспортирования: его ставит pk_transport_fill). Сколько */
+static int pk_craft_fill(void) {
+  XpTable *t = &g_pk[PK_OPS];
+  int n = 0;
+  for (int r = 0; r < t->n && g_szmDicts.nc && t->ncols > PK_OP_CRAFT; r++) {
+    wchar_t cr[200];
+    if (pk_row_from_soyuz(PK_OPS, r) || xp_cell(t, r, PK_OP_CRAFT)[0] || !xp_cell(t, r, 2)[0]) continue;
+    if (!pk_craft_for(xp_cell(t, r, 2), xp_cell(t, r, 3), cr, 200)) continue;
+    pk_put(t, r, PK_OP_CRAFT, cr);
+    if (g_pkSheet == PK_OPS && g_pkList) pk_set_item(r);
+    n++;
+  }
+  return n;
+}
+
 /* пустое оборудование операций — подобранным; нет и участка (операции по чертежу, маршрут из чата) —
    участок того же станка: где эта операция чаще всего стоит в ТП завода. Сколько подставлено */
 /* участок и станок пустой операции — из таблицы приоритетов технолога (soyuz_prio.c), она важнее
@@ -711,6 +799,7 @@ static void pk_changed(void) {
   pk_buy_fill(FALSE);
   pk_equip_fill();
   pk_ops_settle();     /* транспортирования и номера шагом 5 — сразу (с 30.10) */
+  pk_craft_fill();     /* профессия — по операции и участку (с 2026.10.30) */
   pk_norms_fill(TRUE); /* новые операции — сразу с Тпз/Тшт по таблицам ОМН */
   pk_tabs();
   pk_draft_save();
@@ -743,11 +832,13 @@ static HWND g_pkFiltCb;            /* какой список отфильтро
 static wchar_t g_pkFiltTyped[300]; /* и что в нём было напечатано: выбрали «нет в справочнике» — вернуть это */
 static int pk_combo_kind(int sheet, int c);
 
-/* строка i справочника для столбца kind (2 — операции 1С, 3 — участки, 4 — станки); NULL — кончились */
+/* строка i справочника для столбца kind (2 — операции 1С, 3 — участки, 4 — станки, PK_OP_CRAFT — профессии);
+   NULL — кончились */
 static const wchar_t *pk_src_item(int kind, int i) {
   if (kind == 2) return i < OPS_1C_N ? kOps1c[i].name : NULL;
   if (kind == 3) return g_szmDicts.area && i < g_szmDicts.na ? g_szmDicts.area[i] : NULL;
   if (kind == 4) return g_szmDicts.equip && i < g_szmDicts.ne ? g_szmDicts.equip[i] : NULL;
+  if (kind == PK_OP_CRAFT) return g_szmDicts.craft && i < g_szmDicts.nc ? g_szmDicts.craft[i] : NULL;
   return NULL;
 }
 
@@ -776,7 +867,7 @@ static int pk_match_rank(const wchar_t *item, const wchar_t *low) {
 /* список cb (столбца kind) — по напечатанному; open — раскрыть его. Напечатанное и курсор в поле остаются.
    Возвращает число подходящих строк (без «нет в справочнике») */
 static int pk_combo_filter(HWND cb, int kind, BOOL open) {
-  if (!cb || g_pkFiltBusy || kind < 2 || kind > 4) return 0;
+  if (!cb || g_pkFiltBusy || ((kind < 2 || kind > 4) && kind != PK_OP_CRAFT)) return 0;
   g_pkFiltBusy = TRUE;
   wchar_t t[300], low[300];
   GetWindowTextW(cb, t, 300);
@@ -837,7 +928,7 @@ static LRESULT CALLBACK PkEditProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
   /* ячейка со списком (операция, участок, станок): набор — фильтр списка */
   int fkind = hwnd != g_pkEdit && g_pkEditCtl == g_pkCombo && g_pkCombo && g_pkEditRow >= 0
                   ? pk_combo_kind(g_pkSheet, g_pkEditCol) : -1;
-  if (fkind >= 2 && fkind <= 4 &&
+  if (((fkind >= 2 && fkind <= 4) || fkind == PK_OP_CRAFT) &&
       ((msg == WM_CHAR && wParam != L'\r' && wParam != L'\t' && wParam != 27) || (msg == WM_KEYDOWN && wParam == VK_DELETE) ||
        msg == WM_PASTE || msg == WM_CUT || msg == WM_UNDO)) {
     LRESULT res = CallWindowProcW(old, hwnd, msg, wParam, lParam);
@@ -886,11 +977,11 @@ static LRESULT CALLBACK PkEditProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
   return CallWindowProcW(old, hwnd, msg, wParam, lParam);
 }
 
-/* список для столбца: 2 — операции 1С, 3 — участки, 4 — станки (лист «Операции»); 10 — обозначения
+/* список для столбца: 2 — операции 1С, 3 — участки, 4 — станки, 7 — профессии (лист «Операции»); 10 — обозначения
    из «Изделий» (деталь операции и заготовки, сборка и входящее: к какой позиции ЭСИ); 11 — виды
    изделий, как в «Союзе»; 12 — признак покупки (значения из базы); иначе -1 */
 static int pk_combo_kind(int sheet, int c) {
-  if (sheet == PK_OPS && c >= 2 && c <= 4) return c;
+  if (sheet == PK_OPS && ((c >= 2 && c <= 4) || c == PK_OP_CRAFT)) return c;
   if ((sheet == PK_OPS || sheet == PK_BLANKS) && c == 0) return 10;
   if (sheet == PK_LINKS && c <= 1) return 10;
   if (sheet == PK_ITEMS && c == 2) return 11;
@@ -909,6 +1000,8 @@ static void pk_combo_fill(int kind) {
     for (int i = 0; i < g_szmDicts.na; i++) SendMessageW(g_pkCombo, CB_ADDSTRING, 0, (LPARAM)g_szmDicts.area[i]);
   else if (kind == 4)
     for (int i = 0; i < g_szmDicts.ne; i++) SendMessageW(g_pkCombo, CB_ADDSTRING, 0, (LPARAM)g_szmDicts.equip[i]);
+  else if (kind == PK_OP_CRAFT)
+    for (int i = 0; i < g_szmDicts.nc; i++) SendMessageW(g_pkCombo, CB_ADDSTRING, 0, (LPARAM)g_szmDicts.craft[i]);
   else if (kind == 10)
     for (int r = 0; r < g_pk[PK_ITEMS].n; r++) {
       const wchar_t *d = xp_cell(&g_pk[PK_ITEMS], r, 0);
@@ -1061,7 +1154,7 @@ static void pk_q_filter(void) {
 
 /* списки детали, участка и станка — при раскрытии: изделия и справочники могли поменяться */
 static void pk_q_list(HWND cb) {
-  if (g_pkFiltBusy && (cb == g_pkQArea || cb == g_pkQEquip)) return; /* раскрыл сам фильтр — список уже по набору */
+  if (g_pkFiltBusy && (cb == g_pkQArea || cb == g_pkQEquip || cb == g_pkQCraft)) return; /* раскрыл фильтр — уже по набору */
   wchar_t t[200];
   GetWindowTextW(cb, t, 200);
   SendMessageW(cb, CB_RESETCONTENT, 0, 0);
@@ -1072,9 +1165,9 @@ static void pk_q_list(HWND cb) {
           SendMessageW(cb, CB_FINDSTRINGEXACT, (WPARAM)-1, (LPARAM)d) == CB_ERR)
         SendMessageW(cb, CB_ADDSTRING, 0, (LPARAM)d);
     }
-  } else if (cb == g_pkQArea || cb == g_pkQEquip) { /* участок и станок — по напечатанному (фильтр сам раскрывает) */
+  } else if (cb == g_pkQArea || cb == g_pkQEquip || cb == g_pkQCraft) { /* участок, станок, профессия — по напечатанному */
     SetWindowTextW(cb, t);
-    if (!g_pkFiltBusy) pk_combo_filter(cb, cb == g_pkQArea ? 3 : 4, FALSE);
+    if (!g_pkFiltBusy) pk_combo_filter(cb, cb == g_pkQArea ? 3 : cb == g_pkQEquip ? 4 : PK_OP_CRAFT, FALSE);
     return;
   }
   SetWindowTextW(cb, t);
@@ -1090,13 +1183,15 @@ static void pk_q_trim(wchar_t *s) {
 
 /* «+ Операция» (Enter): строка в «Операции» с номером на 5 больше последнего у этой детали */
 static void pk_q_add(void) {
-  wchar_t part[200], op[200], area[200], eq[200];
+  wchar_t part[200], op[200], area[200], eq[200], cr[200];
   GetWindowTextW(g_pkQPart, part, 200);
   GetWindowTextW(g_pkQOp, op, 200);
   GetWindowTextW(g_pkQArea, area, 200);
   GetWindowTextW(g_pkQEquip, eq, 200);
+  GetWindowTextW(g_pkQCraft, cr, 200);
   pk_none_fix(g_pkQOp, op, 200), pk_none_fix(g_pkQArea, area, 200), pk_none_fix(g_pkQEquip, eq, 200);
-  pk_q_trim(part), pk_q_trim(op), pk_q_trim(area), pk_q_trim(eq);
+  pk_none_fix(g_pkQCraft, cr, 200);
+  pk_q_trim(part), pk_q_trim(op), pk_q_trim(area), pk_q_trim(eq), pk_q_trim(cr);
   if (!part[0]) {
     pk_status(L"Сначала деталь — выберите в списке слева или впишите обозначение");
     SetFocus(g_pkQPart);
@@ -1128,6 +1223,7 @@ static void pk_q_add(void) {
     pk_put(t, ed, 2, name);
     pk_put(t, ed, 3, area);
     pk_put(t, ed, 4, eq); /* стёрли станок — pk_changed подберёт заново */
+    pk_put(t, ed, PK_OP_CRAFT, cr); /* и профессию */
     lstrcpynW(g_pkQLastArea, area, 200);
     lstrcpynW(g_pkCur, part, 200);
     pk_q_new();
@@ -1146,6 +1242,7 @@ static void pk_q_add(void) {
   xp_set(w, 2, name);
   xp_set(w, 3, area);
   xp_set(w, 4, eq); /* пусто — pk_changed подберёт по операции и участку */
+  xp_set(w, PK_OP_CRAFT, cr); /* профессия — так же */
   lstrcpynW(g_pkQLastArea, area, 200);
   g_pkQLastEquip[0] = 0; /* станок у каждой операции свой */
   lstrcpynW(g_pkCur, part, 200);
@@ -1157,14 +1254,15 @@ static void pk_q_add(void) {
   g_pkQBusy = TRUE; /* очистка поля — не фильтр */
   SetWindowTextW(g_pkQOp, L"");
   SetWindowTextW(g_pkQEquip, L"");
+  SetWindowTextW(g_pkQCraft, L"");
   g_pkQBusy = FALSE;
   pk_q_filter();
   SetFocus(g_pkQOp);
-  const wchar_t *got = xp_cell(t, t->n - 1, 4);
-  pk_status(L"ТП «%s»: операций %d, последняя — %s %s%s%s%s%s. Печатайте следующую; «В Союз…» создаст ТП и привяжет к "
+  const wchar_t *got = xp_cell(t, t->n - 1, 4), *gc = xp_cell(t, t->n - 1, PK_OP_CRAFT);
+  pk_status(L"ТП «%s»: операций %d, последняя — %s %s%s%s%s%s%s%s. Печатайте следующую; «В Союз…» создаст ТП и привяжет к "
             L"детали",
             part, cnt + 1, num, name, wcscmp(name, op) && !wcschr(op, L' ') ? L" (из справочника 1С)" : L"",
-            got[0] ? L", " : L"", got, got[0] && !eq[0] ? L" (подобран по «Союзу»)" : L"");
+            got[0] ? L", " : L"", got, got[0] && !eq[0] ? L" (подобран по «Союзу»)" : L"", gc[0] ? L", " : L"", gc);
 }
 
 /* строка быстрого ТП — снова для новой операции: кнопка «+ Операция», операция и станок пусты,
@@ -1178,6 +1276,7 @@ static void pk_q_new(void) {
   g_pkQBusy = TRUE;
   SetWindowTextW(g_pkQOp, L"");
   SetWindowTextW(g_pkQEquip, L"");
+  SetWindowTextW(g_pkQCraft, L"");
   g_pkQBusy = FALSE;
   if (g_pkSheet == PK_OPS && ListView_GetSelectedCount(g_pkList)) ListView_SetItemState(g_pkList, -1, 0, LVIS_SELECTED);
 }
@@ -1191,6 +1290,7 @@ static void pk_q_load(int row) {
   SetWindowTextW(g_pkQOp, xp_cell(t, row, 2));
   SetWindowTextW(g_pkQArea, xp_cell(t, row, 3));
   SetWindowTextW(g_pkQEquip, xp_cell(t, row, 4));
+  SetWindowTextW(g_pkQCraft, xp_cell(t, row, PK_OP_CRAFT));
   g_pkQBusy = FALSE;
   g_pkQEdit = row;
   wchar_t b[40];
@@ -1294,11 +1394,11 @@ static LRESULT CALLBACK PkQProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     return 0;
   }
   if (msg == WM_KEYDOWN && wParam == VK_TAB) { /* Tab / Shift+Tab — по полям строки по кругу */
-    HWND f[4] = {g_pkQPart, g_pkQOp, g_pkQArea, g_pkQEquip};
+    HWND f[5] = {g_pkQPart, g_pkQOp, g_pkQArea, g_pkQEquip, g_pkQCraft};
     int i = 0;
-    while (i < 4 && f[i] != cb) i++;
+    while (i < 5 && f[i] != cb) i++;
     if (SendMessageW(cb, CB_GETDROPPEDSTATE, 0, 0)) SendMessageW(cb, CB_SHOWDROPDOWN, FALSE, 0);
-    SetFocus(f[(i + (GetKeyState(VK_SHIFT) < 0 ? 3 : 1)) % 4]);
+    SetFocus(f[(i + (GetKeyState(VK_SHIFT) < 0 ? 4 : 1)) % 5]);
     return 0;
   }
   if (msg == WM_KEYDOWN && wParam == VK_RETURN) {
@@ -1309,7 +1409,7 @@ static LRESULT CALLBACK PkQProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
       SendMessageW(cb, CB_SHOWDROPDOWN, FALSE, 0);
       if (t[0]) SetWindowTextW(cb, t);
       g_pkQBusy = FALSE;
-      if (cb != g_pkQOp) { /* в списке детали, участка, станка Enter — только выбрать */
+      if (cb != g_pkQOp) { /* в списке детали, участка, станка, профессии Enter — только выбрать */
         SetFocus(g_pkQOp);
         return 0;
       }
@@ -1637,9 +1737,12 @@ static void pk_help(void) {
       L"  Размеры — «D=40;L=265» (круг), «S=10;B=280;L=440» (лист); «Ø40x265», «10х280х440» CursorPad переведёт сам.\r\n\r\n"
       L"ОПЕРАЦИИ (ТП) — деталь, № операции («005»), операция с кодом справочника («4110 Токарная»),\r\n"
       L"  участок (код в начале: «31 Механический участок 31»; цех берётся от участка),\r\n"
-      L"  оборудование («16К20, Токарно-винторезный станок»), Тпз и Тшт в минутах. Оборудование пусто — CursorPad\r\n"
-      L"  подставит сам, какое в «Союзе» стоит на этой операции на этом участке (сначала типовые операции,\r\n"
-      L"  потом ТП завода; нужен вход в базу SQL); сменить — выбором в ячейке.\r\n"
+      L"  оборудование («16К20, Токарно-винторезный станок»), Тпз и Тшт в минутах, профессия («19149, Токарь»).\r\n"
+      L"  Оборудование пусто — CursorPad подставит сам, какое в «Союзе» стоит на этой операции на этом участке\r\n"
+      L"  (сначала типовые операции, потом ТП завода; нужен вход в базу SQL); сменить — выбором в ячейке.\r\n"
+      L"  Профессия пуста — так же: какую ставят на эту операцию в ТП завода, иначе из справочника профессий\r\n"
+      L"  (у профессии — список её операций, как в штатной «Добавить профессию»); без базы — её подберёт\r\n"
+      L"  «Союз» (пакет 1.0.0.11) по справочнику операции.\r\n"
       L"  Операция без кода в справочнике пропускается; участок и станок, которых нет, не ставятся.\r\n"
       L"  У каждой детали свой ТП — не сквозной (пакет 1.0.0.10 снимает «Сквозной»); версия 1 «В разработке»,\r\n"
       L"  вариант «Основной», признак «основной ТП»; ТП вносится в карточку ТП детали. Если у детали ТП уже\r\n"
@@ -2021,6 +2124,26 @@ static BOOL pk_check(BOOL quiet) {
       g_pkSendWarn++;
     }
   }
+  if (g_szmDicts.nc) { /* профессии нет в справочнике «Союза» — до отправки (с 2026.10.30) */
+    wchar_t bad[600] = L"";
+    int nb = 0;
+    for (int r = 0; r < op->n; r++) {
+      const wchar_t *cr = xp_cell(op, r, PK_OP_CRAFT);
+      wchar_t full[200], needle[220];
+      if (!cr[0] || pk_row_from_soyuz(PK_OPS, r) || pk_craft_dict(cr, full, 200)) continue;
+      _snwprintf(needle, 220, L"«%s»", cr);
+      needle[219] = 0;
+      nb++;
+      size_t l = wcslen(bad);
+      if (!wcsstr(bad, needle) && l < 500) _snwprintf(bad + l, 600 - l, L"%s%s", l ? L", " : L"", needle);
+    }
+    bad[599] = 0;
+    if (nb) {
+      sb_add(&b, L"• Профессии %s нет в справочнике «Союза» (операций: %d) — в ТП её не будет; выберите из списка в ячейке\n",
+             bad, nb);
+      g_pkSendWarn++;
+    }
+  }
   if (g_szmDictsAsked && !g_szmDicts.err[0] && g_szmDicts.na && !g_szmDicts.nb) { /* признак покупки — в базе списка нет */
     int withBuy = 0;
     for (int r = 0; r < it->n; r++) withBuy += xp_cell(it, r, 6)[0] != 0;
@@ -2234,6 +2357,7 @@ static int pk_soyuz_text(wchar_t **out, wchar_t *note, int ncap, PkSent *st, int
     sb_field(&b, xp_cell(op, r, 4));
     sb_field(&b, xp_cell(op, r, 5));
     sb_field(&b, xp_cell(op, r, 6));
+    if (xp_cell(op, r, PK_OP_CRAFT)[0]) sb_field(&b, xp_cell(op, r, PK_OP_CRAFT)); /* профессия — пакет 1.0.0.11 */
     sb_add(&b, L"\r\n");
     st->ops++;
   }
@@ -2324,15 +2448,18 @@ static void pk_layout(void) {
   /* лист «Операции»: над таблицей — строка быстрого ТП */
   g_pkQShown = g_pkSheet == PK_OPS;
   if (g_pkQPart) {
-    /* деталь, «Все детали», операция, участок, станок, «+ Операция» («Сохранить 010»), ▲ ▼ */
-    int gap = PKS(6), wPart = PKS(160), wAll = PKS(92), wOp = PKS(210), wArea = PKS(190), wBtn = PKS(132), wArr = PKS(30);
-    int wEq = rc.right - pad * 2 - wPart - wAll - wOp - wArea - wBtn - wArr * 2 - gap * 7;
+    /* деталь, «Все детали», операция, участок, станок, профессия, «+ Операция» («Сохранить 010»), ▲ ▼; станку
+       и профессии — что осталось, станку чуть больше */
+    int gap = PKS(6), wPart = PKS(150), wAll = PKS(92), wOp = PKS(190), wArea = PKS(160), wBtn = PKS(132), wArr = PKS(30);
+    int rest = rc.right - pad * 2 - wPart - wAll - wOp - wArea - wBtn - wArr * 2 - gap * 8;
+    int wEq = rest * 55 / 100, wCr = rest - wEq;
     if (wEq < PKS(100)) wEq = PKS(100);
-    HWND q[] = {g_pkQPart, GetDlgItem(g_pkWnd, ID_PK_QALL), g_pkQOp, g_pkQArea, g_pkQEquip, GetDlgItem(g_pkWnd, ID_PK_QADD),
-                GetDlgItem(g_pkWnd, ID_PK_QUP), GetDlgItem(g_pkWnd, ID_PK_QDOWN)};
-    int qw[] = {wPart, wAll, wOp, wArea, wEq, wBtn, wArr, wArr}, qx = pad;
-    for (int i = 0; i < 8; i++) {
-      BOOL btn = i == 1 || i >= 5;
+    if (wCr < PKS(90)) wCr = PKS(90);
+    HWND q[] = {g_pkQPart, GetDlgItem(g_pkWnd, ID_PK_QALL), g_pkQOp, g_pkQArea, g_pkQEquip, g_pkQCraft,
+                GetDlgItem(g_pkWnd, ID_PK_QADD), GetDlgItem(g_pkWnd, ID_PK_QUP), GetDlgItem(g_pkWnd, ID_PK_QDOWN)};
+    int qw[] = {wPart, wAll, wOp, wArea, wEq, wCr, wBtn, wArr, wArr}, qx = pad;
+    for (int i = 0; i < 9; i++) {
+      BOOL btn = i == 1 || i >= 6;
       if (!btn) MoveWindow(q[i], qx, ly, qw[i], PKS(320), TRUE);
       else MoveWindow(q[i], qx, ly - PKS(1), qw[i], PKS(27), TRUE);
       ShowWindow(q[i], g_pkQShown ? SW_SHOW : SW_HIDE);
@@ -2560,18 +2687,24 @@ static LRESULT CALLBACK PkProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
       free(g_szmDicts.buy);
       free(g_szmDicts.fit);
       free(g_szmDicts.afit);
+      free(g_szmDicts.craft);
+      free(g_szmDicts.craftId);
+      free(g_szmDicts.cfit);
+      free(g_szmDicts.cops);
       g_szmDicts = *d;
       free(d);
       g_pkComboCol = -1; /* список заполнить заново */
       if (g_szmDicts.err[0]) pk_status(L"Справочники из базы не прочитаны: %s — участки и станки вписывайте руками", g_szmDicts.err);
-      else pk_status(L"Из базы «Союза»: участков %d, станков %d, признаков покупки %d — выбор списком в ячейках",
-                     g_szmDicts.na, g_szmDicts.ne, g_szmDicts.nb);
+      else pk_status(L"Из базы «Союза»: участков %d, станков %d, профессий %d, признаков покупки %d — выбор списком в ячейках",
+                     g_szmDicts.na, g_szmDicts.ne, g_szmDicts.nc, g_szmDicts.nb);
       pk_buy_fill(TRUE); /* «Собственного изготовления» — как он записан в базе */
       int eqn = pk_equip_fill();
       pk_ops_settle(); /* участки теперь известны — транспортирования и номера */
-      if (eqn) pk_status(L"Из базы «Союза»: участков %d, станков %d; к операциям подобрано оборудование: %d", g_szmDicts.na,
-                         g_szmDicts.ne, eqn);
-      if (eqn || g_pkQEquip) pk_draft_save();
+      int crn = pk_craft_fill();
+      if (eqn || crn)
+        pk_status(L"Из базы «Союза»: участков %d, станков %d, профессий %d; к операциям подобрано оборудование: %d, профессия: %d",
+                  g_szmDicts.na, g_szmDicts.ne, g_szmDicts.nc, eqn, crn);
+      if (eqn || crn || g_pkQEquip) pk_draft_save();
     }
     return 0;
   }
@@ -2604,9 +2737,9 @@ static LRESULT CALLBACK PkProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
     if (id == ID_PK_QPART && (HIWORD(wParam) == CBN_EDITCHANGE || HIWORD(wParam) == CBN_SELCHANGE))
       pk_q_part_changed(HIWORD(wParam) == CBN_SELCHANGE);
     if (id == ID_PK_QOP && HIWORD(wParam) == CBN_EDITCHANGE) pk_q_filter();
-    if ((id == ID_PK_QAREA || id == ID_PK_QEQUIP) && HIWORD(wParam) == CBN_EDITCHANGE && !g_pkQBusy)
-      pk_combo_filter((HWND)lParam, id == ID_PK_QAREA ? 3 : 4, TRUE); /* участок и станок — по набору */
-    if ((id == ID_PK_QPART || id == ID_PK_QAREA || id == ID_PK_QEQUIP) && HIWORD(wParam) == CBN_DROPDOWN)
+    if ((id == ID_PK_QAREA || id == ID_PK_QEQUIP || id == ID_PK_QCRAFT) && HIWORD(wParam) == CBN_EDITCHANGE && !g_pkQBusy)
+      pk_combo_filter((HWND)lParam, id == ID_PK_QAREA ? 3 : id == ID_PK_QEQUIP ? 4 : PK_OP_CRAFT, TRUE); /* по набору */
+    if ((id == ID_PK_QPART || id == ID_PK_QAREA || id == ID_PK_QEQUIP || id == ID_PK_QCRAFT) && HIWORD(wParam) == CBN_DROPDOWN)
       pk_q_list((HWND)lParam);
     if (id == ID_PK_DEL) pk_delete_selected();
     if (id == ID_PK_PASTE) pk_paste();
@@ -2729,6 +2862,7 @@ static void pk_create(void) {
     g_pkQOp = pk_q_combo(ID_PK_QOP, L"операция: печатайте «ток», «4110»… Enter");
     g_pkQArea = pk_q_combo(ID_PK_QAREA, L"участок");
     g_pkQEquip = pk_q_combo(ID_PK_QEQUIP, L"оборудование — само по операции и участку");
+    g_pkQCraft = pk_q_combo(ID_PK_QCRAFT, L"профессия — сама по операции");
     mk_btn(g_pkWnd, L"+ Операция", ID_PK_QADD);
     mk_btn(g_pkWnd, L"Все детали", ID_PK_QALL);
     mk_btn(g_pkWnd, L"▲", ID_PK_QUP);

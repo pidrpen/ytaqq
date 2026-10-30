@@ -818,6 +818,108 @@ static DWORD WINAPI szm_dicts_thread(LPVOID arg) {
         f->score = rows[i].n3;
       }
   }
+  /* профессии (с 2026.10.30, John: «профессии нет в операциях»): справочник — объекты шаблона профессии и
+     тех шаблонов, на которые ссылается «Профессия» в списке профессий операций ТП и типовых (CraftList → Craft →
+     Craft); строка — как DisplayedName профессии в «Союзе»: «Код, Наименование» */
+  if (!d->err[0]) {
+    g_qTimeout = 40;
+    static const wchar_t kCraft[] =
+        L"SELECT TOP 900 o.InfoObjectId, ISNULL(CAST(cd.ShortText AS NVARCHAR(40)),N''), CAST(o.Name AS NVARCHAR(200)), 0, 0 "
+        L"FROM InfoObjects AS o WITH(NOLOCK) JOIN Templates AS t WITH(NOLOCK) ON t.TemplateId=o.TemplateId "
+        L"OUTER APPLY (SELECT TOP 1 c.ShortText FROM InfoObjectAttributes AS c WITH(NOLOCK) JOIN NameKeys AS nk WITH(NOLOCK) "
+        L"ON nk.NameKeyId=c.NameKeyId AND nk.Value=N'Code' WHERE c.OwnerId=o.InfoObjectId AND c.Outdated=0 "
+        L"AND ISNULL(c.CollectionElementId,0)=0) AS cd "
+        L"WHERE o.Erased=0 AND (t.NameKey IN (N'Craft',N'IsCraft') OR o.TemplateId IN (SELECT DISTINCT n.TemplateId FROM "
+        L"(SELECT TOP 3000 a.Link AS L FROM InfoObjectAttributes AS a WITH(NOLOCK) JOIN NameKeys AS nk WITH(NOLOCK) "
+        L"ON nk.NameKeyId=a.NameKeyId AND nk.Value=N'Craft' JOIN InfoObjects AS w WITH(NOLOCK) ON w.InfoObjectId=a.OwnerId "
+        L"JOIN Templates AS wt WITH(NOLOCK) ON wt.TemplateId=w.TemplateId "
+        L"AND wt.NameKey IN (N'TSOperation',N'TSOperationVariant',N'TypesOperation') "
+        L"WHERE a.Outdated=0 AND a.DataType=6 AND ISNULL(a.Link,0)<>0) AS l "
+        L"JOIN InfoObjects AS n WITH(NOLOCK) ON n.InfoObjectId=l.L)) ORDER BY o.Name";
+    int n = card_query(dbc, kCraft, rows, CARD_ROWS, err, 300);
+    if (n > 0) {
+      d->craft = (wchar_t(*)[200])calloc((size_t)n, sizeof(*d->craft));
+      d->craftId = (long *)calloc((size_t)n, sizeof(long));
+    }
+    for (int i = 0; d->craft && d->craftId && i < n; i++) {
+      const wchar_t *a = rows[i].s1, *b = rows[i].s2;
+      wchar_t *o = d->craft[d->nc];
+      if (a[0] && !wcsncmp(b, a, wcslen(a))) lstrcpynW(o, b, 200);
+      else if (a[0]) _snwprintf(o, 200, L"%s, %s", a, b), o[199] = 0;
+      else lstrcpynW(o, b, 200);
+      if (!o[0]) continue;
+      d->craftId[d->nc++] = rows[i].n1;
+    }
+  }
+  /* какую профессию ставят на операцию с этим кодом на этом участке — как станок (kFit): типовые весят 1000 */
+  if (!d->err[0] && d->nc) {
+    static const wchar_t kCraftFit[] =
+        L"SELECT TOP 900 x.A, x.V, N'', x.E, x.S FROM (SELECT g.A, g.V, g.E, g.S, "
+        L"ROW_NUMBER() OVER (PARTITION BY g.A, g.V ORDER BY g.S DESC) AS rn FROM ("
+        L"SELECT ISNULL(ar.L,0) AS A, cd.V AS V, cr.L AS E, SUM(CASE WHEN o.T=1 THEN 1000 ELSE 1 END) AS S "
+        L"FROM (SELECT TOP 30000 io.InfoObjectId AS Id, CASE WHEN t.NameKey=N'TypesOperation' THEN 1 ELSE 0 END AS T "
+        L"FROM InfoObjects AS io WITH(NOLOCK) JOIN Templates AS t WITH(NOLOCK) ON t.TemplateId=io.TemplateId "
+        L"AND t.NameKey IN (N'TSOperation',N'TypesOperation') WHERE io.Erased=0 ORDER BY T DESC, io.DateModified DESC) AS o "
+        L"CROSS APPLY (SELECT TOP 1 l.Link AS D FROM InfoObjectAttributes AS l WITH(NOLOCK) JOIN NameKeys AS nkl WITH(NOLOCK) "
+        L"ON nkl.NameKeyId=l.NameKeyId AND nkl.Value=N'Operation' WHERE l.OwnerId=o.Id AND l.Outdated=0 "
+        L"AND ISNULL(l.Link,0)<>0 AND ISNULL(l.CollectionElementId,0)=0) AS dl "
+        L"CROSS APPLY (SELECT TOP 1 COALESCE(NULLIF(LTRIM(RTRIM(CAST(c.ShortText AS NVARCHAR(40)))),N''), "
+        L"CONVERT(NVARCHAR(40), c.IntegerNumber), CONVERT(NVARCHAR(40), c.LongNumber)) AS V "
+        L"FROM InfoObjectAttributes AS c WITH(NOLOCK) JOIN NameKeys AS nkc WITH(NOLOCK) ON nkc.NameKeyId=c.NameKeyId "
+        L"AND nkc.Value=N'Code' WHERE c.OwnerId=dl.D AND c.Outdated=0 AND ISNULL(c.CollectionElementId,0)=0) AS cd "
+        L"OUTER APPLY (SELECT TOP 1 a.Link AS L FROM InfoObjectAttributes AS a WITH(NOLOCK) JOIN NameKeys AS nka WITH(NOLOCK) "
+        L"ON nka.NameKeyId=a.NameKeyId AND nka.Value=N'ActualOperation' WHERE a.OwnerId=o.Id AND a.Outdated=0 "
+        L"AND ISNULL(a.Link,0)<>0) AS ao "
+        L"OUTER APPLY (SELECT TOP 1 a.Link AS L FROM InfoObjectAttributes AS a WITH(NOLOCK) JOIN NameKeys AS nka WITH(NOLOCK) "
+        L"ON nka.NameKeyId=a.NameKeyId AND nka.Value=N'Area' WHERE a.OwnerId IN (o.Id, ISNULL(ao.L,0)) AND a.Outdated=0 "
+        L"AND a.DataType=6 AND ISNULL(a.Link,0)<>0) AS ar "
+        L"CROSS APPLY (SELECT DISTINCT e.Link AS L FROM InfoObjectAttributes AS e WITH(NOLOCK) JOIN NameKeys AS nke WITH(NOLOCK) "
+        L"ON nke.NameKeyId=e.NameKeyId AND nke.Value=N'Craft' WHERE e.OwnerId IN (o.Id, ISNULL(ao.L,0)) "
+        L"AND e.Outdated=0 AND e.DataType=6 AND ISNULL(e.Link,0)<>0) AS cr "
+        L"WHERE cd.V IS NOT NULL GROUP BY ISNULL(ar.L,0), cd.V, cr.L) AS g) AS x WHERE x.rn<=1 ORDER BY x.S DESC";
+    int n = card_query(dbc, kCraftFit, rows, CARD_ROWS, err, 300);
+    if (n > 0 && (d->cfit = (SzmFit *)calloc((size_t)n, sizeof(SzmFit))) != NULL)
+      for (int i = 0; i < n; i++) {
+        const wchar_t *v = rows[i].s1;
+        while (*v == L' ') v++;
+        if (*v < L'0' || *v > L'9') continue;
+        SzmFit *f = &d->cfit[d->ncf++];
+        f->area = rows[i].n1;
+        f->code = wcstol(v, NULL, 10);
+        f->equip = rows[i].n2;
+        f->score = rows[i].n3;
+      }
+    /* какие операции у профессии в справочнике (её список «Операции», CraftOperations → Operation) — запасной
+       выбор, когда в ТП завода такой операции ещё нет: так предлагает профессии и штатная «Добавить профессию» */
+    size_t cap = (size_t)d->nc * 14 + 2400;
+    wchar_t *q = (wchar_t *)malloc(cap * sizeof(wchar_t));
+    if (q) {
+      size_t l = (size_t)_snwprintf(
+          q, cap,
+          L"SELECT TOP 900 a.OwnerId, cd.V, N'', 0, 0 FROM InfoObjectAttributes AS a WITH(NOLOCK) JOIN NameKeys AS nk WITH(NOLOCK) "
+          L"ON nk.NameKeyId=a.NameKeyId AND nk.Value=N'Operation' "
+          L"CROSS APPLY (SELECT TOP 1 COALESCE(NULLIF(LTRIM(RTRIM(CAST(c.ShortText AS NVARCHAR(40)))),N''), "
+          L"CONVERT(NVARCHAR(40), c.IntegerNumber), CONVERT(NVARCHAR(40), c.LongNumber)) AS V "
+          L"FROM InfoObjectAttributes AS c WITH(NOLOCK) JOIN NameKeys AS nkc WITH(NOLOCK) ON nkc.NameKeyId=c.NameKeyId "
+          L"AND nkc.Value=N'Code' WHERE c.OwnerId=a.Link AND c.Outdated=0 AND ISNULL(c.CollectionElementId,0)=0) AS cd "
+          L"WHERE a.Outdated=0 AND a.DataType=6 AND ISNULL(a.Link,0)<>0 AND ISNULL(a.CollectionElementId,0)<>0 "
+          L"AND cd.V IS NOT NULL AND a.OwnerId IN (");
+      for (int i = 0; i < d->nc && l + 16 < cap; i++) l += (size_t)_snwprintf(q + l, cap - l, i ? L",%ld" : L"%ld", d->craftId[i]);
+      _snwprintf(q + l, cap - l, L")");
+      q[cap - 1] = 0;
+      n = card_query(dbc, q, rows, CARD_ROWS, err, 300);
+      free(q);
+      if (n > 0 && (d->cops = (SzmFit *)calloc((size_t)n, sizeof(SzmFit))) != NULL)
+        for (int i = 0; i < n; i++) {
+          const wchar_t *v = rows[i].s1;
+          while (*v == L' ') v++;
+          if (*v < L'0' || *v > L'9') continue;
+          SzmFit *f = &d->cops[d->nco++];
+          f->equip = rows[i].n1;
+          f->code = wcstol(v, NULL, 10);
+        }
+    }
+  }
   SQLDisconnect(dbc);
 done:
   if (dbc != SQL_NULL_HDBC) SQLFreeHandle(SQL_HANDLE_DBC, dbc);
@@ -832,6 +934,10 @@ done:
     free(d->buy);
     free(d->fit);
     free(d->afit);
+    free(d->craft);
+    free(d->craftId);
+    free(d->cfit);
+    free(d->cops);
     free(d);
   }
   return 0;

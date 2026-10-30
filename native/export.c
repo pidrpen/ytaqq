@@ -1077,9 +1077,10 @@ static const wchar_t *const kPkItemsHead[] = {L"Обозначение", L"На�
 static const int kPkItemsW[] = {26, 34, 18, 40, 10, 40, 22};
 static const wchar_t *const kPkLinksHead[] = {L"Сборка", L"Входящее", L"Кол-во", L"Позиция"};
 static const int kPkLinksW[] = {26, 26, 9, 9};
+/* «Профессия» (с 2026.10.30, John: «профессии нет в операциях») — последним столбцом: номера прежних не сдвигаются */
 static const wchar_t *const kPkOpsHead[] = {L"Обозначение", L"№ опер.", L"Операция", L"Участок",
-                                            L"Оборудование", L"Тпз, мин", L"Тшт, мин"};
-static const int kPkOpsW[] = {26, 8, 30, 20, 34, 9, 9};
+                                            L"Оборудование", L"Тпз, мин", L"Тшт, мин", L"Профессия"};
+static const int kPkOpsW[] = {26, 8, 30, 20, 34, 9, 9, 26};
 static const wchar_t *const kPkBlanksHead[] = {L"Деталь", L"Материал заготовки", L"Норма, кг", L"Размеры, мм"};
 static const int kPkBlanksW[] = {26, 44, 9, 22};
 static const XpSheetDef kPkSheets[PK_NT] = {
@@ -1132,6 +1133,13 @@ static void xp_package(const XpJob *x, XpTable *pk) {
     xp_set(w, 2, op1c[0] ? op1c : xp_cell((void *)ops, r, 5)); /* операция — с кодом 1С: по нему команда найдёт её */
     xp_set(w, 3, xp_cell((void *)ops, r, 7));
     xp_set(w, 4, xp_cell((void *)ops, r, 9));
+    { /* профессия: в выгрузке их бывает несколько через «; » — первая */
+      wchar_t cr[200];
+      lstrcpynW(cr, xp_cell((void *)ops, r, 10), 200);
+      wchar_t *sc = wcsstr(cr, L"; ");
+      if (sc) *sc = 0;
+      xp_set(w, 7, cr);
+    }
     /* нормы — в минутах; в PLM бывают в часах (единица «ч», «час») */
     const wchar_t *unit = xp_cell((void *)ops, r, 13);
     double k = (unit[0] == L'ч' || unit[0] == L'Ч') ? 60.0 : 1.0;

@@ -422,6 +422,26 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
                    !wcscmp(hd, L"ТСТ.120.000") && !wcscmp(hn, L"Узел пробный"),
                L"«Только ТП»: операции без изделий и состава, сборка — строкой «# СБОРКА» (папка ТП сборки)");
       free(pt);
+      /* с 2026.10.30: профессия — последним полем строки ТП (пакет 1.0.0.11); справочник — «Код, Наименование» */
+      pk_put(&g_pk[PK_OPS], 0, PK_OP_CRAFT, L"19149, Токарь");
+      pt = NULL;
+      pk_soyuz_text(&pt, pnote, 200, &sent, PK_SEND_TP);
+      st_check(pt && wcsstr(pt, L"ТП\tТСТ.110.004\t5\t4110\t31\t16К20, Токарно-винторезный станок\t15\t4\t19149, Токарь\r\n") != NULL,
+               L"профессия «19149, Токарь» — последним полем строки ТП");
+      free(pt);
+      pk_put(&g_pk[PK_OPS], 0, PK_OP_CRAFT, NULL);
+      {
+        wchar_t(*oc)[200] = g_szmDicts.craft;
+        int on = g_szmDicts.nc;
+        static wchar_t kc[2][200] = {L"19149, Токарь", L"18466, Слесарь механосборочных работ"};
+        g_szmDicts.craft = kc, g_szmDicts.nc = 2;
+        wchar_t c1[200], c2[200], c3[200], c4[200];
+        BOOL ok = pk_craft_dict(L"токарь", c1, 200) && pk_craft_dict(L"18466", c2, 200) && pk_craft_dict(L"слес", c3, 200) &&
+                  !pk_craft_dict(L"Фрезеровщик", c4, 200);
+        st_check(ok && !wcscmp(c1, L"19149, Токарь") && !wcscmp(c2, kc[1]) && !wcscmp(c3, kc[1]),
+                 L"профессия по вписанному: название, код, начало названия; чужой нет");
+        g_szmDicts.craft = oc, g_szmDicts.nc = on;
+      }
       /* с 2026.10.29: строки из «Союза» («Из Союза») не уходят, заготовка и чертёж — уходят */
       pk_soy_add_item(L"ТСТ.120.000", L"Узел пробный", FALSE);
       pk_soy_add_link(L"ТСТ.120.000", L"ТСТ.110.004");
