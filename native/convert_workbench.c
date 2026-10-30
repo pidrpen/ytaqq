@@ -381,7 +381,7 @@ static BOOL cvx_dispatch(const CvSelection *selection,int action) {
     if(!PostMessageW(g_cvWnd,WM_CV_LINK,action==26,(LPARAM)copy)){free(copy);return FALSE;}
     return TRUE;
   }
-  if(action==19){ /* один TIFF — в окне объединения: там порядок страниц и «Сохранить как TIFF» */
+  if(action==19){ /* один TIFF — сразу, без окна: страницы в порядке выделения (convert.c → tm_merge_quiet) */
     CvSelection *copy=(CvSelection*)malloc(sizeof(*copy));if(!copy)return FALSE;*copy=*selection;
     if(!PostMessageW(g_cvWnd,WM_CV_TIFF_MERGE,0,(LPARAM)copy)){free(copy);return FALSE;}
     return TRUE;

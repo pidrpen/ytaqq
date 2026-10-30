@@ -2646,3 +2646,37 @@ static BOOL tm_open_pack(wchar_t (*paths)[MAX_PATH], int n, const wchar_t *name)
   tm_load_paths_ex(&l, FALSE);
   return TRUE;
 }
+
+/* «Один TIFF» из кольца Shift: без окна и вопросов. Страницы — в порядке выделения,
+   файл «<первый>_объединено.tif» встаёт рядом с первым исходником и ничего не затирает.
+   Итог приходит в окно кольца (WM_TM_DONE), хода и «Отмены» у кольца нет. */
+static volatile LONG g_tmRingCancel;
+
+static void tm_ring_name(const wchar_t *first, wchar_t *out) {
+  wchar_t base[MAX_PATH];
+  lstrcpynW(base, first, MAX_PATH);
+  wchar_t *dot = wcsrchr(base, L'.');
+  if (dot && dot > wcsrchr(base, L'\\')) *dot = 0;
+  _snwprintf(out, MAX_PATH, L"%s_объединено.tif", base);
+  out[MAX_PATH - 1] = 0;
+  for (int k = 2; k < 1000 && GetFileAttributesW(out) != INVALID_FILE_ATTRIBUTES; k++) {
+    _snwprintf(out, MAX_PATH, L"%s_объединено (%d).tif", base, k);
+    out[MAX_PATH - 1] = 0;
+  }
+}
+
+static BOOL tm_merge_quiet(wchar_t (*paths)[MAX_PATH], int n, HWND notify) {
+  if (!n || !notify) return FALSE;
+  tm_common_init();
+  if (g_tmRunning || g_tmExporting || g_tmLoadPending) return FALSE; /* окно объединения занято своим */
+  TmPaths l = {0};
+  for (int i = 0; i < n; i++) tm_paths_add(&l, paths[i]);
+  TmJob *j = tm_job_paths(TJ_TIFF, &l);
+  if (!j) return FALSE;
+  tm_ring_name(paths[0], j->out);
+  j->wnd = notify;
+  j->cancel = &g_tmRingCancel;
+  InterlockedExchange(&g_tmRingCancel, 0);
+  tm_submit(j);
+  return TRUE;
+}

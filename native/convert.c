@@ -7,7 +7,7 @@
 #define TIMER_CONVERT 1739
 #define WM_CONVERT_DONE (WM_APP + 139)
 #define WM_CV_CREATE (WM_APP + 141) /* wParam — что создать на столе или в папке Проводника: 1 папка, 2 TXT, 3 Word, 4 Excel, 5 карта заказа */
-#define WM_CV_TIFF_MERGE (WM_APP + 142) /* lParam — CvSelection*: в окно «Объединение TIFF / PDF» */
+#define WM_CV_TIFF_MERGE (WM_APP + 142) /* lParam — CvSelection* (malloc): «Один TIFF» — объединить сразу, без окна */
 #define WM_CV_LINK (WM_APP + 144) /* lParam — CvSelection* (malloc), wParam — путь к папке (иначе к файлу): «Ссылка» в буфер */
 static HWND g_cvWnd; /* кольцо; дуга «Ссылки» — в нём же */
 static BOOL g_cvOle, g_cvRegistered, g_cvWord, g_cvExcel;
@@ -194,7 +194,7 @@ static BOOL cvx_can(int action, const wchar_t *path) {
   if (action==7 || action==15) return TRUE;
   if (action<4) return image>=0 || pdf; /* PDF → картинки: по странице, 300 dpi */
   if (action==18) return image==3;      /* разделить многостраничный TIFF */
-  if (action==19) return image>=0;      /* один TIFF — в окне объединения */
+  if (action==19) return image>=0;      /* один TIFF — объединяется сразу */
   if (action==8 || action==9) return image>=0;
   if (action==4) return image>=0 || word || excel;
   if (action==5) return word;
@@ -317,10 +317,24 @@ static LRESULT CALLBACK cv_proc(HWND hwnd, UINT message, WPARAM wp, LPARAM lp) {
 #ifndef CV_RING_TEST
   if(message==WM_CV_CREATE){dc_create((int)wp,g_cvOrigin,hwnd);return 0;}
   if(message==WM_CV_CREATED){dc_created((BOOL)wp,(wchar_t*)lp);return 0;}
-  if(message==WM_CV_TIFF_MERGE){ /* уже после сброса: окно с вопросом не держит Проводник */
-    CvSelection *s=(CvSelection*)lp;wchar_t name[MAX_PATH];const wchar_t *slash=wcsrchr(s->paths[0],L'\\');
-    lstrcpynW(name,slash?slash+1:s->paths[0],MAX_PATH);wchar_t *dot=wcsrchr(name,L'.');if(dot)*dot=0;
-    tm_open_pack(s->paths,s->count,name);free(s);return 0;
+  if(message==WM_CV_TIFF_MERGE){ /* уже после сброса; «Один TIFF» — сразу, без окна объединения */
+    CvSelection *s=(CvSelection*)lp;
+    if(InterlockedCompareExchange(&g_cvBusy,1,0)) show_status(L"Конвертер занят другим заданием — повторите после него.");
+    else if(tm_merge_quiet(s->paths,s->count,hwnd)) show_status(L"Объединяю в один TIFF…");
+    else { InterlockedExchange(&g_cvBusy,0); show_status(L"Объединение TIFF сейчас занято — закройте окно «Объединение TIFF / PDF» или дождитесь конца."); }
+    free(s);return 0;
+  }
+  if(message==WM_TM_DONE){ /* итог «Одного TIFF» */
+    TmResult *r=(TmResult*)lp;CvJob *job=(CvJob*)calloc(1,sizeof(*job));
+    if(job){
+      job->format=3;lstrcpynW(job->label,L"Один TIFF",80);
+      if(r->ok){
+        lstrcpynW(job->out,r->out,MAX_PATH);
+        _snwprintf(job->summary,1600,L"Объединено в один TIFF: %ls · страниц: %d. Исходники сохранены.",tm_base(r->out),r->pages);job->summary[1599]=0;
+      } else lstrcpynW(job->error,r->err[0]?r->err:L"Нет страниц для объединения.",400);
+      cv_done(job);
+    } else InterlockedExchange(&g_cvBusy,0);
+    free(r);return 0;
   }
   if(message==WM_CV_LINK){flk_send((const CvSelection*)lp,wp!=0);free((void*)lp);return 0;} /* после сброса, как и выше; wp — путь к папке */
 #endif
