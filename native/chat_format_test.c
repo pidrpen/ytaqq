@@ -56,12 +56,15 @@ int main(void) {
     L"Ответ 12.5 — не операция.";
   AcRtf r2 = {0}; ac_rtf_begin(&r2);
   ac_rtf_message(&r2, route, TRUE, FALSE); ac_rtf_add(&r2, "}"); CHECK(!r2.failed);
-  CHECK(strstr(r2.text, "\\tab ")); /* колонки норм */
+  CHECK(strstr(r2.text, "\\cpnormbeg") && strstr(r2.text, "\\trowd")); /* нормы — таблицей (с 2026.10.30) */
   Source s2 = {&r2, 0}; EDITSTREAM in2 = {(DWORD_PTR)&s2, 0, stream};
   SendMessageW(edit, EM_STREAMIN, SF_RTF, (LPARAM)&in2); CHECK(!in2.dwError);
   SendMessageW(edit, EM_GETTEXTEX, (WPARAM)&get, (LPARAM)text);
   CHECK(wcsstr(text, L"005 Заготовительная. Отрезать заготовку от прутка — заготовка — прокат")); /* текст тот же */
-  CHECK(wcsstr(text, L"010 Токарная (черновая)\tТпз 14 мин\tТшт ≥ 0,864 мин")); /* « · » и «:» — в колонки */
+  /* в таблице — те же числа, что написал расчёт: номер, название, Тпз, Тшт и пометка по ячейкам */
+  CHECK(wcsstr(text, L"Токарная (черновая)") && wcsstr(text, L"14") && wcsstr(text, L"≥ 0,864") &&
+        wcsstr(text, L"без машинного То"));
+  CHECK(wcsstr(text, L"ТШТ, МИН"));
   CHECK(wcsstr(text, L"Ответ 12.5 — не операция."));
   const wchar_t *op = wcsstr(text, L"Заготовительная"), *why = wcsstr(text, L"заготовка — прокат");
   CHECK(op && why);
