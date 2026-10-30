@@ -10,7 +10,7 @@ from PIL import Image, ImageDraw
 from pypdf import PdfReader, PdfWriter
 from pypdf.generic import DictionaryObject, NameObject, DecodedStreamObject
 
-module=Path(sys.argv[1]).resolve() if len(sys.argv)>1 else Path(__file__).with_name('agent')/'convert_files.py'
+module=Path(sys.argv[1]).resolve() if len(sys.argv)>1 else Path(__file__).with_name('convert_files.py')
 spec=importlib.util.spec_from_file_location('convert_files',module)
 c=importlib.util.module_from_spec(spec);spec.loader.exec_module(c)
 
@@ -200,29 +200,27 @@ with tempfile.TemporaryDirectory(prefix='cursorpad-batch-test-') as directory:
     finally:c.stamp=previous_stamp
     assert set(out.iterdir())==before
     # A same-byte replacement immediately after publication is NOT ours.
-    previous_rename=c.os.rename;previous_link=c.os.link;substitutes=[]
+    previous_publish=c.publish;substitutes=[]
     def substitute(target):
         target=Path(target);value=target.read_bytes()
         saved=root/('retained-original-'+str(len(substitutes))+target.suffix)
-        previous_rename(target,saved);target.write_bytes(value);substitutes.append(target)
-    def racing_rename(source,target):
-        previous_rename(source,target)
+        target.rename(saved);target.write_bytes(value);substitutes.append(target)
+    def racing_publish(source,target):
+        info=previous_publish(source,target)
         if Path(target).parent==out:substitute(target)
-    def racing_link(source,target):
-        previous_link(source,target)
-        if Path(target).parent==out:substitute(target)
-    c.os.rename=racing_rename;c.os.link=racing_link
+        return info
+    c.publish=racing_publish
     try:raced=run('convert',[a],format='jpg')
-    finally:c.os.rename=previous_rename;c.os.link=previous_link
+    finally:c.publish=previous_publish
     assert len(substitutes)==1
     undo_race=run('undo',entry_id=raced['id']);assert substitutes[0].exists()
     assert entry(raced)['state']=='partial'
     # Rollback after a history failure also preserves a same-byte replacement.
-    c.os.rename=racing_rename;c.os.link=racing_link;c.save_history=fail
+    c.publish=racing_publish;c.save_history=fail
     try:run('convert',[a],format='jpg')
     except OSError:pass
     else:raise AssertionError('History failure hidden during replacement')
-    finally:c.os.rename=previous_rename;c.os.link=previous_link;c.save_history=previous
+    finally:c.publish=previous_publish;c.save_history=previous
     assert len(substitutes)==2 and substitutes[-1].exists()
     # The documented batch limit is exercised using real files.
     capfiles=[]
@@ -235,7 +233,43 @@ with tempfile.TemporaryDirectory(prefix='cursorpad-batch-test-') as directory:
     except ValueError:pass
     else:raise AssertionError('129 files accepted')
     assert set(out.iterdir())==before
+    # Network archive: the folder refuses writing. Nothing is made there, the copy goes to Downloads.
+    locked=root/'archive';locked.mkdir();scan2=locked/'Лист.png';scan2.write_bytes(a.read_bytes())
+    home=root/'home';(home/'Downloads').mkdir(parents=True);previous_env=c.os.environ.get('USERPROFILE');c.os.environ['USERPROFILE']=str(home)
+    def refusing(source,target):
+        if Path(target).parent==locked:raise PermissionError(13,'Отказано в доступе',str(target))
+        return previous_publish(source,target)
+    c.publish=refusing
+    try:
+        moved=c.execute({'op':'convert','files':[str(scan2)],'history':str(history),'format':'jpg'})
+        assert Path(moved['first_output'])==home/'Downloads'/'Лист.jpg' and 'Downloads' in moved['summary'] and 'нет прав' in moved['summary']
+        try:c.execute({'op':'convert','files':[str(scan2)],'history':str(history),'format':'jpg','replace':True})
+        except ValueError as error:assert 'Нет прав' in str(error) and 'не тронут' in str(error)
+        else:raise AssertionError('Replace into a read-only folder')
+    finally:
+        c.publish=previous_publish
+        if previous_env is None:c.os.environ.pop('USERPROFILE',None)
+        else:c.os.environ['USERPROFILE']=previous_env
+    assert sorted(x.name for x in locked.iterdir())==['Лист.png']
+    # Replace: the result takes the place of the original, no copy is left.
+    swap=root/'swap';swap.mkdir();one=swap/'Деталь.png';Image.new('RGB',(40,30),'red').save(one)
+    two=swap/'Лист.pdf';writer=PdfWriter();writer.add_blank_page(width=100,height=100);writer.write(two)
+    replaced=c.execute({'op':'to_pdf','files':[str(one)],'history':str(history),'replace':True})
+    assert sorted(x.name for x in swap.iterdir())==['Деталь.pdf','Лист.pdf'] and 'заменены: 1' in replaced['summary']
+    assert len(PdfReader(swap/'Деталь.pdf').pages)==1
+    try:c.execute({'op':'undo','entry_id':replaced['id'],'history':str(history)})
+    except ValueError as error:assert 'подмена' in str(error)
+    else:raise AssertionError('Undo of a replace')
+    three=swap/'Лист2.png';Image.new('RGB',(40,30),'blue').save(three)
+    joined=c.execute({'op':'packet','files':[str(two),str(three)],'history':str(history),'replace':True})
+    assert sorted(x.name for x in swap.iterdir())==['Деталь.pdf','Пакет чертежей.pdf'] and 'заменены: 2' in joined['summary']
+    # A failed conversion in replace mode keeps the original.
+    broken=swap/'Битый.png';broken.write_bytes(b'not image')
+    try:c.execute({'op':'convert','files':[str(broken)],'history':str(history),'format':'jpg','replace':True})
+    except Exception:pass
+    else:raise AssertionError('Broken image accepted')
+    assert broken.exists() and not (swap/'Битый.jpg').exists()
     for path,digest in source_hash.items():assert hashlib.sha256(path.read_bytes()).hexdigest()==digest
     assert not list(out.glob('.CursorPad-*'))
     listing=run('history');assert listing['history_ids'] and listing['history_labels']
-print('PASS: batches, real image formats/size/byte budget, scan dpi/1-bit/G4/CCITT PDF, CMYK, 16-bit, A0 size, TIFF split, PDF pages to 1-bit/colour images, multipage TIFF, PDF ordering/extract/split/rotate/packet, ZIP duplicates, persisted history, identity/hash undo, cancellation, metadata failure rollback, publication replacement guard, atomic failure rollback, unchanged sources')
+print('PASS: batches, real image formats/size/byte budget, scan dpi/1-bit/G4/CCITT PDF, CMYK, 16-bit, A0 size, TIFF split, PDF pages to 1-bit/colour images, multipage TIFF, PDF ordering/extract/split/rotate/packet, ZIP duplicates, persisted history, identity/hash undo, cancellation, metadata failure rollback, publication replacement guard, atomic failure rollback, unchanged sources, read-only folder fallback, replace')

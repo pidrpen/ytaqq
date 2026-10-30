@@ -28,13 +28,14 @@ enum { CV_T_IMAGE, CV_T_PDF, CV_T_TEXT, CV_T_ZIP, CV_T_MORE };
 typedef struct { wchar_t icon; const wchar_t *label, *title, *note; int tint; const wchar_t *shell; BOOL folder; } CvRingItem;
 /* по номерам действий: 0–3 картинки, 4 PDF, 5 TXT, 6 CSV, 7 ZIP, 8–14 окно параметров, 15 «Ещё»,
    24 — «Ссылка», 25 и 26 — сегменты её дуги вокруг кольца: «Включая файл» и «До файла» (file_link_ui.c),
-   27 — пятая плитка кольца «Создать»: бланк «Карта заказа» */
-static const CvRingItem kCvRing[28] = {
-    {0xEB9F, L"PNG", L"В PNG", L"копия рядом с исходником", CV_T_IMAGE},
-    {0xEB9F, L"JPG", L"В JPG", L"копия рядом с исходником", CV_T_IMAGE},
-    {0xEB9F, L"BMP", L"В BMP", L"копия рядом с исходником", CV_T_IMAGE},
-    {0xEB9F, L"TIFF", L"В TIFF", L"копия рядом с исходником", CV_T_IMAGE},
-    {0xEA90, L"PDF", L"В PDF", L"копия рядом с исходником", CV_T_PDF},
+   27 — пятая плитка кольца «Создать»: бланк «Карта заказа»,
+   28 и 29 — та же дуга у преобразований: «Копия рядом» и «Подмена» (исходник удаляется) */
+static const CvRingItem kCvRing[30] = {
+    {0xEB9F, L"PNG", L"В PNG", L"копия рядом; задержите — подмена", CV_T_IMAGE},
+    {0xEB9F, L"JPG", L"В JPG", L"копия рядом; задержите — подмена", CV_T_IMAGE},
+    {0xEB9F, L"BMP", L"В BMP", L"копия рядом; задержите — подмена", CV_T_IMAGE},
+    {0xEB9F, L"TIFF", L"В TIFF", L"копия рядом; задержите — подмена", CV_T_IMAGE},
+    {0xEA90, L"PDF", L"В PDF", L"копия рядом; задержите — подмена", CV_T_PDF},
     {0xE8A5, L"TXT", L"Word → TXT", L"текст рядом с исходником", CV_T_TEXT},
     {0xE80A, L"CSV", L"Excel → CSV", L"первый лист, рядом", CV_T_TEXT},
     {0xE7B8, L"ZIP", L"Собрать ZIP", L"архив рядом с исходником", CV_T_ZIP},
@@ -57,7 +58,9 @@ static const CvRingItem kCvRing[28] = {
     {0xE71B, L"Ссылка", L"Ссылка", L"задержите: путь к файлу или к папке", CV_T_ZIP},
     {0xE8A5, L"Включая файл", L"Включая файл", L"путь с именем файла — в буфер", CV_T_ZIP},
     {0xE8B7, L"До файла", L"До файла", L"папка, где лежит файл, — в буфер", CV_T_ZIP},
-    {0xE8A5, L"Карта заказа", L"Карта заказа", L"бланк ТИ.21-0025 — появится здесь", CV_T_TEXT, L"a.docx", FALSE}};
+    {0xE8A5, L"Карта заказа", L"Карта заказа", L"бланк ТИ.21-0025 — появится здесь", CV_T_TEXT, L"a.docx", FALSE},
+    {0xE8C8, L"Копия рядом", L"Копия рядом", L"исходник остаётся", CV_T_ZIP},
+    {0xE8AB, L"Подмена", L"Подмена", L"старый файл удаляется", CV_T_ZIP}};
 static const COLORREF kCvTint[] = {RGB(8, 145, 178), RGB(220, 38, 38), RGB(22, 163, 74), RGB(217, 119, 6),
                                    RGB(100, 116, 139)};
 
@@ -93,9 +96,15 @@ static DWORD g_cvShownAt;   /* начало появления */
 static float g_cvLevel[16]; /* подсветка плиток 0…1, плавно к цели */
 static BOOL g_cvInHub;      /* курсор в центре — отпускание ничего не делает */
 static POINT g_cvAt;        /* левый верхний угол окна на экране */
-/* дуга «Ссылки» вокруг кольца: 0 — «Включая файл» (выше), 1 — «До файла» (ниже) */
+/* дуга вокруг кольца у плитки g_cvSubTile: у «Ссылки» 0 — «Включая файл» (выше), 1 — «До файла» (ниже);
+   у преобразований 0 — «Копия рядом», 1 — «Подмена» */
 static BOOL g_cvSubOn;
-static int g_cvSubTile = -1, g_cvSubHover = -1; /* g_cvSubTile — номер плитки «Ссылка» в кольце */
+static int g_cvSubTile = -1, g_cvSubHover = -1; /* g_cvSubTile — плитка, у которой открыта дуга (по умолчанию «Ссылка») */
+/* пункт kCvRing сегмента k открытой дуги */
+static int cv_sub_item(int k) {
+  BOOL link = g_cvSubTile < 0 || g_cvSubTile >= g_cvCount || g_cvFormats[g_cvSubTile] == 24;
+  return (link ? 25 : 28) + k;
+}
 static float g_cvSubLevel[2];
 static DWORD g_cvSubShownAt;
 static HBITMAP g_cvBmp, g_cvTextBmp;
@@ -1027,7 +1036,7 @@ static void cv_render(BYTE *pix, int size, HDC dc, DWORD now) {
       float rm = (r0 + r1 + 5.0f * g.s * lk) / 2, cx = g.c + cosf(mid) * rm, cy = g.c + sinf(mid) * rm;
       /* читается вдоль дуги, верх букв наружу; внизу — наоборот, чтобы не вверх ногами */
       float deg = mid * 57.29578f + (sinf(mid) > 0.2f ? -90.0f : 90.0f);
-      cv_text_rot(pix, size, dc, CV_F_LABEL, kCvRing[25 + k].label, cx, cy, deg, cv_mix(pal.ink, pal.on, lk), an.arc);
+      cv_text_rot(pix, size, dc, CV_F_LABEL, kCvRing[cv_sub_item(k)].label, cx, cy, deg, cv_mix(pal.ink, pal.on, lk), an.arc);
     }
   }
   /* центр */
@@ -1041,11 +1050,18 @@ static void cv_render(BYTE *pix, int size, HDC dc, DWORD now) {
                     g_cvPendingData ? L"держите Shift" : L"не отпускайте мышь и Shift", ink, muted);
   } else if (g_cvCreate)
     cv_hub_create(pix, size, dc, g, ink, muted);
-  else if (g_cvHover >= 0 || g_cvSubOn) { /* мышь на дуге «Ссылки» — в центре кольца её пояснение */
-    int action = g_cvHover >= 0 ? g_cvFormats[g_cvHover] : g_cvSubHover >= 0 ? 25 + g_cvSubHover : 24;
+  else if (g_cvHover >= 0 || g_cvSubOn) { /* мышь на дуге — в центре кольца её пояснение */
+    int tile = g_cvSubTile >= 0 && g_cvSubTile < g_cvCount ? g_cvFormats[g_cvSubTile] : 24;
+    int action = g_cvHover >= 0 ? g_cvFormats[g_cvHover] : g_cvSubHover >= 0 && tile == 24 ? 25 + g_cvSubHover : tile;
     const CvRingItem *it = &kCvRing[action];
     BOOL pages = action < 4 && !_wcsicmp(cv_extension(g_cvPath), L"pdf"); /* PDF → картинки */
-    cv_hub_say(pix, size, dc, g, it->icon, kCvTint[it->tint], it->title, pages ? L"каждая страница, 300 dpi" : it->note, ink, muted);
+    const wchar_t *title = it->title, *note = pages ? L"каждая страница, 300 dpi" : it->note;
+    wchar_t both[80];
+    if (g_cvHover < 0 && g_cvSubHover >= 0 && tile != 24) { /* «Копия рядом» / «Подмена» у преобразования */
+      swprintf(both, 80, L"%ls · %ls", it->title, g_cvSubHover ? L"подмена" : L"копия");
+      title = both, note = kCvRing[28 + g_cvSubHover].note;
+    }
+    cv_hub_say(pix, size, dc, g, it->icon, kCvTint[it->tint], title, note, ink, muted);
   } else
     cv_hub_file(pix, size, dc, g, ink, muted);
 }

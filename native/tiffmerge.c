@@ -596,9 +596,14 @@ static int tm_fseek(void *ctx, uint64_t pos) {
    а сохранить поверх одного из исходников можно без вреда. */
 static BOOL tm_write_doc(IWICImagingFactory *f, const TmPage *pages, int n, BOOL pdf, const wchar_t *out,
                          TmResult *r) {
-  wchar_t tmp[MAX_PATH + 8];
-  _snwprintf(tmp, MAX_PATH + 8, L"%s.part", out);
-  tmp[MAX_PATH + 7] = 0;
+  /* черновик — во временной папке этого ПК, не рядом с результатом: в сетевом архиве
+     чертежей часто можно добавить файл, но нельзя создать и удалить лишний */
+  wchar_t tmp[MAX_PATH + 8], dir[MAX_PATH];
+  DWORD n0 = GetTempPathW(MAX_PATH, dir);
+  if (!n0 || n0 >= MAX_PATH || !GetTempFileNameW(dir, L"cpm", 0, tmp)) {
+    _snwprintf(tmp, MAX_PATH + 8, L"%s.part", out);
+    tmp[MAX_PATH + 7] = 0;
+  }
   HANDLE h = CreateFileW(tmp, GENERIC_READ | GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
   if (h == INVALID_HANDLE_VALUE) {
     wchar_t why[120];
@@ -664,7 +669,7 @@ static BOOL tm_write_doc(IWICImagingFactory *f, const TmPage *pages, int n, BOOL
   }
   r->bytes = o.pos;
   CloseHandle(h);
-  if (ok && !MoveFileExW(tmp, out, MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED)) {
+  if (ok && !MoveFileExW(tmp, out, MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED | MOVEFILE_WRITE_THROUGH)) {
     ok = FALSE;
     wchar_t why[120];
     tm_why(HRESULT_FROM_WIN32(GetLastError()), why, 120);

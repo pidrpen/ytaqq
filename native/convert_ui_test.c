@@ -107,6 +107,13 @@ static int preview(const wchar_t *dir, int dpi) {
     g_cvSubOn = TRUE; g_cvSubShownAt = 0; g_cvSubHover = 0; g_cvSubLevel[0] = 1; g_cvSubLevel[1] = 0; preview_shot(dir, L"7c-link-file", t);
     g_cvSubHover = 1; g_cvSubLevel[0] = 0; g_cvSubLevel[1] = 1; preview_shot(dir, L"7d-link-folder", t);
     g_cvSubOn = FALSE; g_cvSubHover = -1; memset(g_cvSubLevel, 0, sizeof(g_cvSubLevel));
+    /* та же дуга у преобразования: «Копия рядом» и «Подмена» у плитки PDF */
+    preview_select(image, 1); g_cvHover = -1; memset(g_cvLevel, 0, sizeof(g_cvLevel));
+    for (int i = 0; i < g_cvCount; i++) if (g_cvFormats[i] == 4) g_cvSubTile = i;
+    g_cvLevel[g_cvSubTile] = 1; g_cvSubOn = TRUE; g_cvSubShownAt = 0;
+    g_cvSubHover = 0; g_cvSubLevel[0] = 1; g_cvSubLevel[1] = 0; preview_shot(dir, L"7e-convert-copy", t);
+    g_cvSubHover = 1; g_cvSubLevel[0] = 0; g_cvSubLevel[1] = 1; preview_shot(dir, L"7f-convert-replace", t);
+    g_cvSubOn = FALSE; g_cvSubHover = -1; memset(g_cvSubLevel, 0, sizeof(g_cvSubLevel)); memset(g_cvLevel, 0, sizeof(g_cvLevel));
     g_cvCreate = TRUE; g_cvCount = 5; for (int i = 0; i < 4; i++) g_cvFormats[i] = 20 + i;
     g_cvFormats[4] = 27;
     g_cvHover = -1; memset(g_cvLevel, 0, sizeof(g_cvLevel)); preview_shot(dir, L"11-desktop", t);
@@ -230,7 +237,19 @@ int wmain(int argc, wchar_t **argv) {
   effect=DROPEFFECT_COPY|DROPEFFECT_MOVE; cv_over(&g_cvDrop.iface,MK_SHIFT,low,&effect);
   effect=DROPEFFECT_COPY|DROPEFFECT_MOVE; cv_drop(&g_cvDrop.iface,&data.iface,MK_SHIFT,low,&effect);
   if (g_cvTestLink!=26 || effect!=DROPEFFECT_COPY || IsWindowVisible(g_cvWnd)) return 29;
+  /* у преобразования та же дуга: нижний сегмент — «Подмена» (действие | CV_REPLACE) */
+  cv_show(at,FALSE); g_cvDismissed=FALSE;
+  effect=DROPEFFECT_COPY|DROPEFFECT_MOVE; cv_enter(&g_cvDrop.iface,&data.iface,MK_SHIFT,mid,&effect);
+  int conv=-1; for (int i=0;i<g_cvCount;i++) if (g_cvFormats[i]<7 && conv<0) conv=i;
+  if (conv<0) return 32;
+  float ca=-1.5707963f+conv*6.2831853f/g_cvCount; POINTL ctile={mid.x+(LONG)(cosf(ca)*lr),mid.y+(LONG)(sinf(ca)*lr)};
+  effect=DROPEFFECT_COPY|DROPEFFECT_MOVE; cv_over(&g_cvDrop.iface,MK_SHIFT,ctile,&effect);
+  g_cvLinkSince=(GetTickCount()-300)|1; cv_link_dwell(); if (!g_cvSubOn || g_cvSubTile!=conv) return 33;
+  lowAt=cv_sub_center(1); low.x=lowAt.x; low.y=lowAt.y;
+  effect=DROPEFFECT_COPY|DROPEFFECT_MOVE; cv_over(&g_cvDrop.iface,MK_SHIFT,low,&effect);
+  effect=DROPEFFECT_COPY|DROPEFFECT_MOVE; cv_drop(&g_cvDrop.iface,&data.iface,MK_SHIFT,low,&effect);
+  if (g_cvTestReplace!=(g_cvFormats[conv]|CV_REPLACE) || effect!=DROPEFFECT_COPY) return 34;
   cv_shutdown(); DestroyWindow(g_hwnd);
-  puts(ok ? "PASS: OLE registration, delayed CF_HDROP retry without re-click, immediate paint, center cancellation, Shift, multiple-file selection, folder-only selection, Shift-click range kept, desktop create ring, COPY effect, threaded conversion, link arc around the ring" : "FAIL: conversion");
+  puts(ok ? "PASS: OLE registration, delayed CF_HDROP retry without re-click, immediate paint, center cancellation, Shift, multiple-file selection, folder-only selection, Shift-click range kept, desktop create ring, COPY effect, threaded conversion, link arc around the ring, copy/replace arc on conversions" : "FAIL: conversion");
   return ok ? 0 : 9;
 }
