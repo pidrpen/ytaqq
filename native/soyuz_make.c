@@ -772,6 +772,44 @@ static DWORD WINAPI szm_dicts_thread(LPVOID arg) {
         f->score = rows[i].n3;
       }
   }
+  /* участок операции по коду — и без станка (контроль, слесарная, термообработка): типовые операции
+     «Союза» весят 1000, операции ТП завода — по 1; по коду — самый весомый участок (с 30.10) */
+  if (!d->err[0] && d->na) {
+    g_qTimeout = 40;
+    static const wchar_t kAreaFit[] =
+        L"SELECT TOP 900 x.A, x.V, N'', 0, x.S FROM (SELECT g.A, g.V, g.S, "
+        L"ROW_NUMBER() OVER (PARTITION BY g.V ORDER BY g.S DESC) AS rn FROM ("
+        L"SELECT ar.L AS A, cd.V AS V, SUM(CASE WHEN o.T=1 THEN 1000 ELSE 1 END) AS S "
+        L"FROM (SELECT TOP 30000 io.InfoObjectId AS Id, CASE WHEN t.NameKey=N'TypesOperation' THEN 1 ELSE 0 END AS T "
+        L"FROM InfoObjects AS io WITH(NOLOCK) JOIN Templates AS t WITH(NOLOCK) ON t.TemplateId=io.TemplateId "
+        L"AND t.NameKey IN (N'TSOperation',N'TypesOperation') WHERE io.Erased=0 ORDER BY T DESC, io.DateModified DESC) AS o "
+        L"CROSS APPLY (SELECT TOP 1 l.Link AS D FROM InfoObjectAttributes AS l WITH(NOLOCK) JOIN NameKeys AS nkl WITH(NOLOCK) "
+        L"ON nkl.NameKeyId=l.NameKeyId AND nkl.Value=N'Operation' WHERE l.OwnerId=o.Id AND l.Outdated=0 "
+        L"AND ISNULL(l.Link,0)<>0 AND ISNULL(l.CollectionElementId,0)=0) AS dl "
+        L"CROSS APPLY (SELECT TOP 1 COALESCE(NULLIF(LTRIM(RTRIM(CAST(c.ShortText AS NVARCHAR(40)))),N''), "
+        L"CONVERT(NVARCHAR(40), c.IntegerNumber), CONVERT(NVARCHAR(40), c.LongNumber)) AS V "
+        L"FROM InfoObjectAttributes AS c WITH(NOLOCK) JOIN NameKeys AS nkc WITH(NOLOCK) ON nkc.NameKeyId=c.NameKeyId "
+        L"AND nkc.Value=N'Code' WHERE c.OwnerId=dl.D AND c.Outdated=0 AND ISNULL(c.CollectionElementId,0)=0) AS cd "
+        L"OUTER APPLY (SELECT TOP 1 a.Link AS L FROM InfoObjectAttributes AS a WITH(NOLOCK) JOIN NameKeys AS nka WITH(NOLOCK) "
+        L"ON nka.NameKeyId=a.NameKeyId AND nka.Value=N'ActualOperation' WHERE a.OwnerId=o.Id AND a.Outdated=0 "
+        L"AND ISNULL(a.Link,0)<>0) AS ao "
+        L"CROSS APPLY (SELECT TOP 1 a.Link AS L FROM InfoObjectAttributes AS a WITH(NOLOCK) JOIN NameKeys AS nka WITH(NOLOCK) "
+        L"ON nka.NameKeyId=a.NameKeyId AND nka.Value=N'Area' WHERE a.OwnerId IN (o.Id, ISNULL(ao.L,0)) AND a.Outdated=0 "
+        L"AND a.DataType=6 AND ISNULL(a.Link,0)<>0) AS ar "
+        L"WHERE cd.V IS NOT NULL GROUP BY ar.L, cd.V) AS g) AS x WHERE x.rn<=1 ORDER BY x.S DESC";
+    int n = card_query(dbc, kAreaFit, rows, CARD_ROWS, err, 300);
+    if (n > 0 && (d->afit = (SzmFit *)calloc((size_t)n, sizeof(SzmFit))) != NULL)
+      for (int i = 0; i < n; i++) {
+        const wchar_t *v = rows[i].s1;
+        while (*v == L' ') v++;
+        if (*v < L'0' || *v > L'9') continue;
+        SzmFit *f = &d->afit[d->naf++];
+        f->area = rows[i].n1;
+        f->code = wcstol(v, NULL, 10);
+        f->equip = 0;
+        f->score = rows[i].n3;
+      }
+  }
   SQLDisconnect(dbc);
 done:
   if (dbc != SQL_NULL_HDBC) SQLFreeHandle(SQL_HANDLE_DBC, dbc);
@@ -785,6 +823,7 @@ done:
     free(d->areaCode);
     free(d->buy);
     free(d->fit);
+    free(d->afit);
     free(d);
   }
   return 0;
