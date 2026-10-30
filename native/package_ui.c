@@ -547,6 +547,37 @@ static int pk_equip_for(const wchar_t *op, const wchar_t *area, wchar_t *out, in
 /* участок и станок пустой операции — из таблицы приоритетов технолога (soyuz_prio.c), она важнее
    подбора по базе; код участка из таблицы — как в «Союзе», если справочник уже прочитан.
    1 — что-то подставлено */
+/* Участок справочника «Союза» по вписанному (с 30.10, правило пользователя: «12» — номер в начале названия
+   «12 Инструментальный участок»): название целиком → код → «<номер> » в начале названия («12» ≠ «120 …») →
+   номер отдельным словом. В out — название как в справочнике. FALSE — нет (или справочник не прочитан) */
+static BOOL pk_area_dict(const wchar_t *typed, wchar_t *out, int cap) {
+  out[0] = 0;
+  if (!typed || !g_szmDicts.area) return FALSE;
+  while (*typed == L' ') typed++;
+  wchar_t w[200];
+  lstrcpynW(w, typed, 200);
+  size_t l = wcslen(w);
+  while (l && w[l - 1] == L' ') w[--l] = 0;
+  if (!l) return FALSE;
+  int hit = -1;
+  for (int i = 0; i < g_szmDicts.na && hit < 0; i++)
+    if (!_wcsicmp(g_szmDicts.area[i], w)) hit = i;
+  for (int i = 0; i < g_szmDicts.na && hit < 0 && g_szmDicts.areaCode; i++)
+    if (g_szmDicts.areaCode[i][0] && !_wcsicmp(g_szmDicts.areaCode[i], w)) hit = i;
+  for (int i = 0; i < g_szmDicts.na && hit < 0; i++)
+    if (!_wcsnicmp(g_szmDicts.area[i], w, l) && g_szmDicts.area[i][l] == L' ') hit = i;
+  BOOL digits = TRUE;
+  for (size_t k = 0; k < l; k++) digits = digits && w[k] >= L'0' && w[k] <= L'9';
+  for (int i = 0; i < g_szmDicts.na && hit < 0 && digits; i++) {
+    const wchar_t *a = g_szmDicts.area[i];
+    for (const wchar_t *q = a; (q = wcsstr(q, w)) != NULL && hit < 0; q += l)
+      if ((q == a || q[-1] == L' ') && (q[l] == L' ' || !q[l])) hit = i;
+  }
+  if (hit < 0) return FALSE;
+  lstrcpynW(out, g_szmDicts.area[hit], cap);
+  return TRUE;
+}
+
 static int pk_prio_row(XpTable *t, int r) {
   const SzPrio *p = szp_find_eq(xp_cell(t, r, 2), xp_cell(t, r, 4)); /* станок — для группы ЧПУ */
   int k = szp_pick(p, xp_cell(t, r, 3));
@@ -554,13 +585,8 @@ static int pk_prio_row(XpTable *t, int r) {
   int set = 0;
   if (!xp_cell(t, r, 3)[0] && p->area[k][0]) {
     const wchar_t *a = p->area[k];
-    wchar_t c[16];
-    szp_area_code(a, c, 16);
-    for (int i = 0; c[0] && g_szmDicts.areaCode && i < g_szmDicts.na; i++)
-      if (!_wcsicmp(g_szmDicts.areaCode[i], c)) {
-        a = g_szmDicts.area[i];
-        break;
-      }
+    wchar_t full[200];
+    if (pk_area_dict(a, full, 200)) a = full; /* «12» → «12 Инструментальный участок», как в справочнике */
     pk_put(t, r, 3, a);
     set = 1;
   }
@@ -1836,10 +1862,15 @@ static int pk_transport_fill(void) {
   return added;
 }
 
+static int g_pkSendWarn;  /* предупреждения «Проверить», о которых надо сказать до «В Союз…» (с 30.10) */
+static BOOL g_pkNoBox;     /* стенд: окна сообщений не показывать (они бы ждали человека) */
+static wchar_t *g_pkLastCheck; /* текст последнего «Проверить» — стенду и статусу */
+
 static BOOL pk_check(BOOL quiet) {
   ShareBuf b;
   memset(&b, 0, sizeof(b));
   int errs = 0, fixes = 0;
+  g_pkSendWarn = 0;
   XpTable *it = &g_pk[PK_ITEMS], *ln = &g_pk[PK_LINKS], *op = &g_pk[PK_OPS], *bl = &g_pk[PK_BLANKS];
   if (!it->n && !op->n && !bl->n) sb_add(&b, L"• Пакет пуст\n"), errs++;
   for (int r = 0; r < it->n; r++) {
@@ -1959,6 +1990,41 @@ static BOOL pk_check(BOOL quiet) {
   }
   int nmf = pk_norms_fill(TRUE);
   if (nmf) sb_add(&b, L"• Нормы Тпз/Тшт по таблицам ОМН посчитаны у %d операций (Тшт — только где есть машинное время)\n", nmf);
+  if (g_szmDicts.na) { /* участка нет в справочнике «Союза» (группа по умолчанию с заводским номером, своя цифра) — до отправки */
+    wchar_t bad[600] = L"";
+    int nb = 0;
+    for (int r = 0; r < op->n; r++) {
+      const wchar_t *ar = xp_cell(op, r, 3);
+      wchar_t full[200];
+      if (!ar[0] || pk_row_from_soyuz(PK_OPS, r) || pk_area_dict(ar, full, 200)) continue;
+      BOOL seen = FALSE;
+      wchar_t needle[220];
+      _snwprintf(needle, 220, L"«%s»", ar);
+      needle[219] = 0;
+      seen = wcsstr(bad, needle) != NULL;
+      nb++;
+      size_t l = wcslen(bad);
+      if (!seen && l < 500) _snwprintf(bad + l, 600 - l, L"%s%s", l ? L", " : L"", needle);
+    }
+    bad[599] = 0;
+    if (nb) {
+      sb_add(&b, L"• Участка %s нет в справочнике «Союза» (операций: %d) — в ТП он не попадёт. Впишите свой участок в "
+                 L"«Приоритетах операций» (Ещё ▾: группы ЗАГОТОВКА, МЕХОБРАБОТКА… — номер в начале названия, как «31 Механический "
+                 L"участок 31») или выберите из списка в ячейке\n",
+             bad, nb);
+      g_pkSendWarn++;
+    }
+  }
+  if (g_szmDictsAsked && !g_szmDicts.err[0] && g_szmDicts.na && !g_szmDicts.nb) { /* признак покупки — в базе списка нет */
+    int withBuy = 0;
+    for (int r = 0; r < it->n; r++) withBuy += xp_cell(it, r, 6)[0] != 0;
+    if (withBuy) {
+      sb_add(&b, L"• В этой базе «Признак покупки» не список — функция «Союза» его не поставит (изделий с признаком: %d), "
+                 L"остальное создастся\n",
+             withBuy);
+      g_pkSendWarn++;
+    }
+  }
   { /* участок по предыдущей операции (или вписан руками) и операции по станку без станка — проверить (с 30.10) */
     wchar_t prevList[600] = L"", noEq[600] = L"";
     int np2 = 0, ne2 = 0;
@@ -1986,7 +2052,9 @@ static BOOL pk_check(BOOL quiet) {
       if (xp_cell(op, r, 2)[0] && !xp_cell(op, r, 3)[0] && !pk_is_transport(xp_cell(op, r, 2))) noArea++;
     if (noArea) sb_add(&b, L"• Операций без участка: %d — проверить (заготовке нужна своя строка в приоритетах)\n", noArea);
   }
-  if (b.w && b.w[0] && !quiet) {
+  free(g_pkLastCheck);
+  g_pkLastCheck = b.w && b.w[0] ? _wcsdup(b.w) : NULL;
+  if (b.w && b.w[0] && !quiet && !g_pkNoBox) {
     wchar_t *msg = b.w;
     if (wcslen(msg) > 3000) msg[3000] = 0, wcscat(msg, L"\n…");
     MessageBoxW(g_pkWnd, msg, errs ? L"ЭСИ и ТП: есть ошибки" : L"ЭСИ и ТП: замечания", errs ? MB_ICONWARNING : MB_ICONINFORMATION);
@@ -2153,7 +2221,8 @@ static int pk_soyuz_text(wchar_t **out, wchar_t *note, int ncap, PkSent *st) {
 
 static void pk_to_soyuz(void) {
   if (g_pkEditRow >= 0) pk_edit_end(TRUE);
-  pk_check(TRUE); /* номера «005», названия операций как в 1С — отсюда коды; виды и размеры — как в «Союзе» */
+  BOOL okc = pk_check(TRUE); /* номера «005», названия операций как в 1С — отсюда коды; виды и размеры — как в «Союзе» */
+  if (!okc || g_pkSendWarn) pk_check(FALSE); /* до отправки — на экран: участка нет в справочнике, признак покупки… */
   wchar_t *text = NULL, note[200];
   PkSent st;
   pk_soyuz_text(&text, note, 200, &st);

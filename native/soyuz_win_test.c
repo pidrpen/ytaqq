@@ -235,6 +235,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
     return st_live(argc > 2 ? argv[2] : NULL);
   }
   g_stDir = argv[1];
+  g_pkNoBox = TRUE; /* окна «Проверить» ждали бы человека */
   CreateDirectoryW(g_stDir, NULL);
   HDESK desk = CreateDesktopW(L"CursorPadSoyuzTest", NULL, NULL, 0, GENERIC_ALL, NULL);
   if (!desk || !SetThreadDesktop(desk)) return 3;
@@ -766,6 +767,40 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
           SendMessageW(g_pkQArea, CB_GETLBTEXT, 1, (LPARAM)a1);
           st_check(k12 == 2 && !wcscmp(a0, L"12 Механический участок 12") && !wcscmp(a1, L"Цех 3 · 12 Сборка"),
                    L"«12» в участке — участок 12 первым, потом «Цех 3 · 12 …»; 31 не показан");
+          { /* участок справочника по вписанному (pk_area_dict): код, «<номер> » в начале, не «120», номер словом, название */
+            static wchar_t ar2[3][200] = {L"31 Механический участок 31", L"12 Инструментальный участок", L"120 Склад заготовок"};
+            static wchar_t cd2[3][40] = {L"31", L"12", L"120"};
+            g_szmDicts.area = ar2;
+            g_szmDicts.areaCode = cd2;
+            g_szmDicts.na = 3;
+            wchar_t f1[200], f2[200], f3[200], f4[200], f5[200];
+            BOOL h1 = pk_area_dict(L"12", f1, 200), h2 = pk_area_dict(L"120", f2, 200), h3 = pk_area_dict(L"инструментальный участок", f3, 200),
+                 h4 = pk_area_dict(L"12 Инструментальный участок", f4, 200), h5 = pk_area_dict(L"1", f5, 200);
+            st_check(h1 && !wcscmp(f1, L"12 Инструментальный участок") && h2 && !wcscmp(f2, L"120 Склад заготовок") && !h3 &&
+                         h4 && !wcscmp(f4, L"12 Инструментальный участок") && !h5 && !pk_area_dict(L"77", f5, 200),
+                     L"участок по вписанному: «12» → «12 Инструментальный участок» (не «120 …»), «120» → склад, «1» и «77» — нет");
+            /* «Проверить» до отправки: участка «77» нет в справочнике — предупреждение с текстом; строка — не из «Союза»
+               (строки из «Союза» не проверяются), вернули участок — про «77» ни слова */
+            XpTable *ot2 = &g_pk[PK_OPS];
+            int r77 = -1;
+            for (int r = 0; r < ot2->n && r77 < 0; r++)
+              if (!pk_row_from_soyuz(PK_OPS, r) && !wcscmp(xp_cell(ot2, r, 2), L"4260 Фрезерная")) r77 = r;
+            wchar_t wasA[200] = L"";
+            if (r77 >= 0) lstrcpynW(wasA, xp_cell(ot2, r77, 3), 200);
+            pk_check(TRUE);
+            BOOL before77 = g_pkLastCheck && wcsstr(g_pkLastCheck, L"«77»");
+            if (r77 >= 0) pk_put(ot2, r77, 3, L"77");
+            pk_check(TRUE);
+            BOOL after77 = g_pkLastCheck && wcsstr(g_pkLastCheck, L"Участка") && wcsstr(g_pkLastCheck, L"«77»") &&
+                           wcsstr(g_pkLastCheck, L"Приоритетах операций");
+            int warn77 = g_pkSendWarn;
+            if (r77 >= 0) pk_put(ot2, r77, 3, wasA);
+            pk_check(TRUE);
+            BOOL gone77 = !(g_pkLastCheck && wcsstr(g_pkLastCheck, L"«77»"));
+            st_check(r77 >= 0 && !before77 && after77 && warn77 >= 1 && gone77,
+                     L"«Проверить» до отправки: «Участка «77» нет в справочнике «Союза»… впишите свой в «Приоритетах операций»»; вернули участок — про «77» ни слова");
+            g_szmDicts.areaCode = keep.areaCode;
+          }
           g_szmDicts = keep;
           SetWindowTextW(g_pkQArea, L"");
           pk_combo_filter(g_pkQArea, 3, FALSE);
