@@ -1,7 +1,10 @@
-2026103004
-2026.10.30.4
-sha256 a0157d67d2529d57eaf698729d8f418053bab739043174fa87d20c8f04a0f09d
-== 0 signature-rsa-sha256 GCQhcww+OtY8qST1w3N5kwC4JCiGJ2dmzRSfQp2jfP0asKkJzaiqr+laG7QBRIvXZ8ZeSI/qc9WkB648jB6b3grt1GqIXL/OlyHe15zbGpXXFvDZ5o6hdjB8eID7RNgtX3dMXbgkdw6Qx37C1r8pLmrOxpm5TiQX6holP2ZslEVQ3P0Npblub1JpFcItdb7Qt61RuemVVY6qfEY8qtIGNlYpfP0aI6RyllJlaScPWES3OiGuWxGjuofN3naAM7zFhereGMiA971iPWLVBQYTz1tebSkXk7enJyKwgbgB80ONiyPeKntR/Q4FkZHBGbDJ+ed2v9BC28QE3pONxLc4ine/aoynA8V2/nit0+AGKG/EPRbFBwdjDh5Qe1RGt37Y5p0xY4ifJJ+jB5nVemzkiz0IxWK7WlkGQ7slnNdZqfbpv4yeoJIsypZPbTgzJq05cunwNvoubnJyQ8JfazbEbd7ZXBesscAme7+YhAwZoMBpcMVXcjMGZ+zKuNzziSRB
+2026103005
+2026.10.30.5
+sha256 18161e428a3bd51a62a58b4380d2a5e702c6a87daa886cddd0b320a06d3c2ca5
+== 0 signature-rsa-sha256 GKcGc/sXxsgqCP4mnfBJ/IxNx+yMZV0zwY3igNzDefj0oW1uSX606x/G1TU8IYMcY95r21/WgtHk4WJH9BMswnNmggmCfLqouY6zx2ipZkvxsOBcHbzjif8/yHCnlzMDV3r1RBgJ6eOJVmMFpSYHK59ej+OGLi5Rwe+5etdNMOQ7anVG0xFFKY+iIRSrPw+lRb+jJJAk1evWrus+drs9I4oqrxmcTP7oqAPEwcdsCMX6WNzJikPJxogs0PrCXLIluTrsKryE5EXG/6H5tGE9vbs4lJqz5KYCOdUSNl9p83ufXM5GpaxWem5tMRNFNbbozKjO1GAp0Xkjmh/ry+l+p5U1N9mgN5aijA2OxP2b1GEQjWu2qgbNmNnjn6WXaxBUJhbzln4xX+dbxxs1LV5bfjMcJFTkvBEFAYDev06wX+6cSA382VUnzblPo5GKfqjM3g4SoLhoQJidmQ9mhZrLwx6TcjaPVX7J2LVc3A87rXguGOCez4w6EzYr3Q6cOxse
+== 2026.10.30.5
+Новый вид «Чертёж» — теперь он по умолчанию: главное окно оформлено как лист чертежа. Заголовок CURSORPAD вразрядку, вкладки «БЛОКНОТ | ПОИСК» ячейками, строки пронумерованы 01, 02… и разделены чертой, внизу строка-штамп (режим, число строк, «закреплено»), меню «Ещё» — таблицей в две колонки, вдвое уже прежнего. У тех, кто уже пользуется CursorPad, «Чертёж» включится один раз при первом запуске; прежние темы, курсоры и кольцо Shift на месте — тема выбирается в Настройках. Нормы времени в чате ИИ (и в мини-чате) теперь идут таблицей: №, операция, Тпз, Тшт, пометка, ниже режимы и кнопки действий — числа ровно из расчёта норм.
+
 == 2026.10.30.4
 Кольцо Shift: у каждого преобразования, которое идёт сразу (PNG, JPG, TIFF, PDF, TXT, CSV, ZIP, «Собрать», «Один PDF», «Один TIFF», «Разделить» TIFF), теперь есть такая же дуга, как у «Ссылки». Задержите мышь на плитке — снаружи кольца выедут «Копия рядом» (новый файл рядом, исходник остаётся) и «Подмена» (новый файл встаёт вместо исходника: копии нет, старый удаляется — в Корзину, а в сетевой папке насовсем). Отпустить на самой плитке — как раньше, копия рядом. Подмена безопасная: исходник удаляется только после того, как новый файл полностью записан; если удалить его нельзя (нет прав), он остаётся, и об этом говорит сообщение. Отменить подмену из истории нельзя. Конвертация в сетевых папках (архив чертежей) больше не падает с «[WinError 5] Отказано в доступе»: временные файлы создаются на этом компьютере, а в папку записывается только готовый результат. Если в папку записывать нельзя совсем, копия сохраняется в «Загрузки», и сообщение говорит, куда; ошибки доступа объясняются словами, а не кодом Windows.
 
