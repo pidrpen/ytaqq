@@ -8,7 +8,7 @@
    ввести значение вне пределов. */
 
 #define ID_NL_FACTORY 4895
-#define ID_NL_OP 4940 /* + номер правила операции (g_nmOps) — галочка «нормировать» */
+#define ID_NL_OP 4940 /* + номер правила операции (g_nmOps) — класс: Тпз и Тшт, только Тшт, без норм */
 #define ID_NL_HEAT 4930 /* + 0 — порог массы, 1 — Тшт до порога, 2 — тяжелее, 3 — зачистка после (норма технолога на ТО) */
 #define ID_NL_EDIT 4900 /* + параметр·3 + столбец: 0 — от, 1 — до, 2 — по умолчанию */
 
@@ -21,6 +21,15 @@ static double *nl_heat(int c) {
 static BOOL g_nlFill; /* поля заполняет код: EN_CHANGE — не правка */
 static wchar_t g_nlTitle[NM_LIMS][64], g_nlDesc[NM_LIMS][96]; /* подписи строк: раскладка хранит указатели */
 static const wchar_t *const kNlCol[3] = {L"min", L"max", L"def"};
+static const wchar_t *const kNlClass[3] = {L"Тпз и Тшт", L"только Тшт", L"без норм"}; /* NMC_FULL, NMC_TSHT, NMC_NONE */
+static const wchar_t *const kNlClassKey[3] = {L"full", L"tsht", L"none"};
+static WNDPROC g_nlComboProc;
+
+/* колесо над закрытым списком класса — прокрутка Настроек, а не смена класса */
+static LRESULT CALLBACK nl_combo_proc(HWND h, UINT m, WPARAM w, LPARAM l) {
+  if (m == WM_MOUSEWHEEL && !SendMessageW(h, CB_GETDROPPEDSTATE, 0, 0)) return SendMessageW(GetParent(h), m, w, l);
+  return CallWindowProcW(g_nlComboProc, h, m, w, l);
+}
 
 static void nl_path(wchar_t *p) {
   _snwprintf(p, MAX_PATH, L"%s\\norms.ini", g_dataDir);
@@ -58,9 +67,13 @@ static void nl_load(void) {
     GetPrivateProfileStringW(L"heat", kNlHeatKey[c], L"", v, 64, p);
     if (v[0] && nm_num(v, &x, &e)) *nl_heat(c) = x;
   }
-  for (int k = 0; k < NM_OPRULES; k++) { /* [ops] Токарная=1 — нормировать; 0 — нет */
-    GetPrivateProfileStringW(L"ops", g_nmOps[k].op, L"1", v, 64, p);
-    g_nmOps[k].off = !wcscmp(v, L"0");
+  /* [ops] Сварка=full — Тпз и Тшт, tsht — только Тшт, none — без норм; нет строки — класс по умолчанию;
+     до 30.10 там была галочка: «0» — без норм, «1» — по умолчанию */
+  for (int k = 0; k < NM_OPRULES; k++) {
+    GetPrivateProfileStringW(L"ops", g_nmOps[k].op, L"", v, 64, p);
+    g_nmOps[k].cls = !wcscmp(v, L"0") ? NMC_NONE : g_nmOps[k].cls0;
+    for (int c = 0; c < 3; c++)
+      if (!wcscmp(v, kNlClassKey[c])) g_nmOps[k].cls = c;
   }
 }
 
@@ -74,7 +87,8 @@ static void nl_save(void) {
     WriteFile(f, bom, 2, &w, NULL);
     CloseHandle(f);
   }
-  for (int k = 0; k < NM_OPRULES; k++) WritePrivateProfileStringW(L"ops", g_nmOps[k].op, g_nmOps[k].off ? L"0" : L"1", p);
+  for (int k = 0; k < NM_OPRULES; k++) /* только изменённые: новые классы по умолчанию дойдут с обновлением */
+    if (g_nmOps[k].cls != g_nmOps[k].cls0) WritePrivateProfileStringW(L"ops", g_nmOps[k].op, kNlClassKey[g_nmOps[k].cls], p);
   for (int c = 0; c < 4; c++) {
     _snwprintf(v, 64, L"%g", *nl_heat(c));
     v[63] = 0;
@@ -99,7 +113,7 @@ static void nl_refresh(void) {
     if (g_nlHeat[c]) SetWindowTextW(g_nlHeat[c], v);
   }
   for (int k = 0; k < NM_OPRULES; k++)
-    if (g_nlOp[k]) SendMessageW(g_nlOp[k], BM_SETCHECK, g_nmOps[k].off ? BST_UNCHECKED : BST_CHECKED, 0);
+    if (g_nlOp[k]) SendMessageW(g_nlOp[k], CB_SETCURSEL, (WPARAM)g_nmOps[k].cls, 0);
   for (int k = 0; k < NM_LIMS; k++)
     for (int c = 0; c < 3; c++) {
       wchar_t v[48] = L"";
@@ -134,9 +148,11 @@ static void nl_create(HWND p) {
     SendMessageW(g_nlHeat[c], EM_SETLIMITTEXT, 12, 0);
   }
   for (int k = 0; k < NM_OPRULES; k++) {
-    g_nlOp[k] = CreateWindowExW(0, L"BUTTON", L"нормировать", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 0, -4000, 130, 26, p,
-                                (HMENU)(INT_PTR)(ID_NL_OP + k), NULL, NULL);
+    g_nlOp[k] = CreateWindowExW(0, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST, 0, -4000, 150,
+                                160, p, (HMENU)(INT_PTR)(ID_NL_OP + k), NULL, NULL);
     SendMessageW(g_nlOp[k], WM_SETFONT, (WPARAM)g_fontUi, TRUE);
+    for (int c = 0; c < 3; c++) SendMessageW(g_nlOp[k], CB_ADDSTRING, 0, (LPARAM)kNlClass[c]);
+    g_nlComboProc = (WNDPROC)SetWindowLongPtrW(g_nlOp[k], GWLP_WNDPROC, (LONG_PTR)nl_combo_proc);
   }
   SendMessageW(g_nlFactory, WM_SETFONT, (WPARAM)g_fontUi, TRUE);
   nl_refresh();
@@ -160,10 +176,14 @@ static void nl_layout(int btnH) {
   sd_card_end();
   sd_group(L"Какие операции нормируются");
   sd_card_begin();
-  sd_stack_end(sd_stack(NULL, L"Станочные — по ОМН, резка — по нормам резки завода, остальные — оценкой (в ответе "
-                              L"«оценка, проверить»), термическая и покрытия — по факту. Снятая галочка — операция не "
-                              L"нормируется, в ответе ИИ она одной строкой «не нормируются».") - 12);
-  static const int cw = 130;
+  sd_stack_end(sd_stack(NULL, L"Тпз — только у мехобработки; заготовительным и вспомогательным — только Тшт, "
+                              L"контролю — без норм (в ответе ИИ одной строкой). Станочные считаются по ОМН, резка — "
+                              L"по нормам резки завода, остальные — оценкой (в ответе «оценка, проверить»), "
+                              L"термическая — норма технолога, покрытия — по факту. То же — у окна «ЭСИ и ТП».") - 12);
+  static const int cw = 150;
+  for (int k = 0; k < NM_OPRULES; k++) /* поле списка — высотой как кнопки (смена шрифта её сбрасывает) */
+    if (g_nlOp[k] && SendMessageW(g_nlOp[k], CB_GETITEMHEIGHT, (WPARAM)-1, 0) != btnH - 6)
+      SendMessageW(g_nlOp[k], CB_SETITEMHEIGHT, (WPARAM)-1, btnH - 6);
   for (int k = 0; k < NM_OPRULES; k++) sd_row(g_nmOps[k].op, g_nmOps[k].src, &g_nlOp[k], &cw, 1, btnH);
   sd_card_end();
   sd_group(L"Термическая обработка — норма технолога");
@@ -214,9 +234,9 @@ static BOOL nl_command(HWND hwnd, int id, int code) {
     return TRUE;
   }
   if (id >= ID_NL_OP && id < ID_NL_OP + NM_OPRULES) {
-    if (code == BN_CLICKED && !g_nlFill) {
-      g_nmOps[id - ID_NL_OP].off = SendMessageW(g_nlOp[id - ID_NL_OP], BM_GETCHECK, 0, 0) != BST_CHECKED;
-      nl_save();
+    if (code == CBN_SELCHANGE && !g_nlFill) {
+      int c = (int)SendMessageW(g_nlOp[id - ID_NL_OP], CB_GETCURSEL, 0, 0);
+      if (c >= 0 && c < 3) g_nmOps[id - ID_NL_OP].cls = c, nl_save();
     }
     return TRUE;
   }

@@ -175,7 +175,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
     if (g_nuRes->op[i].kind == NMK_TURN && kT < 0) kT = i;
     if (g_nuRes->op[i].kind == NMK_DRILL && kD < 0) kD = i;
   }
-  nut_check(g_nuRes && g_nuRes->n == r.n && kT >= 0 && kD >= 0, L"в окне — все операции маршрута, среди них токарная и сверлильная");
+  nut_check(g_nuRes && g_nuRes->n == r.n - 1 && wcsstr(g_nuRes->off, L"Контроль") && kT >= 0 && kD >= 0,
+            L"в окне — операции маршрута, кроме контроля (без норм), среди них токарная и сверлильная");
   nut_check(g_nuRes->op[0].kind == NMK_EST && !nm_na(g_nuRes->op[0].tsht), L"005 Отрезная — оценка с Тшт");
   nut_check(nm_na(g_nuRes->op[kT].to) && wcsstr(g_nuRes->op[kT].toNeed, L"длина обработки L") != NULL,
             L"без длины То нет — окно говорит, что нужна L");
