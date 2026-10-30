@@ -666,6 +666,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
     dst_chat_fill();
     ac_status(L"Enter — отправить · Shift+Enter — новая строка");
     dst_pump(300);
+    if (g_acLog) SendMessageW(g_acLog, WM_VSCROLL, SB_BOTTOM, 0); /* к последнему ответу — нормы видны */
+    dst_pump(100);
     _snwprintf(name, 200, L"%ls-chat.png", tn);
     dst_shot(g_acWnd, name);
     ac_mini_show();
