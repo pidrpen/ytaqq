@@ -683,6 +683,18 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
       pk_edit_begin(0, 3);
       st_check(g_pkEditCtl == g_pkCombo && SendMessageW(g_pkCombo, CB_GETCOUNT, 0, 0) == 1, L"правка «Участка» — список из базы");
       st_shot_wnd(L"9-package.png", g_pkWnd);
+      { /* «Ещё»: один пункт «ЭСИ и ТП в Союз» (пункт «Загрузить ЭСИ в Союз» убран 30.10); в окне «Чертежи…» — первая слева */
+        int nEsi = 0, nOld = 0;
+        for (size_t i = 0; i < sizeof(kMore) / sizeof(kMore[0]); i++) {
+          if (kMore[i].text && !wcscmp(kMore[i].text, L"ЭСИ и ТП в Союз")) nEsi++;
+          if (kMore[i].text && (wcsstr(kMore[i].text, L"Загрузить ЭСИ") || wcsstr(kMore[i].text, L"пакет или сразу"))) nOld++;
+        }
+        RECT rd, rp;
+        GetWindowRect(GetDlgItem(g_pkWnd, ID_PK_DRAW), &rd);
+        GetWindowRect(GetDlgItem(g_pkWnd, ID_PK_PASTE), &rp);
+        st_check(nEsi == 1 && nOld == 0 && rd.left < rp.left && IsWindowVisible(GetDlgItem(g_pkWnd, ID_PK_DRAW)),
+                 L"меню «Ещё»: один пункт «ЭСИ и ТП в Союз», второго нет; в окне «Чертежи…» — первая кнопка подвала");
+      }
       pk_edit_end(FALSE);
       /* строки таблицы дописывает очередь окна (справочники из базы → pk_equip_fill → pk_fill): ждём её, не таймер */
       for (int t = 0; t < 50 && ListView_GetItemCount(g_pkList) != 7; t++) st_pump(100);
