@@ -1,7 +1,10 @@
-2026103002
-2026.10.30.2
-sha256 74885d037411a428bb6f5935cb993de564b28254718e9db09ef75f8ea1f88325
-== 0 signature-rsa-sha256 ru1CReMqkPU3pF9SeA4AgukNek9SGtX0yjLoq902QC2rtSCBbp6088CJPPsPVasU8jcSdKDilbEVI4H4z3t1m/vsWFbztlnbyTGbh2W/CjoSqwOuzJEeD3+Qs7GH8dkyuJ5+pwXOL0aNrDDUjXcBTS2y0UGqDHORAtP5IKPGSJqDWOWX3qgSMSQetz2PwYroEsFkgKn4TesPns+7x+M83t3gZ6KQ/XaSbccbdjFRuY5x0Q2M/VZbszjT4mOPoyvXPxXiQwIXY/cF33qX2n7wTYSFLFz1G6/vI+xGJxJF+rj5qmPU2jwnzLRXsOgyjMpc3gEBFyeZgI745goIaK93SVyHowyaaiJgOx7afTMWigd9SEKidmuChhc1+g9UsjL/kPpzV51KB2hT9v26EoVZpLPhQM+n+VawpS0qUcSlsFnSkl8Z3QtaJ5IP6iRJC/vFuBHMJayVriCMKCOe19SiKmdNCRV/bqIYea/BFkzfZiTzI52ot2v82hekMWWbw4Wb
+2026103003
+2026.10.30.3
+sha256 15035932ba3996fe5c8077d73e433d7da96757de650e618c158584814ce9b0b5
+== 0 signature-rsa-sha256 m/v8e2HA1K2wulSs/EPxbDltaecNfsI0W2fGZf/IadyMSTw9MFH0bN1hpajMkHTIRfKDXz21fhHeu+MjO4ZHZ2fDEODF6UkUv6pmJgQZ4XRFu0tGmK3h5pY9lRRlBOZkYoxh/8/BNEx++83pxlv0t+t518/YIqObJz/H9085Iu+63CpMfBPjcDH3maC9HiigRocoDMkKfPXISabhrhPonJS83W0g5axipDup1j8lr1dMEsABHkTgrzCn7voqhKfX5udn+7PqdLmiPzhkR+l3Uy52+b8nshiK2BRVIyikKlceyQa3G/bQcyHN7Zhzf3GbX7uF9XoAYNMHGW/XmUZNmZ5gaaL9xiMUFkgDPfj2yXQG7EsuqZKEUnTBY53Luo71QWH4j94zYTumKtlSPtrkIl2RIXTMXugp1EeCXrkA89ymxhpXIhxVP3M/zKLdxydQZvpI4E/jjiWV0HDVJxsiAfMegqs2A/RfTRm6C5tBFttNFWji2d65nu7+HRVszTV7
+== 2026.10.30.3
+В операциях ТП появилась профессия. На листе «Операции» окна «ЭСИ и ТП» новый столбец «Профессия», и в строке быстрого ТП — своё поле. Профессия выбирается из справочника «Союза» списком («19149, Токарь»); можно набрать код или начало названия — «ток», «19149». Пустую профессию CursorPad ставит сам: какую чаще всего ставят на эту операцию на этом участке в техпроцессах завода, а если такой нет — из справочника профессий по операции. Другую можно выбрать в ячейке; профессию, которой нет в справочнике, «Проверить» покажет до отправки. В «Союз» профессию записывает новый файл конфига «CursorPad — Союз» 1.0.0.11 — его нужно один раз поставить администратору «Союза» (вместо 1.0.0.10); со старым операции создаются без профессии. С живым «Союзом» не проверялось.
+
 == 2026.10.30.2
 ЭСИ и ТП теперь можно отправить в «Союз» по отдельности: кнопка «В Союз…» в окне «ЭСИ и ТП» открывает меню — «ЭСИ и ТП — всё сразу», «Только ЭСИ» (изделия, состав, чертежи) или «Только ТП» (операции и заготовки к изделиям, которые уже заведены в «Союзе»; ТП ложатся в папку ТП своей сборки). Те же «Только ЭСИ» и «Только ТП» есть в чате под карточкой «ЭСИ по чертежам». ТП создаются не сквозными: у каждой детали свой ТП, а признак «Сквозной» новый файл конфига «CursorPad — Союз» 1.0.0.10 снимает сам (если не вышло или сквозным оказался уже существующий ТП — об этом строка в отчёте); его нужно один раз поставить администратору «Союза». В кольце Shift «Один TIFF», «Объединить PDF» и «Всё в один PDF» объединяют сразу, без окна: страницы в порядке выделения, новый файл встаёт рядом с первым исходным и ничего не затирает.
 
