@@ -375,6 +375,7 @@ static void cvx_show(void) {
   }
   ShowWindow(g_cvxWnd,SW_SHOWNORMAL);SetForegroundWindow(g_cvxWnd);cvx_controls();cvx_hint();if(g_cvxHistoryOpen&&!g_cvBusy)cvx_history(15);
 }
+/* 10 «Объединить PDF» и 14 «Всё в один PDF» идут без окна параметров: порядок — как в выделении, файл рядом с первым */
 static BOOL cvx_dispatch(const CvSelection *selection,int action) {
   if(action>=24&&action<=26){ /* «Ссылка»: 24, 25 — путь к файлу, 26 — к его папке; буфер — после сброса */
     CvSelection *copy=(CvSelection*)malloc(sizeof(*copy));if(!copy)return FALSE;*copy=*selection;
@@ -386,7 +387,7 @@ static BOOL cvx_dispatch(const CvSelection *selection,int action) {
     if(!PostMessageW(g_cvWnd,WM_CV_TIFF_MERGE,0,(LPARAM)copy)){free(copy);return FALSE;}
     return TRUE;
   }
-  if(action>=8&&action!=18){cvx_show();g_cvxSelection=*selection;cvx_list();int chosen=action==15?(cvx_all(selection,10)?10:cvx_all(selection,8)?8:cvx_all(selection,14)?14:7):action;SendMessageW(g_cvxAction,CB_SETCURSEL,chosen,0);cvx_controls();cvx_hint();return TRUE;}
+  if(action>=8&&action!=18&&action!=10&&action!=14){cvx_show();g_cvxSelection=*selection;cvx_list();int chosen=action==15?(cvx_all(selection,10)?10:cvx_all(selection,8)?8:cvx_all(selection,14)?14:7):action;SendMessageW(g_cvxAction,CB_SETCURSEL,chosen,0);cvx_controls();cvx_hint();return TRUE;}
   CvxJob *job=(CvxJob*)calloc(1,sizeof(*job));if(!job)return FALSE;job->files=*selection;job->action=action;job->format=action<4?action:0;job->kb=1024;job->size=1920;job->rotation=90;return cvx_start(job);
 }
 static void cvx_shutdown(void) {if(g_cvxWnd){DestroyWindow(g_cvxWnd);g_cvxWnd=NULL;}if(g_cvxFont){DeleteObject(g_cvxFont);g_cvxFont=NULL;}}
