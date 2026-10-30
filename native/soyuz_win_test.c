@@ -694,6 +694,98 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
         GetWindowRect(GetDlgItem(g_pkWnd, ID_PK_PASTE), &rp);
         st_check(nEsi == 1 && nOld == 0 && rd.left < rp.left && IsWindowVisible(GetDlgItem(g_pkWnd, ID_PK_DRAW)),
                  L"меню «Ещё»: один пункт «ЭСИ и ТП в Союз», второго нет; в окне «Чертежи…» — первая кнопка подвала");
+        RECT ra, rs;
+        GetWindowRect(GetDlgItem(g_pkWnd, ID_PK_ADD), &ra);
+        GetWindowRect(GetDlgItem(g_pkWnd, ID_PK_ASM), &rs);
+        st_check(IsWindowVisible(GetDlgItem(g_pkWnd, ID_PK_ADD)) && IsWindowVisible(GetDlgItem(g_pkWnd, ID_PK_ASM)) &&
+                     rd.left < ra.left && ra.left < rs.left && rs.left < rp.left,
+                 L"«+ Строка» и «+ Сборка» — видимые кнопки сразу за «Чертежи…», до «Вставить»");
+      }
+      { /* списки по набору (pk_combo_filter): «ток» → токарные первыми, «411» → коды с 411, участок — по номеру и слову */
+        st_check(pk_match_rank(L"4110 Токарная", L"ток") == 0 && pk_match_rank(L"4110 Токарная", L"411") == 0 &&
+                     pk_match_rank(L"12 Механический участок 12", L"12") == 0 && pk_match_rank(L"12 Механический участок 12", L"мех") == 0 &&
+                     pk_match_rank(L"12 Механический участок 12", L"участ") == 1 &&
+                     pk_match_rank(L"Цех 3 · 31 Сварочный", L"31") == 1 && pk_match_rank(L"4233 Токарная с ЧПУ", L"чпу") == 1 &&
+                     pk_match_rank(L"4130 Шлифовальная", L"фова") == 2 && pk_match_rank(L"0200 Контроль", L"ток") == -1,
+                 L"подбор по набору: с начала кода или названия, с начала слова, вхождение; без регистра");
+        SetWindowTextW(g_pkQOp, L"ток");
+        int nOp = pk_combo_filter(g_pkQOp, 2, FALSE);
+        wchar_t f0[300] = L"", fl[300] = L"";
+        SendMessageW(g_pkQOp, CB_GETLBTEXT, 0, (LPARAM)f0);
+        int cnt = (int)SendMessageW(g_pkQOp, CB_GETCOUNT, 0, 0);
+        if (cnt > 0) SendMessageW(g_pkQOp, CB_GETLBTEXT, (WPARAM)(cnt - 1), (LPARAM)fl);
+        wchar_t tx[300];
+        GetWindowTextW(g_pkQOp, tx, 300);
+        st_check(nOp > 0 && nOp < OPS_1C_N && wcsstr(f0, L"Токарн") && f0[0] >= L'0' && f0[0] <= L'9' && !wcscmp(tx, L"ток"),
+                 L"«ток» в поле «Операция» — первая строка токарная, весь справочник не показан, набранное в поле");
+        st_note(L"     «ток»: подходящих %d из %d, первая «%ls», последняя «%ls»", nOp, OPS_1C_N, f0, fl);
+        SetWindowTextW(g_pkQOp, L"411");
+        pk_combo_filter(g_pkQOp, 2, FALSE);
+        SendMessageW(g_pkQOp, CB_GETLBTEXT, 0, (LPARAM)f0);
+        st_check(!wcsncmp(f0, L"411", 3), L"«411» — первыми коды с 411");
+        SetWindowTextW(g_pkQOp, L"");
+        pk_combo_filter(g_pkQOp, 2, FALSE);
+        st_check((int)SendMessageW(g_pkQOp, CB_GETCOUNT, 0, 0) == OPS_1C_N, L"поле пустое — снова весь справочник");
+        /* участок: в домашней базе — «31 Механический участок 31»; «12» там нет — «нет в справочнике», набранное остаётся */
+        SetWindowTextW(g_pkQArea, L"31");
+        int nA = pk_combo_filter(g_pkQArea, 3, FALSE);
+        SendMessageW(g_pkQArea, CB_GETLBTEXT, 0, (LPARAM)f0);
+        BOOL a31 = nA >= 1 && !wcsncmp(f0, L"31 ", 3);
+        SetWindowTextW(g_pkQArea, L"мех");
+        pk_combo_filter(g_pkQArea, 3, FALSE);
+        SendMessageW(g_pkQArea, CB_GETLBTEXT, 0, (LPARAM)fl);
+        BOOL aMex = wcsstr(fl, L"Механ") != NULL;
+        SetWindowTextW(g_pkQArea, L"12");
+        int n12 = pk_combo_filter(g_pkQArea, 3, FALSE);
+        wchar_t none[300] = L"", typed[300] = L"";
+        SendMessageW(g_pkQArea, CB_GETLBTEXT, 0, (LPARAM)none);
+        GetWindowTextW(g_pkQArea, typed, 300);
+        wchar_t fixd[300];
+        lstrcpynW(fixd, kPkNone, 300);
+        pk_none_fix(g_pkQArea, fixd, 300);
+        st_check(a31 && aMex && n12 == 0 && !wcscmp(none, kPkNone) && !wcscmp(typed, L"12") && !wcscmp(fixd, L"12"),
+                 L"участок: «31» и «мех» — 31 Механический; «12» (в домашней базе нет) — «нет в справочнике», набранное «12» не теряется");
+        SetWindowTextW(g_pkQArea, L"");
+        { /* участок 12 — на выдуманном справочнике: «12» → «12 …» первым, раньше «Цех 3 · 12 …» */
+          SzmDicts keep = g_szmDicts;
+          static wchar_t ar[3][200] = {L"31 Механический участок 31", L"Цех 3 · 12 Сборка", L"12 Механический участок 12"};
+          g_szmDicts.area = ar;
+          g_szmDicts.na = 3;
+          SetWindowTextW(g_pkQArea, L"12");
+          int k12 = pk_combo_filter(g_pkQArea, 3, FALSE);
+          wchar_t a0[200] = L"", a1[200] = L"";
+          SendMessageW(g_pkQArea, CB_GETLBTEXT, 0, (LPARAM)a0);
+          SendMessageW(g_pkQArea, CB_GETLBTEXT, 1, (LPARAM)a1);
+          st_check(k12 == 2 && !wcscmp(a0, L"12 Механический участок 12") && !wcscmp(a1, L"Цех 3 · 12 Сборка"),
+                   L"«12» в участке — участок 12 первым, потом «Цех 3 · 12 …»; 31 не показан");
+          g_szmDicts = keep;
+          SetWindowTextW(g_pkQArea, L"");
+          pk_combo_filter(g_pkQArea, 3, FALSE);
+        }
+        /* ячейка «Операция»: набор «ток» — список раскрыт и по набору, Enter — первая подходящая */
+        wchar_t was[300];
+        lstrcpynW(was, xp_cell(&g_pk[PK_OPS], 0, 2), 300);
+        pk_edit_begin(0, 2);
+        COMBOBOXINFO ci;
+        memset(&ci, 0, sizeof(ci));
+        ci.cbSize = sizeof(ci);
+        GetComboBoxInfo(g_pkCombo, &ci);
+        SetWindowTextW(g_pkCombo, L"то");
+        SendMessageW(ci.hwndItem, EM_SETSEL, 2, 2);
+        SendMessageW(ci.hwndItem, WM_CHAR, L'к', 0); /* как с клавиатуры: фильтр по «ток» */
+        BOOL dropped = SendMessageW(g_pkCombo, CB_GETDROPPEDSTATE, 0, 0) != 0;
+        wchar_t c0[300] = L"";
+        SendMessageW(g_pkCombo, CB_GETLBTEXT, 0, (LPARAM)c0);
+        int ccnt = (int)SendMessageW(g_pkCombo, CB_GETCOUNT, 0, 0);
+        SendMessageW(ci.hwndItem, WM_KEYDOWN, VK_RETURN, 0);
+        wchar_t got[300];
+        lstrcpynW(got, xp_cell(&g_pk[PK_OPS], 0, 2), 300);
+        if (g_pkEditRow >= 0) pk_edit_end(FALSE); /* Enter ушёл на следующую строку — без правки */
+        st_check(dropped && ccnt < OPS_1C_N && wcsstr(c0, L"Токарн") && !wcscmp(got, c0),
+                 L"ячейка «Операция»: набор «ток» — список раскрыт и по набору, Enter — первая подходящая в ячейку");
+        st_note(L"     ячейка: раскрыт %d, строк %d, первая «%ls», в ячейке «%ls»", dropped, ccnt, c0, got);
+        pk_put(&g_pk[PK_OPS], 0, 2, was); /* дальше стенд ждёт прежнюю операцию */
+        if (g_pkSheet == PK_OPS) pk_fill(FALSE);
       }
       pk_edit_end(FALSE);
       /* строки таблицы дописывает очередь окна (справочники из базы → pk_equip_fill → pk_fill): ждём её, не таймер */

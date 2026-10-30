@@ -587,8 +587,119 @@ static void pk_prio_changed(void) {
 static void pk_edit_end(BOOL commit);
 static void pk_edit_begin(int r, int c);
 
+/* ---- списки по набору (с 30.10, просьба пользователя): операция, участок, станок — и в ячейках листа
+   «Операции», и в строке быстрого ТП. Список оставляет только подходящее к напечатанному: сначала то, что
+   начинается так же (код «411…» или название «Ток…»), потом то, где так начинается слово («мех», «ЧПУ»,
+   «31» после «Цех 3 · »), потом простое вхождение; без регистра. Ничего — строка «нет в справочнике»,
+   напечатанное остаётся. Список раскрыт и обновляется при наборе; Enter — выделенная строка, а если
+   стрелками не выбирали — первая подходящая; Esc — как было. */
+static const wchar_t kPkNone[] = L"— нет в справочнике —";
+static BOOL g_pkFiltBusy;          /* фильтр сам раскрывает список и ставит текст — свои уведомления не считать */
+static HWND g_pkFiltCb;            /* какой список отфильтрован последним */
+static wchar_t g_pkFiltTyped[300]; /* и что в нём было напечатано: выбрали «нет в справочнике» — вернуть это */
+static int pk_combo_kind(int sheet, int c);
+
+/* строка i справочника для столбца kind (2 — операции 1С, 3 — участки, 4 — станки); NULL — кончились */
+static const wchar_t *pk_src_item(int kind, int i) {
+  if (kind == 2) return i < OPS_1C_N ? kOps1c[i].name : NULL;
+  if (kind == 3) return g_szmDicts.area && i < g_szmDicts.na ? g_szmDicts.area[i] : NULL;
+  if (kind == 4) return g_szmDicts.equip && i < g_szmDicts.ne ? g_szmDicts.equip[i] : NULL;
+  return NULL;
+}
+
+static BOOL pk_word_sep(wchar_t c) {
+  return c == L' ' || c == L'-' || c == L'(' || c == L'.' || c == L',' || c == L'/' || c == 0x00B7 || c == 0x00AB || c == L'"';
+}
+
+/* насколько строка подходит к напечатанному low (строчные, без краевых пробелов): 0 — с начала кода или
+   названия, 1 — с начала слова, 2 — вхождение, -1 — нет; пусто — подходит всё */
+static int pk_match_rank(const wchar_t *item, const wchar_t *low) {
+  if (!low[0]) return 0;
+  wchar_t s[400];
+  lstrcpynW(s, item, 400);
+  CharLowerBuffW(s, (DWORD)wcslen(s));
+  size_t l = wcslen(low);
+  if (!wcsncmp(s, low, l)) return 0; /* «411» → «4110 …», «31» → «31 Механический…», «16к» → «16К20…» */
+  const wchar_t *n = s;
+  while (*n >= L'0' && *n <= L'9') n++;
+  while (*n == L' ') n++;
+  if (n != s && !wcsncmp(n, low, l)) return 0; /* название после кода: «ток» → «4110 Токарная» */
+  for (const wchar_t *q = s + 1; *q; q++)
+    if (pk_word_sep(q[-1]) && !pk_word_sep(*q) && !wcsncmp(q, low, l)) return 1;
+  return wcsstr(s, low) ? 2 : -1;
+}
+
+/* список cb (столбца kind) — по напечатанному; open — раскрыть его. Напечатанное и курсор в поле остаются.
+   Возвращает число подходящих строк (без «нет в справочнике») */
+static int pk_combo_filter(HWND cb, int kind, BOOL open) {
+  if (!cb || g_pkFiltBusy || kind < 2 || kind > 4) return 0;
+  g_pkFiltBusy = TRUE;
+  wchar_t t[300], low[300];
+  GetWindowTextW(cb, t, 300);
+  DWORD s0 = 0, s1 = 0;
+  SendMessageW(cb, CB_GETEDITSEL, (WPARAM)&s0, (LPARAM)&s1);
+  const wchar_t *b = t;
+  while (*b == L' ') b++;
+  lstrcpynW(low, b, 300);
+  size_t ll = wcslen(low);
+  while (ll && low[ll - 1] == L' ') low[--ll] = 0;
+  CharLowerBuffW(low, (DWORD)ll);
+  if (!wcscmp(t, kPkNone)) low[0] = 0;
+  g_pkFiltCb = cb;
+  lstrcpynW(g_pkFiltTyped, t, 300);
+  SendMessageW(cb, WM_SETREDRAW, FALSE, 0);
+  SendMessageW(cb, CB_RESETCONTENT, 0, 0);
+  int n = 0;
+  for (int rank = 0; rank <= 2 && (rank == 0 || low[0]); rank++)
+    for (int i = 0; !low[0] || n < 400; i++) { /* пусто — весь справочник; по набору — первые 400 подходящих */
+      const wchar_t *it = pk_src_item(kind, i);
+      if (!it) break;
+      if (pk_match_rank(it, low) == rank) SendMessageW(cb, CB_ADDSTRING, 0, (LPARAM)it), n++;
+    }
+  if (!n && low[0]) SendMessageW(cb, CB_ADDSTRING, 0, (LPARAM)kPkNone);
+  SendMessageW(cb, WM_SETREDRAW, TRUE, 0);
+  if (open && low[0] && !SendMessageW(cb, CB_GETDROPPEDSTATE, 0, 0)) {
+    SendMessageW(cb, CB_SHOWDROPDOWN, TRUE, 0);
+    SetCursor(LoadCursorW(NULL, IDC_ARROW)); /* раскрытый список прячет курсор мыши */
+  }
+  SendMessageW(cb, CB_SETCURSEL, (WPARAM)-1, 0); /* ничего не выделено: Enter возьмёт первую, ↓ — встанет на неё */
+  SetWindowTextW(cb, t);                         /* раскрытие и очистка списка трогают поле — вернуть напечатанное */
+  SendMessageW(cb, CB_SETEDITSEL, 0, MAKELPARAM(s0, s1));
+  InvalidateRect(cb, NULL, TRUE);
+  if (cb == g_pkCombo) g_pkComboCol = -1; /* в списке ячейки — не весь справочник: в следующий раз заполнить заново */
+  g_pkFiltBusy = FALSE;
+  return n;
+}
+
+/* Enter в раскрытом отфильтрованном списке: выделенная строка, а если не выбирали — первая; «нет в
+   справочнике» — напечатанное. В out — что поставить; FALSE — список не раскрыт, брать поле как есть */
+static BOOL pk_combo_pick(HWND cb, wchar_t *out, int cap) {
+  out[0] = 0;
+  if (!cb || !SendMessageW(cb, CB_GETDROPPEDSTATE, 0, 0)) return FALSE;
+  int sel = (int)SendMessageW(cb, CB_GETCURSEL, 0, 0);
+  if (sel < 0 && SendMessageW(cb, CB_GETCOUNT, 0, 0) > 0) sel = 0;
+  if (sel >= 0 && SendMessageW(cb, CB_GETLBTEXTLEN, (WPARAM)sel, 0) < cap) SendMessageW(cb, CB_GETLBTEXT, (WPARAM)sel, (LPARAM)out);
+  if (!wcscmp(out, kPkNone)) lstrcpynW(out, cb == g_pkFiltCb ? g_pkFiltTyped : L"", cap);
+  return TRUE;
+}
+
+/* в поле осталась строка «нет в справочнике» (щёлкнули по ней) — вернуть напечатанное */
+static void pk_none_fix(HWND cb, wchar_t *v, int cap) {
+  if (!wcscmp(v, kPkNone)) lstrcpynW(v, cb == g_pkFiltCb ? g_pkFiltTyped : L"", cap);
+}
+
 static LRESULT CALLBACK PkEditProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
   WNDPROC old = (WNDPROC)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+  /* ячейка со списком (операция, участок, станок): набор — фильтр списка */
+  int fkind = hwnd != g_pkEdit && g_pkEditCtl == g_pkCombo && g_pkCombo && g_pkEditRow >= 0
+                  ? pk_combo_kind(g_pkSheet, g_pkEditCol) : -1;
+  if (fkind >= 2 && fkind <= 4 &&
+      ((msg == WM_CHAR && wParam != L'\r' && wParam != L'\t' && wParam != 27) || (msg == WM_KEYDOWN && wParam == VK_DELETE) ||
+       msg == WM_PASTE || msg == WM_CUT || msg == WM_UNDO)) {
+    LRESULT res = CallWindowProcW(old, hwnd, msg, wParam, lParam);
+    pk_combo_filter(g_pkCombo, fkind, TRUE);
+    return res;
+  }
   if (msg == WM_KEYDOWN) {
     if (wParam == VK_ESCAPE) {
       pk_edit_end(FALSE);
@@ -597,6 +708,15 @@ static LRESULT CALLBACK PkEditProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
     if (wParam == VK_RETURN || wParam == VK_TAB) {
       int r = pk_item(g_pkEditRow), c = g_pkEditCol; /* дальше — по списку: на «Операциях» он может быть одной детали */
       BOOL shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+      if (wParam == VK_RETURN && fkind >= 2) { /* раскрытый отфильтрованный список: выделенная или первая подходящая */
+        wchar_t pick[300];
+        if (pk_combo_pick(g_pkCombo, pick, 300)) {
+          g_pkFiltBusy = TRUE;
+          SendMessageW(g_pkCombo, CB_SHOWDROPDOWN, FALSE, 0);
+          SetWindowTextW(g_pkCombo, pick);
+          g_pkFiltBusy = FALSE;
+        }
+      }
       pk_edit_end(TRUE);
       XpTable *t = &g_pk[g_pkSheet];
       if (wParam == VK_TAB) c = shift ? c - 1 : c + 1;
@@ -717,6 +837,7 @@ static void pk_edit_end(BOOL commit) {
   if (commit && r >= 0 && r < g_pk[g_pkSheet].n) {
     wchar_t v[600];
     GetWindowTextW(ctl, v, 600);
+    pk_none_fix(ctl, v, 600);
     pk_put(&g_pk[g_pkSheet], r, c, v);
     pk_set_item(r);
     if (g_pkSheet == PK_ITEMS && c == 0) pk_stamp_typed(r);
@@ -788,40 +909,15 @@ static void pk_q_resolve(const wchar_t *in, wchar_t *out, int cap) {
   lstrcpynW(out, low[0] && k >= 0 ? kOps1c[k].name : in, cap);
 }
 
-/* список операций — по напечатанному (пусто — весь справочник) */
+/* список операций — по напечатанному (пусто — весь справочник): общий фильтр pk_combo_filter */
 static void pk_q_filter(void) {
   if (g_pkQBusy || !g_pkQOp) return;
-  g_pkQBusy = TRUE;
-  wchar_t t[200], low[200];
-  GetWindowTextW(g_pkQOp, t, 200);
-  DWORD s0 = 0, s1 = 0;
-  SendMessageW(g_pkQOp, CB_GETEDITSEL, (WPARAM)&s0, (LPARAM)&s1);
-  lstrcpynW(low, t, 200);
-  CharLowerBuffW(low, (DWORD)wcslen(low));
-  SendMessageW(g_pkQOp, WM_SETREDRAW, FALSE, 0);
-  SendMessageW(g_pkQOp, CB_RESETCONTENT, 0, 0);
-  int n = 0;
-  for (int i = 0; i < OPS_1C_N && n < 300; i++) {
-    wchar_t nm[200];
-    lstrcpynW(nm, kOps1c[i].name, 200);
-    CharLowerBuffW(nm, (DWORD)wcslen(nm));
-    if (!low[0] || wcsstr(nm, low)) SendMessageW(g_pkQOp, CB_ADDSTRING, 0, (LPARAM)kOps1c[i].name), n++;
-  }
-  SendMessageW(g_pkQOp, WM_SETREDRAW, TRUE, 0);
-  if (low[0] && n && !SendMessageW(g_pkQOp, CB_GETDROPPEDSTATE, 0, 0)) {
-    SendMessageW(g_pkQOp, CB_SHOWDROPDOWN, TRUE, 0);
-    SetCursor(LoadCursorW(NULL, IDC_ARROW)); /* раскрытый список прячет курсор мыши */
-  } else if (!n && SendMessageW(g_pkQOp, CB_GETDROPPEDSTATE, 0, 0)) {
-    SendMessageW(g_pkQOp, CB_SHOWDROPDOWN, FALSE, 0); /* нет такой — пустой список не нужен */
-  }
-  SetWindowTextW(g_pkQOp, t); /* раскрытие и очистка списка трогают поле — вернуть напечатанное */
-  SendMessageW(g_pkQOp, CB_SETEDITSEL, 0, MAKELPARAM(s0, s1));
-  InvalidateRect(g_pkQOp, NULL, TRUE);
-  g_pkQBusy = FALSE;
+  pk_combo_filter(g_pkQOp, 2, TRUE);
 }
 
 /* списки детали, участка и станка — при раскрытии: изделия и справочники могли поменяться */
 static void pk_q_list(HWND cb) {
+  if (g_pkFiltBusy && (cb == g_pkQArea || cb == g_pkQEquip)) return; /* раскрыл сам фильтр — список уже по набору */
   wchar_t t[200];
   GetWindowTextW(cb, t, 200);
   SendMessageW(cb, CB_RESETCONTENT, 0, 0);
@@ -832,10 +928,10 @@ static void pk_q_list(HWND cb) {
           SendMessageW(cb, CB_FINDSTRINGEXACT, (WPARAM)-1, (LPARAM)d) == CB_ERR)
         SendMessageW(cb, CB_ADDSTRING, 0, (LPARAM)d);
     }
-  } else if (cb == g_pkQArea) {
-    for (int i = 0; i < g_szmDicts.na; i++) SendMessageW(cb, CB_ADDSTRING, 0, (LPARAM)g_szmDicts.area[i]);
-  } else if (cb == g_pkQEquip) {
-    for (int i = 0; i < g_szmDicts.ne; i++) SendMessageW(cb, CB_ADDSTRING, 0, (LPARAM)g_szmDicts.equip[i]);
+  } else if (cb == g_pkQArea || cb == g_pkQEquip) { /* участок и станок — по напечатанному (фильтр сам раскрывает) */
+    SetWindowTextW(cb, t);
+    if (!g_pkFiltBusy) pk_combo_filter(cb, cb == g_pkQArea ? 3 : 4, FALSE);
+    return;
   }
   SetWindowTextW(cb, t);
 }
@@ -855,6 +951,7 @@ static void pk_q_add(void) {
   GetWindowTextW(g_pkQOp, op, 200);
   GetWindowTextW(g_pkQArea, area, 200);
   GetWindowTextW(g_pkQEquip, eq, 200);
+  pk_none_fix(g_pkQOp, op, 200), pk_none_fix(g_pkQArea, area, 200), pk_none_fix(g_pkQEquip, eq, 200);
   pk_q_trim(part), pk_q_trim(op), pk_q_trim(area), pk_q_trim(eq);
   if (!part[0]) {
     pk_status(L"Сначала деталь — выберите в списке слева или впишите обозначение");
@@ -1062,10 +1159,8 @@ static LRESULT CALLBACK PkQProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
   }
   if (msg == WM_KEYDOWN && wParam == VK_RETURN) {
     if (SendMessageW(cb, CB_GETDROPPEDSTATE, 0, 0)) {
-      int sel = (int)SendMessageW(cb, CB_GETCURSEL, 0, 0);
-      wchar_t t[200] = L"";
-      if (sel >= 0 && SendMessageW(cb, CB_GETLBTEXTLEN, (WPARAM)sel, 0) < 200)
-        SendMessageW(cb, CB_GETLBTEXT, (WPARAM)sel, (LPARAM)t);
+      wchar_t t[300] = L"";
+      pk_combo_pick(cb, t, 300); /* выделенная, а если не выбирали — первая подходящая; «нет в справочнике» — набранное */
       g_pkQBusy = TRUE;
       SendMessageW(cb, CB_SHOWDROPDOWN, FALSE, 0);
       if (t[0]) SetWindowTextW(cb, t);
@@ -1937,15 +2032,31 @@ static void pk_layout(void) {
   MoveWindow(g_pkList, pad, ly, rc.right - pad * 2, foot - PKS(26) - ly, TRUE);
   /* подвал (с 2026.10.21): правка строк — слева, главное «Сохранить» — справа */
   /* один путь (с 2026.10.29): чертежи → «Проверить» → «В Союз…»; редкое — в меню «Ещё ▾» */
-  static const int ids[] = {ID_PK_DRAW, ID_PK_PASTE, ID_PK_CHECK, ID_PK_MORE};
-  static const int w[] = {124, 100, 104, 90}; /* «Чертежи…» — шире и цветом главной (cursorpad.c) */
+  /* с 30.10: «+ Строка» и «+ Сборка» — видимыми кнопками рядом с «Чертежи…» (просьба пользователя); на узком
+     окне — короче («+ Стр.», «+ Сб.»), но не в меню */
+  static const int ids[] = {ID_PK_DRAW, ID_PK_ADD, ID_PK_ASM, ID_PK_PASTE, ID_PK_CHECK, ID_PK_MORE};
+  static const int wWide[] = {124, 96, 96, 92, 100, 80}; /* «Чертежи…» — шире и цветом главной (cursorpad.c) */
+  static const int wNarrow[] = {104, 64, 64, 84, 92, 66};
+  int need = 16 + 8 * 5 + 16 + 170 + 16;
+  for (int i = 0; i < 6; i++) need += wWide[i];
+  BOOL narrow = rc.right < PKS(need);
+  const int *w = narrow ? wNarrow : wWide;
+  {
+    wchar_t cur[40];
+    const wchar_t *la = narrow ? L"+ Стр." : L"+ Строка", *lb = narrow ? L"+ Сб." : L"+ Сборка";
+    GetWindowTextW(GetDlgItem(g_pkWnd, ID_PK_ADD), cur, 40);
+    if (wcscmp(cur, la)) SetWindowTextW(GetDlgItem(g_pkWnd, ID_PK_ADD), la);
+    GetWindowTextW(GetDlgItem(g_pkWnd, ID_PK_ASM), cur, 40);
+    if (wcscmp(cur, lb)) SetWindowTextW(GetDlgItem(g_pkWnd, ID_PK_ASM), lb);
+  }
   x = PKS(16);
-  for (int i = 0; i < 4; i++) {
+  for (int i = 0; i < 6; i++) {
     MoveWindow(GetDlgItem(g_pkWnd, ids[i]), x, by, PKS(w[i]), PKS(30), TRUE);
+    ShowWindow(GetDlgItem(g_pkWnd, ids[i]), SW_SHOW);
     x += PKS(w[i] + 8);
   }
-  static const int hidden[] = {ID_PK_ADD, ID_PK_ASM, ID_PK_DEL, ID_PK_CLEAR, ID_PK_HELP, ID_PK_FROMXP, ID_PK_SAVE};
-  for (int i = 0; i < 7; i++) ShowWindow(GetDlgItem(g_pkWnd, hidden[i]), SW_HIDE);
+  static const int hidden[] = {ID_PK_DEL, ID_PK_CLEAR, ID_PK_HELP, ID_PK_FROMXP, ID_PK_SAVE};
+  for (int i = 0; i < 5; i++) ShowWindow(GetDlgItem(g_pkWnd, hidden[i]), SW_HIDE);
   MoveWindow(GetDlgItem(g_pkWnd, ID_PK_SOYUZ), rc.right - PKS(16) - PKS(170), by, PKS(170), PKS(30), TRUE);
   InvalidateRect(g_pkWnd, NULL, FALSE); /* карточка и подвал — по новому размеру */
 }
@@ -2180,6 +2291,8 @@ static LRESULT CALLBACK PkProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
     if (id == ID_PK_QPART && (HIWORD(wParam) == CBN_EDITCHANGE || HIWORD(wParam) == CBN_SELCHANGE))
       pk_q_part_changed(HIWORD(wParam) == CBN_SELCHANGE);
     if (id == ID_PK_QOP && HIWORD(wParam) == CBN_EDITCHANGE) pk_q_filter();
+    if ((id == ID_PK_QAREA || id == ID_PK_QEQUIP) && HIWORD(wParam) == CBN_EDITCHANGE && !g_pkQBusy)
+      pk_combo_filter((HWND)lParam, id == ID_PK_QAREA ? 3 : 4, TRUE); /* участок и станок — по набору */
     if ((id == ID_PK_QPART || id == ID_PK_QAREA || id == ID_PK_QEQUIP) && HIWORD(wParam) == CBN_DROPDOWN)
       pk_q_list((HWND)lParam);
     if (id == ID_PK_DEL) pk_delete_selected();
@@ -2193,9 +2306,7 @@ static LRESULT CALLBACK PkProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
     if (id == ID_PK_PRIO) szp_edit(hwnd);
     if (id == ID_PK_MORE) { /* редкое — меню у кнопки; выбранное уходит тем же WM_COMMAND */
       HMENU m = CreatePopupMenu();
-      AppendMenuW(m, MF_STRING, ID_PK_ADD, L"+ Строка\tInsert");
-      AppendMenuW(m, MF_STRING, ID_PK_ASM, L"+ Сборка");
-      AppendMenuW(m, MF_STRING, ID_PK_DEL, L"Удалить выделенные\tDelete");
+      AppendMenuW(m, MF_STRING, ID_PK_DEL, L"Удалить выделенные\tDelete"); /* «+ Строка», «+ Сборка» — кнопками (30.10) */
       AppendMenuW(m, MF_SEPARATOR, 0, NULL);
       AppendMenuW(m, MF_STRING, ID_PK_DRAWFIND, L"Чертежи из архива по обозначениям — к изделиям без файла");
       AppendMenuW(m, MF_STRING | (pk_stamp_ops_on() ? MF_CHECKED : 0), ID_PK_DRAWTOGGLE,
