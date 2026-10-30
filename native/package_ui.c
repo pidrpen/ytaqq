@@ -73,6 +73,8 @@ typedef struct {
   wchar_t (*buy)[200];   /* значения «Признака покупки» (PurchasedKind), какие есть в базе */
   int nf;
   SzmFit *fit;
+  int naf;     /* участок операции по коду, и без станка (с 30.10): equip 0 */
+  SzmFit *afit;
   wchar_t err[300];
 } SzmDicts;
 static SzmDicts g_szmDicts;
@@ -406,7 +408,13 @@ static void pk_set_item(int r) {
   }
 }
 
+static void pk_edit_end(BOOL commit);
 static void pk_fill(BOOL columns) {
+  /* правка ячейки — закончить: список перестраивается и прокручивается к началу, поле правки (дочернее окно
+     таблицы) уехало бы в шапку («12» поверх «Участка», снимок пользователя 30.10) */
+  if (g_pkEditRow >= 0) pk_edit_end(TRUE);
+  if (g_pkEdit) ShowWindow(g_pkEdit, SW_HIDE);
+  if (g_pkCombo) ShowWindow(g_pkCombo, SW_HIDE);
   XpTable *t = &g_pk[g_pkSheet];
   g_pkFilling = TRUE;
   SendMessageW(g_pkList, WM_SETREDRAW, FALSE, 0);
@@ -471,20 +479,41 @@ static void pk_buy_fill(BOOL dicts) {
 /* станок к операции: какой в «Союзе» ставят на операцию с этим кодом на этом участке (типовые
    операции, потом ТП завода — SzmFit); участок пуст — самый частый у этой операции вообще, и его
    участок — в *areaId. Участка нет в справочнике или пары нет в базе — 0 */
+/* код справочной операции: «4110 Токарная» → 4110, «Токарная» — по справочнику 1С; -1 — нет */
+static long pk_op_code(const wchar_t *op) {
+  while (*op == L' ') op++;
+  if (*op >= L'0' && *op <= L'9') return wcstol(op, NULL, 10);
+  wchar_t low[200];
+  lstrcpynW(low, op, 200);
+  CharLowerBuffW(low, (DWORD)wcslen(low));
+  for (int i = 0; i < OPS_1C_N; i++)
+    if (!wcscmp(kOps1c[i].key, low)) return wcstol(kOps1c[i].num, NULL, 10);
+  return -1;
+}
+
+/* участок операции из «Союза» (с 30.10): самый весомый по коду — типовая операция, потом ТП завода
+   (SzmDicts.afit), и без станка; в out — как в справочнике участков. FALSE — нет */
+static BOOL pk_area_for(const wchar_t *op, wchar_t *out, int cap) {
+  out[0] = 0;
+  long code = op && op[0] ? pk_op_code(op) : -1;
+  if (code < 0 || !g_szmDicts.naf || !g_szmDicts.areaId) return FALSE;
+  const SzmFit *best = NULL;
+  for (int i = 0; i < g_szmDicts.naf; i++)
+    if (g_szmDicts.afit[i].code == code && g_szmDicts.afit[i].area && (!best || g_szmDicts.afit[i].score > best->score))
+      best = &g_szmDicts.afit[i];
+  for (int i = 0; best && i < g_szmDicts.na; i++)
+    if (g_szmDicts.areaId[i] == best->area) {
+      lstrcpynW(out, g_szmDicts.area[i], cap);
+      return TRUE;
+    }
+  return FALSE;
+}
+
 static int pk_equip_for(const wchar_t *op, const wchar_t *area, wchar_t *out, int cap, long *areaId) {
   out[0] = 0;
   *areaId = 0;
   if (!g_szmDicts.nf || !op[0]) return 0;
-  while (*op == L' ') op++;
-  long code = -1;
-  if (*op >= L'0' && *op <= L'9') code = wcstol(op, NULL, 10);
-  else { /* «Токарная» без номера — номер из справочника 1С */
-    wchar_t low[200];
-    lstrcpynW(low, op, 200);
-    CharLowerBuffW(low, (DWORD)wcslen(low));
-    for (int i = 0; i < OPS_1C_N && code < 0; i++)
-      if (!wcscmp(kOps1c[i].key, low)) code = wcstol(kOps1c[i].num, NULL, 10);
-  }
+  long code = pk_op_code(op);
   if (code < 0) return 0;
   while (*area == L' ') area++;
   long aid = 0;
@@ -542,12 +571,69 @@ static int pk_prio_row(XpTable *t, int r) {
   return set;
 }
 
+static BOOL pk_is_transport(const wchar_t *op);
+static int pk_transport_fill(void);
+static int g_pkTrTouched; /* транспортирования или номера поменялись — список листа перестроить */
+
+/* участка нет ни в таблице приоритетов, ни в «Союзе» — как у предыдущей операции этой детали (слесарная,
+   маркирование, контроль обычно там же; с 30.10); в «Проверить» такие помечены. Справочники ещё читаются —
+   ждать их: участок из «Союза» важнее предыдущей. Сколько подставлено */
+static int pk_area_prev(void) {
+  if (g_szmDictsAsked && !g_szmDicts.na && !g_szmDicts.err[0]) return 0;
+  XpTable *t = &g_pk[PK_OPS];
+  int n = 0;
+  for (int r = 0; r < t->n; r++) {
+    if (pk_row_from_soyuz(PK_OPS, r) || xp_cell(t, r, 3)[0]) continue;
+    const wchar_t *op = xp_cell(t, r, 2), *des = xp_cell(t, r, 0);
+    if (!op[0] || pk_is_transport(op)) continue;
+    int me = _wtoi(xp_cell(t, r, 1)), best = -1, bn = -1;
+    for (int q = 0; q < t->n; q++) {
+      if (q == r || _wcsicmp(xp_cell(t, q, 0), des) || !xp_cell(t, q, 3)[0] || pk_is_transport(xp_cell(t, q, 2))) continue;
+      int k = _wtoi(xp_cell(t, q, 1));
+      if (k < me && k > bn) bn = k, best = q;
+    }
+    if (best < 0) continue;
+    pk_put(t, r, 3, xp_cell(t, best, 3));
+    if (g_pkSheet == PK_OPS && g_pkList) pk_set_item(r);
+    n++;
+  }
+  return n;
+}
+
+/* участок пришёл не из таблицы приоритетов и не из «Союза» (взят по предыдущей или вписан руками) — для
+   пометки в «Проверить» */
+static BOOL pk_area_sourced(const wchar_t *op, const wchar_t *eq) {
+  const SzPrio *p = szp_find_eq(op, eq);
+  for (int k = 0; p && k < p->n; k++)
+    if (p->area[k][0]) return TRUE;
+  wchar_t b[200];
+  long aid = 0;
+  if (pk_area_for(op, b, 200)) return TRUE;
+  return pk_equip_for(op, L"", b, 200, &aid) && aid;
+}
+
+/* операция по станку (заготовка, гибка, ЧПУ, шлифовальные, зубообработка, мехобработка): без станка — «проверить» */
+static BOOL pk_needs_machine(const wchar_t *op) {
+  wchar_t key[80];
+  szp_key(op, key, 80);
+  int g = szp_group_of(szp_code_of(op), key, NULL);
+  return g == SZP_G_ZAG || g == SZP_G_GIB || g == SZP_G_CNC || g == SZP_G_SHLIF || g == SZP_G_ZUBO || g == SZP_G_MECH;
+}
+
+/* участок и станок каждой операции (с 30.10 — у каждой): своя строка таблицы приоритетов, потом группа
+   (pk_prio_row); участок — из «Союза» по коду (типовая операция, потом ТП завода); станок — какой ставят на
+   эту операцию на этом участке, а нет такой пары — на любом (в ТП завода у операций участок бывает не
+   записан); участка всё нет — как у предыдущей операции детали. Сколько строк тронуто */
 static int pk_equip_fill(void) {
   XpTable *t = &g_pk[PK_OPS];
   int n = 0;
   for (int r = 0; r < t->n; r++) {
     if (pk_row_from_soyuz(PK_OPS, r)) continue;
-    int did = pk_prio_row(t, r); /* сначала таблица технолога */
+    const wchar_t *op = xp_cell(t, r, 2);
+    if (!op[0] || pk_is_transport(op)) continue;
+    int did = pk_prio_row(t, r); /* сначала таблица технолога: своя строка, потом группа */
+    wchar_t buf[200];
+    if (!xp_cell(t, r, 3)[0] && pk_area_for(op, buf, 200)) pk_put(t, r, 3, buf), did = 1;
     if (!xp_cell(t, r, 4)[0] && g_szmDicts.nf) {
       wchar_t eq[200];
       long aid;
@@ -556,18 +642,46 @@ static int pk_equip_fill(void) {
         for (int i = 0; !xp_cell(t, r, 3)[0] && g_szmDicts.areaId && i < g_szmDicts.na; i++)
           if (g_szmDicts.areaId[i] == aid) pk_put(t, r, 3, g_szmDicts.area[i]);
         did = 1;
+      } else if (xp_cell(t, r, 3)[0] && pk_equip_for(xp_cell(t, r, 2), L"", eq, 200, &aid)) {
+        pk_put(t, r, 4, eq); /* на этом участке пары нет — станок этой операции на любом участке */
+        did = 1;
       }
     }
     if (!did) continue;
     if (g_pkSheet == PK_OPS && g_pkList) pk_set_item(r);
     n++;
   }
-  return n;
+  return n + pk_area_prev();
+}
+
+/* транспортирования и номера — сразу, как операции легли или поменялись (с 30.10): между сменами участка и
+   в конце — «0401 Транспортирование», лишние — прочь, номера деталей шагом 5. Список листа — заново,
+   выделенная операция остаётся выделенной */
+static void pk_ops_settle(void) {
+  g_pkTrTouched = 0;
+  pk_transport_fill();
+  if (!g_pkTrTouched || g_pkSheet != PK_OPS || !g_pkList || !g_pkWnd) return;
+  XpTable *t = &g_pk[PK_OPS];
+  int sr = pk_sel_row();
+  const wchar_t *key = sr >= 0 && sr < t->n ? t->cell[(size_t)sr * (size_t)t->ncols + 2] : NULL;
+  pk_fill(FALSE);
+  for (int r = 0; key && r < t->n; r++)
+    if (t->cell[(size_t)r * (size_t)t->ncols + 2] == key) {
+      int it = pk_item(r);
+      if (it >= 0) {
+        g_pkFilling = TRUE; /* та же строка — не новый выбор человека */
+        ListView_SetItemState(g_pkList, it, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+        g_pkFilling = FALSE;
+        ListView_EnsureVisible(g_pkList, it, FALSE);
+      }
+      break;
+    }
 }
 
 static void pk_changed(void) {
   pk_buy_fill(FALSE);
   pk_equip_fill();
+  pk_ops_settle();     /* транспортирования и номера шагом 5 — сразу (с 30.10) */
   pk_norms_fill(TRUE); /* новые операции — сразу с Тпз/Тшт по таблицам ОМН */
   pk_tabs();
   pk_draft_save();
@@ -577,6 +691,7 @@ static void pk_changed(void) {
 static void pk_prio_changed(void) {
   if (!g_pkWnd) return;
   int n = pk_equip_fill();
+  pk_ops_settle();
   pk_tabs();
   pk_draft_save();
   if (g_pkSheet == PK_OPS) pk_fill(FALSE);
@@ -1589,6 +1704,59 @@ static int pk_transport_fill(void) {
     for (int q = 0; q < np && !seen; q++) seen = !_wcsicmp(parts[q], des);
     if (!seen) lstrcpynW(parts[np++], des, 200);
   }
+  /* лишние транспортирования — прочь (с 30.10): до и после один участок (поменяли участок, удалили
+     операцию) или два подряд; оставшимся — участок следующей операции */
+  {
+    char *del = t->n ? (char *)calloc((size_t)t->n, 1) : NULL;
+    for (int p = 0; p < np && del; p++) {
+      const wchar_t *des = parts[p];
+      int order[200], n = 0;
+      for (int r = 0; r < t->n && n < 200; r++)
+        if (!_wcsicmp(xp_cell(t, r, 0), des) && xp_cell(t, r, 2)[0]) order[n++] = r;
+      for (int i = 1; i < n; i++)
+        for (int k = i; k > 0 && _wtoi(xp_cell(t, order[k - 1], 1)) > _wtoi(xp_cell(t, order[k], 1)); k--) {
+          int tmp = order[k];
+          order[k] = order[k - 1];
+          order[k - 1] = tmp;
+        }
+      wchar_t endArea[200] = L"";
+      for (int r = 0; r < ln->n && !endArea[0]; r++)
+        if (!_wcsicmp(xp_cell(ln, r, 1), des) && xp_cell(ln, r, 0)[0] && _wcsicmp(xp_cell(ln, r, 0), des))
+          pk_first_area(xp_cell(ln, r, 0), endArea, 200);
+      for (int i = 0; i < n; i++) {
+        int r = order[i];
+        if (!pk_is_transport(xp_cell(t, r, 2)) || pk_row_from_soyuz(PK_OPS, r)) continue;
+        if (i > 0 && pk_is_transport(xp_cell(t, order[i - 1], 2)) && !del[order[i - 1]]) {
+          del[r] = 1; /* два подряд */
+          continue;
+        }
+        const wchar_t *pa = L"", *na = L"";
+        for (int j = i - 1; j >= 0 && !pa[0]; j--)
+          if (!pk_is_transport(xp_cell(t, order[j], 2))) pa = xp_cell(t, order[j], 3);
+        for (int j = i + 1; j < n && !na[0]; j++)
+          if (!pk_is_transport(xp_cell(t, order[j], 2))) na = xp_cell(t, order[j], 3);
+        BOOL last = TRUE;
+        for (int j = i + 1; j < n; j++)
+          if (!pk_is_transport(xp_cell(t, order[j], 2))) last = FALSE;
+        if (last) na = endArea;
+        if (!pa[0] || !na[0]) continue;
+        wchar_t a[40], b2[40], c3[40];
+        pk_area_code_of(pa, a, 40);
+        pk_area_code_of(na, b2, 40);
+        pk_area_code_of(xp_cell(t, r, 3), c3, 40);
+        if (!wcscmp(a, b2)) del[r] = 1;
+        else if (wcscmp(c3, b2)) pk_put(t, r, 3, na), g_pkTrTouched++;
+      }
+    }
+    for (int r = t->n - 1; del && r >= 0; r--)
+      if (del[r]) {
+        pk_del_row(t, r);
+        if (g_pkQEdit == r) g_pkQEdit = -1;
+        else if (g_pkQEdit > r) g_pkQEdit--;
+        g_pkTrTouched++;
+      }
+    free(del);
+  }
   for (int p = 0; p < np; p++) {
     const wchar_t *des = parts[p];
     /* покупное — не наш маршрут */
@@ -1634,6 +1802,7 @@ static int pk_transport_fill(void) {
           xp_set(w, 3, area);
           seq[ns++] = nr;
           added++;
+          g_pkTrTouched++;
         }
       }
       if (ns < 399) seq[ns++] = r;
@@ -1652,6 +1821,7 @@ static int pk_transport_fill(void) {
           xp_set(w, 3, endArea);
           seq[ns++] = t->n - 1;
           added++;
+          g_pkTrTouched++;
         }
       }
     }
@@ -1660,7 +1830,7 @@ static int pk_transport_fill(void) {
       wchar_t num[8];
       _snwprintf(num, 8, L"%03d", (i + 1) * 5);
       num[7] = 0;
-      if (wcscmp(xp_cell(t, seq[i], 1), num)) pk_put(t, seq[i], 1, num);
+      if (wcscmp(xp_cell(t, seq[i], 1), num)) pk_put(t, seq[i], 1, num), g_pkTrTouched++;
     }
   }
   return added;
@@ -1789,6 +1959,27 @@ static BOOL pk_check(BOOL quiet) {
   }
   int nmf = pk_norms_fill(TRUE);
   if (nmf) sb_add(&b, L"• Нормы Тпз/Тшт по таблицам ОМН посчитаны у %d операций (Тшт — только где есть машинное время)\n", nmf);
+  { /* участок по предыдущей операции (или вписан руками) и операции по станку без станка — проверить (с 30.10) */
+    wchar_t prevList[600] = L"", noEq[600] = L"";
+    int np2 = 0, ne2 = 0;
+    for (int r = 0; r < op->n; r++) {
+      const wchar_t *o = xp_cell(op, r, 2);
+      if (!o[0] || pk_is_transport(o) || pk_row_from_soyuz(PK_OPS, r)) continue;
+      if (xp_cell(op, r, 3)[0] && !pk_area_sourced(o, xp_cell(op, r, 4))) {
+        np2++;
+        size_t l = wcslen(prevList);
+        if (l < 500) _snwprintf(prevList + l, 600 - l, L"%s%s %s %s", l ? L", " : L"", xp_cell(op, r, 0), xp_cell(op, r, 1), o);
+      }
+      if (!xp_cell(op, r, 4)[0] && pk_needs_machine(o)) {
+        ne2++;
+        size_t l = wcslen(noEq);
+        if (l < 500) _snwprintf(noEq + l, 600 - l, L"%s%s %s %s", l ? L", " : L"", xp_cell(op, r, 0), xp_cell(op, r, 1), o);
+      }
+    }
+    prevList[599] = noEq[599] = 0;
+    if (np2) sb_add(&b, L"• Участок как у предыдущей операции (нет ни в приоритетах, ни в «Союзе») — проверить (%d): %s\n", np2, prevList);
+    if (ne2) sb_add(&b, L"• Без оборудования — проверить (%d): %s\n", ne2, noEq);
+  }
   { /* участок не подобрался (заготовка без своей строки в приоритетах, редкая операция) — проверить */
     int noArea = 0;
     for (int r = 0; r < op->n; r++)
@@ -2248,6 +2439,7 @@ static LRESULT CALLBACK PkProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
       free(g_szmDicts.areaCode);
       free(g_szmDicts.buy);
       free(g_szmDicts.fit);
+      free(g_szmDicts.afit);
       g_szmDicts = *d;
       free(d);
       g_pkComboCol = -1; /* список заполнить заново */
@@ -2256,6 +2448,7 @@ static LRESULT CALLBACK PkProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
                      g_szmDicts.na, g_szmDicts.ne, g_szmDicts.nb);
       pk_buy_fill(TRUE); /* «Собственного изготовления» — как он записан в базе */
       int eqn = pk_equip_fill();
+      pk_ops_settle(); /* участки теперь известны — транспортирования и номера */
       if (eqn) pk_status(L"Из базы «Союза»: участков %d, станков %d; к операциям подобрано оборудование: %d", g_szmDicts.na,
                          g_szmDicts.ne, eqn);
       if (eqn || g_pkQEquip) pk_draft_save();

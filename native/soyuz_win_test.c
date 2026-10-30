@@ -21,21 +21,29 @@
 
 static const wchar_t *g_stDir;
 static int g_stFail;
-static wchar_t g_stReport[12000];
+#define ST_REPORT_CAP 60000 /* отчёт стенда; переполнение 12000 затирало соседние переменные (30.10) */
+static wchar_t g_stReport[ST_REPORT_CAP];
 static wchar_t g_stClip[200];
 static int g_stClipN;
 
 static void st_check(BOOL ok, const wchar_t *what) {
   size_t n = wcslen(g_stReport);
-  _snwprintf(g_stReport + n, 12000 - n, L"%ls %ls\r\n", ok ? L"ok  " : L"FAIL", what);
   if (!ok) g_stFail++;
+  if (n + 8 >= ST_REPORT_CAP) return; /* отчёт полон — дальше не писать, не затирать соседей */
+  _snwprintf(g_stReport + n, ST_REPORT_CAP - n, L"%ls %ls\r\n", ok ? L"ok  " : L"FAIL", what);
+  g_stReport[ST_REPORT_CAP - 1] = 0;
 }
 
 static void st_note(const wchar_t *fmt, ...) {
   size_t n = wcslen(g_stReport);
   va_list ap;
   va_start(ap, fmt);
-  _vsnwprintf(g_stReport + n, 12000 - n - 3, fmt, ap);
+  if (n + 8 >= ST_REPORT_CAP) {
+    va_end(ap);
+    return;
+  }
+  _vsnwprintf(g_stReport + n, ST_REPORT_CAP - n - 3, fmt, ap);
+  g_stReport[ST_REPORT_CAP - 4] = 0;
   va_end(ap);
   wcscat(g_stReport, L"\r\n");
 }
@@ -792,6 +800,98 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
       for (int t = 0; t < 50 && ListView_GetItemCount(g_pkList) != 7; t++) st_pump(100);
       st_check(ListView_GetItemCount(g_pkList) == 7, L"в таблице листа «Операции» семь строк (с транспортированиями и сборкой)");
       st_note(L"     строк в таблице «Операции»: %d, в данных %d", ListView_GetItemCount(g_pkList), g_pk[PK_OPS].n);
+      { /* деталь из 8 операций по чертежу (как на снимке пользователя 30.10; обозначение выдуманное): участок у
+           каждой, станок у токарной, транспортирование сразу, номера шагом 5 — и после удаления и правки участка */
+        XpTable *ot = &g_pk[PK_OPS];
+        static const wchar_t *const ops8[8] = {L"4280 Отрезная",  L"4110 Токарная",  L"5000 Термическая обработка", L"0108 Слесарная",
+                                              L"4110 Токарная",  L"0108 Слесарная", L"0180 Маркирование",         L"0200 Контроль"};
+        for (int i = 0; i < 8; i++) {
+          wchar_t num[8];
+          _snwprintf(num, 8, L"%03d", (i + 1) * 5);
+          xp_row(ot);
+          ot = &g_pk[PK_OPS];
+          pk_put(ot, ot->n - 1, 0, L"ТСТ.150.001");
+          pk_put(ot, ot->n - 1, 1, num);
+          pk_put(ot, ot->n - 1, 2, ops8[i]);
+        }
+        pk_changed(); /* как после чтения чертежа (pk_stamp.c) */
+        ot = &g_pk[PK_OPS];
+        int rows = 0, noArea = 0, tr = 0, tok = 0, tokEq = 0, seqOk = 1, mark = -1;
+        int nums[40], nn = 0;
+        for (int r = 0; r < ot->n; r++) {
+          if (wcscmp(xp_cell(ot, r, 0), L"ТСТ.150.001")) continue;
+          rows++;
+          const wchar_t *o = xp_cell(ot, r, 2);
+          if (!xp_cell(ot, r, 3)[0]) noArea++;
+          if (pk_is_transport(o)) tr++;
+          if (!wcscmp(o, L"4110 Токарная")) tok++, tokEq += xp_cell(ot, r, 4)[0] != 0;
+          if (!wcscmp(o, L"0180 Маркирование")) mark = r;
+          if (nn < 40) nums[nn++] = _wtoi(xp_cell(ot, r, 1));
+        }
+        for (int i = 0; i < nn; i++) { /* номера — 5, 10, … без пропусков и повторов */
+          int seen = 0;
+          for (int k = 0; k < nn; k++) seen += nums[k] == (i + 1) * 5;
+          if (seen != 1) seqOk = 0;
+        }
+        st_note(L"     деталь из 8 операций: строк %d (транспортирований %d), без участка %d, токарных со станком %d из %d, маркирование — «%ls»",
+                rows, tr, noArea, tokEq, tok, mark >= 0 ? xp_cell(ot, mark, 3) : L"-");
+        st_check(rows == 8 + tr && tr >= 2 && noArea == 0 && tok == 2 && tokEq == 2 && seqOk && mark >= 0 && xp_cell(ot, mark, 3)[0],
+                 L"8 операций по чертежу: участок у каждой (маркирование — как у предыдущей), станок у токарных, "
+                 L"«Транспортирование» сразу при смене участка, номера 005… шагом 5");
+        /* «Проверить»: маркирование — «как у предыдущей», в списке */
+        BOOL markSrc = mark >= 0 && pk_area_sourced(xp_cell(ot, mark, 2), xp_cell(ot, mark, 4));
+        st_check(!markSrc, L"маркирование без участка в таблице и в «Союзе» — помечено «участок как у предыдущей — проверить»");
+        /* удалить термообработку (была 015) — номера заново 005…, лишних транспортирований нет */
+        for (int r = 0; r < ot->n; r++)
+          if (!wcscmp(xp_cell(ot, r, 0), L"ТСТ.150.001") && !wcscmp(xp_cell(ot, r, 2), L"5000 Термическая обработка")) {
+            pk_del_row(ot, r);
+            break;
+          }
+        pk_changed(); /* как «Удалить» (pk_delete_selected) */
+        ot = &g_pk[PK_OPS];
+        int rows2 = 0, tr2 = 0;
+        nn = 0;
+        for (int r = 0; r < ot->n; r++)
+          if (!wcscmp(xp_cell(ot, r, 0), L"ТСТ.150.001")) {
+            rows2++;
+            tr2 += pk_is_transport(xp_cell(ot, r, 2));
+            if (nn < 40) nums[nn++] = _wtoi(xp_cell(ot, r, 1));
+          }
+        int seq2 = 1;
+        for (int i = 0; i < nn; i++) {
+          int seen = 0;
+          for (int k = 0; k < nn; k++) seen += nums[k] == (i + 1) * 5;
+          if (seen != 1) seq2 = 0;
+        }
+        st_check(rows2 == 7 + tr2 && seq2, L"после удаления операции номера детали снова 005… шагом 5 без пропусков");
+        st_note(L"     после удаления: строк %d (транспортирований %d), последний номер %03d", rows2, tr2, rows2 * 5);
+        /* вторая токарная — на участок слесарной: транспортирования вокруг неё стали лишними — убраны */
+        int tok2 = -1, cntTok = 0;
+        for (int r = 0; r < ot->n; r++)
+          if (!wcscmp(xp_cell(ot, r, 0), L"ТСТ.150.001") && !wcscmp(xp_cell(ot, r, 2), L"4110 Токарная") && ++cntTok == 2) tok2 = r;
+        wchar_t slesArea[200] = L"";
+        for (int r = 0; r < ot->n && !slesArea[0]; r++)
+          if (!wcscmp(xp_cell(ot, r, 0), L"ТСТ.150.001") && !wcscmp(xp_cell(ot, r, 2), L"0108 Слесарная")) lstrcpynW(slesArea, xp_cell(ot, r, 3), 200);
+        if (tok2 >= 0) pk_put(ot, tok2, 3, slesArea);
+        pk_changed(); /* как правка ячейки «Участок» */
+        ot = &g_pk[PK_OPS];
+        int tr3 = 0;
+        for (int r = 0; r < ot->n; r++) tr3 += !wcscmp(xp_cell(ot, r, 0), L"ТСТ.150.001") && pk_is_transport(xp_cell(ot, r, 2));
+        st_check(tok2 >= 0 && slesArea[0] && tr3 == tr2 - 2, L"участок токарной сменили на участок соседних — два транспортирования вокруг неё убраны");
+        st_note(L"     транспортирований: было %d, после правки участка %d", tr2, tr3);
+        /* деталь — прочь: дальше стенд ждёт прежние семь строк */
+        for (int r = ot->n - 1; r >= 0; r--)
+          if (!wcscmp(xp_cell(ot, r, 0), L"ТСТ.150.001")) pk_del_row(ot, r);
+        pk_changed();
+        if (g_pkSheet == PK_OPS) pk_fill(FALSE);
+        st_check(g_pk[PK_OPS].n == 7, L"чужая деталь убрана — на листе снова семь строк");
+        /* поле правки не остаётся поверх таблицы, когда список перестраивается */
+        pk_edit_begin(0, 3);
+        BOOL shown = g_pkCombo && IsWindowVisible(g_pkCombo);
+        pk_fill(FALSE);
+        st_check(shown && !IsWindowVisible(g_pkCombo) && g_pkEditRow < 0,
+                 L"список перестроили во время правки ячейки — правка закончена, поле не висит над шапкой");
+      }
       pk_to_soyuz();
       for (int t = 0; t < 100 && SendMessageW(g_szmCombo, CB_GETCOUNT, 0, 0) == 0; t++) st_pump(100);
       int nf = (int)SendMessageW(g_szmCombo, CB_GETCOUNT, 0, 0);
