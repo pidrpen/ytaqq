@@ -495,7 +495,7 @@ static void ac_rtf_begin_ui(AcRtf *b) {
                    COL_INK,
                    blend_rgb(COL_PAPER_DARK, COL_INK, 10)};
   char head[700];
-  int n = snprintf(head, sizeof(head), "{\\rtf1\\ansi\\deff0\\uc1{\\fonttbl{\\f0 Segoe UI;}{\\f1 Consolas;}}{\\colortbl;");
+  int n = snprintf(head, sizeof(head), "{\\rtf1\\ansi\\deff0\\uc1{\\fonttbl{\\f0 Segoe UI;}{\\f1 Consolas;}{\\f2 Consolas;}}{\\colortbl;");
   for (int i = 0; i < 8 && n > 0 && n < (int)sizeof(head); i++)
     n += snprintf(head + n, sizeof(head) - (size_t)n, "\\red%d\\green%d\\blue%d;", GetRValue(c[i]), GetGValue(c[i]),
                   GetBValue(c[i]));
@@ -579,6 +579,7 @@ static void ac_think_links(void) {
 
 static void ac_rtf_bubble(AcRtf *out, const AcTurn *t, int widthTw) {
   AcRtf one = {0};
+  g_acNormTw = widthTw * 96 / 100; /* таблица норм — во всю ширину ответа */
   wchar_t *shown = ac_turn_show_text(t);
   ac_rtf_message(&one, shown ? shown : t->text, t->assistant, t->png != NULL);
   free(shown);
@@ -595,6 +596,8 @@ static void ac_rtf_bubble(AcRtf *out, const AcTurn *t, int widthTw) {
            "\\trpaddfl3\\trpaddfr3\\trpaddft3\\trpaddfb3%s\\clcbpat%d\\cellx%d ",
            left, t->assistant ? "\\clbrdrl\\brdrs\\brdrw20\\brdrcf6" : "", t->assistant ? 4 : 5, right);
   ac_rtf_add(out, row);
+  char reopen[700];
+  snprintf(reopen, sizeof(reopen), "\\pard\\sa0\\sb0\\fs8\\par\\fs22 %s", row);
   const char *s = one.text;
   size_t end = one.size;
   if (end >= 5 && !memcmp(s + end - 5, "\\par ", 5)) end -= 5;
@@ -619,8 +622,20 @@ static void ac_rtf_bubble(AcRtf *out, const AcTurn *t, int widthTw) {
     else if (nameLen == 2 && !memcmp(name, "sb", 2) && k - j == 3 && !memcmp(s + j, "180", 3)) add = "\\sb40";
     else if (nameLen == 1 && name[0] == 'f' && k - j == 1 && s[j] == '1') add = "\\f1\\highlight8\\cf7";
     else if (nameLen == 1 && name[0] == 'f' && k - j == 1 && s[j] == '0') add = "\\f0\\highlight0\\cf1";
+    /* таблица норм — вне пузыря; RichEdit не принимает две разные таблицы вплотную —
+       между ними пустой абзац, как между пузырями */
+    else if (nameLen == 9 && !memcmp(name, "cpnormbeg", 9)) add = "\\cell\\row \\pard\\sa0\\sb0\\fs8\\par\\fs22 ";
+    else if (nameLen == 9 && !memcmp(name, "cpnormend", 9)) add = reopen; /* после неё — пузырь снова */
     if (add) {
-      ac_rtf_addn(out, s + from, i - from);
+      size_t cut = i;
+      if (add[1] == 'c' && add[2] == 'e') { /* перед таблицей норм — без пустой строки в пузыре */
+        static const char *const tail[2] = {"\\par\\sb0 ", "\\par\\sb100 "};
+        for (int t = 0; t < 2; t++) {
+          size_t n = strlen(tail[t]);
+          if (cut - from >= n && !memcmp(s + cut - n, tail[t], n)) cut -= n;
+        }
+      }
+      ac_rtf_addn(out, s + from, cut - from);
       ac_rtf_add(out, add);
       from = k;
     }

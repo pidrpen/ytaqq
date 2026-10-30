@@ -96,6 +96,7 @@ static void tools_menu_measure(MEASUREITEMSTRUCT *mi) {
   mi->itemWidth = (UINT)(sz.cx + kz.cx + more_px(it->key ? 96 : 66));
   /* заголовок раздела — с воздухом сверху, кроме самого первого */
   mi->itemHeight = (UINT)more_px(it->kind == 1 ? (it == kMore ? 26 : 32) : 32);
+  if (chertezh_on()) mi->itemHeight = (UINT)more_px(it->kind == 1 ? 24 : 28); /* «Чертёж» — плотнее, таблицей */
 }
 
 static void tools_menu_draw(const DRAWITEMSTRUCT *di) {
@@ -104,6 +105,52 @@ static void tools_menu_draw(const DRAWITEMSTRUCT *di) {
   HDC dc = di->hDC;
   RECT r = di->rcItem;
   BOOL sel = (di->itemState & ODS_SELECTED) && it->kind != 1 && it->kind != 3;
+  if (chertezh_on()) { /* «Чертёж» (с 2026.10.30): строки таблицы — черта снизу, разделы на сером прописными */
+    FillRect(dc, &r, it->kind == 1 ? g_paperDark : sel ? g_paperDark : g_paper);
+    HBRUSH line = CreateSolidBrush(it->kind == 1 ? blend_rgb(COL_LINE, COL_INK, 90) : blend_rgb(COL_LINE, COL_PAPER, 60));
+    RECT b = {r.left, r.bottom - 1, r.right, r.bottom};
+    FillRect(dc, &b, line);
+    DeleteObject(line);
+    if (sel) {
+      HBRUSH ab = CreateSolidBrush(COL_SAGE);
+      RECT a = {r.left, r.top, r.left + more_px(3), r.bottom - 1};
+      FillRect(dc, &a, ab);
+      DeleteObject(ab);
+    }
+    SetBkMode(dc, TRANSPARENT);
+    int x = r.left + more_px(12);
+    if (it->kind == 1) {
+      wchar_t up[64];
+      lstrcpynW(up, it->text, 64);
+      CharUpperBuffW(up, (DWORD)wcslen(up));
+      if (g_fontMonoSm) SelectObject(dc, g_fontMonoSm);
+      SetTextColor(dc, COL_MUTED);
+      int ox = SetTextCharacterExtra(dc, 1);
+      RECT t = {x, r.top, r.right - more_px(8), r.bottom - 1};
+      DrawTextW(dc, up, -1, &t, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+      SetTextCharacterExtra(dc, ox);
+      return;
+    }
+    COLORREF fg = it->kind == 2 ? COL_SAGE : it->kind == 3 ? COL_MUTED : COL_INK;
+    HFONT ifont = it->icon ? ui_icon_font(more_px(14)) : NULL;
+    if (ifont) {
+      SelectObject(dc, ifont);
+      SetTextColor(dc, it->kind == 3 ? COL_MUTED : COL_INK);
+      RECT ir = {x, r.top, x + more_px(16), r.bottom - 1};
+      DrawTextW(dc, &it->icon, 1, &ir, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    }
+    x += more_px(26);
+    if (g_fontBody) SelectObject(dc, g_fontBody);
+    SetTextColor(dc, fg);
+    RECT t = {x, r.top, r.right - more_px(12), r.bottom - 1};
+    DrawTextW(dc, it->text, -1, &t, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    if (it->key) {
+      if (g_fontMonoSm) SelectObject(dc, g_fontMonoSm);
+      SetTextColor(dc, COL_MUTED);
+      DrawTextW(dc, it->key, -1, &t, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+    }
+    return;
+  }
   FillRect(dc, &r, g_paper);
   if (sel) { /* выделение — серая скруглённая подложка с отступом от краёв */
     RECT s = {r.left + more_px(4), r.top + 1, r.right - more_px(4), r.bottom - 1};
@@ -146,9 +193,11 @@ static void tools_menu(HWND owner, HWND btn) {
   ac_avatar_menu_label();
   for (size_t k = 0; k < sizeof(kMore) / sizeof(kMore[0]); k++) {
     const MoreItem *it = &kMore[k];
+    /* «Чертёж»: меню таблицей в две колонки — со раздела «ИИ» вторая, через черту */
+    UINT brk = chertezh_on() && it->kind == 1 && it->text && !wcscmp(it->text, L"ИИ") ? MF_MENUBARBREAK : 0;
     if (it->cmd < 0) AppendMenuW(m, MF_SEPARATOR, 0, NULL);
     else
-      AppendMenuW(m, MF_OWNERDRAW | (it->kind == 1 || it->kind == 3 ? MF_DISABLED : 0),
+      AppendMenuW(m, MF_OWNERDRAW | brk | (it->kind == 1 || it->kind == 3 ? MF_DISABLED : 0),
                   (UINT_PTR)(it->kind == 1 ? 999 : it->kind == 3 ? 998 : it->cmd),
                   (LPCWSTR)it);
   }

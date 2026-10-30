@@ -427,6 +427,75 @@ static void dst_modules(const wchar_t *tn) {
   }
 }
 
+/* меню «Ещё» картинкой: пункты рисует настоящий tools_menu_draw, колонки — как у
+   TrackPopupMenu (у «Чертежа» со раздела «ИИ» — вторая колонка через черту) */
+static void dst_more_menu(const wchar_t *name) {
+  ac_avatar_menu_label();
+  int n = (int)(sizeof(kMore) / sizeof(kMore[0]));
+  int colOf[64], w[2] = {0, 0}, h[2] = {0, 0}, ih[64], col = 0;
+  for (int k = 0; k < n && k < 64; k++) {
+    const MoreItem *it = &kMore[k];
+    if (chertezh_on() && it->kind == 1 && it->text && !wcscmp(it->text, L"ИИ")) col = 1;
+    MEASUREITEMSTRUCT mi;
+    memset(&mi, 0, sizeof(mi));
+    mi.itemData = (ULONG_PTR)it;
+    if (it->cmd < 0) mi.itemHeight = 9, mi.itemWidth = 40;
+    else tools_menu_measure(&mi);
+    colOf[k] = col;
+    ih[k] = (int)mi.itemHeight;
+    if ((int)mi.itemWidth > w[col]) w[col] = (int)mi.itemWidth;
+    h[col] += ih[k];
+  }
+  int cols = col + 1, bar = cols > 1 ? 1 : 0, W = w[0] + (cols > 1 ? w[1] + bar : 0) + 2, H = (h[0] > h[1] ? h[0] : h[1]) + 2;
+  HDC scr = GetDC(NULL), mem = CreateCompatibleDC(scr);
+  HBITMAP bm = CreateCompatibleBitmap(scr, W, H);
+  ReleaseDC(NULL, scr);
+  HGDIOBJ old = SelectObject(mem, bm);
+  RECT all = {0, 0, W, H};
+  FillRect(mem, &all, g_paper);
+  int y[2] = {1, 1};
+  for (int k = 0; k < n && k < 64; k++) {
+    int c = colOf[k], x = 1 + (c ? w[0] + bar : 0);
+    RECT r = {x, y[c], x + w[c], y[c] + ih[k]};
+    if (kMore[k].cmd < 0) {
+      HBRUSH l = CreateSolidBrush(COL_LINE);
+      RECT m = {r.left + 4, (r.top + r.bottom) / 2, r.right - 4, (r.top + r.bottom) / 2 + 1};
+      FillRect(mem, &m, l);
+      DeleteObject(l);
+    } else {
+      DRAWITEMSTRUCT di;
+      memset(&di, 0, sizeof(di));
+      di.CtlType = ODT_MENU;
+      di.hDC = mem;
+      di.rcItem = r;
+      di.itemData = (ULONG_PTR)&kMore[k];
+      di.itemState = k == 2 ? ODS_SELECTED : 0; /* второй пункт — как под мышью */
+      tools_menu_draw(&di);
+    }
+    y[c] += ih[k];
+  }
+  HBRUSH frame = CreateSolidBrush(chertezh_on() ? COL_INK : COL_LINE);
+  FrameRect(mem, &all, frame);
+  if (bar) {
+    RECT b = {1 + w[0], 1, 2 + w[0], H - 1};
+    FillRect(mem, &b, frame);
+  }
+  DeleteObject(frame);
+  BITMAPINFO bi;
+  memset(&bi, 0, sizeof(bi));
+  bi.bmiHeader.biSize = sizeof(bi.bmiHeader);
+  bi.bmiHeader.biWidth = W;
+  bi.bmiHeader.biHeight = -H;
+  bi.bmiHeader.biPlanes = 1;
+  bi.bmiHeader.biBitCount = 32;
+  BYTE *px = (BYTE *)malloc((size_t)W * H * 4);
+  SelectObject(mem, old);
+  if (px && GetDIBits(mem, bm, 0, (UINT)H, px, &bi, DIB_RGB_COLORS)) dst_png(name, px, W, H);
+  free(px);
+  DeleteObject(bm);
+  DeleteDC(mem);
+}
+
 static void dst_chat_fill(void) {
   if (g_acN) return;
   ac_push(0, L"Посмотри чертёж вала и скажи, как его обрабатывать");
@@ -440,12 +509,13 @@ static void dst_chat_fill(void) {
              L"Что не прочиталось на листе — допуск на длину ступени Ø52 и покрытие: уточните, и я поправлю маршрут. "
              L"Если вал идёт партией, черновую токарную и фрезерную лучше вынести на станки с ЧПУ.");
   ac_push(0, L"А какие нормы времени по этому маршруту?");
-  ac_push(1, L"Нормы по ОМН (таблицы токарной и фрезерной обработки):\n"
-             L"010 Токарная черновая: Тпз 18 мин, Тшт 12,4 мин\n"
-             L"020 Токарная чистовая: Тпз 16 мин, Тшт 9,8 мин\n"
-             L"025 Фрезерная: Тпз 14 мин, Тшт 6,1 мин\n"
-             L"030 Шлифовальная: Тпз 20 мин, Тшт 7,3 мин\n\n"
-             L"Источник — ОМН, карты 12, 31 и 44. Для партии 50 шт. подготовительно-заключительное время делится на партию.");
+  /* как пишет nm_text_brief (norms.c): строка на операцию, « · » между Тпз и Тшт, строка режимов */
+  ac_push(1, L"Нормы времени (ОМН; проверяет технолог):\n"
+             L"010 Токарная черновая: Тпз 18 мин · Тшт 12,4 мин\n"
+             L"020 Токарная чистовая: Тпз 16 мин · Тшт ≈ 9,8 мин (неполная)\n"
+             L"025 Фрезерная: Тпз 14 мин · Тшт 6,1 мин\n"
+             L"030 Шлифовальная: Тпз — · Тшт ≥ 3,2 мин без машинного То\n"
+             L"Режимы: 010 V 125 · S 0,45 · t 2,5 · i 1; 025 V 20 · Sz 0,08 · t 5 · i 1 — изменить · подробно");
   ac_redraw();
 }
 
@@ -513,9 +583,9 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
   dst_pump(100);
 
   if (argc >= 3 && !wcscmp(argv[2], L"mods")) { /* окна модулей в светлой и четырёх темах «Кастомизации» */
-    static const int th[5] = {0, 5, 6, 7, 8};
-    static const wchar_t *const thn[5] = {L"obychnaya", L"steklo", L"grafit", L"sinka", L"tseh"};
-    for (int i = 0; i < 5; i++) {
+    static const int th[6] = {0, 3, 5, 6, 7, 8};
+    static const wchar_t *const thn[6] = {L"obychnaya", L"chertezh", L"steklo", L"grafit", L"sinka", L"tseh"};
+    for (int i = 0; i < 6; i++) {
       set_theme(th[i]);
       dst_pump(150);
       dst_modules(thn[i]);
@@ -618,6 +688,12 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
     ac_mini_close();
     if (g_acWnd) ShowWindow(g_acWnd, SW_HIDE);
   }
+  set_theme(0);
+  dst_pump(100);
+  dst_more_menu(L"obychnaya-menu-more.png");
+  set_theme(THEME_CHERTEZH);
+  dst_pump(100);
+  dst_more_menu(L"chertezh-menu-more.png");
   set_theme(0);
   dst_pump(100);
 

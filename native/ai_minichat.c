@@ -316,6 +316,74 @@ static void am_rich_line(AmRich *r, const wchar_t *p, const wchar_t *e, BOOL fen
   r->y += lineH;
 }
 
+/* ---- нормы таблицей (с 2026.10.30, как в полном чате) ---------------------------------
+   Строки norms.c подряд — таблица: № | операция | Тпз | Тшт; пометка («(неполная)», «Тшк …»)
+   — серой строкой под названием. Числа — ровно как в строке расчёта (ac_norm_val). */
+#define AM_NORM_MAX 40
+static HFONT g_amMono; /* цифры норм — моноширинным, по высоте шрифта пузыря */
+static HFONT am_mono(void) {
+  if (g_amMono) return g_amMono;
+  LOGFONTW lf;
+  if (!g_amFont || !GetObjectW(g_amFont, sizeof(lf), &lf)) return g_amFont;
+  lf.lfWeight = FW_NORMAL;
+  lstrcpynW(lf.lfFaceName, font_exists(L"Cascadia Mono") ? L"Cascadia Mono" : L"Consolas", LF_FACESIZE);
+  g_amMono = CreateFontIndirectW(&lf);
+  return g_amMono ? g_amMono : g_amFont;
+}
+
+static void am_norm_text(AmRich *r, HFONT f, COLORREF col, const wchar_t *p, const wchar_t *e, int x0, int x1, int y,
+                         BOOL right) {
+  while (p < e && *p == L' ') p++;
+  while (e > p && (e[-1] == L' ' || e[-1] == 0x00B7)) e--;
+  if (!r->draw || e <= p) return;
+  SelectObject(r->dc, f);
+  SetTextColor(r->dc, col);
+  RECT tr = {r->x0 + x0, y, r->x0 + x1, y + r->lineH};
+  DrawTextW(r->dc, p, (int)(e - p), &tr, (right ? DT_RIGHT : DT_LEFT) | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+}
+
+static void am_norm_line(AmRich *r, int y, BOOL strong) {
+  if (!r->draw) return;
+  HBRUSH b = CreateSolidBrush(strong ? am_muted() : ui_hairline());
+  RECT l = {r->x0, y, r->x0 + r->width, y + 1};
+  FillRect(r->dc, &l, b);
+  DeleteObject(b);
+}
+
+/* n строк норм: p[i]..e[i], mark[i] — «: » после названия */
+static void am_rich_norms(AmRich *r, const wchar_t **p, const wchar_t **e, const wchar_t **mark, int n) {
+  int w = r->width, gap = am_px(6), numW = am_px(30), tW = am_px(64);
+  int xOp = numW + gap, xPz = w - 2 * tW - gap, xSh = w - tW;
+  int rowH = r->lineH + am_px(4);
+  r->y += am_px(2);
+  am_norm_text(r, g_amFont, am_muted(), L"№", L"№" + 1, 0, numW, r->y, FALSE);
+  am_norm_text(r, g_amFont, am_muted(), L"Операция", L"Операция" + 8, xOp, xPz - gap, r->y, FALSE);
+  am_norm_text(r, g_amFont, am_muted(), L"Тпз, мин", L"Тпз, мин" + 8, xPz, xPz + tW, r->y, TRUE);
+  am_norm_text(r, g_amFont, am_muted(), L"Тшт, мин", L"Тшт, мин" + 8, xSh, w, r->y, TRUE);
+  r->y += rowH;
+  am_norm_line(r, r->y - am_px(2), TRUE);
+  for (int i = 0; i < n; i++) {
+    const wchar_t *rs = mark[i] + 2, *pzb, *pze, *shb, *she, *a1 = rs, *a2 = rs;
+    BOOL pz = ac_norm_val(rs, e[i], L"Тпз ", &pzb, &pze, &a1);
+    BOOL sh = ac_norm_val(rs, e[i], L"Тшт ", &shb, &she, &a2);
+    int y = r->y + am_px(1);
+    am_norm_text(r, am_mono(), am_muted(), p[i], p[i] + 3, 0, numW, y, FALSE);
+    am_norm_text(r, g_amBold, am_ink(), p[i] + 4, mark[i], xOp, xPz - gap, y, FALSE);
+    if (pz) am_norm_text(r, am_mono(), am_ink(), pzb, pze, xPz, xPz + tW, y, TRUE);
+    if (sh) am_norm_text(r, am_mono(), am_ink(), shb, she, xSh, w, y, TRUE);
+    r->y += rowH;
+    const wchar_t *rest = sh ? a2 : pz ? a1 : rs;
+    while (rest < e[i] && (*rest == L' ' || *rest == 0x00B7)) rest++;
+    if (rest < e[i]) { /* пометка — серым под названием */
+      am_norm_text(r, g_amFont, am_muted(), rest, e[i], xOp, w, r->y - am_px(3), FALSE);
+      r->y += r->lineH;
+    }
+    am_norm_line(r, r->y - am_px(2), FALSE);
+  }
+  if (r->maxW < w) r->maxW = w;
+  r->y += am_px(4);
+}
+
 /* весь ответ: строки через \n, пустая строка — отступ абзаца, ``` — без разбора */
 static void am_rich_text(AmRich *r, const wchar_t *s) {
   BOOL fenced = FALSE, gap = FALSE;
@@ -324,6 +392,25 @@ static void am_rich_text(AmRich *r, const wchar_t *s) {
     while (*e && *e != L'\n') e++;
     const wchar_t *t = p;
     while (t < e && *t == L' ') t++;
+    const wchar_t *mk;
+    if (!fenced && ac_route_kind(t, e, &mk) == ACR_NORM && !wcsncmp(mk, L": Тпз ", 6)) { /* нормы подряд — таблицей */
+      const wchar_t *np[AM_NORM_MAX], *ne[AM_NORM_MAX], *nm[AM_NORM_MAX];
+      int n = 0;
+      for (;;) {
+        np[n] = t, ne[n] = e, nm[n] = mk, n++;
+        p = *e ? e + 1 : e;
+        if (!*p || n == AM_NORM_MAX) break;
+        const wchar_t *e2 = p, *t2 = p;
+        while (*e2 && *e2 != L'\n') e2++;
+        while (t2 < e2 && *t2 == L' ') t2++;
+        if (ac_route_kind(t2, e2, &mk) != ACR_NORM) break;
+        t = t2, e = e2;
+      }
+      if (gap) r->y += r->lineH / 2;
+      gap = FALSE;
+      am_rich_norms(r, np, ne, nm, n);
+      continue;
+    }
     if (e - t >= 3 && t[0] == L'`' && t[1] == L'`' && t[2] == L'`') fenced = !fenced;
     else if (t == e) gap = r->y > 0; /* пустая строка — полстроки, но не в начале */
     else {
@@ -1335,6 +1422,10 @@ static void am_fonts(void) {
   if (g_amIn) SendMessageW(g_amIn, WM_SETFONT, (WPARAM)g_amFont, TRUE);
   for (int i = 0; i < 3; i++)
     if (old[i]) DeleteObject(old[i]);
+  if (g_amMono) { /* цифры норм — под новый размер, при первом рисовании */
+    DeleteObject(g_amMono);
+    g_amMono = NULL;
+  }
 }
 
 /* кисти и кромка окна — в цветах темы; углы — как у окон темы (ui_theme.c) */
