@@ -9,16 +9,16 @@
          СБ — документом к сборке, спецификация — составом, детали — маршрут с операциями;
          участок и станок — по таблице приоритетов, Тпз/Тшт — norms.c, «Транспортирование» —
          при смене участка. По окончании — карточка: изделия, состав, операции, что не
-         прочитано, и «Действия: В Союз · Проверить подробно · Отмена»;
+         прочитано, и «Действия: В Союз · Только ЭСИ · Только ТП · Проверить подробно · Отмена»;
      «В Союз» — описание отдаётся мостом в клиент с последней папкой (нет папки — окно папки),
-         отчёт клиента — строкой в чат; «Проверить подробно» — окно «ЭСИ и ТП» с этими
+         отчёт клиента — строкой в чат; «Только ЭСИ» / «Только ТП» — то же по отдельности (2026.10.30); «Проверить подробно» — окно «ЭСИ и ТП» с этими
          строками; «Отмена» — листы очищаются;
      «выгрузи МВ по ТСТ.100.000» / «маршрутная ведомость ТСТ.100.000» — окно ведомости, сбор
          сразу (route_ui.c);
      «приоритет участков», «поставь участки» — таблица «операция → участок» (soyuz_prio.c).
    Запасной путь без чата — те же окна: «Ещё → ЭСИ и ТП в Союз», первая кнопка «Чертежи…». */
 
-static const wchar_t *const kAcEsiLinks[] = {L"Проверить подробно", L"Отмена"}; /* WM_AC_LINK 21, 22; «В Союз» — 10 */
+static const wchar_t *const kAcEsiLinks[] = {L"Проверить подробно", L"Отмена", L"Только ЭСИ", L"Только ТП"}; /* WM_AC_LINK 21…24; «В Союз» — 10 */
 #define AC_ESI_HEAD L"ЭСИ по чертежам"
 
 static void esi_low(const wchar_t *a, wchar_t *low, int cap) {
@@ -113,7 +113,7 @@ static BOOL esi_folders_line(wchar_t *out, int cap) {
   wchar_t *text = NULL, note[200];
   PkSent sent;
   memset(&sent, 0, sizeof(sent));
-  pk_soyuz_text(&text, note, 200, &sent);
+  pk_soyuz_text(&text, note, 200, &sent, PK_SEND_ALL);
   if (!text) return FALSE;
   wchar_t des[200], nm[200];
   BOOL has = szm_head_asm(text, des, 200, nm, 200);
@@ -171,11 +171,11 @@ static void esi_card(void) {
   if (g_pksDoubt[0]) l += _snwprintf(t + l, 1800 - l, L"\nПроверьте обозначения: %ls.", g_pksDoubt);
   if (g_pksOpsNo) l += _snwprintf(t + l, 1800 - l, L"\nБез маршрута: %d (лист не прочитался или это не чертёж детали).", g_pksOpsNo);
   if (!op->n && det) l += _snwprintf(t + l, 1800 - l, L"\nОпераций нет: листы деталей не дали маршрута.");
-  if (l < 1800 - 120)
-    _snwprintf(t + l, 1800 - l, L"\n\nДействия:   В Союз   ·   Проверить подробно   ·   Отмена");
+  if (l < 1800 - 160)
+    _snwprintf(t + l, 1800 - l, L"\n\nДействия:   В Союз   ·   Только ЭСИ   ·   Только ТП   ·   Проверить подробно   ·   Отмена");
   t[1799] = 0;
   ac_push(1, t);
-  ac_status(L"ЭСИ готово — «В Союз», «Проверить подробно» или «Отмена» под ответом");
+  ac_status(L"ЭСИ готово — «В Союз» (или только ЭСИ, только ТП), «Проверить подробно» или «Отмена» под ответом");
 }
 
 /* последний ответ с карточкой ЭСИ — позже последнего маршрута? тогда «В Союз» под ним — её */
@@ -196,11 +196,11 @@ static void ac_esi_links(void) {
   ft.lpstrText = L"Действия:";
   if (SendMessageW(g_acLog, EM_FINDTEXTEXW, 0, (LPARAM)&ft) < 0) return;
   LONG at = ft.chrgText.cpMax;
-  static const wchar_t *const words[] = {L"В Союз", L"Проверить подробно", L"Отмена"};
+  static const wchar_t *const words[] = {L"В Союз", L"Только ЭСИ", L"Только ТП", L"Проверить подробно", L"Отмена"};
   for (size_t i = 0; i < sizeof(words) / sizeof(words[0]); i++) {
     memset(&ft, 0, sizeof(ft));
     ft.chrg.cpMin = at;
-    ft.chrg.cpMax = at + 90;
+    ft.chrg.cpMax = at + 140;
     ft.lpstrText = words[i];
     if (SendMessageW(g_acLog, EM_FINDTEXTEXW, FR_DOWN | FR_MATCHCASE, (LPARAM)&ft) < 0) continue;
     SendMessageW(g_acLog, EM_EXSETSEL, 0, (LPARAM)&ft.chrgText);
@@ -213,8 +213,9 @@ static void ac_esi_links(void) {
   }
 }
 
-/* «В Союз» под карточкой: описание из листов — мостом в клиент с последней папкой */
-static void esi_send(void) {
+/* «В Союз» под карточкой: описание из листов — мостом в клиент с последней папкой; mode — всё, только ЭСИ
+   или только ТП (PK_SEND_*, «Только ЭСИ» / «Только ТП» под карточкой) */
+static void esi_send(int mode) {
   if (!g_pk[PK_ITEMS].n && !g_pk[PK_OPS].n && !g_pk[PK_LINKS].n) {
     ac_push(1, L"В «Союз» нечего отправлять: листы «ЭСИ и ТП» пусты.");
     return;
@@ -222,10 +223,12 @@ static void esi_send(void) {
   pk_check(TRUE);
   wchar_t *text = NULL, note[200];
   PkSent sent;
-  int n = pk_soyuz_text(&text, note, 200, &sent);
+  int n = pk_soyuz_text(&text, note, 200, &sent, mode);
   if (!text || !text[0]) {
     free(text);
-    ac_push(1, L"В «Союз» нечего отправлять: нет ни изделий, ни операций с кодом справочника.");
+    ac_push(1, mode == PK_SEND_ESI  ? L"Только ЭСИ — нечего отправлять: нет новых изделий, строк состава и чертежей."
+               : mode == PK_SEND_TP ? L"Только ТП — нечего отправлять: нет операций с кодом справочника и заготовок."
+                                    : L"В «Союз» нечего отправлять: нет ни изделий, ни операций с кодом справочника.");
     return;
   }
   SzmPrefs *pf = (SzmPrefs *)calloc(1, sizeof(SzmPrefs));
@@ -236,10 +239,15 @@ static void esi_send(void) {
     lstrcpynW(tp, pf->cur[1], SZM_PATH);
     free(pf);
   }
-  if (wcsstr(text, L"ИЗДЕЛИЕ\t") && !folder[0]) { /* папки ещё не было — спросить в окне */
-    wchar_t label[240];
+  wchar_t label[240]; /* заголовок окна «В Союз…», если придётся его открыть */
+  if (mode == PK_SEND_ESI)
+    _snwprintf(label, 240, L"Только ЭСИ: изделий %d, состав %d, чертежей %d", sent.items, sent.links, sent.draws);
+  else if (mode == PK_SEND_TP)
+    _snwprintf(label, 240, L"Только ТП (к изделиям в «Союзе»): операций %d, заготовок %d", n, sent.blanks);
+  else
     _snwprintf(label, 240, L"В «Союз»: изделий %d, состав %d, операций %d", sent.items, g_pk[PK_LINKS].n, n);
-    label[239] = 0;
+  label[239] = 0;
+  if (wcsstr(text, L"ИЗДЕЛИЕ\t") && !folder[0]) { /* папки ещё не было — спросить в окне */
     szm_open_text(text, label);
     free(text);
     ac_push(1, L"Папку «Союза» для новых изделий ещё не выбирали — выберите в открывшемся окне (или вставьте ссылку "
@@ -250,9 +258,6 @@ static void esi_send(void) {
   wchar_t des[200], nm[200];
   BOOL hasAsm = szm_head_asm(text, des, 200, nm, 200);
   if (hasAsm && folder[0] && !g_szmFold) {
-    wchar_t label[240];
-    _snwprintf(label, 240, L"В «Союз»: изделий %d, состав %d, операций %d", sent.items, g_pk[PK_LINKS].n, n);
-    label[239] = 0;
     szm_open_text(text, label);
     free(text);
     ac_push(1, L"Сборке положена своя папка в «Союзе» — проверьте предложение в открывшемся окне (папки спрашиваются у клиента) "

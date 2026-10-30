@@ -55,6 +55,14 @@ static void szm_propose(void);         /* soyuz_asmfolder.c: предложен�
 static unsigned g_szmPkgVer; /* версия пакета в клиенте по строке «ПАКЕТ\t1.0.0.7» отчёта (szm_ver_num); 0 — до 1.0.0.7 или не знаем */
 #define SZM_VER(a, b, c, d) (((unsigned)(a) << 24) | ((unsigned)(b) << 16) | ((unsigned)(c) << 8) | (unsigned)(d))
 
+/* есть ли в описании строка, которая начинается с tag («ТП\t» — не «ПАПКА_ТП\t») */
+static BOOL szm_has_line(const wchar_t *text, const wchar_t *tag) {
+  size_t n = wcslen(tag);
+  for (const wchar_t *p = text; p && *p; p = wcschr(p, L'\n'), p = p ? p + 1 : NULL)
+    if (!wcsncmp(p, tag, n)) return TRUE;
+  return FALSE;
+}
+
 /* «1.0.0.7» → число для сравнения; не версия — 0 */
 static unsigned szm_ver_num(const wchar_t *v) {
   unsigned parts[4] = {0, 0, 0, 0};
@@ -1342,9 +1350,12 @@ static LRESULT CALLBACK SzmProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     SetTextColor(hdc, COL_INK);
     if (g_fontUi) SelectObject(hdc, g_fontUi);
     wchar_t t[3][300];
-    if (g_szmText) _snwprintf(t[0], 300, L"%s — папка «Союза» для новых изделий:", g_szmLabel[0] ? g_szmLabel : L"Из «ЭСИ и ТП»");
-    else _snwprintf(t[0], 300, L"Папка «Союза» для детали %s %s (если создавать):", g_szR.des, g_szR.name);
-    lstrcpynW(t[1], L"Папка для ТП (пусто — «Для основных ТП»):", 300);
+    const wchar_t *lb = g_szmLabel[0] ? g_szmLabel : L"Из «ЭСИ и ТП»";
+    if (!g_szmText) _snwprintf(t[0], 300, L"Папка «Союза» для детали %s %s (если создавать):", g_szR.des, g_szR.name);
+    else if (szm_has_line(g_szmText, L"ИЗДЕЛИЕ\t")) _snwprintf(t[0], 300, L"%s — папка «Союза» для новых изделий:", lb);
+    else _snwprintf(t[0], 300, L"%s — новых изделий нет, их папка не нужна:", lb); /* «Только ТП» (с 2026.10.30) */
+    lstrcpynW(t[1], g_szmText && !szm_has_line(g_szmText, L"ТП\t") ? L"Папка для ТП — не нужна: ТП в описании нет"
+                                                                    : L"Папка для ТП (пусто — «Для основных ТП»):", 300);
     lstrcpynW(t[2], L"ТП — к изделию (обозначение; можно уже заведённое в «Союзе» ЭСИ):", 300);
     for (int i = 0; i < 3; i++) {
       if (g_szmLabelY[i] < 0) continue;
@@ -1544,6 +1555,9 @@ static void szm_show(void) {
   SetWindowPos(g_szmWnd, NULL, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
   ShowWindow(g_szmDes, route ? SW_SHOW : SW_HIDE);
   ShowWindow(g_szmChk, route ? SW_SHOW : SW_HIDE); /* в режиме текста изделия уже перечислены в описании */
+  /* «Только ТП» — папка изделий не нужна, «Только ЭСИ» — папка ТП (с 2026.10.30) */
+  EnableWindow(g_szmCombo, route || szm_has_line(g_szmText, L"ИЗДЕЛИЕ\t"));
+  EnableWindow(g_szmTpCombo, route || szm_has_line(g_szmText, L"ТП\t"));
   szm_layout();
   SzmPrefs *pf = (SzmPrefs *)malloc(sizeof(SzmPrefs));
   if (pf) { /* последняя папка — в поле, недавние — в списке, пока не пришёл список из «Союза» */

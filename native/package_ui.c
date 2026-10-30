@@ -46,6 +46,9 @@
 #define ID_PK_DRAWFIND 327   /* «Ещё ▾»: чертежи из архива по обозначениям — к изделиям без файла */
 #define ID_PK_DRAWTOGGLE 328 /* «Ещё ▾»: чертёж детали — сразу и операции (галочка) */
 #define ID_PK_DRAWOPS 329    /* «Ещё ▾»: операции по чертежам — деталям с файлом и без операций */
+#define ID_PK_SOYALL 330     /* меню «В Союз…» (с 2026.10.30): всё сразу */
+#define ID_PK_SOYESI 331     /*   только ЭСИ — изделия, состав, чертежи */
+#define ID_PK_SOYTP 332      /*   только ТП — операции и заготовки к изделиям, уже заведённым в «Союзе» */
 #define WM_PK_ESI (WM_APP + 99) /* lParam — RtJob*, освобождает окно */
 /* чертежи, брошенные мышью (pk_stamp.c): штамп читает рабочий поток */
 #define WM_PK_STAMP (WM_APP + 96)   /* lParam — PkStRes*, освобождает окно */
@@ -1607,6 +1610,8 @@ static void pk_help(void) {
       g_pkHelp,
       L"ЧТО НУЖНО «СОЮЗУ», ЧТОБЫ СОЗДАТЬ ЭСИ И ТП\r\n"
       L"«В Союз…» отдаёт строки функции пакета «CursorPad — Союз» в запущенном клиенте «Союза» — под тем, кто вошёл.\r\n"
+      L"Меню кнопки: «ЭСИ и ТП — всё сразу»; «Только ЭСИ» — изделия, состав, чертежи (ТП потом); «Только ТП» —\r\n"
+      L"операции и заготовки к изделиям, которые уже есть в «Союзе» (ищутся по обозначению; нет — строка в отчёте).\r\n"
       L"Справочники функция не пополняет: чего в них нет (материал, участок, станок, операция), пишет в отчёт.\r\n\r\n"
       L"ИЗДЕЛИЯ — только для новых; уже заведённые «Союз» находит по обозначению, их строки не нужны.\r\n"
       L"  Обозначение   обязательно, как в штампе: «АБВГ.123456.002».\r\n"
@@ -1636,8 +1641,9 @@ static void pk_help(void) {
       L"  подставит сам, какое в «Союзе» стоит на этой операции на этом участке (сначала типовые операции,\r\n"
       L"  потом ТП завода; нужен вход в базу SQL); сменить — выбором в ячейке.\r\n"
       L"  Операция без кода в справочнике пропускается; участок и станок, которых нет, не ставятся.\r\n"
-      L"  ТП создаётся с версией 1 «В разработке», вариантом «Основной», признаком «основной ТП» и вносится\r\n"
-      L"  в карточку ТП детали. Если у детали ТП уже есть — новый не создаётся (такие позиции «Проверить» назовёт).\r\n"
+      L"  У каждой детали свой ТП — не сквозной (пакет 1.0.0.10 снимает «Сквозной»); версия 1 «В разработке»,\r\n"
+      L"  вариант «Основной», признак «основной ТП»; ТП вносится в карточку ТП детали. Если у детали ТП уже\r\n"
+      L"  есть — новый не создаётся (такие позиции «Проверить» назовёт; сквозной назовёт отчёт «Союза»).\r\n"
       L"  Папка для ТП — в окне «В Союз…»; пусто — «Для основных ТП».\r\n\r\n"
       L"ЧЕРТЕЖИ МЫШЬЮ\r\n"
       L"  Перетащите в окно чертежи (PDF, TIF, PNG, JPG; папку — все картинки в ней): обозначение и наименование\r\n"
@@ -2113,22 +2119,44 @@ static void pk_save(void) {
 }
 
 /* Описание для функции CursorPadCreate из листов (без ПАПКА и ПАПКА_ТП — их спросит окно «В Союз…»):
-   ИЗДЕЛИЕ, СОСТАВ, ЗАГОТОВКА, ТП, ЧЕРТЕЖ. Строки, пришедшие из «Союза» и не тронутые, — мимо: они там
+   ИЗДЕЛИЕ, СОСТАВ, ЗАГОТОВКА, ТП, ЧЕРТЕЖ. mode (с 2026.10.30, John: «создать ЭСИ от ТП отдельно»):
+   PK_SEND_ESI — ИЗДЕЛИЕ, СОСТАВ, ЧЕРТЕЖ; PK_SEND_TP — ТП и ЗАГОТОВКА (к изделиям, которые «Союз» найдёт
+   по обозначению) и строка-комментарий «# СБОРКА» — головная сборка листов, для папки ТП сборки. Строки, пришедшие из «Союза» и не тронутые, — мимо: они там
    есть. Изделие без наименования (кроме стандартных и прочих) — мимо: у существующего функция стёрла бы
    его наименование. Код операции — число в начале «4110 Токарная» (после «Проверить» названия уже
    в виде 1С), код участка — число в начале участка. Возвращает число строк ТП; что пропущено — в note. */
 typedef struct {
   int items, links, ops, blanks, draws;
 } PkSent;
+enum { PK_SEND_ALL, PK_SEND_ESI, PK_SEND_TP };
 
-static int pk_soyuz_text(wchar_t **out, wchar_t *note, int ncap, PkSent *st) {
+/* головная сборка листов: сборочная единица, которая ни во что не входит; FALSE — такой нет */
+static BOOL pk_head_asm(const wchar_t **des, const wchar_t **name) {
+  XpTable *it = &g_pk[PK_ITEMS], *ln = &g_pk[PK_LINKS];
+  for (int r = 0; r < it->n; r++) {
+    const wchar_t *d = xp_cell(it, r, 0);
+    if (!d[0] || !wcsstr(xp_cell(it, r, 2), L"борочн")) continue;
+    BOOL child = FALSE;
+    for (int q = 0; q < ln->n && !child; q++) child = !_wcsicmp(xp_cell(ln, q, 1), d);
+    if (child) continue;
+    *des = d;
+    *name = xp_cell(it, r, 1);
+    PkSoyItem *si = (*name)[0] ? NULL : pk_soy_item(d);
+    if (si) *name = si->name;
+    return TRUE;
+  }
+  return FALSE;
+}
+
+static int pk_soyuz_text(wchar_t **out, wchar_t *note, int ncap, PkSent *st, int mode) {
   ShareBuf b;
   memset(&b, 0, sizeof(b));
   memset(st, 0, sizeof(*st));
   note[0] = 0;
   XpTable *it = &g_pk[PK_ITEMS], *ln = &g_pk[PK_LINKS], *op = &g_pk[PK_OPS], *bl = &g_pk[PK_BLANKS];
   int noName = 0;
-  for (int r = 0; r < it->n; r++) {
+  BOOL esi = mode != PK_SEND_TP, tp = mode != PK_SEND_ESI;
+  for (int r = 0; r < (esi ? it->n : 0); r++) {
     const wchar_t *des = xp_cell(it, r, 0);
     if (!des[0]) continue;
     if (xp_cell(it, r, 5)[0]) { /* чертёж — и к новому изделию, и к тому, что уже в «Союзе» */
@@ -2163,14 +2191,14 @@ static int pk_soyuz_text(wchar_t **out, wchar_t *note, int ncap, PkSent *st) {
     sb_add(&b, L"\r\n");
     st->items++;
   }
-  for (int r = 0; r < ln->n; r++) {
+  for (int r = 0; r < (esi ? ln->n : 0); r++) {
     if (!xp_cell(ln, r, 0)[0] || !xp_cell(ln, r, 1)[0] || pk_row_from_soyuz(PK_LINKS, r)) continue;
     sb_add(&b, L"СОСТАВ");
     for (int c = 0; c < 4; c++) sb_field(&b, xp_cell(ln, r, c));
     sb_add(&b, L"\r\n");
     st->links++;
   }
-  for (int r = 0; r < bl->n; r++) {
+  for (int r = 0; r < (tp ? bl->n : 0); r++) {
     if (!xp_cell(bl, r, 0)[0] || !xp_cell(bl, r, 1)[0]) continue;
     sb_add(&b, L"ЗАГОТОВКА");
     for (int c = 0; c < 4; c++) sb_field(&b, xp_cell(bl, r, c));
@@ -2178,7 +2206,7 @@ static int pk_soyuz_text(wchar_t **out, wchar_t *note, int ncap, PkSent *st) {
     st->blanks++;
   }
   int skipped = 0;
-  for (int r = 0; r < op->n; r++) {
+  for (int r = 0; r < (tp ? op->n : 0); r++) {
     const wchar_t *des = xp_cell(op, r, 0), *o = xp_cell(op, r, 2), *ar = xp_cell(op, r, 3);
     if (!des[0]) continue;
     wchar_t code[8] = L"", area[8] = L"";
@@ -2215,26 +2243,49 @@ static int pk_soyuz_text(wchar_t **out, wchar_t *note, int ncap, PkSent *st) {
     _snwprintf(note + l, ncap - l, L"%sизделий без наименования: %d", l ? L"; " : L"", noName);
   }
   note[ncap - 1] = 0;
+  const wchar_t *hd, *hn;
+  if (mode == PK_SEND_TP && b.w && b.w[0] && pk_head_asm(&hd, &hn)) {
+    /* функция «#» пропускает; CursorPad по ней кладёт ТП в папку ТП сборки (szm_head_asm) */
+    size_t need = wcslen(b.w) + wcslen(hd) + wcslen(hn) + 16;
+    wchar_t *w = (wchar_t *)malloc(need * sizeof(wchar_t));
+    if (w) {
+      _snwprintf(w, need, L"# СБОРКА\t%s\t%s\r\n%s", hd, hn, b.w);
+      w[need - 1] = 0;
+      free(b.w);
+      b.w = w;
+    }
+  }
   *out = b.w;
   return st->ops;
 }
 
-static void pk_to_soyuz(void) {
+/* mode — PK_SEND_ALL, только ЭСИ или только ТП (меню кнопки «В Союз…») */
+static void pk_to_soyuz(int mode) {
   if (g_pkEditRow >= 0) pk_edit_end(TRUE);
   BOOL okc = pk_check(TRUE); /* номера «005», названия операций как в 1С — отсюда коды; виды и размеры — как в «Союзе» */
   if (!okc || g_pkSendWarn) pk_check(FALSE); /* до отправки — на экран: участка нет в справочнике, признак покупки… */
   wchar_t *text = NULL, note[200];
   PkSent st;
-  pk_soyuz_text(&text, note, 200, &st);
+  pk_soyuz_text(&text, note, 200, &st, mode);
   if (!text || !text[0]) {
     free(text);
-    pk_status(g_pkSoyItN ? L"Нечего отправлять: строки из «Союза» там уже есть — дайте позиции операции, заготовку или чертёж"
-                         : L"Нечего отправлять: заполните «Изделия», «Операции» или «Заготовки»");
+    pk_status(mode == PK_SEND_ESI  ? L"Только ЭСИ — нечего отправлять: нет новых изделий, строк состава и чертежей (строки из «Союза» "
+                                     L"там уже есть)"
+              : mode == PK_SEND_TP ? L"Только ТП — нечего отправлять: нет операций с кодом справочника и заготовок"
+              : g_pkSoyItN ? L"Нечего отправлять: строки из «Союза» там уже есть — дайте позиции операции, заготовку или чертёж"
+                           : L"Нечего отправлять: заполните «Изделия», «Операции» или «Заготовки»");
     return;
   }
   wchar_t label[240];
-  _snwprintf(label, 240, L"В «Союз»: изделий %d, состав %d, заготовок %d, операций %d, чертежей %d%s%s", st.items, st.links,
-             st.blanks, st.ops, st.draws, note[0] ? L" · " : L"", note);
+  if (mode == PK_SEND_ESI)
+    _snwprintf(label, 240, L"Только ЭСИ: изделий %d, состав %d, чертежей %d%s%s", st.items, st.links, st.draws,
+               note[0] ? L" · " : L"", note);
+  else if (mode == PK_SEND_TP)
+    _snwprintf(label, 240, L"Только ТП (к изделиям в «Союзе»): операций %d, заготовок %d%s%s", st.ops, st.blanks,
+               note[0] ? L" · " : L"", note);
+  else
+    _snwprintf(label, 240, L"В «Союз»: изделий %d, состав %d, заготовок %d, операций %d, чертежей %d%s%s", st.items,
+               st.links, st.blanks, st.ops, st.draws, note[0] ? L" · " : L"", note);
   label[239] = 0;
   szm_open_text(text, label);
   free(text);
@@ -2563,7 +2614,23 @@ static LRESULT CALLBACK PkProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
     if (id == ID_PK_CHECK) pk_check(FALSE);
     if (id == ID_PK_SAVE) pk_save();
     if (id == ID_PK_CLEAR) pk_clear();
-    if (id == ID_PK_SOYUZ) pk_to_soyuz();
+    if (id == ID_PK_SOYUZ) { /* что отправить — меню у кнопки (с 2026.10.30: ЭСИ и ТП можно по отдельности) */
+      HMENU m = CreatePopupMenu();
+      AppendMenuW(m, MF_STRING, ID_PK_SOYALL, L"ЭСИ и ТП — всё сразу");
+      AppendMenuW(m, MF_SEPARATOR, 0, NULL);
+      AppendMenuW(m, MF_STRING, ID_PK_SOYESI, L"Только ЭСИ — изделия, состав, чертежи");
+      AppendMenuW(m, MF_STRING, ID_PK_SOYTP, L"Только ТП — операции и заготовки к изделиям, уже заведённым в «Союзе»");
+      SetMenuDefaultItem(m, ID_PK_SOYALL, FALSE);
+      RECT br;
+      GetWindowRect(GetDlgItem(hwnd, ID_PK_SOYUZ), &br);
+      int cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTALIGN | TPM_BOTTOMALIGN | TPM_NONOTIFY, br.right, br.top, 0,
+                               hwnd, NULL);
+      DestroyMenu(m);
+      if (cmd) PostMessageW(hwnd, WM_COMMAND, (WPARAM)cmd, 0);
+      return 0;
+    }
+    if (id == ID_PK_SOYALL || id == ID_PK_SOYESI || id == ID_PK_SOYTP)
+      pk_to_soyuz(id == ID_PK_SOYESI ? PK_SEND_ESI : id == ID_PK_SOYTP ? PK_SEND_TP : PK_SEND_ALL);
     if (id == ID_PK_HELP) pk_help();
     if (id == ID_PK_PRIO) szp_edit(hwnd);
     if (id == ID_PK_MORE) { /* редкое — меню у кнопки; выбранное уходит тем же WM_COMMAND */

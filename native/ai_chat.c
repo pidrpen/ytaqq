@@ -659,7 +659,7 @@ static BOOL esi_chat_cmd(const wchar_t *a);
 static void esi_start(const wchar_t *a);
 static BOOL ac_esi_last(void);
 static void ac_esi_links(void);
-static void esi_send(void);
+static void esi_send(int mode); /* PK_SEND_ALL / _ESI / _TP (package_ui.c) */
 static void esi_detail(void);
 static void esi_cancel(void);
 static void esi_report(wchar_t *rep);
@@ -3394,6 +3394,8 @@ static void ac_log_link(const ENLINK *el) {
     if (!wcscmp(t, kAcRouteLinks[i])) PostMessageW(g_acWnd, WM_AC_LINK, 10 + i, 0);
   if (!wcscmp(t, L"Проверить подробно")) PostMessageW(g_acWnd, WM_AC_LINK, 21, 0); /* карточка ЭСИ (ai_esi.c) */
   if (!wcscmp(t, L"Отмена")) PostMessageW(g_acWnd, WM_AC_LINK, 22, 0);
+  if (!wcscmp(t, L"Только ЭСИ")) PostMessageW(g_acWnd, WM_AC_LINK, 23, 0);
+  if (!wcscmp(t, L"Только ТП")) PostMessageW(g_acWnd, WM_AC_LINK, 24, 0);
   if (!wcscmp(t, L"изменить")) PostMessageW(g_acWnd, WM_AC_LINK, 14, 0); /* строка «Режимы: …» под нормами */
   if (!wcscmp(t, L"подробно")) PostMessageW(g_acWnd, WM_AC_LINK, 15, 0);
   for (size_t i = 0; i < sizeof(kAcThinkLinks) / sizeof(kAcThinkLinks[0]); i++)
@@ -3435,11 +3437,15 @@ static void ac_log_link_do(WPARAM which) {
     break;
   case 3: ac_clear_ask(); break;
   case 10: /* «В Союз»: под карточкой ЭСИ — отправка листов, под маршрутом — окно «В Союз» */
-    if (ac_esi_last()) esi_send();
+    if (ac_esi_last()) esi_send(PK_SEND_ALL);
     else ac_route_say(L"в союз");
     break;
   case 21: esi_detail(); break;
   case 22: esi_cancel(); break;
+  case 23: /* «Только ЭСИ» / «Только ТП» под карточкой ЭСИ */
+  case 24:
+    if (ac_esi_last()) esi_send(which == 23 ? PK_SEND_ESI : PK_SEND_TP);
+    break;
   case 40: case 41: case 42: case 43: ac_des_action((int)which); break; /* обозначение в ленте */
   case 11: ac_route_say(L"норма подробно"); break;
   case 12: nu_open(); break;
