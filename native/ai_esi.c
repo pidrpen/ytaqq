@@ -98,11 +98,16 @@ static void esi_start(const wchar_t *a) {
   g_pkAiOps = TRUE;           /* операции сразу по чертежам деталей */
   g_esiChat = TRUE;
   int n = l.n;
-  pks_enqueue(&l, -1, FALSE);
-  wchar_t m[300];
-  _snwprintf(m, 300, L"Читаю %d %ls%ls: штампы, спецификации и листы деталей. Как закончу — покажу здесь карточку с кнопками.", n,
-             n == 1 ? L"лист" : n < 5 ? L"листа" : L"листов", dr_vl_ok() ? L" (мини-ИИ с картинками)" : L" (Tesseract)");
-  m[299] = 0;
+  if (!pks_enqueue(&l, -1, FALSE)) {
+    g_esiChat = FALSE;
+    ac_push(1, L"Чтение чертежей не начато: локальная модель с картинками не готова. Выберите или скачайте «Средний» в "
+                L"Настройках → ИИ и повторите — или ответьте «Да» на вопрос, чтобы читать без ИИ (Tesseract).");
+    return;
+  }
+  wchar_t m[400];
+  _snwprintf(m, 400, L"Читаю %d %ls (%ls): штампы, спецификации и листы деталей. Как закончу — покажу здесь карточку с кнопками.", n,
+             n == 1 ? L"лист" : n < 5 ? L"листа" : L"листов", g_pksHow);
+  m[399] = 0;
   ac_push(1, m);
   ac_status(L"ЭСИ: читаю чертежи…");
 }
@@ -170,6 +175,7 @@ static void esi_card(void) {
     l += _snwprintf(t + l, 1800 - l, L"\nБез обозначения: %d — штамп не прочитался, впишите в «Проверить подробно».", noDes ? noDes : g_pksNoDes);
   if (g_pksDoubt[0]) l += _snwprintf(t + l, 1800 - l, L"\nПроверьте обозначения: %ls.", g_pksDoubt);
   if (g_pksOpsNo) l += _snwprintf(t + l, 1800 - l, L"\nБез маршрута: %d (лист не прочитался или это не чертёж детали).", g_pksOpsNo);
+  if (g_pksHow[0] == L'T') l += _snwprintf(t + l, 1800 - l, L"\nЧитали: %ls — наименования проверьте.", g_pksHow);
   if (g_pksSpecEmpty)
     l += _snwprintf(t + l, 1800 - l, L"\nСпецификаций без строк: %d (%ls) — состав не прочитан: впишите в «Проверить подробно» или загрузите из файла.",
                     g_pksSpecEmpty, g_pksSpecEmptyDes);
