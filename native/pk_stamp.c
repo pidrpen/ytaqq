@@ -580,11 +580,37 @@ static void pks_ops(int row, const wchar_t *file, wchar_t **route) {
   if (!t) return;
   _snwprintf(t, n, L"Лист: %ls · %ls\n%ls", tm_base(file), des, *route);
   t[n - 1] = 0;
-  wchar_t d[DR_CELL], msg[400];
+  wchar_t d[DR_CELL], msg[400], nameWas[DR_CELL];
   lstrcpynW(d, des, DR_CELL); /* «Вставить» может дописать строки «Изделий» — des переедет */
+  lstrcpynW(nameWas, xp_cell(it, row, 1), DR_CELL);
+  wchar_t routeName[DR_CELL] = L""; /* «Деталь: …» маршрута — наименование со штампа */
+  const wchar_t *dn = wcsstr(t, L"Деталь: ");
+  if (dn) {
+    dn += 8;
+    int k = 0;
+    while (dn[k] && dn[k] != L'\r' && dn[k] != L'\n' && k < DR_CELL - 1) routeName[k] = dn[k], k++;
+    routeName[k] = 0;
+  }
   int show, was = g_pk[PK_OPS].n;
   pk_paste_text(t, PK_OPS, L"", d, &show, msg, 400);
   free(t);
+  /* маршрут несёт «Деталь: <наименование>» со штампа (без ИИ — Tesseract): уже стоявшее (из спецификации или
+     проверенного штампа) не затирается; мусор не вписывается — пусто и «проверьте» (с 31.10, снимок с завода) */
+  int rr = pks_find(d);
+  if (rr >= 0) {
+    const wchar_t *now = xp_cell(&g_pk[PK_ITEMS], rr, 1);
+    if (nameWas[0] && wcscmp(now, nameWas)) pk_put(&g_pk[PK_ITEMS], rr, 1, nameWas); /* стоявшее — остаётся */
+    else if (!nameWas[0] && now[0] && pks_name_junk(now)) {
+      pk_put(&g_pk[PK_ITEMS], rr, 1, L"");
+      pks_doubt_add(d);
+    }
+    /* наименование со штампа (строка «Деталь:» маршрута) расходится со стоявшим — «проверьте» */
+    if (nameWas[0] && routeName[0] && !pks_name_junk(routeName)) {
+      wchar_t a[DR_CELL], b[DR_CELL];
+      pks_name_key(nameWas, a, DR_CELL), pks_name_key(routeName, b, DR_CELL);
+      if (wcscmp(a, b)) pks_doubt_add(d);
+    }
+  }
   if (g_pk[PK_OPS].n > was) g_pksOps += g_pk[PK_OPS].n - was, g_pksOpsParts++;
   else g_pksOpsNo++;
 }

@@ -221,11 +221,79 @@ static int st_live(const wchar_t *routeFile) {
   return 0;
 }
 
+/* --esi-folder <папка чертежей> <папка снимков> [model]: окно «ЭСИ и ТП» на невидимом столе, все листы папки — в очередь
+   чтения, как «Чертежи…» (штампы, спецификации, операции деталей), ждать конца; снимки листов «Изделия» и «Состав»
+   (esi-items.png, esi-links.png) и их текст (esi-sheets.txt) — только в папку снимков: заводские листы в репозиторий и
+   отчёты не идут. Без «model» — без ИИ, как ответ «Да — читать без ИИ»; с «model» — ИИ по ai.txt папки данных (стенд
+   кладёт туда «server 127.0.0.1 <порт>» — уже запущенный сервер модели человека, второй на видеокарту не поднимается) */
+static int st_esi_folder(HINSTANCE inst, const wchar_t *folder, const wchar_t *out, BOOL model) {
+  g_stDir = out;
+  g_pkNoBox = TRUE;
+  CreateDirectoryW(out, NULL);
+  HDESK desk = CreateDesktopW(L"CursorPadEsiShots", NULL, NULL, 0, GENERIC_ALL, NULL);
+  if (!desk || !SetThreadDesktop(desk)) return 3;
+  g_inst = inst;
+  enable_dpi();
+  INITCOMMONCONTROLSEX icc = {sizeof(icc), ICC_STANDARD_CLASSES | ICC_BAR_CLASSES | ICC_LISTVIEW_CLASSES};
+  InitCommonControlsEx(&icc);
+  CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+  _snwprintf(g_dataDir, MAX_PATH, L"%ls\\data", out);
+  CreateDirectoryW(g_dataDir, NULL);
+  apply_theme();
+  if (model) ai_load();
+  else InterlockedExchange(&g_aiOn, FALSE);
+  package_show(FALSE);
+  if (!g_pkWnd) return 5;
+  SetWindowPos(g_pkWnd, NULL, 0, 0, 1500, 940, SWP_NOZORDER | SWP_NOACTIVATE);
+  TmPaths l = {0};
+  tm_paths_add_any(&l, folder);
+  int n = l.n;
+  pks_ops_pref();
+  g_pkAiOps = TRUE;
+  DWORD t0 = GetTickCount();
+  pks_enqueue(&l, -1, FALSE);
+  for (int t = 0; t < 3600 && (g_pksRunning || g_pksDone < g_pksTotal); t++) st_pump(500); /* до 30 мин */
+  st_pump(1000);
+  DWORD secs = (GetTickCount() - t0) / 1000;
+  wchar_t status[600] = L"";
+  lstrcpynW(status, g_pkStatus, 600);
+  /* текст листов — для сравнения; только в папку снимков */
+  ShareBuf b;
+  memset(&b, 0, sizeof(b));
+  sb_add(&b, L"листов в папке: %d, прочитано %d из %d за %lu с; чем: %ls\r\nстрока состояния: %ls\r\n\r\nИЗДЕЛИЯ\r\n", n,
+         g_pksDone, g_pksTotal, secs, g_pksHow, status);
+  XpTable *it = &g_pk[PK_ITEMS], *ln = &g_pk[PK_LINKS];
+  for (int r = 0; r < it->n; r++)
+    sb_add(&b, L"%ls | %ls | %ls | %ls | %ls\r\n", xp_cell(it, r, 0), xp_cell(it, r, 1), xp_cell(it, r, 2), xp_cell(it, r, 3),
+           xp_cell(it, r, 4));
+  sb_add(&b, L"\r\nСОСТАВ\r\n");
+  for (int r = 0; r < ln->n; r++)
+    sb_add(&b, L"%ls → %ls | %ls | %ls\r\n", xp_cell(ln, r, 0), xp_cell(ln, r, 1), xp_cell(ln, r, 2), xp_cell(ln, r, 3));
+  sb_add(&b, L"\r\nОПЕРАЦИЙ: %d\r\n", g_pk[PK_OPS].n);
+  wchar_t tp[MAX_PATH];
+  _snwprintf(tp, MAX_PATH, L"%ls\\esi-sheets.txt", out);
+  szm_write_part(tp, b.w ? b.w : L"");
+  free(b.w);
+  g_pkSheet = PK_ITEMS;
+  pk_fill(TRUE);
+  pk_tabs();
+  st_pump(300);
+  st_shot_wnd(L"esi-items.png", g_pkWnd);
+  g_pkSheet = PK_LINKS;
+  pk_fill(TRUE);
+  pk_tabs();
+  st_pump(300);
+  st_shot_wnd(L"esi-links.png", g_pkWnd);
+  if (model) ai_shutdown();
+  return 0;
+}
+
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
   (void)prev, (void)cmd, (void)show;
   int argc = 0;
   LPWSTR *argv = CommandLineToArgvW(GetCommandLineW(), &argc);
   if (!argv || argc < 2) return 2;
+  if (!wcscmp(argv[1], L"--esi-folder") && argc >= 4) return st_esi_folder(inst, argv[2], argv[3], argc > 4 && !wcscmp(argv[4], L"model"));
   if (!wcscmp(argv[1], L"--live")) {
     g_inst = inst;
     enable_dpi();
@@ -1129,6 +1197,36 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
             for (int r = ln7->n - 1; r >= 0; r--)
               if (!wcsncmp(xp_cell(ln7, r, 0), L"ТСТ.210.", 8)) pk_del_row(ln7, r);
             lstrcpynW(g_pksDoubt, keepD, 120);
+            { /* маршрут детали (pks_ops → «Вставить»): «Деталь: <мусор>» не вписывается; наименование из спецификации не затирается */
+              XpTable *i9 = &g_pk[PK_ITEMS];
+              int b9 = i9->n;
+              xp_row(i9), i9 = &g_pk[PK_ITEMS];
+              pk_put(i9, b9, 0, L"ТСТ.220.001"), pk_put(i9, b9, 2, L"Детали");
+              xp_row(i9), i9 = &g_pk[PK_ITEMS];
+              pk_put(i9, b9 + 1, 0, L"ТСТ.220.002"), pk_put(i9, b9 + 1, 1, L"Планка опорная"), pk_put(i9, b9 + 1, 2, L"Детали");
+              wchar_t keepD9[120];
+              lstrcpynW(keepD9, g_pksDoubt, 120);
+              g_pksDoubt[0] = 0;
+              wchar_t *rt1 = _wcsdup(L"Деталь: СYXapb\nМатериал: Круг 40 ГОСТ 2590-2006 / Сталь 45 ГОСТ 1050-2013\n005 Токарная. Точить\n");
+              wchar_t *rt2 = _wcsdup(L"Деталь: Плонка\nМатериал: Лист 4 ГОСТ 19903-2015 / Ст3сп ГОСТ 380-2005\n005 Отрезная. Отрезать\n");
+              pks_ops(pks_find(L"ТСТ.220.001"), L"Z:\\x\\a.tif", &rt1);
+              pks_ops(pks_find(L"ТСТ.220.002"), L"Z:\\x\\b.tif", &rt2);
+              i9 = &g_pk[PK_ITEMS];
+              int k1 = pks_find(L"ТСТ.220.001"), k2 = pks_find(L"ТСТ.220.002");
+              st_check(k1 >= 0 && !xp_cell(i9, k1, 1)[0] && k2 >= 0 && !wcscmp(xp_cell(i9, k2, 1), L"Планка опорная") &&
+                           wcsstr(g_pksDoubt, L"ТСТ.220.001") && wcsstr(g_pksDoubt, L"ТСТ.220.002"),
+                       L"маршрут детали: «Деталь: <мусор>» не вписан (пусто, «проверьте»), наименование из спецификации не затёрто штампом (расхождение — «проверьте»)");
+              st_note(L"     после маршрута: «%ls», «%ls»; проверьте: %ls", k1 >= 0 ? xp_cell(i9, k1, 1) : L"-", k2 >= 0 ? xp_cell(i9, k2, 1) : L"-", g_pksDoubt);
+              free(rt1), free(rt2);
+              XpTable *o9 = &g_pk[PK_OPS];
+              for (int r = o9->n - 1; r >= 0; r--)
+                if (!wcsncmp(xp_cell(o9, r, 0), L"ТСТ.220.", 8)) pk_del_row(o9, r);
+              i9 = &g_pk[PK_ITEMS];
+              for (int r = i9->n - 1; r >= 0; r--)
+                if (!wcsncmp(xp_cell(i9, r, 0), L"ТСТ.220.", 8)) pk_del_row(i9, r);
+              lstrcpynW(g_pksDoubt, keepD9, 120);
+              pk_changed();
+            }
             /* чем читаем: на стенде модели нет — «Tesseract — без ИИ» с причиной, без вопроса (g_pkNoBox) */
             int gate = pks_ai_gate(g_pkWnd);
             st_check(gate == 1 && !wcsncmp(g_pksHow, L"Tesseract — без ИИ: ", 19),
