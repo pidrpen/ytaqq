@@ -1098,7 +1098,8 @@ static void nardy_show(void) {
     wc.hCursor = LoadCursorW(NULL, IDC_ARROW);
     wc.hbrBackground = g_paper;
     wc.lpszClassName = L"CursorPadNardy";
-    wc.hIcon = LoadIconW(NULL, IDI_APPLICATION);
+    wc.hIcon = app_icon(FALSE);
+    wc.hIconSm = app_icon(TRUE);
     RegisterClassExW(&wc);
     int w = S_(ND_LEFT * 2 + nd_board_w()), h = S_(ND_TOP + ND_H + 108);
     g_ndWnd = CreateWindowExW(WS_EX_APPWINDOW, L"CursorPadNardy", L"Нарды",

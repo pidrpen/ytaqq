@@ -65,6 +65,11 @@ static const NuField kNuCut[] = {{L"периметр", L"Периметр, мм"
                                  {L"пробивок", L"Пробивок", L"пробивок"},
                                  {L"партия", L"Партия, шт", L"партия"},
                                  {L"То", L"То своё, мин", L"То"}};
+/* зубодолбёжная: модуль, зубья и ширина венца — с листа или вписать; режимы — Настройки */
+static const NuField kNuGear[] = {{L"m", L"Модуль m, мм", L"модуль"},
+                                  {L"zк", L"Число зубьев колеса", L"zк"},
+                                  {L"B", L"Ширина венца B, мм", L"B"},
+                                  {L"партия", L"Партия, шт", L"партия"}};
 static const NuField kNuHB = {L"HB", L"Твёрдость HB", L"HB"}; /* у чугуна вместо σв */
 
 static HWND g_nuWnd, g_nuList, g_nuEdit[NU_ROWS];
@@ -88,6 +93,7 @@ static const NuField *nu_fields(const NmOp *o, int *n) {
   case NMK_DRILL: *n = (int)(sizeof(kNuDrill) / sizeof(kNuDrill[0])); return kNuDrill;
   case NMK_MILL: *n = (int)(sizeof(kNuMill) / sizeof(kNuMill[0])); return kNuMill;
   case NMK_CUT: *n = (int)(sizeof(kNuCut) / sizeof(kNuCut[0])); return kNuCut;
+  case NMK_GEAR: *n = (int)(sizeof(kNuGear) / sizeof(kNuGear[0])); return kNuGear;
   }
   *n = 0;
   return NULL;

@@ -1014,7 +1014,8 @@ static void cutting_show(void) {
     wc.hInstance = g_inst;
     wc.hCursor = LoadCursorW(NULL, IDC_ARROW);
     wc.lpszClassName = L"CursorPadCutting";
-    wc.hIcon = LoadIconW(NULL, IDI_APPLICATION);
+    wc.hIcon = app_icon(FALSE);
+    wc.hIconSm = app_icon(TRUE);
     RegisterClassExW(&wc);
     wc.lpfnWndProc = CutCanvasProc;
     wc.lpszClassName = L"CursorPadCuttingCanvas";

@@ -1119,7 +1119,8 @@ static void msg_open_chat(const wchar_t *id) {
     wc.hCursor = LoadCursorW(NULL, IDC_ARROW);
     wc.hbrBackground = g_paper;
     wc.lpszClassName = L"CursorPadMsgOut";
-    wc.hIcon = LoadIconW(NULL, IDI_APPLICATION);
+    wc.hIcon = app_icon(FALSE);
+    wc.hIconSm = app_icon(TRUE);
     RegisterClassExW(&wc);
     WNDCLASSEXW vc;
     memset(&vc, 0, sizeof(vc));

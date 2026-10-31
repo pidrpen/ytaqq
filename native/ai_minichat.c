@@ -782,6 +782,7 @@ static void am_draw(HWND hwnd, HDC pdc) {
     am_shape(dc, g_amBtn[AM_SEND], -1.0f, g_amHot == AM_SEND ? blend_rgb(accent, ink, 40) : accent, 0, 0.0f);
     am_icon(dc, g_amBtn[AM_SEND], 0xE724, L"➤", am_on_accent(), 13);
   }
+  ui_sheet_frame(dc, rc, hwnd); /* «Чертёж»: рамка листа */
   BitBlt(pdc, 0, 0, rc.right, rc.bottom, dc, 0, 0, SRCCOPY);
   SelectObject(dc, ob);
   DeleteObject(bm);

@@ -1,4 +1,6 @@
 1 24 "cursorpad.manifest"
+// значок программы (make_icon.py): ICON с наименьшим номером — его берут Проводник, ярлык и панель задач
+1 ICON "cursorpad.ico"
 #include <winver.h>
 #include "version.h"
 1 VERSIONINFO

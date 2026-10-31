@@ -890,7 +890,58 @@ static BOOL ui_our_window(HWND h) {
   return TRUE;
 }
 
+/* «Чертёж» (с 2026.10.31): у окон нет ни системной рамки, ни тени — свои окна прозрачные
+   (WS_EX_LAYERED для появления), а им DWM рамку не рисует, — и белое поле сливалось с белым
+   столом. Поэтому по периметру — сплошная линия цвета чернил, как рамка листа: 2 точки
+   при 100 %, толще с масштабом */
+static void ui_sheet_frame(HDC dc, RECT rc, HWND h) {
+  if (!chertezh_on() || !dc) return;
+  int t = ui_px(h, 2);
+  if (t < 2) t = 2;
+  HBRUSH ink = CreateSolidBrush(COL_INK);
+  RECT e[4] = {{rc.left, rc.top, rc.right, rc.top + t},
+               {rc.left, rc.bottom - t, rc.right, rc.bottom},
+               {rc.left, rc.top, rc.left + t, rc.bottom},
+               {rc.right - t, rc.top, rc.right, rc.bottom}};
+  for (int i = 0; i < 4; i++) FillRect(dc, &e[i], ink);
+  DeleteObject(ink);
+}
+
+/* рамка листа — после отрисовки самого окна; у окон с системным заголовком своя рамка Windows */
+static LRESULT CALLBACK ui_frame_proc(HWND h, UINT m, WPARAM w, LPARAM l, UINT_PTR id, DWORD_PTR ref) {
+  (void)id;
+  (void)ref;
+  switch (m) {
+  case WM_PAINT: {
+    LRESULT r = DefSubclassProc(h, m, w, l);
+    if (chertezh_on() && (GetWindowLongW(h, GWL_STYLE) & WS_CAPTION) != WS_CAPTION) {
+      HDC dc = GetDC(h);
+      RECT rc;
+      GetClientRect(h, &rc);
+      ui_sheet_frame(dc, rc, h);
+      ReleaseDC(h, dc);
+    }
+    return r;
+  }
+  case WM_SIZE:
+    if (chertezh_on()) InvalidateRect(h, NULL, FALSE); /* рамка уезжает вместе с краем */
+    break;
+  case WM_NCDESTROY:
+    RemoveWindowSubclass(h, ui_frame_proc, 0x5548);
+    break;
+  }
+  return DefSubclassProc(h, m, w, l);
+}
+
 static void ui_chrome_once(HWND h) {
+  if (!SendMessageW(h, WM_GETICON, ICON_BIG, 0)) { /* панель задач и Alt+Tab — значок программы */
+    SendMessageW(h, WM_SETICON, ICON_BIG, (LPARAM)app_icon(FALSE));
+    SendMessageW(h, WM_SETICON, ICON_SMALL, (LPARAM)app_icon(TRUE));
+  }
+  if (!GetPropW(h, L"CpUiFrame")) {
+    SetPropW(h, L"CpUiFrame", (HANDLE)1);
+    SetWindowSubclass(h, ui_frame_proc, 0x5548, 0);
+  }
   if ((int)(INT_PTR)GetPropW(h, L"CpUiGen") == g_uiGen) return;
   ui_class_brush_fix(h);
   ui_window_chrome(h);

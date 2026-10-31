@@ -1188,7 +1188,8 @@ static void shahmaty_show(void) {
     wc.hCursor = LoadCursorW(NULL, IDC_ARROW);
     wc.hbrBackground = g_paper;
     wc.lpszClassName = L"CursorPadShahmaty";
-    wc.hIcon = LoadIconW(NULL, IDI_APPLICATION);
+    wc.hIcon = app_icon(FALSE);
+    wc.hIconSm = app_icon(TRUE);
     RegisterClassExW(&wc);
     int w = XS_(SX_LEFT * 2 + SX_FRAME * 2 + SX_SQ * 8 + 14 + SX_SIDE), h = XS_(SX_TOP + SX_SQ * 8 + SX_FRAME * 2 + 124);
     g_sxWnd = CreateWindowExW(WS_EX_APPWINDOW, L"CursorPadShahmaty", L"Шахматы",
