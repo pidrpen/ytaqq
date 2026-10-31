@@ -258,8 +258,9 @@ def similar(a, b):
 # ---- обозначение и строки спецификации ----------------------------------------------------
 
 def des_key(s):
-    """обозначение для сверки: латиница → кириллица, без пробелов, регистр не важен"""
-    return re.sub(r'\s+', '', (s or '').translate(_LAT)).upper().replace('Ё', 'Е')
+    """обозначение для сверки, как его приводит CursorPad (dr_norm_des): латиница → кириллица, запятая → точка
+    (рукописные штампы пишут «1249,00,00»), без пробелов, регистр не важен"""
+    return re.sub(r'\s+', '', (s or '').translate(_LAT)).upper().replace('Ё', 'Е').replace(',', '.')
 
 
 def _isdig(s, i):
@@ -366,6 +367,37 @@ def spec_rows(ans):
     return [{k: str(r.get(k) or '').strip() for k in SPEC_KEYS} for r in rows or [] if isinstance(r, dict)]
 
 
+_SECT = ('докум', 'компле', 'сборо', 'детал', 'станд', 'прочи', 'матер')  # drawrec.c dr_section
+
+
+def section_id(s):
+    """номер раздела по началу названия, как dr_section; -1 — не раздел"""
+    s = (s or '').strip().lower()
+    return next((i for i, p in enumerate(_SECT) if s.startswith(p)), -1)
+
+
+def spec_post(rows):
+    """drawrec.c dr_json_spec: строка из одного заголовка раздела — раздел для строк под ней, строка из одного
+    наименования — перенос к предыдущей, «Резерв» и пустые — прочь"""
+    out, sect = [], ''
+    for r in rows:
+        only_name = not any(r[k] for k in ('fmt', 'zone', 'pos', 'des', 'qty', 'note'))
+        head = (r['name'] or r['sect']) if only_name else ''
+        if head and section_id(head) >= 0:
+            sect = head
+        elif not (r['name'] or not only_name) or (not r['des'] and r['name'].lower().startswith('резерв')):
+            pass
+        elif only_name and out:
+            out[-1] = {**out[-1], 'name': (out[-1]['name'] + ' ' + r['name']).strip()}
+        else:
+            if not r['sect']:
+                r = {**r, 'sect': sect}
+            elif section_id(r['sect']) >= 0:
+                sect = r['sect']
+            out.append(r)
+    return out
+
+
 def _qty(s):
     return (s or '').replace(' ', '').replace('.', ',')
 
@@ -393,7 +425,7 @@ def score_spec(want, got):
         used.add(best)
         g = got[best]
         d_ok = not w['des'] or des_key(g['des']) == des_key(w['des'])
-        q_ok, s_ok, p_ok = _qty(g['qty']) == _qty(w['qty']), g['sect'] == w['sect'], g['pos'] == w['pos']
+        q_ok, s_ok, p_ok = _qty(g['qty']) == _qty(w['qty']), section_id(g['sect']) == section_id(w['sect']), g['pos'] == w['pos']
         sim = similar(g['name'], w['name'])
         r['des_n'] += bool(w['des'])
         r['des_ok'] += bool(w['des']) and d_ok

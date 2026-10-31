@@ -1183,6 +1183,18 @@ static void dr_trim(wchar_t *s) {
 static void dr_norm_fmt(wchar_t *s) {
   wchar_t t[DR_CELL];
   int n = 0;
+  /* «без чертежа»: «Б\Ч», «б|ч», «Б/Ч», «Б14» (палочка и Ч, прочитанные цифрами) — «БЧ» */
+  if (s[0] == L'Б' || s[0] == L'б') {
+    int l = (int)wcslen(s);
+    while (l > 1 && s[l - 1] == L' ') l--;
+    wchar_t e = s[l - 1];
+    BOOL mid = TRUE;
+    for (int i = 1; i < l - 1; i++) mid &= wcschr(L"\\|/1lI ", s[i]) != NULL;
+    if (l >= 2 && l <= 4 && mid && (e == L'Ч' || e == L'ч' || e == L'4')) {
+      lstrcpyW(s, L"БЧ");
+      return;
+    }
+  }
   for (int i = 0; s[i] && n < DR_CELL - 1; i++) {
     wchar_t c = s[i];
     if (c == L' ') continue;
@@ -1199,6 +1211,7 @@ static void dr_norm_fmt(wchar_t *s) {
 
 /* формат листа: А0…А4, можно с кратностью «А4х3» */
 static BOOL dr_fmt_ok(const wchar_t *s) {
+  if (!wcscmp(s, L"БЧ")) return TRUE;
   if (s[0] != L'А' || s[1] < L'0' || s[1] > L'4') return FALSE;
   if (!s[2]) return TRUE;
   if (s[2] != L'х' || !dr_isdig(s[3])) return FALSE;
@@ -2055,6 +2068,7 @@ static BOOL dr_json_spec(const wchar_t *j, DrPage *pg) {
   const wchar_t *p = j ? wcsstr(j, L"\"rows\"") : NULL;
   if (!p || !(p = wcschr(p, L'['))) return FALSE;
   int cap = 0, n = 0;
+  wchar_t sect[DR_CELL] = {0};
   for (const wchar_t *q = p; (q = wcschr(q, L'{')) != NULL; q++) cap++;
   DrSpecRow *rows = cap ? (DrSpecRow *)calloc((size_t)cap, sizeof(DrSpecRow)) : NULL;
   for (const wchar_t *q = p; rows && n < cap && (q = wcschr(q, L'{')) != NULL;) {
@@ -2073,8 +2087,27 @@ static BOOL dr_json_spec(const wchar_t *j, DrPage *pg) {
       if (c == DS_SECT) lstrcpynW(o->c[c], v, DR_CELL);
       else dr_spec_cell(o, c, v, 100), any |= v[0] != 0;
     }
-    if (any && (o->c[DS_DES][0] || !dr_spec_reserve(o->c[DS_NAME]))) n++;
-    else memset(o, 0, sizeof(*o));
+    /* как у строк Tesseract (dr_spec): строка из одного заголовка раздела — раздел для строк под ней (модель,
+       не обученная этому, пишет его отдельной строкой — в «Наименование» или в sect), строка из одного
+       наименования — перенос к предыдущей (материал дробью под «Планкой»), «Резерв» и пустые — прочь */
+    BOOL onlyName = TRUE;
+    for (int c = DS_FMT; c < DS_N; c++)
+      if (c != DS_NAME && o->c[c][0]) onlyName = FALSE;
+    const wchar_t *head = !onlyName ? NULL : o->c[DS_NAME][0] ? o->c[DS_NAME] : o->c[DS_SECT];
+    if (head && head[0] && dr_section(head) >= 0) {
+      lstrcpynW(sect, head, DR_CELL);
+    } else if (!any || (!o->c[DS_DES][0] && dr_spec_reserve(o->c[DS_NAME]))) {
+    } else if (onlyName && n > 0) {
+      size_t l = wcslen(rows[n - 1].c[DS_NAME]);
+      _snwprintf(rows[n - 1].c[DS_NAME] + l, DR_CELL - l, L"%s%s", l ? L" " : L"", o->c[DS_NAME]);
+    } else {
+      if (!o->c[DS_SECT][0]) lstrcpynW(o->c[DS_SECT], sect, DR_CELL);
+      else if (dr_section(o->c[DS_SECT]) >= 0) lstrcpynW(sect, o->c[DS_SECT], DR_CELL);
+      n++;
+      q = end + 1;
+      continue;
+    }
+    memset(o, 0, sizeof(*o));
     q = end + 1;
   }
   if (!n) {

@@ -42,7 +42,7 @@ def score_sheet(lab, got, tess, tn, spec_tess=None):
     score_des(r, lab, got)
     if lab.get('type') == 'spec':  # спецификация: только строки (маршрута у неё нет)
         if got.get('spec') is not None:
-            r['spec'] = cpvl.score_spec(lab['rows'], cpvl.spec_rows(got['spec']))
+            r['spec'] = cpvl.score_spec(lab['rows'], cpvl.spec_post(cpvl.spec_rows(got['spec'])))  # как разбирает CursorPad
         if spec_tess is not None:
             r['spec_tess'] = cpvl.score_spec(lab['rows'], cpvl.spec_rows(spec_tess))
         return r

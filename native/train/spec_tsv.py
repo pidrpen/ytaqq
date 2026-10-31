@@ -34,7 +34,7 @@ def main():
         sheets = {k: v['rows'] for k, v in cpvl.load_labels(a.labels).items() if v.get('type') == 'spec'}
     elif a.answers:
         got = json.loads(pathlib.Path(a.answers).read_text('utf-8'))['sheets']
-        sheets = {k: cpvl.spec_rows(v['got']['spec']) for k, v in got.items() if v.get('got', {}).get('spec')}
+        sheets = {k: cpvl.spec_post(cpvl.spec_rows(v['got']['spec'])) for k, v in got.items() if v.get('got', {}).get('spec')}
     else:
         for f in sorted(pathlib.Path(a.dump).glob('*.spec_tess.json')):
             sheets[f.name[:-len('.spec_tess.json')]] = cpvl.spec_rows(f.read_text('utf-8-sig'))
