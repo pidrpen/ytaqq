@@ -214,6 +214,21 @@ static void pks_doubt_add(const wchar_t *des) {
 }
 
 /* штамп первой страницы → обозначение, наименование, вид; спецификация — и её строки */
+/* обозначение спецификации взято из имени файла уже после строк (штамп не прочитался): «<сборка>.05<код>» из
+   «Документации» — её СБ, как в pks_spec_rows, под сомнением */
+static void pks_doc05_fix(PkStRes *r) {
+  size_t al = wcslen(r->des);
+  if (!al) return;
+  for (int k = 0; k < r->nrows; k++) {
+    PkStRow *o = &r->rows[k];
+    if (wcscmp(o->kind, L"Документация") || _wcsnicmp(o->des, r->des, al) || wcsncmp(o->des + al, L".05", 3)) continue;
+    const wchar_t *code = o->des + al + 3;
+    if (!code[0] || iswdigit(code[0]) || code[0] == L'.') continue;
+    memmove(o->des + al, code, (wcslen(code) + 1) * sizeof(wchar_t));
+    o->doubt = TRUE;
+  }
+}
+
 static void pks_from_page(DrPage *pg, PkStRes *r) {
   wchar_t raw[DR_CELL] = L"", v[DR_CELL];
   /* обозначение: модель по графе — если похоже на обозначение; иначе Tesseract, под вопросом */
@@ -320,6 +335,7 @@ static void pks_read(IWICImagingFactory *f, PkStRes *r) {
       r->how = 3;
       r->asmDoc = doc == 1 || r->spec;
       if (!r->kind[0]) lstrcpynW(r->kind, r->asmDoc ? L"Сборочные единицы" : !doc ? L"Детали" : L"", 40);
+      if (r->spec) pks_doc05_fix(r);
     }
   }
   pks_spec_check(r, why);

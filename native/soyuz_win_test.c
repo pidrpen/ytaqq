@@ -1329,6 +1329,20 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
                                !wcscmp(rd->rows[1].des, L"ТСТ.181.000.05СБ") && !rd->rows[1].doubt && rd->rows[2].doubt,
                            L"«Документация»: «<сборка>.05» со «Сборочный чертеж» — её СБ, под сомнением; чужое «.05» не трогается; раздел под сомнением — «проверьте»");
                   st_note(L"     документ: «%ls», чужой: «%ls»", rd->rows[0].des, rd->rows[1].des);
+                  /* обозначение штампа спецификации не прочиталось — строки раньше имени файла; «.05» сводится после */
+                  free(rd->rows);
+                  memset(rd, 0, sizeof(*rd));
+                  lstrcpynW(p3.rows[0].c[DS_DES], L"ТСТ.190.000.05", DR_CELL);
+                  lstrcpynW(p3.rows[1].c[DS_DES], L"ТСТ.191.000.05", DR_CELL);
+                  p3.rows[0].doubt[DS_DES] = 0;
+                  pks_spec_rows(&p3, rd);
+                  BOOL early = rd->nrows == 3 && !wcscmp(rd->rows[0].des, L"ТСТ.190.000.05СБ");
+                  lstrcpynW(rd->des, L"ТСТ.190.000", DR_CELL), rd->spec = TRUE;
+                  pks_doc05_fix(rd);
+                  st_check(early && !wcscmp(rd->rows[0].des, L"ТСТ.190.000СБ") && rd->rows[0].doubt &&
+                               !wcscmp(rd->rows[1].des, L"ТСТ.191.000.05СБ") && !wcscmp(rd->rows[2].des, L"ТСТ.180.005"),
+                           L"штамп спецификации не прочитан, обозначение из имени файла: «<сборка>.05» — её СБ, под сомнением; чужое не трогается");
+                  st_note(L"     по имени файла: «%ls», чужой: «%ls»", rd->rows[0].des, rd->rows[1].des);
                 }
                 if (rd) free(rd->rows);
                 free(rd), free(p3.rows);
