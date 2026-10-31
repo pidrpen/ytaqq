@@ -376,24 +376,44 @@ def section_id(s):
     return next((i for i, p in enumerate(_SECT) if s.startswith(p)), -1)
 
 
+_DOC_CODES = ('СБ', 'ВО', 'ГЧ', 'МЧ', 'МЭ', 'УЧ', 'ПЗ', 'ТУ', 'ПС', 'РЭ', 'Э3', 'ТЧ', 'ВП')
+_DOC_PHRASES = ('сборочный черт', 'чертеж общего', 'габаритный черт', 'монтажный черт', 'схема ', 'пояснительная')
+
+
+def doc_row(r):
+    """drawrec.c dr_spec_doc_row: код документа в конце обозначения или документ по началу наименования"""
+    d = des_key(r['des'])
+    if any(d.endswith(c) and len(d) > len(c) and d[-len(c) - 1].isdigit() for c in _DOC_CODES):
+        return True
+    return r['name'].lower().startswith(_DOC_PHRASES)
+
+
 def spec_post(rows):
     """drawrec.c dr_json_spec: строка из одного заголовка раздела — раздел для строк под ней, строка из одного
-    наименования — перенос к предыдущей, «Резерв» и пустые — прочь"""
-    out, sect = [], ''
+    наименования — перенос к предыдущей, «Резерв» и пустые — прочь; документ — в «Документацию» по содержанию,
+    строка «Документации», которая не документ, — к заголовку, идущему сразу за ней"""
+    out, sect, late = [], '', False
     for r in rows:
         only_name = not any(r[k] for k in ('fmt', 'zone', 'pos', 'des', 'qty', 'note'))
         head = (r['name'] or r['sect']) if only_name else ''
         if head and section_id(head) >= 0:
+            if out and late and section_id(head) != 0:
+                out[-1] = {**out[-1], 'sect': head}
+            late = False
             sect = head
         elif not (r['name'] or not only_name) or (not r['des'] and r['name'].lower().startswith('резерв')):
             pass
         elif only_name and out:
             out[-1] = {**out[-1], 'name': (out[-1]['name'] + ' ' + r['name']).strip()}
         else:
-            if not r['sect']:
+            doc = doc_row(r)
+            if doc:
+                r = {**r, 'sect': 'Документация'}
+            elif not r['sect']:
                 r = {**r, 'sect': sect}
             elif section_id(r['sect']) >= 0:
                 sect = r['sect']
+            late = not doc and section_id(r['sect']) == 0
             out.append(r)
     return out
 

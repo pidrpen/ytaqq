@@ -2216,6 +2216,26 @@ static const wchar_t *dr_json_obj_end(const wchar_t *p) {
   return NULL;
 }
 
+/* строка спецификации — документ изделия: код документа в конце обозначения («…00СБ», «… Э3») или «Сборочный
+   чертеж», «Схема…», «Пояснительная записка» в начале наименования */
+static BOOL dr_spec_doc_row(const DrSpecRow *o) {
+  static const wchar_t *const kCode[] = {L"СБ", L"ВО", L"ГЧ", L"МЧ", L"МЭ", L"УЧ", L"ПЗ", L"ТУ", L"ПС", L"РЭ", L"Э3", L"ТЧ", L"ВП"};
+  static const wchar_t *const kPhrase[] = {L"сборочный черт", L"чертеж общего", L"габаритный черт", L"монтажный черт",
+                                           L"схема ", L"пояснительная"};
+  const wchar_t *d = o->c[DS_DES];
+  int e = (int)wcslen(d);
+  for (size_t i = 0; i < sizeof(kCode) / sizeof(kCode[0]); i++) {
+    int k = e - (int)wcslen(kCode[i]);
+    if (k > 0 && !wcscmp(d + k, kCode[i]) && (dr_isdig(d[k - 1]) || d[k - 1] == L' ')) return TRUE;
+  }
+  wchar_t low[24];
+  lstrcpynW(low, o->c[DS_NAME], 24);
+  CharLowerBuffW(low, (DWORD)wcslen(low));
+  for (size_t i = 0; i < sizeof(kPhrase) / sizeof(kPhrase[0]); i++)
+    if (!wcsncmp(low, kPhrase[i], wcslen(kPhrase[i]))) return TRUE;
+  return FALSE;
+}
+
 /* строки спецификации из ответа модели — вместо прочитанных Tesseract; FALSE — строк нет */
 static BOOL dr_json_spec(const wchar_t *j, DrPage *pg) {
   const wchar_t *p = j ? wcsstr(j, L"\"rows\"") : NULL;
@@ -2248,14 +2268,27 @@ static BOOL dr_json_spec(const wchar_t *j, DrPage *pg) {
       if (c != DS_NAME && o->c[c][0]) onlyName = FALSE;
     const wchar_t *head = !onlyName ? NULL : o->c[DS_NAME][0] ? o->c[DS_NAME] : o->c[DS_SECT];
     if (head && head[0] && dr_section(head) >= 0) {
+      /* заголовок после первой строки своего раздела (модель так ошибается): строка, записанная в
+         «Документацию», хотя не документ, — к этому разделу */
+      if (n > 0 && rows[n - 1].doubt[DS_SECT] && dr_section(rows[n - 1].c[DS_SECT]) == 0 && dr_section(head) != 0)
+        lstrcpynW(rows[n - 1].c[DS_SECT], head, DR_CELL), rows[n - 1].doubt[DS_SECT] = 0;
       lstrcpynW(sect, head, DR_CELL);
     } else if (!any || (!o->c[DS_DES][0] && dr_spec_reserve(o->c[DS_NAME]))) {
     } else if (onlyName && n > 0) {
       size_t l = wcslen(rows[n - 1].c[DS_NAME]);
       _snwprintf(rows[n - 1].c[DS_NAME] + l, DR_CELL - l, L"%s%s", l ? L" " : L"", o->c[DS_NAME]);
     } else {
-      if (!o->c[DS_SECT][0]) lstrcpynW(o->c[DS_SECT], sect, DR_CELL);
+      BOOL doc = dr_spec_doc_row(o);
+      if (doc) lstrcpynW(o->c[DS_SECT], L"Документация", DR_CELL); /* документ — по содержанию, где бы ни был заголовок */
+      else if (!o->c[DS_SECT][0]) lstrcpynW(o->c[DS_SECT], sect, DR_CELL);
       else if (dr_section(o->c[DS_SECT]) >= 0) lstrcpynW(sect, o->c[DS_SECT], DR_CELL);
+      if (!doc && dr_section(o->c[DS_SECT]) == 0) o->doubt[DS_SECT] = 1; /* в «Документации», а не документ */
+      wchar_t low[16];
+      lstrcpynW(low, o->c[DS_NAME], 16);
+      CharLowerBuffW(low, (DWORD)wcslen(low));
+      int e = (int)wcslen(o->c[DS_DES]);
+      if (!wcsncmp(low, L"сборочный черт", 14) && (e < 2 || wcscmp(o->c[DS_DES] + e - 2, L"СБ")))
+        o->doubt[DS_DES] = 1; /* сборочный чертёж без «СБ» в конце: рукописное «СБ» модель читает «.05» */
       n++;
       q = end + 1;
       continue;
