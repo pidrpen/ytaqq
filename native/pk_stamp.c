@@ -47,6 +47,7 @@ typedef struct {
   BOOL ops, opsOnly;        /* составить и операции; только они (строка уже есть — по файлу) */
   wchar_t *route;           /* маршрут по листу, как в чате (tn_text + нормы); malloc, NULL — нет */
   BOOL spec;                /* лист — спецификация (с 31.10): строк нет — не пустая сборка молча, а пометка */
+  BOOL nameJunk;            /* наименование со штампа — мусор (графы «№ докум.», «Подп.», латиница вперемешку): пусто + «проверьте» */
   BOOL specEmpty;           /* спецификация, а строк не прочитано */
   wchar_t lastSect[40];     /* раздел последней строки: у листа-продолжения (2а) без заголовка — с прошлой страницы */
 } PkStRes;
@@ -88,6 +89,8 @@ static BOOL g_pkAiOps = TRUE, g_pkAiOpsRead;
 static int g_pksOps, g_pksOpsParts, g_pksOpsHad, g_pksOpsNo;
 static int g_pksSpecEmpty;           /* спецификаций без строк (с 31.10) */
 static wchar_t g_pksSpecEmptyDes[200]; /* их обозначения — в карточку и строку состояния */
+static wchar_t g_pksHow[200];          /* чем читаем этот бросок: «моделью…» или «Tesseract — без ИИ: причина» (pks_ai_gate) */
+static BOOL pks_name_junk(const wchar_t *s); /* наименование-мусор со штампа */
 static BOOL g_esiChat;        /* чтение запущено из чата (ai_esi.c): по последнему файлу — карточка в чат */
 static void esi_card(void);   /* ai_esi.c */
 /* маршрут скана без обозначения: впишут обозначение — операции лягут к нему (по файлу строки) */
@@ -149,7 +152,65 @@ static void pks_spec_rows(const DrPage *pg, PkStRes *r) {
     lstrcpynW(o->pos, s->c[DS_POS], 16);
     /* раздел под сомнением (модель вывела заголовок не там) — тоже «проверьте» */
     o->doubt = s->doubt[DS_DES] || s->doubt[DS_QTY] || s->doubt[DS_POS] || s->doubt[DS_SECT] || (!s->c[DS_DES][0] && s->doubt[DS_NAME]);
+    if (s->c[DS_DES][0] && pks_name_junk(o->name)) o->name[0] = 0, o->doubt = TRUE; /* мусор в наименовании */
   }
+}
+
+/* Наименование-мусор (с 31.10, завод: «5 (EX, b ИУ: OBR GS…», «СYXapb», «Кельце plated MH oe», «№ doxum. Года, fama
+   Сидоренко…», «Pedpo» — Tesseract без модели читает графу и соседние): слова граф штампа («№», «докум», «подп», «дата»,
+   «изм», «разраб», «пров», «утв», «н.контр», «т.контр», «лит», «листов», «масштаб»); слово, где латиница вперемешку с
+   кириллицей; латиница — больше трети букв слов без цифр (у «М8-6gx20» цифры — это резьба, не мусор); кириллицы меньше
+   двух букв. Такое не вписывается: пусто и «проверьте» */
+static BOOL pks_name_junk(const wchar_t *s) {
+  if (!s || !s[0]) return FALSE;
+  static const wchar_t *const kStop[] = {L"№",     L"докум",  L"подп",    L"дата",     L"изм",   L"разраб", L"пров",
+                                         L"утв",   L"н.контр", L"т.контр", L"нконтр",  L"лит",   L"листов", L"масштаб"};
+  int cyr = 0, lat = 0;
+  const wchar_t *p = s;
+  while (*p) {
+    while (*p && (*p == L' ' || *p == L',' || *p == L';' || *p == L':' || *p == L'(' || *p == L')')) p++;
+    if (!*p) break;
+    const wchar_t *b = p;
+    while (*p && *p != L' ' && *p != L',' && *p != L';' && *p != L':' && *p != L'(' && *p != L')') p++;
+    int len = (int)(p - b);
+    if (len <= 0 || len >= 64) continue;
+    wchar_t w[64];
+    memcpy(w, b, (size_t)len * sizeof(wchar_t));
+    w[len] = 0;
+    CharLowerBuffW(w, (DWORD)len);
+    for (int k = len; k > 0 && (w[k - 1] == L'.' || w[k - 1] == L'…'); k--) w[k - 1] = 0;
+    for (size_t i = 0; i < sizeof(kStop) / sizeof(kStop[0]); i++)
+      if (!wcscmp(w, kStop[i]) || (kStop[i][0] == L'№' && wcschr(w, L'№'))) return TRUE;
+    int wc = 0, wl = 0, dg = 0;
+    for (const wchar_t *q = b; q < p; q++) {
+      if (*q >= 0x400 && *q <= 0x4FF) wc++;
+      else if ((*q >= L'A' && *q <= L'Z') || (*q >= L'a' && *q <= L'z')) wl++;
+      else if (*q >= L'0' && *q <= L'9') dg++;
+    }
+    if (dg) continue; /* обозначение резьбы, марки, размера — латиница там своя */
+    if (wc && wl) return TRUE; /* «СYXapb» */
+    cyr += wc, lat += wl;
+  }
+  if (lat * 3 > cyr + lat) return TRUE;
+  return cyr < 2;
+}
+
+/* наименования для сравнения: строчные, только буквы и цифры, ё → е */
+static void pks_name_key(const wchar_t *s, wchar_t *out, int cap) {
+  int k = 0;
+  for (; s && *s && k < cap - 1; s++) {
+    wchar_t c = *s;
+    if (!(IsCharAlphaNumericW(c))) continue;
+    c = (wchar_t)(UINT_PTR)CharLowerW((LPWSTR)(UINT_PTR)c);
+    if (c == 0x451) c = 0x435;
+    out[k++] = c;
+  }
+  out[k] = 0;
+}
+
+static void pks_doubt_add(const wchar_t *des) {
+  if (!des || !des[0] || wcsstr(g_pksDoubt, des) || wcslen(g_pksDoubt) + wcslen(des) + 3 >= 120) return;
+  wcscat(g_pksDoubt, g_pksDoubt[0] ? L", " : L""), wcscat(g_pksDoubt, des);
 }
 
 /* штамп первой страницы → обозначение, наименование, вид; спецификация — и её строки */
@@ -167,6 +228,7 @@ static void pks_from_page(DrPage *pg, PkStRes *r) {
   if (!r->how) return;
   wchar_t name[DR_CELL];
   lstrcpynW(name, rs_name(pg), DR_CELL);
+  if (pks_name_junk(name)) name[0] = 0, r->nameJunk = TRUE; /* мусор — не вписывать, «проверьте» */
   int doc = pp_draw_doc_code(raw, name, r->docCode); /* «… СБ», «Сборочный чертеж» — сборка; код — прочь */
   if (doc != 1 || pg->type == DRT_SPEC) r->docCode[0] = 0; /* спецификация — подлинник самой сборки */
   r->doc = doc;
@@ -417,7 +479,13 @@ static int pks_apply(PkStRes *r) {
   if (target && have[0] && r->des[0] && _wcsicmp(have, r->des))
     _snwprintf(r->note, 200, L"на чертеже «%ls», строка «%ls» оставлена", r->des, have);
   pks_fill_empty(row, 0, r->des);
+  if (r->name[0] && xp_cell(it, row, 1)[0]) { /* наименование уже есть (из спецификации сборки) — оно надёжнее штампа */
+    wchar_t a[DR_CELL], b[DR_CELL];
+    pks_name_key(xp_cell(it, row, 1), a, DR_CELL), pks_name_key(r->name, b, DR_CELL);
+    if (wcscmp(a, b)) pks_doubt_add(r->des[0] ? r->des : xp_cell(it, row, 0));
+  }
   pks_fill_empty(row, 1, r->name);
+  if (r->nameJunk) pks_doubt_add(r->des[0] ? r->des : xp_cell(it, row, 0));
   if (r->asmDoc && !_wcsicmp(xp_cell(it, row, 2), L"Детали")) pk_put(it, row, 2, r->kind); /* «Детали» — пустышка вида */
   pks_fill_empty(row, 2, r->kind);
   pks_fill_empty(row, 3, r->mat);
@@ -454,7 +522,8 @@ static int pks_apply(PkStRes *r) {
   /* спецификация: её состав — сразу в «Состав», новые позиции — в «Изделия» */
   for (int k = 0; k < r->nrows && des[0]; k++) {
     PkStRow *s = &r->rows[k];
-    if (pks_find(s->des) < 0 && (s->name[0] || s->kind[0])) {
+    int have = pks_find(s->des);
+    if (have < 0 && (s->name[0] || s->kind[0])) {
       wchar_t **w = xp_row(it);
       if (w) {
         xp_set(w, 0, s->des);
@@ -463,6 +532,14 @@ static int pks_apply(PkStRes *r) {
         g_pksNew++;
       }
       des = xp_cell(it, row, 0); /* строки переехали */
+    } else if (have >= 0 && s->name[0]) { /* позиция уже есть (лист детали прочитан раньше): наименование — из спецификации */
+      wchar_t a[DR_CELL], b[DR_CELL];
+      pks_name_key(xp_cell(it, have, 1), a, DR_CELL), pks_name_key(s->name, b, DR_CELL);
+      if (wcscmp(a, b)) {
+        if (a[0]) pks_doubt_add(s->des); /* штамп и спецификация расходятся — «проверьте» */
+        pk_put(it, have, 1, s->name);
+      }
+      des = xp_cell(it, row, 0);
     }
     if (pks_link(des, s->des, s->qty, s->pos)) g_pksLinks++;
     if (s->doubt && !wcsstr(g_pksDoubt, s->des) && wcslen(g_pksDoubt) + wcslen(s->des) + 3 < 120) /* сомнение строки — «проверьте» */
@@ -577,7 +654,8 @@ static void pks_status(const wchar_t *note) {
     ops[199] = 0;
   }
   if (g_pksBy[2] || g_pksBy[1] || g_pksBy[3])
-    _snwprintf(by, 120, L"; обозначения: моделью %d, Tesseract %d, из имени файла %d", g_pksBy[2], g_pksBy[1], g_pksBy[3]);
+    _snwprintf(by, 120, L"; читали %ls; обозначения: моделью %d, Tesseract %d, из имени файла %d",
+               g_pksHow[0] == L'T' ? L"Tesseract — без ИИ" : L"моделью", g_pksBy[2], g_pksBy[1], g_pksBy[3]);
   if (g_pksWait) _snwprintf(wait, 120, L"; %d ждут обозначения сборки — впишите его", g_pksWait);
   else if (g_pksSpecEmpty) _snwprintf(wait, 120, L"; спецификаций без строк %d — состав не прочитан, проверьте", g_pksSpecEmpty);
   pk_status(L"Чертежи: %d из %d — новых изделий %d, дополнено %d, в состав%ls%ls%ls %d%ls%ls%ls%ls%ls%ls%ls%ls%ls",
@@ -677,12 +755,54 @@ static void pks_add_path(TmPaths *l, const wchar_t *p) {
 
 /* файлы — в очередь чтения; hit — строка открытого листа, куда их отдали (-1 — никуда);
    opsOnly — строки уже есть, нужны только операции по их чертежам */
-static void pks_enqueue(TmPaths *pl, int hit, BOOL opsOnly) {
+/* Чем читать (с 31.10, завод: модель не была готова — окно молча читало Tesseract'ом, наименования — мусор). Перед
+   новым броском: модель с картинками готова — ею; ИИ выключен, а модель с картинками есть — включить его, как «включи
+   ИИ» в чате (сервер модели поднимается при первом листе — он дольше), и читать ею; иначе — спросить «Читать без ИИ
+   (Tesseract, наименования хуже)?» и только по ответу; «Нет» — открыть Настройки → ИИ. В g_pksHow — чем читаем, для
+   строки состояния и карточки ЭСИ. 0 — моделью, 1 — Tesseract с согласия, -1 — не читать */
+static int pks_ai_gate(HWND owner) {
+  if (dr_vl_ok()) {
+    lstrcpynW(g_pksHow, L"моделью (локальный ИИ с картинками)", 200);
+    return 0;
+  }
+  if (!g_aiProvider && !g_aiOn && ai_vision_ready()) { /* выключен, а модель с картинками есть — включить */
+    InterlockedExchange(&g_aiOn, TRUE);
+    ai_save();
+    ai_ui_refresh();
+    if (dr_vl_ok()) {
+      lstrcpynW(g_pksHow, L"моделью — ИИ был выключен, включён (первый лист дольше: модель запускается)", 200);
+      return 0;
+    }
+  }
+  const wchar_t *why = g_aiProvider ? L"выбран облачный Z.ai — чертежи ему не отправляются"
+                       : !ai_vision_ready() ? L"у выбранной модели нет картинок или она не скачана (нужна «Средний» или «С картинками»)"
+                       : !g_aiOn ? L"ИИ выключен в Настройках"
+                                 : L"модель с картинками недоступна";
+  _snwprintf(g_pksHow, 200, L"Tesseract — без ИИ: %ls", why);
+  g_pksHow[199] = 0;
+  if (g_pkNoBox) return 1; /* стенд — не спрашивать */
+  wchar_t q[600];
+  _snwprintf(q, 600, L"Локальная модель с картинками не готова: %ls.\n\nДа — читать без ИИ (Tesseract: обозначения читаются, "
+                     L"наименования — хуже, их надо проверить).\nНет — не читать сейчас и открыть Настройки → ИИ (выбрать или скачать "
+                     L"модель «Средний»).",
+             why);
+  q[599] = 0;
+  if (MessageBoxW(owner, q, L"Чтение чертежей — ЭСИ и ТП", MB_YESNO | MB_ICONQUESTION) == IDYES) return 1;
+  ac_open_settings();
+  return -1;
+}
+
+static BOOL pks_enqueue(TmPaths *pl, int hit, BOOL opsOnly) {
   TmPaths l = *pl;
   if (!l.n) {
     pk_status(L"Чертежей не нашлось — бросьте файлы (PDF, TIF, PNG…) или папку с ними");
     free(l.p);
-    return;
+    return FALSE;
+  }
+  if (!g_pksRunning && pks_ai_gate(g_pkWnd && IsWindowVisible(g_pkWnd) ? g_pkWnd : g_acWnd) < 0) {
+    pk_status(L"Чтение не начато: выберите модель с картинками в Настройках → ИИ, затем бросьте чертежи снова");
+    free(l.p);
+    return FALSE;
   }
   if (!opsOnly) tm_paths_sort(&l);
   if (g_pkEditRow >= 0) pk_edit_end(TRUE);
@@ -691,7 +811,7 @@ static void pks_enqueue(TmPaths *pl, int hit, BOOL opsOnly) {
   PkStJob *j = (PkStJob *)calloc(1, sizeof(PkStJob));
   if (!j) {
     free(l.p);
-    return;
+    return FALSE;
   }
   j->files = l.p;
   j->n = l.n;
@@ -747,11 +867,12 @@ static void pks_enqueue(TmPaths *pl, int hit, BOOL opsOnly) {
   if (opsOnly) {
     pk_status(L"Операции по чертежам: читаю %d %ls%ls…", g_pksTotal, g_pksTotal == 1 ? L"лист" : L"листов",
               dr_vl_ok() ? L" (мини-ИИ)" : L" (Tesseract — мини-ИИ с картинками выключен)");
-    return;
+    return TRUE;
   }
-  pk_status(L"Читаю штампы: %d %ls%ls%ls%ls%ls%ls…", g_pksTotal, g_pksTotal == 1 ? L"чертёж" : L"чертежей",
+  pk_status(L"Читаю штампы: %d %ls%ls%ls%ls%ls%ls — %ls…", g_pksTotal, g_pksTotal == 1 ? L"чертёж" : L"чертежей",
             j->parent[0] ? L" → в состав «" : j->parentRow >= 0 ? L" → в состав новой сборки" : L"", j->parent,
-            j->parent[0] ? L"»" : L"", note[0] ? L"; " : L"", note);
+            j->parent[0] ? L"»" : L"", note[0] ? L"; " : L"", note, g_pksHow);
+  return TRUE;
 }
 
 /* WM_DROPFILES: файлы (и картинки из папок) — в очередь чтения, цель — строка под мышью */

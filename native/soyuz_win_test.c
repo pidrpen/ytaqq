@@ -1063,6 +1063,78 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
           pk_fill(FALSE);
           DeleteFileW(sp);
           st_check(g_pk[PK_ITEMS].n == itBefore && g_pk[PK_LINKS].n == lnBefore, L"строки из файла убраны — листы как были");
+          { /* наименования (31.10, завод): мусор Tesseract не вписывается; наименование из спецификации надёжнее штампа */
+            static const wchar_t *const junk[] = {L"5 (EX, b ИУ: OBR GS…", L"СYXapb", L"Кельце plated MH oe",
+                                                  L"№ doxum. Года, fama Сидоренко Welz…", L"Pedpo", L"Изм. Лист № докум. Подп. Дата"};
+            static const wchar_t *const good[] = {L"Планка опорная", L"Болт М8-6gx20 ГОСТ 7798-70", L"Подшипник 205 ГОСТ 8338-75",
+                                                  L"Подпорка", L"Сборочный чертеж", L"Ребро", L"Лист Б-ПН-4 ГОСТ 19903-2015",
+                                                  L"Кольцо 040-045-30-2-2 ГОСТ 9833-73"};
+            int jk = 0, gd = 0;
+            wchar_t badJ[200] = L"", badG[200] = L"";
+            for (size_t i = 0; i < sizeof(junk) / sizeof(junk[0]); i++)
+              if (pks_name_junk(junk[i])) jk++;
+              else lstrcpynW(badJ, junk[i], 200);
+            for (size_t i = 0; i < sizeof(good) / sizeof(good[0]); i++)
+              if (!pks_name_junk(good[i])) gd++;
+              else lstrcpynW(badG, good[i], 200);
+            st_check(jk == (int)(sizeof(junk) / sizeof(junk[0])) && gd == (int)(sizeof(good) / sizeof(good[0])),
+                     L"наименование-мусор со штампа (латиница вперемешку, графы «№ докум.», «Подп.») узнаётся; ГОСТы, резьба «М8-6gx20», «Подпорка» — нет");
+            if (badJ[0] || badG[0]) st_note(L"     не узнан мусор «%ls», ложно — «%ls»", badJ, badG);
+            /* лист детали прочитан раньше спецификации: наименование штампа «Планка» → из спецификации «Планка опорная», «проверьте» */
+            XpTable *it7 = &g_pk[PK_ITEMS];
+            int b7 = it7->n;
+            xp_row(it7);
+            it7 = &g_pk[PK_ITEMS];
+            pk_put(it7, b7, 0, L"ТСТ.210.001"), pk_put(it7, b7, 1, L"Планка"), pk_put(it7, b7, 2, L"Детали");
+            wchar_t keepD[120];
+            lstrcpynW(keepD, g_pksDoubt, 120);
+            g_pksDoubt[0] = 0;
+            PkStRes *r7 = (PkStRes *)calloc(1, sizeof(PkStRes));
+            PkStRow *rows7 = (PkStRow *)calloc(2, sizeof(PkStRow));
+            if (r7 && rows7) {
+              r7->parentRow = r7->row = -1, r7->how = 3, r7->asmDoc = TRUE;
+              lstrcpynW(r7->des, L"ТСТ.210.000", DR_CELL), lstrcpynW(r7->kind, L"Сборочные единицы", 40);
+              lstrcpynW(rows7[0].des, L"ТСТ.210.001", DR_CELL), lstrcpynW(rows7[0].name, L"Планка опорная", DR_CELL);
+              lstrcpynW(rows7[0].kind, L"Детали", 40), lstrcpynW(rows7[0].qty, L"2", 32);
+              r7->rows = rows7, r7->nrows = 1;
+              pks_apply(r7);
+              int k7 = pks_find(L"ТСТ.210.001");
+              st_check(k7 >= 0 && !wcscmp(xp_cell(&g_pk[PK_ITEMS], k7, 1), L"Планка опорная") && wcsstr(g_pksDoubt, L"ТСТ.210.001"),
+                       L"наименование из спецификации сборки заменило прочитанное со штампа, расхождение — в «проверьте»");
+              /* а лист детали после спецификации: штамп с другим наименованием не затирает спецификацию, «проверьте» */
+              g_pksDoubt[0] = 0;
+              PkStRes d7;
+              memset(&d7, 0, sizeof(d7));
+              d7.parentRow = d7.row = -1, d7.how = 1;
+              lstrcpynW(d7.des, L"ТСТ.210.001", DR_CELL), lstrcpynW(d7.name, L"Плонка", DR_CELL), lstrcpynW(d7.kind, L"Детали", 40);
+              pks_apply(&d7);
+              st_check(!wcscmp(xp_cell(&g_pk[PK_ITEMS], pks_find(L"ТСТ.210.001"), 1), L"Планка опорная") && wcsstr(g_pksDoubt, L"ТСТ.210.001"),
+                       L"лист детали после спецификации: наименование спецификации остаётся, расхождение со штампом — «проверьте»");
+              /* мусор со штампа — не вписан, «проверьте» */
+              g_pksDoubt[0] = 0;
+              PkStRes j7;
+              memset(&j7, 0, sizeof(j7));
+              j7.parentRow = j7.row = -1, j7.how = 1, j7.nameJunk = TRUE;
+              lstrcpynW(j7.des, L"ТСТ.210.002", DR_CELL), lstrcpynW(j7.kind, L"Детали", 40);
+              pks_apply(&j7);
+              int k8 = pks_find(L"ТСТ.210.002");
+              st_check(k8 >= 0 && !xp_cell(&g_pk[PK_ITEMS], k8, 1)[0] && wcsstr(g_pksDoubt, L"ТСТ.210.002"),
+                       L"наименование-мусор со штампа — ячейка пустая, обозначение в «проверьте»");
+            }
+            free(rows7), free(r7);
+            it7 = &g_pk[PK_ITEMS];
+            for (int r = it7->n - 1; r >= 0; r--)
+              if (!wcsncmp(xp_cell(it7, r, 0), L"ТСТ.210.", 8)) pk_del_row(it7, r);
+            XpTable *ln7 = &g_pk[PK_LINKS];
+            for (int r = ln7->n - 1; r >= 0; r--)
+              if (!wcsncmp(xp_cell(ln7, r, 0), L"ТСТ.210.", 8)) pk_del_row(ln7, r);
+            lstrcpynW(g_pksDoubt, keepD, 120);
+            /* чем читаем: на стенде модели нет — «Tesseract — без ИИ» с причиной, без вопроса (g_pkNoBox) */
+            int gate = pks_ai_gate(g_pkWnd);
+            st_check(gate == 1 && !wcsncmp(g_pksHow, L"Tesseract — без ИИ: ", 19),
+                     L"модель с картинками не готова — чтение помечено «Tesseract — без ИИ» с причиной; в работе — вопрос «читать без ИИ?»");
+            st_note(L"     чем читаем: %ls", g_pksHow);
+          }
           { /* страницы одной спецификации файлами без шапки (как пишет spec_tsv.py ветки обучения): порядок имён, раздел
                продолжения — с прошлой страницы, «Сборочный чертеж» без кода в обозначении — документом «…СБ» */
             XpTable *it6 = &g_pk[PK_ITEMS];
