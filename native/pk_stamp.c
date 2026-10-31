@@ -24,6 +24,7 @@
 
 typedef struct {
   wchar_t des[DR_CELL], name[DR_CELL], kind[40], qty[32], pos[16];
+  BOOL doubt; /* модель или Tesseract сомневается в обозначении, количестве или позиции — «проверьте» (с 31.10) */
 } PkStRow;
 
 typedef struct {
@@ -141,6 +142,7 @@ static void pks_spec_rows(const DrPage *pg, PkStRes *r) {
     lstrcpynW(o->kind, dr_kind_of(sect), 40);
     lstrcpynW(o->qty, s->c[DS_QTY], 32);
     lstrcpynW(o->pos, s->c[DS_POS], 16);
+    o->doubt = s->doubt[DS_DES] || s->doubt[DS_QTY] || s->doubt[DS_POS] || (!s->c[DS_DES][0] && s->doubt[DS_NAME]);
   }
 }
 
@@ -457,6 +459,8 @@ static int pks_apply(PkStRes *r) {
       des = xp_cell(it, row, 0); /* строки переехали */
     }
     if (pks_link(des, s->des, s->qty, s->pos)) g_pksLinks++;
+    if (s->doubt && !wcsstr(g_pksDoubt, s->des) && wcslen(g_pksDoubt) + wcslen(s->des) + 3 < 120) /* сомнение строки — «проверьте» */
+      wcscat(g_pksDoubt, g_pksDoubt[0] ? L", " : L""), wcscat(g_pksDoubt, s->des);
   }
   if (r->nrows) lstrcpynW(g_pksParent, des, 200);
   if (docDraw) pks_doc_row(row, r);
