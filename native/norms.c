@@ -780,12 +780,12 @@ static double nm_step(const wchar_t *row, double x, int *low) {
 /* ---- расчёт операции -------------------------------------------------------------- */
 
 /* EST — оценка, FACT — по факту, TECH — норма технолога (Тшт по массе детали, Настройки) */
-enum { NMK_NONE, NMK_TURN, NMK_DRILL, NMK_MILL, NMK_CUT, NMK_EST, NMK_FACT, NMK_TECH, NMK_SAW, NMK_GEAR };
+enum { NMK_NONE, NMK_TURN, NMK_DRILL, NMK_MILL, NMK_CUT, NMK_EST, NMK_FACT, NMK_TECH, NMK_SAW, NMK_GEAR, NMK_WELD };
 /* класс операции — что у неё нормируется (правило технолога 30.10): мехобработка — Тпз и Тшт;
    заготовительные и вспомогательные — только Тшт (Тпз не нужен); контроль — без норм */
 enum { NMC_FULL, NMC_TSHT, NMC_NONE };
 static const wchar_t *const kNmKind[] = {L"", L"токарная", L"сверлильная", L"фрезерная", L"резка", L"оценка",
-                                         L"по факту", L"норма технолога", L"отрезная", L"зубодолбежная"};
+                                         L"по факту", L"норма технолога", L"отрезная", L"зубодолбежная", L"сварка"};
 
 #define NM_TRS 16 /* переходов операции, расписанных по одному (токарная, фрезерная) */
 typedef struct {
@@ -2370,6 +2370,69 @@ static void nm_gear(NmJob *j) {
   if (!nm_na(o->tpz) && !nm_na(q) && q > 0 && o->full) o->tshk = o->tsht + o->tpz / q;
 }
 
+
+/* ---- сварка (с 2026.10.31) ----------------------------------------------------------------
+   ОМН на дуговую сварку в среде защитных газов (1989), как в примере 1.18.1 книги:
+     Тшт = [(Тнш + Тзач)·L + Тус]·K3·Kсер
+   Тнш — неполное штучное на 1 м шва по катету и проволоке (карта 6: углеродистые и
+   низколегированные стали, полуавтомат в CO2, нижнее положение; в нём уже основное, вспомогательное
+   на шов, обслуживание и отдых), Тзач — зачистка брызг (карта 75), Тус — установка и снятие
+   (карта 82), K3 — по длине одного шва (карта 90), Kсер — тип производства (п. 1.14: единичное ×1,3,
+   мелкосерийное ×1,2; тип по партии — оценка CursorPad: до 5 — единичное, до 50 — мелкосерийное).
+   Длина шва и катет — в чате «норма: шов 200, катет 5, швов 2»; нет — «проверить», числа нет. */
+static void nm_weld(NmJob *j) {
+  NmOp *o = j->o;
+  wchar_t s[300];
+  o->to = o->tv = o->top = o->tsht = o->tpz = o->tshk = NM_NONE;
+  j->pref = kNmKind[NMK_WELD];
+  int okL = nm_req(j, L"Lшва", L"длина шва, мм («шов 200»)"), okk = nm_req(j, L"k", L"катет шва («катет 5»)");
+  int mat = j->r ? j->r->s.mat : 0;
+  if (mat == TNM_STEEL_STAIN || mat == TNM_ALU || mat == TNM_ALU_CAST || mat == TNM_COPPER || mat == TNM_BRASS ||
+      mat == TNM_BRONZE) {
+    nm_line(j, L"Тшт — проверить: карты на сварку этого материала (легированные, аргон, алюминий, медь) не перенесены");
+    return;
+  }
+  if (!okL || !okk) {
+    nm_line(j, L"Тшт — проверить: нужны длина шва и катет — «норма: шов 200, катет 5»");
+    return;
+  }
+  double L = nm_v(&j->c, L"Lшва") / 1000, cnt = nm_v(&j->c, L"швов"), q = nm_v(&j->c, L"партия");
+  if (nm_na(cnt) || cnt < 1) cnt = 1;
+  nm_put(&j->c, L"проволока", NULL, 1.2, NMO_DEF, L"полуавтомат, проволока Ø1,2");
+  if (nm_na(nm_v(&j->c, L"толщина"))) nm_putv(&j->c, L"толщина", nm_v(&j->c, L"k"), NMO_DEF, L"толщина — как катет");
+  nm_put(&j->c, L"зачистка", L"механизированная", NM_NONE, NMO_DEF, L"шлифмашинкой");
+  nm_put(&j->c, L"способ", L"стол", NM_NONE, NMO_DEF, L"установка на стол вручную");
+  nm_put(&j->c, L"шов", L"прямолинейный", NM_NONE, NMO_DEF, NULL);
+  nm_putv(&j->c, L"длина шва", L / cnt, NMO_CALC, L"длина одного шва");
+  double tn = 0, tz = 0, tus = 0, k3 = 1;
+  int ok = nm_look_pref(j, L"шов", L"Тнш (на 1 м шва)", 1, &tn);
+  if (!nm_look_pref(j, L"зачистка", L"Тзач (на 1 м шва)", 0, &tz)) tz = 0;
+  ok &= nm_look_pref(j, L"установка", L"Тус", 1, &tus);
+  if (!nm_look_pref(j, L"длина", L"K3 (длина шва)", 0, &k3)) k3 = 1;
+  double kser = 1;
+  const wchar_t *type = L"средне- и крупносерийное";
+  if (!nm_na(q) && q <= 5) kser = 1.3, type = L"единичное";
+  else if (!nm_na(q) && q <= 50) kser = 1.2, type = L"мелкосерийное";
+  else if (nm_na(q)) kser = 1.2, type = L"мелкосерийное (партия не задана)";
+  tn_cpy(s, 300, L"Kсер ");
+  tn_catnum(s, 300, kser);
+  tn_cat(s, 300, L" — производство ");
+  tn_cat(s, 300, type);
+  tn_cat(s, 300, L" (п. 1.14 ОМН; тип по партии — оценка CursorPad)");
+  nm_line(j, s);
+  o->to = tn * L;
+  o->tv = tz * L + tus;
+  o->top = o->to + o->tv;
+  o->tsht = ((tn + tz) * L + tus) * k3 * kser;
+  tn_cpy(s, 300, L"Тшт = [(Тнш + Тзач)·L + Тус]·K3·Kсер = [(");
+  tn_catnum(s, 300, tn), tn_cat(s, 300, L" + "), tn_catnum(s, 300, tz), tn_cat(s, 300, L")·");
+  tn_catnum(s, 300, L), tn_cat(s, 300, L" + "), tn_catnum(s, 300, tus), tn_cat(s, 300, L"]·");
+  tn_catnum(s, 300, k3), tn_cat(s, 300, L"·"), tn_catnum(s, 300, kser), tn_cat(s, 300, L" = ");
+  tn_catnum(s, 300, o->tsht), tn_cat(s, 300, L" мин");
+  nm_line(j, s);
+  o->full = ok;
+}
+
 /* одна операция: То, Тв, Топ, Тшт, Тпз */
 static void nm_op_calc(NmJob *j) {
   NmOp *o = j->o;
@@ -2629,7 +2692,9 @@ static void nm_ask(const wchar_t *text, NmCtx *c) {
            {L"изменений оборотов", L"изменений оборотов", 0, 0}, {L"смен", L"смен", 0, 0},
            {L"измеритель", L"измеритель", 2, 0}, {L"доп", L"доп", 2, 0},
            {L"модуль", L"m", 0, 0},           {L"m", L"m", 0, 1},            {L"zк", L"zк", 0, 1},
-           {L"ступени", L"ступени", 2, 0},    {L"расточка", L"Dотв", 0, 0},  {L"Dотв", L"Dотв", 0, 1},
+           {L"ступени", L"ступени", 2, 0},
+           {L"длина шва", L"Lшва", 0, 0},     {L"шов", L"Lшва", 0, 0},        {L"швов", L"швов", 0, 0},
+           {L"катет", L"k", 0, 0},            {L"проволока", L"проволока", 0, 0},    {L"расточка", L"Dотв", 0, 0},  {L"Dотв", L"Dотв", 0, 1},
            {L"переход", L"переходов", 0, 0},
            {L"инструмент", L"инструментов", 0, 0}, {L"измерен", L"измерений", 0, 0},
            {L"отверсти", L"отверстий", 0, 0},  {L"врезание", L"врезание", 0, 0},
@@ -2973,7 +3038,7 @@ static void nm_ask_op(const wchar_t *ask, int num, NmCtx *c) {
    (укрупнённо, не ОМН: Тшт = Тшт + на кг·масса, Тпз), термическая и покрытия — по факту (время
    цикла задаёт их технология). Класс операции (Настройки) — Тпз и Тшт, только Тшт или без норм;
    операции «без норм» в ответе одной строкой. */
-enum { NMS_OMN, NMS_CUT, NMS_EST, NMS_FACT, NMS_TECH, NMS_SAW, NMS_GEAR };
+enum { NMS_OMN, NMS_CUT, NMS_EST, NMS_FACT, NMS_TECH, NMS_SAW, NMS_GEAR, NMS_WELD };
 
 /* норма технолога на термическую обработку: Тшт по массе детали — до порога одна, тяжелее другая;
    массы нет — как у тяжёлой, с пометкой. Цифры — Настройки → «Нормирование» (norms.ini [heat]) */
@@ -3026,7 +3091,9 @@ static NmOpRule g_nmOps[] = {
     NM_R(L"Доводочная", NMS_EST, NM_SRC_EST, NMC_FULL),
     NM_R(L"Гибка", NMS_EST, NM_SRC_EST, NMC_TSHT),
     NM_R(L"Штамповка", NMS_EST, NM_SRC_EST, NMC_TSHT),
-    NM_R(L"Сварка", NMS_EST, NM_SRC_EST, NMC_TSHT),
+    NM_R(L"Сварка", NMS_WELD,
+         L"ОМН на сварку в защитных газах: по длине шва и катету (карта 6), зачистка (75), установка (82), длина шва (90)",
+         NMC_TSHT),
     NM_R(L"Разметка", NMS_EST, NM_SRC_EST, NMC_TSHT),
     NM_R(L"Слесарная", NMS_EST, NM_SRC_EST, NMC_TSHT),
     NM_R(L"Маркирование", NMS_EST, NM_SRC_EST, NMC_TSHT),
@@ -3168,6 +3235,7 @@ static void nm_route(const NmBase *b, const TnRoute *r, const wchar_t *mass, con
              : rule->how == NMS_TECH ? NMK_TECH
              : rule->how == NMS_SAW  ? NMK_SAW
              : rule->how == NMS_GEAR ? NMK_GEAR
+             : rule->how == NMS_WELD ? NMK_WELD
                                      : NMK_EST;
     if (!wcscmp(r->op[i].sub, L"зачистка ТО")) kind = NMK_TECH; /* слесарная после ТО — норма технолога */
     if (!b->n && kind != NMK_CUT) continue; /* без таблиц — только То резки по нормам завода */
@@ -3191,6 +3259,10 @@ static void nm_route(const NmBase *b, const TnRoute *r, const wchar_t *mass, con
       nm_est(j);
     } else if (kind == NMK_SAW) {
       nm_saw(j);
+    } else if (kind == NMK_WELD) {
+      double q;
+      if (nm_na(nm_v(&j->c, L"партия"))) nm_lim_def(j, L"партия", &q);
+      nm_weld(j);
     } else if (kind == NMK_GEAR) {
       double q;
       if (nm_na(nm_v(&j->c, L"партия"))) nm_lim_def(j, L"партия", &q);
