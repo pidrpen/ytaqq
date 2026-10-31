@@ -1138,6 +1138,31 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
               pks_spec_rows(&p2, rr);
               st_check(rr->nrows == 4 && rr->rows[2].doubt && !rr->rows[0].doubt && !rr->rows[1].doubt && !rr->rows[3].doubt,
                        L"сомнение строки спецификации (количество) переходит в строку состава — остальные без пометки");
+              { /* «Документация»: СБ, прочитанный моделью как «.05», — СБ этой сборки, под сомнением; раздел под сомнением — «проверьте» */
+                PkStRes *rd = (PkStRes *)calloc(1, sizeof(PkStRes));
+                DrPage p3;
+                memset(&p3, 0, sizeof(p3));
+                p3.rows = (DrSpecRow *)calloc(3, sizeof(DrSpecRow));
+                if (rd && p3.rows) {
+                  lstrcpynW(rd->des, L"ТСТ.180.000", DR_CELL);
+                  lstrcpynW(p3.rows[0].c[DS_SECT], L"Документация", DR_CELL), lstrcpynW(p3.rows[0].c[DS_DES], L"ТСТ.180.000.05", DR_CELL);
+                  lstrcpynW(p3.rows[0].c[DS_NAME], L"Сборочный чертеж", DR_CELL);
+                  p3.rows[0].doubt[DS_DES] = 1;
+                  lstrcpynW(p3.rows[1].c[DS_SECT], L"Документация", DR_CELL), lstrcpynW(p3.rows[1].c[DS_DES], L"ТСТ.181.000.05", DR_CELL);
+                  lstrcpynW(p3.rows[1].c[DS_NAME], L"Сборочный чертеж", DR_CELL);
+                  lstrcpynW(p3.rows[2].c[DS_SECT], L"Детали", DR_CELL), lstrcpynW(p3.rows[2].c[DS_DES], L"ТСТ.180.005", DR_CELL);
+                  lstrcpynW(p3.rows[2].c[DS_NAME], L"Косынка", DR_CELL), lstrcpynW(p3.rows[2].c[DS_QTY], L"2", DR_CELL);
+                  p3.rows[2].doubt[DS_SECT] = 1;
+                  p3.nrows = 3;
+                  pks_spec_rows(&p3, rd);
+                  st_check(rd->nrows == 3 && !wcscmp(rd->rows[0].des, L"ТСТ.180.000СБ") && rd->rows[0].doubt &&
+                               !wcscmp(rd->rows[1].des, L"ТСТ.181.000.05СБ") && !rd->rows[1].doubt && rd->rows[2].doubt,
+                           L"«Документация»: «<сборка>.05» со «Сборочный чертеж» — её СБ, под сомнением; чужое «.05» не трогается; раздел под сомнением — «проверьте»");
+                  st_note(L"     документ: «%ls», чужой: «%ls»", rd->rows[0].des, rd->rows[1].des);
+                }
+                if (rd) free(rd->rows);
+                free(rd), free(p3.rows);
+              }
               { /* и попадает в «проверьте» строки состояния и карточки */
                 wchar_t keepD[120];
                 lstrcpynW(keepD, g_pksDoubt, 120);
