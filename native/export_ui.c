@@ -848,7 +848,8 @@ static void export_show(void) {
     wc.hCursor = LoadCursorW(NULL, IDC_ARROW);
     wc.hbrBackground = g_paper;
     wc.lpszClassName = L"CursorPadExport";
-    wc.hIcon = LoadIconW(NULL, IDI_APPLICATION);
+    wc.hIcon = app_icon(FALSE);
+    wc.hIconSm = app_icon(TRUE);
     RegisterClassExW(&wc);
     RECT wa;
     SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0);

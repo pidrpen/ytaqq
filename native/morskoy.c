@@ -1462,7 +1462,8 @@ static void morskoy_show(void) {
     wc.hCursor = LoadCursorW(NULL, IDC_ARROW);
     wc.hbrBackground = g_paper;
     wc.lpszClassName = L"CursorPadMorskoy";
-    wc.hIcon = LoadIconW(NULL, IDI_APPLICATION);
+    wc.hIcon = app_icon(FALSE);
+    wc.hIconSm = app_icon(TRUE);
     RegisterClassExW(&wc);
     int w = MB_(MB_LEFT * 2 + MB_LAB * 2 + MB_CELL * MB_N * 2 + MB_GAP);
     int h = MB_(MB_TOP + 26 + MB_LAB + MB_CELL * MB_N + 128);

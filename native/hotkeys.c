@@ -585,7 +585,8 @@ static void hk_show(void) {
     wc.hCursor = LoadCursorW(NULL, IDC_ARROW);
     wc.hbrBackground = bg_brush(TRUE);
     wc.lpszClassName = L"CursorPadHotkeys";
-    wc.hIcon = LoadIconW(NULL, IDI_APPLICATION);
+    wc.hIcon = app_icon(FALSE);
+    wc.hIconSm = app_icon(TRUE);
     RegisterClassExW(&wc);
     int w = HS_(HK_W), h = hk_row_y(HK_COUNT) + HS_(8 + 66 + 14 + 28 + 14);
     g_hkWnd = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, L"CursorPadHotkeys", L"Горячие клавиши",

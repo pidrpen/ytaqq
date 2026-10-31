@@ -1112,7 +1112,8 @@ static void shashki_show(void) {
     wc.hCursor = LoadCursorW(NULL, IDC_ARROW);
     wc.hbrBackground = g_paper;
     wc.lpszClassName = L"CursorPadShashki";
-    wc.hIcon = LoadIconW(NULL, IDI_APPLICATION);
+    wc.hIcon = app_icon(FALSE);
+    wc.hIconSm = app_icon(TRUE);
     RegisterClassExW(&wc);
     int w = SS_(SH_LEFT * 2 + SH_SQ * 8 + SH_FRAME * 2), h = SS_(SH_TOP + SH_SQ * 8 + SH_FRAME * 2 + 140);
     g_shWnd = CreateWindowExW(WS_EX_APPWINDOW, L"CursorPadShashki", L"Шашки",

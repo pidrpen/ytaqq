@@ -2586,7 +2586,8 @@ static void tiffmerge_show(void) {
     wc.hInstance = g_inst;
     wc.hCursor = LoadCursorW(NULL, IDC_ARROW);
     wc.lpszClassName = L"CursorPadTiffMerge";
-    wc.hIcon = LoadIconW(NULL, IDI_APPLICATION);
+    wc.hIcon = app_icon(FALSE);
+    wc.hIconSm = app_icon(TRUE);
     RegisterClassExW(&wc);
     wc.lpfnWndProc = TmCanvasProc;
     wc.lpszClassName = L"CursorPadTiffMergeCanvas";
