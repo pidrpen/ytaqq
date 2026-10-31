@@ -231,18 +231,204 @@ static BOOL load_bmp24(const wchar_t *path, Pix *out) {
   return TRUE;
 }
 
+/* ---- тёмный фон и картинки ---------------------------------------------------
+   Tesseract и Windows OCR ждут тёмный текст на светлом. На тёмной теме текст
+   светлый — кадр переворачивается. А обложки, аватарки и большие значки
+   (плейлисты, чаты, списки файлов) они читают как буквы: из пёстрой картинки
+   выходят строки вроде «‚©. e=». Такие картинки закрашиваются цветом фона до
+   распознавания; что просочится — отсеет ocr_lines.h по уверенности. */
+
+#define PIC_B 4     /* блок сетки, пикселей */
+#define PIC_MIN 28  /* картинка — не меньше стольких пикселей с каждой стороны */
+#define PIC_MAX 400 /* крупнее — часть самого снимка: на ней может быть настоящий текст */
+#define PIC_RECTS 64
+
+static int px_gray(const BYTE *s) { return (s[0] * 29 + s[1] * 150 + s[2] * 77) >> 8; }
+
+static int px_sat(const BYTE *s) {
+  int mx = s[0] > s[1] ? s[0] : s[1], mn = s[0] < s[1] ? s[0] : s[1];
+  if (s[2] > mx) mx = s[2];
+  if (s[2] < mn) mn = s[2];
+  return mx - mn;
+}
+
+static int px_bucket(const BYTE *s) { return ((s[2] >> 4) << 8) | ((s[1] >> 4) << 4) | (s[0] >> 4); }
+
+/* Фон — самый частый цвет кадра (по 4 бита на канал), берётся его среднее. */
+static void dominant_bg(const Pix *p, BYTE bg[4]) {
+  static unsigned cnt[4096];
+  static unsigned long long sum[4096][3];
+  memset(cnt, 0, sizeof(cnt));
+  memset(sum, 0, sizeof(sum));
+  for (size_t i = 0; i < (size_t)p->w * p->h; i++) {
+    const BYTE *s = p->bgra + i * 4;
+    int k = px_bucket(s);
+    cnt[k]++;
+    for (int c = 0; c < 3; c++) sum[k][c] += s[c];
+  }
+  int best = 0;
+  for (int k = 1; k < 4096; k++)
+    if (cnt[k] > cnt[best]) best = k;
+  for (int c = 0; c < 3; c++) bg[c] = cnt[best] ? (BYTE)(sum[best][c] / cnt[best]) : 0;
+  bg[3] = 255;
+}
+
+typedef struct {
+  int x0, y0, x1, y1; /* [x0, x1) × [y0, y1) */
+} PicRect;
+
+/* Ищет почти квадратные пёстрые области — обложки, аватарки — и закрашивает их в g
+   (серое кадра) цветом фона. Сетка из блоков PIC_B×PIC_B: блок «картинный», если
+   почти все его пиксели далеки от фона или в среднем сильно насыщены (цветной
+   текст и ClearType-кайма сюда не попадают: у них строки штрихов с просветами).
+   Связная область блоков берётся, только если она не меньше PIC_MIN, не больше
+   PIC_MAX, почти квадратная и почти сплошная, не одноцветная плашка (там
+   обычно подпись) и заметно цветная. Возвращает, сколько картинок закрашено. */
+static int paint_pictures(const Pix *p, BYTE *g, const BYTE bg[4]) {
+  int bw = (p->w + PIC_B - 1) / PIC_B, bh = (p->h + PIC_B - 1) / PIC_B;
+  if (p->w < PIC_MIN || p->h < PIC_MIN) return 0;
+  size_t nb = (size_t)bw * bh;
+  BYTE *mk = (BYTE *)calloc(nb, 1), *dl = (BYTE *)calloc(nb, 1);
+  int *st = (int *)malloc(nb * sizeof(int));
+  PicRect rc[PIC_RECTS];
+  int nrc = 0;
+  long long area = 0;
+  if (!mk || !dl || !st) {
+    free(mk);
+    free(dl);
+    free(st);
+    return 0;
+  }
+
+  for (int by = 0; by < bh; by++)
+    for (int bx = 0; bx < bw; bx++) {
+      int x1 = (bx + 1) * PIC_B < p->w ? (bx + 1) * PIC_B : p->w;
+      int y1 = (by + 1) * PIC_B < p->h ? (by + 1) * PIC_B : p->h;
+      int n = 0, away = 0, sat = 0;
+      for (int y = by * PIC_B; y < y1; y++)
+        for (int x = bx * PIC_B; x < x1; x++) {
+          const BYTE *s = p->bgra + ((size_t)y * p->w + x) * 4;
+          int d0 = abs(s[0] - bg[0]), d1 = abs(s[1] - bg[1]), d2 = abs(s[2] - bg[2]);
+          if (d0 > 18 || d1 > 18 || d2 > 18) away++;
+          sat += px_sat(s);
+          n++;
+        }
+      if (away * 10 >= n * 9 || sat >= n * 55) mk[(size_t)by * bw + bx] = 1;
+    }
+  /* зазор в один блок не разрывает картинку: в обложке бывают места, близкие к фону */
+  for (int by = 0; by < bh; by++)
+    for (int bx = 0; bx < bw; bx++)
+      if (mk[(size_t)by * bw + bx])
+        for (int dy = -1; dy <= 1; dy++)
+          for (int dx = -1; dx <= 1; dx++) {
+            int yy = by + dy, xx = bx + dx;
+            if (yy >= 0 && yy < bh && xx >= 0 && xx < bw) dl[(size_t)yy * bw + xx] = 1;
+          }
+
+  for (int s0 = 0; s0 < (int)nb; s0++) {
+    if (!dl[s0]) continue;
+    int top = 0, cnt = 0, mx0 = bw, my0 = bh, mx1 = -1, my1 = -1;
+    st[top++] = s0;
+    dl[s0] = 0;
+    while (top) {
+      int i = st[--top], x = i % bw, y = i / bw;
+      if (mk[i]) {
+        cnt++;
+        if (x < mx0) mx0 = x;
+        if (x > mx1) mx1 = x;
+        if (y < my0) my0 = y;
+        if (y > my1) my1 = y;
+      }
+      for (int dy = -1; dy <= 1; dy++)
+        for (int dx = -1; dx <= 1; dx++) {
+          int yy = y + dy, xx = x + dx;
+          if (yy < 0 || yy >= bh || xx < 0 || xx >= bw || !dl[(size_t)yy * bw + xx]) continue;
+          dl[(size_t)yy * bw + xx] = 0;
+          st[top++] = yy * bw + xx;
+        }
+    }
+    if (cnt == 0) continue;
+    int pw = (mx1 - mx0 + 1) * PIC_B, ph = (my1 - my0 + 1) * PIC_B;
+    if (pw < PIC_MIN || ph < PIC_MIN || pw > PIC_MAX || ph > PIC_MAX) continue;
+    if (pw * 10 > ph * 18 || ph * 10 > pw * 18) continue; /* вытянутая — подсветка, строка */
+    if (cnt * 100 < (mx1 - mx0 + 1) * (my1 - my0 + 1) * 45) continue; /* сплошь просветы — не картинка */
+
+    /* внутри: не плашка одного цвета и не серая */
+    static long hist[4096];
+    memset(hist, 0, sizeof(hist));
+    int x0 = mx0 * PIC_B, y0 = my0 * PIC_B;
+    int x1 = (mx1 + 1) * PIC_B < p->w ? (mx1 + 1) * PIC_B : p->w;
+    int y1 = (my1 + 1) * PIC_B < p->h ? (my1 + 1) * PIC_B : p->h;
+    long tot = 0, colourful = 0, top1 = 0;
+    for (int y = y0; y < y1; y++)
+      for (int x = x0; x < x1; x++) {
+        const BYTE *s = p->bgra + ((size_t)y * p->w + x) * 4;
+        int k = px_bucket(s);
+        if (++hist[k] > top1) top1 = hist[k];
+        if (px_sat(s) >= 30) colourful++;
+        tot++;
+      }
+    if (top1 * 100 >= tot * 75 || colourful * 100 < tot * 25) continue;
+
+    if (nrc < PIC_RECTS) {
+      rc[nrc].x0 = x0 > 2 ? x0 - 2 : 0;
+      rc[nrc].y0 = y0 > 2 ? y0 - 2 : 0;
+      rc[nrc].x1 = x1 + 2 < p->w ? x1 + 2 : p->w;
+      rc[nrc].y1 = y1 + 2 < p->h ? y1 + 2 : p->h;
+      area += (long long)(rc[nrc].x1 - rc[nrc].x0) * (rc[nrc].y1 - rc[nrc].y0);
+      nrc++;
+    }
+  }
+  free(mk);
+  free(dl);
+  free(st);
+
+  /* больше половины кадра «картинки» — это не обложки, а сам снимок: не трогаем */
+  if (area * 2 > (long long)p->w * p->h) return 0;
+  int bgg = px_gray(bg);
+  for (int r = 0; r < nrc; r++)
+    for (int y = rc[r].y0; y < rc[r].y1; y++)
+      memset(g + (size_t)y * p->w + rc[r].x0, bgg, (size_t)(rc[r].x1 - rc[r].x0));
+  return nrc;
+}
+
 /* Screen text recognises far better after a clean upscale and a contrast
-   stretch than it does at native resolution. */
+   stretch than it does at native resolution. Тёмный кадр (медиана яркости ниже
+   100, фон тёмный) переворачивается, картинки закрашиваются фоном — см. выше. */
 static BOOL enhance(Pix *p, int scale) {
   int w = p->w * scale, h = p->h * scale;
-  if ((long long)w * h > 40000000LL) return TRUE; /* already big enough */
+  if ((long long)w * h > 40000000LL) { /* already big enough: без увеличения */
+    scale = 1;
+    w = p->w;
+    h = p->h;
+  }
   BYTE *dst = (BYTE *)malloc((size_t)w * h * 4);
-  if (!dst) return FALSE;
+  size_t np = (size_t)p->w * p->h;
+  BYTE *gray = (BYTE *)malloc(np);
+  if (!dst || !gray) {
+    free(dst);
+    free(gray);
+    return FALSE;
+  }
+
+  unsigned hist[256];
+  memset(hist, 0, sizeof(hist));
+  for (size_t i = 0; i < np; i++) {
+    gray[i] = (BYTE)px_gray(p->bgra + i * 4);
+    hist[gray[i]]++;
+  }
+  int med = 0;
+  for (size_t acc = 0; med < 255 && (acc += hist[med]) * 2 < np; med++) {}
+  BYTE bg[4];
+  dominant_bg(p, bg);
+  int dark = med < 100 && px_gray(bg) < 128;
+  paint_pictures(p, gray, bg);
+  if (dark)
+    for (size_t i = 0; i < np; i++) gray[i] = (BYTE)(255 - gray[i]);
 
   int lo = 255, hi = 0;
-  for (int i = 0; i < p->w * p->h; i++) {
-    const BYTE *s = p->bgra + (size_t)i * 4;
-    int g = (s[0] * 29 + s[1] * 150 + s[2] * 77) >> 8;
+  for (size_t i = 0; i < np; i++) {
+    int g = gray[i];
     if (g < lo) lo = g;
     if (g > hi) hi = g;
   }
@@ -268,11 +454,7 @@ static BOOL enhance(Pix *p, int scale) {
       const int xs[2] = {x0, x1}, ys[2] = {y0, y1};
       const float wx[2] = {1 - fx, fx}, wy[2] = {1 - fy, fy};
       for (int j = 0; j < 2; j++)
-        for (int i = 0; i < 2; i++) {
-          const BYTE *s = p->bgra + ((size_t)ys[j] * p->w + xs[i]) * 4;
-          int g = (s[0] * 29 + s[1] * 150 + s[2] * 77) >> 8;
-          acc += g * wx[i] * wy[j];
-        }
+        for (int i = 0; i < 2; i++) acc += gray[(size_t)ys[j] * p->w + xs[i]] * wx[i] * wy[j];
       int g = (int)((acc - lo) * 255.0f / span + 0.5f);
       if (g < 0) g = 0;
       if (g > 255) g = 255;
@@ -281,6 +463,7 @@ static BOOL enhance(Pix *p, int scale) {
       d[3] = 255;
     }
   }
+  free(gray);
   free(p->bgra);
   p->bgra = dst;
   p->w = w;

@@ -7,7 +7,10 @@
    Arial, Times, Tahoma, Verdana, Consolas, 11–16 точек, строки из ведомостей,
    ГОСТов, служебок: у Windows OCR 11–12 ошибок на 100 знаков, у Tesseract
    около 2, и он не медленнее. Картинку готовит тот же CursorPadOcr.exe
-   (--prep: серое, растяжка контраста, увеличение ×2–3), что и для Windows.
+   (--prep: серое, растяжка контраста, увеличение ×2–3), что и для Windows;
+   тёмную тему он переворачивает, а обложки и аватарки закрашивает фоном.
+   Tesseract отдаёт таблицу слов с уверенностью (TSV): ocr_lines.h собирает из неё
+   строки и выбрасывает обрывки, которые он прочитал с картинок и значков.
 
    Пакет — папка tesseract рядом с данными (%LOCALAPPDATA%\CursorPad\tesseract):
      tesseract.exe, его DLL, tessdata\rus.traineddata, tessdata\eng.traineddata,
@@ -33,6 +36,7 @@
    запускался у коллег при F6. Теперь отпечатки файлов идут из закреплённого
    pack.txt, а папку пакета перед запуском один раз за сеанс сверяют целиком. */
 #include "tess_pack.h" /* TESS_PACK_SHA */
+#include "ocr_lines.h" /* отсев обрывков с обложек и значков по TSV, чистая логика */
 
 #define TESS_PACK_MAX 64        /* файлов в пакете */
 #define TESS_FILE_MAX (24u << 20) /* один файл пакета — не больше 24 МБ */
@@ -169,10 +173,35 @@ static wchar_t *tess_ocr(const wchar_t *bmp, const wchar_t *helper) {
   wchar_t tessdata[MAX_PATH], langs[24] = L"rus";
   _snwprintf(tessdata, MAX_PATH, L"%s\\tessdata\\eng.traineddata", dir);
   if (GetFileAttributesW(tessdata) != INVALID_FILE_ATTRIBUTES) lstrcpyW(langs, L"rus+eng");
-  /* --psm 6 — один блок текста: так выделяют фрагмент экрана */
-  _snwprintf(cmd, 1400, L"\"%s\\tesseract.exe\" \"%s\" stdout --tessdata-dir tessdata -l %s --psm 6",
+  /* --psm 6 — один блок текста: так выделяют фрагмент экрана. Сначала таблица
+     (tessedit_create_tsv — конфиг «tsv» в пакете не лежит): по уверенности слов
+     ocr_lines.h выбрасывает обрывки с обложек и значков. Не вышло — как раньше, текстом. */
+  _snwprintf(cmd, 1400,
+             L"\"%s\\tesseract.exe\" \"%s\" stdout --tessdata-dir tessdata -l %s --psm 6 -c tessedit_create_tsv=1",
              dir, arg, langs);
   BOOL ran = run_capture_in(cmd, dir, &out, &n, &code, err, 256);
+  char *flt = NULL;
+  int fl = -1;
+  if (ran && code == 0 && out && (flt = (char *)malloc((size_t)n + 16)) != NULL)
+    fl = ocl_filter(out, n, flt, (size_t)n + 16);
+  if (fl == 0) { /* осталось одно мусорное — пусть читает Windows */
+    free(out);
+    free(flt);
+    DeleteFileW(in);
+    return NULL;
+  }
+  if (fl > 0) {
+    free(out);
+    out = flt;
+    n = (DWORD)fl;
+  } else {
+    free(out);
+    free(flt);
+    out = NULL;
+    _snwprintf(cmd, 1400, L"\"%s\\tesseract.exe\" \"%s\" stdout --tessdata-dir tessdata -l %s --psm 6", dir,
+               arg, langs);
+    ran = run_capture_in(cmd, dir, &out, &n, &code, err, 256);
+  }
   DeleteFileW(in);
   if (!ran || code != 0 || !out) {
     free(out);

@@ -109,6 +109,116 @@ static inline int dr_des_fix_sb(wchar_t *s) { /* inline: plm_check_test подк
   return n;
 }
 
+/* ---- буквенные коды своих обозначений -------------------------------------------- */
+
+#define SR_CODES 6 /* своих кодов больше не бывает: обычно один-два («КЛМ», «ПРС») */
+
+/* коды стандартов и документов — не свои, их не правят и не собирают */
+static inline int sr_code_std(const wchar_t *c, int l) {
+  static const wchar_t *const kStd[] = {L"ГОСТ", L"ОСТ", L"СТО", L"СТП", L"РД", L"ТУ", L"РТМ", L"ЕСКД", L"ОСТВ"};
+  for (size_t i = 0; i < sizeof(kStd) / sizeof(kStd[0]); i++)
+    if ((int)wcslen(kStd[i]) == l && !wcsncmp(c, kStd[i], (size_t)l)) return 1;
+  return 0;
+}
+
+/* заглавные буквы в начале s (латиница, похожая на кириллицу, и строчные — как заглавные кириллицы) — в c
+   (до 6), ответ — сколько */
+static inline int sr_code_letters(const wchar_t *s, wchar_t c[7], int low) {
+  static const wchar_t lat[] = L"ABCEHKMOPTX", cyr[] = L"АВСЕНКМОРТХ";
+  int l = 0;
+  for (; l < 6 && s[l]; l++) {
+    wchar_t ch = s[l];
+    if (low && ch >= L'а' && ch <= L'я') ch = (wchar_t)(ch - 0x20);
+    if (low && ch >= L'a' && ch <= L'z') ch = (wchar_t)(ch - 0x20);
+    const wchar_t *q = wcschr(lat, ch);
+    if (q) ch = cyr[q - lat];
+    if (!dr_isupper_cyr(ch)) break;
+    c[l] = ch;
+  }
+  c[l] = 0;
+  return l;
+}
+
+/* Коды, вписанные в Настройках: «КЛМ, ПРС», «клм прс»; не буквы 2–5 и коды стандартов пропускаются */
+static inline int sr_codes_parse(const wchar_t *s, wchar_t out[][8], int max) {
+  int got = 0;
+  while (*s && got < max) {
+    wchar_t c[7];
+    int l = sr_code_letters(s, c, 1);
+    if (l >= 2 && l <= 5 && !(s[l] && !wcschr(L" ,;", s[l])) && !sr_code_std(c, l)) wcscpy(out[got++], c);
+    s += l ? l : 1;
+  }
+  return got;
+}
+
+/* Коды по именам файлов архива: заглавные буквы (2–5) перед номером — «КЛМ 1234-…», «КЛМ1234-…»; латиница,
+   похожая на кириллицу, — кириллица. Свой код — стоит перед номером не реже чем у 1 % таких имён и не меньше 5
+   раз; в out — до max кодов, самые частые первыми. Ответ — сколько */
+static inline int sr_codes_from_names(const wchar_t *const *names, int n, wchar_t out[][8], int max) {
+  wchar_t code[64][6];
+  int cnt[64], nc = 0, withNum = 0, got = 0;
+  for (int i = 0; i < n; i++) {
+    const wchar_t *s = names[i];
+    wchar_t c[7];
+    int l = sr_code_letters(s, c, 0);
+    if (l < 2 || l > 5 || !dr_isdig(s[l] == L' ' ? s[l + 1] : s[l])) continue;
+    withNum++;
+    if (sr_code_std(c, l)) continue;
+    int k = 0;
+    while (k < nc && wcscmp(code[k], c)) k++;
+    if (k == nc) {
+      if (nc == 64) continue;
+      wcscpy(code[nc], c);
+      cnt[nc++] = 0;
+    }
+    cnt[k]++;
+  }
+  while (got < max) {
+    int b = -1;
+    for (int k = 0; k < nc; k++)
+      if (cnt[k] > 0 && (b < 0 || cnt[k] > cnt[b])) b = k;
+    if (b < 0 || cnt[b] < 5 || cnt[b] * 100 < withNum) break;
+    wcscpy(out[got++], code[b]);
+    cnt[b] = 0;
+  }
+  return got;
+}
+
+/* Буквенный код в начале обозначения, которого нет среди своих, — на свой, если отличается от него одной буквой
+   (Tesseract на курсиве ГОСТ читает «Д» как «Л», «М» или латинскую «N», «L») или одна буква пропала («КМ» при
+   своём «КЛМ»). Чужой код, не похожий ни на один свой (или похожий сразу на два), коды стандартов («ГОСТ»,
+   «ТУ») и замена в двухбуквенном (одна буква из двух — уже не опечатка) не трогаются. 1 — поправлено */
+static inline int dr_des_fix_code(wchar_t *s, int cap, const wchar_t codes[][8], int n) {
+  int l = 0, hit = -1, hits = 0;
+  while (l < 6 && (dr_isupper_cyr(s[l]) || (s[l] >= L'A' && s[l] <= L'Z'))) l++;
+  if (l < 2 || l > 5 || !(s[l] == L' ' || dr_isdig(s[l])) || sr_code_std(s, l)) return 0;
+  for (int i = 0; i < n; i++) {
+    int cl = (int)wcslen(codes[i]), diff = 0;
+    if (cl == l) {
+      for (int j = 0; j < l; j++) diff += s[j] != codes[i][j];
+      if (!diff) return 0;
+      if (diff == 1 && l >= 3) hit = i, hits++;
+    } else if (cl == l + 1) {
+      for (int j = 0; j < cl; j++) { /* codes[i] без буквы j — это s */
+        int k = 0;
+        while (k < l && s[k] == codes[i][k + (k >= j)]) k++;
+        if (k == l) {
+          hit = i, hits++;
+          break;
+        }
+      }
+    }
+  }
+  if (hits != 1) return 0;
+  int cl = (int)wcslen(codes[hit]), sl = (int)wcslen(s);
+  if (cl > l) {
+    if (sl + 1 >= cap) return 0;
+    memmove(s + 1, s, (size_t)(sl + 1) * sizeof(wchar_t));
+  }
+  memcpy(s, codes[hit], (size_t)cl * sizeof(wchar_t));
+  return 1;
+}
+
 /* то же в свободном тексте (F6 «Выделить и прочитать»): правятся только обозначения — dr_des_fix_sb
    сверяет с шаблоном, обычные «с6 листами», «С6-ая» не трогаются. Латинская «c» перед «6» в обозначении
    (Tesseract путает алфавиты) — тоже, она становится кириллицей. first — первое поправленное слово */
