@@ -322,6 +322,68 @@ static void route_one(TnRoute *r, const wchar_t *op) {
   tn_cpy(r->op[0].op, 48, op);
 }
 
+/* переход с таким началом названия; -1 — нет */
+static int tr_at(const NmOp *o, const wchar_t *what) {
+  for (int k = 0; k < o->ntr; k++)
+    if (!wcsncmp(o->tr[k].what, what, wcslen(what))) return k;
+  return -1;
+}
+
+/* токарная по переходам: каждый торец, ступень, отверстие, черновой и чистовой проход — свой переход,
+   обороты от своего Ø; установок две (вторая ×0,8) */
+static void test_turn_plan(NmBase *b) {
+  static TnRoute r;
+  static NmResult res;
+  static wchar_t txt[60000];
+  tn_route(L"Вал", L"Круг 45 ГОСТ 2590-2006 / 45 ГОСТ 1050-2013", L"Ø40\nØ30\n1x45°\nRa 6,3\n§GB d=40 l=180\n", &r);
+  ok("ступени с листа: Ø40 и Ø30", r.s.nDia == 2 && r.s.dia[0] == 40 && r.s.dia[1] == 30 && !r.s.diaIn);
+  nm_route(b, &r, L"1,8", L"норма: партия 50", &res);
+  int t = -1;
+  for (int i = 0; i < res.n; i++)
+    if (res.op[i].kind == NMK_TURN) t = i;
+  const NmOp *o = t >= 0 ? &res.op[t] : NULL;
+  ok("вал: переходы расписаны", o && o->ntr == 5);
+  if (!o) return;
+  ok("вал: торцы, ступени, фаски", tr_at(o, L"Подрезать торец Ø45") == 0 && tr_at(o, L"Точить Ø45 → Ø40, l 180") == 1 &&
+                                       tr_at(o, L"Точить Ø40 → Ø30, l 90 (оценка)") == 2 &&
+                                       !wcscmp(o->tr[3].what, L"Подрезать торец Ø45") && tr_at(o, L"Снять фаски") == 4);
+  ok("вал: у переходов своё То", o->tr[1].to > 0 && o->tr[2].to > 0 && o->tr[1].to != o->tr[2].to);
+  double sum = 0;
+  for (int k = 0; k < o->ntr; k++) sum += nm_na(o->tr[k].to) ? 0 : o->tr[k].to;
+  near("вал: То — сумма переходов", o->to, sum);
+  has("вал: две установки, вторая ×0,8", o->how, L" + 0,8·");
+  has("вал: длины ступеней — оценка", o->how, L"длины ступеней — оценка: общая длина поровну");
+  has("вал: обороты от своего Ø", o->how, L"n = 1000·V/(π·D) = 1000·");
+  txt[0] = 0;
+  nm_text(b, &res, L"", txt, 60000);
+  has("подробно: разбивка по переходам", txt, L"по переходам (То · Тв без установки):\n   1. Подрезать торец Ø45 — То ");
+  txt[0] = 0;
+  nm_text_brief(b, &res, L"", txt, 60000);
+  ok("коротко: без разбивки", !wcsstr(txt, L"по переходам (То"));
+  /* длина ступени задана в чате — не оценка */
+  nm_route(b, &r, L"1,8", L"норма: партия 50, ступени Ø30×60", &res);
+  o = &res.op[t];
+  ok("ступени из чата: Ø30 — 60 мм", tr_at(o, L"Точить Ø40 → Ø30, l 60") == 2 && !wcsstr(o->how, L"длины ступеней — оценка"));
+  /* втулка: отверстие с полем допуска прописной — сверлить, расточить, расточить начисто */
+  tn_route(L"Втулка", L"Круг 65 ГОСТ 2590-2006 / 45 ГОСТ 1050-2013", L"Ø60\nØ40H9\n1x45°\nRa 3,2\n§GB d=60 l=50\n", &r);
+  ok("Ø40H9 — внутренний", r.s.nDia == 2 && (r.s.diaIn & 2) && r.s.diaIT[1] == 9);
+  nm_route(b, &r, L"0,62", L"норма: партия 50", &res);
+  o = NULL;
+  for (int i = 0; i < res.n; i++)
+    if (res.op[i].kind == NMK_TURN) o = &res.op[i];
+  ok("втулка: отверстие из сплошного", o && tr_at(o, L"Сверлить Ø20, l 50") >= 0 && tr_at(o, L"Расточить Ø20 → Ø39, l 50") >= 0 &&
+                                           tr_at(o, L"Расточить начисто Ø40 IT9, l 50") >= 0);
+  ok("втулка: Ra 3,2 без квалитета у Ø60 — чистовой не нужен (квалитет есть у отверстия)",
+     o && tr_at(o, L"Точить начисто Ø60") < 0);
+  if (o) has("втулка: сверло Ø20 — оценка", o->how, L"сверло Ø20 под расточку — оценка");
+  /* ручной ввод без листа — одной поверхностью, как раньше */
+  route_one(&r, L"Токарная");
+  r.s.dmax = 40;
+  tn_cpy(r.blank, TN_TXT, L"Круг 43 ГОСТ 2590");
+  nm_route(b, &r, L"2,4", L"норма: L 120, партия 10", &res);
+  ok("без листа — одной поверхностью", res.op[0].ntr == 0);
+}
+
 static void test_turn(NmBase *b) {
   static TnRoute r;
   static NmResult res;
@@ -901,6 +963,7 @@ int main(int argc, char **argv) {
   test_bad_files();
   test_ask();
   test_turn(&b);
+  test_turn_plan(&b);
   test_drill(&b);
   test_mill(&b);
   test_cut(&b);

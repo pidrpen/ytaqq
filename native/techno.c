@@ -84,6 +84,13 @@ typedef struct {
   int coatKind;           /* TC_… */
   double dmax;            /* наибольший Ø со знаком Ø — уверенно; 0 — нет */
   int rot;                /* признаки тела вращения: Ø, резьбы, фаски ×45° */
+  /* все Ø со знаком на листе, без повторов, кроме выносок отверстий («4 отв. Ø13») и строк модели «§…»:
+     ступени и расточки для переходов токарной (norms.c); внутренний — поле допуска прописной (Ø40H9) */
+  double dia[12];
+  int diaIT[12];          /* квалитет по полю допуска после Ø; 0 — не прочитан */
+  int nDia;
+  unsigned diaIn;         /* бит i — dia[i] внутренний */
+  int chamfers;           /* фасок «…×45°» на листе */
 } TnSigns;
 
 typedef struct {
@@ -750,6 +757,34 @@ static void tn_coat(const wchar_t *t, const wchar_t *f, TnSigns *s) {
   }
 }
 
+/* Ø со знаком в список ступеней: e — сразу за числом. Выноски отверстий («4 отв. Ø13») и строки
+   модели «§AX 2 Ø6» — мимо: их сверлят, а не точат. Поле допуска прописной буквой — внутренний */
+static void tn_dia_add(const wchar_t *t, const wchar_t *p, const wchar_t *e, double v, TnSigns *s) {
+  const wchar_t *b = p;
+  while (b > t && b[-1] != L'\n') b--;
+  if (*b == L'§') return;
+  for (const wchar_t *q = b; q < p; q++)
+    if ((q[0] == L'о' || q[0] == L'О') && q[1] == L'т' && (q[2] == L'в' || q[2] == L'б')) return;
+  int it = 0, in = 0;
+  if (*e && wcschr(L"hHgfekKnpmjJsdGFEDN", *e)) {
+    const wchar_t *q = e + 1;
+    if ((*e == L'j' || *e == L'J') && *q == L's') q++;
+    while (tn_isdig(*q) && it < 100) it = it * 10 + (*q++ - L'0');
+    if (it < 4 || it > 14) it = 0;
+    else in = *e >= L'A' && *e <= L'Z';
+  }
+  for (int i = 0; i < s->nDia; i++)
+    if (s->dia[i] == v && (((s->diaIn >> i) & 1) == (unsigned)in || !it)) {
+      if (it && (!s->diaIT[i] || it < s->diaIT[i])) s->diaIT[i] = it;
+      return;
+    }
+  if (s->nDia >= 12) return;
+  s->dia[s->nDia] = v;
+  s->diaIT[s->nDia] = it;
+  if (in) s->diaIn |= 1u << s->nDia;
+  s->nDia++;
+}
+
 /* ---- все признаки ------------------------------------------------------------------ */
 
 static void tn_signs(const wchar_t *name, const wchar_t *mat, const wchar_t *text, TnSigns *s) {
@@ -928,12 +963,13 @@ static void tn_signs(const wchar_t *name, const wchar_t *mat, const wchar_t *tex
     if (!tn_num(q, &v, &len, &sep) || v < 1 || v > 2000 || (maybe && len < 2)) continue;
     s->rot++;
     if (sure && v > s->dmax) s->dmax = v;
+    if (sure) tn_dia_add(t, p, q + len, v, s);
   }
   if (s->gD) s->dmax = s->gD; /* наибольший Ø, который модель нашла среди размеров, точнее любого «Ø» в тексте */
   for (const wchar_t *p = f; *p; p++)
-    if (tn_isdig(*p) && (p[1] == L'х' || p[1] == L'×') && p[2] == L'4' && p[3] == L'5') s->rot++;
+    if (tn_isdig(*p) && (p[1] == L'х' || p[1] == L'×') && p[2] == L'4' && p[3] == L'5') s->rot++, s->chamfers++;
   for (const wchar_t *p = f; *p; p++)
-    if (tn_isdig(*p) && p[1] == L' ' && (p[2] == L'х' || p[2] == L'×') && p[3] == L'4' && p[4] == L'5') s->rot++;
+    if (tn_isdig(*p) && p[1] == L' ' && (p[2] == L'х' || p[2] == L'×') && p[3] == L'4' && p[4] == L'5') s->rot++, s->chamfers++;
   /* наименование, если штампа нет: слово вида детали в именительном падеже */
   if (!s->name[0]) {
     static const wchar_t *const kw[] = {

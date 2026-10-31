@@ -68,9 +68,9 @@
 #define NM_NONE (-1e300) /* нет значения */
 #define NM_INF 1e300
 #define NM_PI 3.14159265358979323846
-#define NM_HOW 7000  /* разбор одной операции */
+#define NM_HOW 24000 /* разбор одной операции (с переходами — длинный) */
 #define NM_OPS 24    /* операций маршрута с нормой */
-#define NM_OUT 48000 /* текст норм маршрута */
+#define NM_OUT 160000 /* текст норм маршрута (подробно — с переходами) */
 static int nm_na(double v) { return v < -1e299; }
 
 /* ---- строки и числа ------------------------------------------------------------ */
@@ -787,6 +787,12 @@ enum { NMC_FULL, NMC_TSHT, NMC_NONE };
 static const wchar_t *const kNmKind[] = {L"", L"токарная", L"сверлильная", L"фрезерная", L"резка", L"оценка",
                                          L"по факту", L"норма технолога"};
 
+#define NM_TRS 16 /* переходов операции, расписанных по одному (токарная, фрезерная) */
+typedef struct {
+  wchar_t what[96]; /* «Точить Ø45 → Ø40, l 180» */
+  double to, tv;    /* То и Тв перехода (Тв — время на переход и измерение, без установки) */
+} NmTr;
+
 typedef struct {
   int kind, idx;   /* idx — номер операции в маршруте (с нуля) */
   wchar_t op[128]; /* как в справочнике операций */
@@ -797,6 +803,8 @@ typedef struct {
   wchar_t how[NM_HOW];
   NmCtx c;         /* параметры после расчёта — что взято и откуда (окно «Режимы») */
   wchar_t toNeed[200]; /* без чего не посчиталось машинное То */
+  NmTr tr[NM_TRS];     /* переходы — разбивка «переход — То — Тв» в подробном ответе */
+  int ntr;
 } NmOp;
 
 #define NM_USED 48
@@ -819,6 +827,7 @@ typedef struct {
   NmResult *res;
   const wchar_t *pref; /* «токарная» */
   int inTo;            /* считается То: нехватки — и в toNeed операции */
+  const TnRoute *r;    /* маршрут и признаки листа — для переходов токарной и фрезерной */
 } NmJob;
 
 static void nm_line(NmJob *j, const wchar_t *s) {
@@ -1683,17 +1692,354 @@ static double nm_priems(NmJob *j) {
   return sum;
 }
 
+/* ---- токарная по переходам (с 2026.10.31) ---------------------------------------------
+   Каждый торец, ступень, отверстие, черновой и чистовой проход и фаски — свой переход: свои
+   режимы (обороты — от своего диаметра), своё То, своё время на переход по карте 20 ОМН и своё
+   измерение (карты 43, 44); То и Тв переходов складываются. Ступени — Ø со знаком с листа
+   (techno.c, dia), длины ступеней — «ступени Ø30×80; Ø40×100» в вопросе, иначе оценкой: общая
+   длина поровну. Деталь переворачивают на другой торец — установок две, вторая по карте
+   с коэффициентом 0,8 (примечания к картам 2 и 6). Отверстие из сплошной заготовки — сверлить
+   (до Ø25 — в размер, больше — Ø20) и расточить. Чистовой проход — у поверхностей с квалитетом
+   до IT11, а если квалитетов на листе нет — у всех при Ra 3,2 и чище. */
+enum { NMT_FACE, NMT_OD, NMT_BORE, NMT_DRILL, NMT_CHAMF };
+typedef struct {
+  int type, fine, it, est, cnt; /* est — длина оценкой; cnt — отверстий или фасок */
+  double D, Dfrom, L, h;        /* Ø после и до перехода; длина прохода; припуск на сторону */
+} NmTrPlan;
+#define NM_HFINE 0.5 /* припуск под чистовой проход на сторону — оценка, пока нет таблицы припусков */
+#define NM_HFACE 1.0 /* припуск на подрезку торца — оценка */
+#define NM_DRILL0 20 /* сверло под расточку отверстия больше Ø25 — оценка */
+
+static int nm_tr_add(NmTrPlan *pl, int n, int type, int fine, double D, double Dfrom, double L, double h, int it,
+                     int est) {
+  if (n >= NM_TRS) return n;
+  NmTrPlan t = {type, fine, it, est, 1, D, Dfrom, L, h};
+  pl[n] = t;
+  return n + 1;
+}
+
+/* длина ступени Ød из вопроса «ступени Ø30×80; Ø40×100»; NM_NONE — не задана */
+static double nm_step_len(const NmCtx *c, double d) {
+  const NmPar *p = nm_parc(c, L"ступени");
+  if (!p) return NM_NONE;
+  for (const wchar_t *q = p->s; *q;) {
+    while (*q && !tn_isdig(*q)) q++;
+    double a, b;
+    const wchar_t *e;
+    if (!*q || !nm_num(q, &a, &e)) break;
+    q = e;
+    while (*q && !tn_isdig(*q) && *q != L';') q++;
+    if (!*q || *q == L';' || !nm_num(q, &b, &e)) continue;
+    q = e;
+    if (fabs(a - d) < 0.01) return b;
+  }
+  return NM_NONE;
+}
+
+/* Ø по убыванию в a[], квалитеты в ai[] */
+static void nm_dia_put(double *a, int *ai, int *n, int cap, double v, int it) {
+  for (int i = 0; i < *n; i++)
+    if (fabs(a[i] - v) < 0.01) return;
+  if (*n >= cap) return;
+  int k = (*n)++;
+  while (k > 0 && a[k - 1] < v) a[k] = a[k - 1], ai[k] = ai[k - 1], k--;
+  a[k] = v, ai[k] = it;
+}
+
+/* переходы токарной операции; 0 — расписать нечем (нет длины или диаметра — старый расчёт одной
+   поверхностью покажет, чего не хватает). note — что взято оценкой */
+static int nm_turn_plan(const NmJob *j, NmTrPlan *pl, int *setups, wchar_t *note, int ncap) {
+  const NmCtx *c = &j->c;
+  const NmOp *o = j->o;
+  const TnSigns *s = j->r ? &j->r->s : NULL;
+  double L = nm_v(c, L"L"), Dz = nm_v(c, L"Dзаг"), D = nm_v(c, L"D"), Din = nm_v(c, L"Dотв");
+  *setups = 1;
+  note[0] = 0;
+  if (nm_na(L) || L <= 0) return 0;
+  /* расписывать — когда Ø прочитаны с листа или ступени заданы в чате; ручной ввод «D 40, L 120»
+     без листа — одной поверхностью, как задано */
+  if (!(s && s->nDia) && !nm_parc(c, L"ступени") && nm_na(Din)) return 0;
+  double od[6], in[3];
+  int odIT[6], inIT[3], nod = 0, nin = 0;
+  for (int i = 0; s && i < s->nDia; i++) {
+    if ((s->diaIn >> i) & 1) nm_dia_put(in, inIT, &nin, 3, s->dia[i], s->diaIT[i]);
+    else if (nm_na(Dz) || s->dia[i] <= Dz) nm_dia_put(od, odIT, &nod, 6, s->dia[i], s->diaIT[i]);
+  }
+  if (!nm_na(D) && nm_parc(c, L"D")->org == NMO_ASK) nod = 0, nm_dia_put(od, odIT, &nod, 6, D, 0);
+  if (!nod && !nm_na(D)) nm_dia_put(od, odIT, &nod, 6, D, 0);
+  if (!nm_na(Din)) nm_dia_put(in, inIT, &nin, 3, Din, 0);
+  if (!nod) return 0;
+  if (nm_na(Dz) || Dz < od[0]) Dz = od[0];
+  int anyIT = 0;
+  for (int i = 0; i < nod; i++) anyIT |= odIT[i] > 0;
+  for (int i = 0; i < nin; i++) anyIT |= inIT[i] > 0;
+  double ra = s ? s->raMin : 0;
+  int rough = wcscmp(o->sub, L"чистовая") && wcscmp(o->sub, L"тонкая"), finish = wcscmp(o->sub, L"черновая");
+  /* длины ступеней: заданные, остальное поровну */
+  double len[6], known = 0;
+  int unknown = 0, est = 0;
+  for (int i = 0; i < nod; i++) {
+    len[i] = nod == 1 ? L : nm_step_len(c, od[i]);
+    if (nm_na(len[i])) unknown++;
+    else known += len[i];
+  }
+  for (int i = 0; i < nod; i++) /* одна незаданная — остаток длины, точно; несколько — поровну, оценка */
+    if (nm_na(len[i])) len[i] = L - known > 0 ? (L - known) / unknown : L / nod, est = unknown > 1 || L - known <= 0;
+  if (est) tn_item(note, ncap, L"длины ступеней — оценка: общая длина поровну (впишите «ступени Ø30×80; Ø40×100»)");
+  int n = 0;
+  if (rough) n = nm_tr_add(pl, n, NMT_FACE, 0, Dz, Dz, Dz / 2, NM_HFACE, 0, 0);
+  /* наружные: от заготовки к меньшим Ø; проход — по длине всех ступеней не больше этой */
+  double prev = Dz, run = L;
+  for (int k = 0; k < nod; k++) {
+    int precise = (odIT[k] && odIT[k] <= 11) || (!anyIT && ra > 0 && ra <= 3.2);
+    double leave = precise && rough ? NM_HFINE : 0, to = od[k] + 2 * leave, h = (prev - to) / 2;
+    if (rough && h > 0.05) n = nm_tr_add(pl, n, NMT_OD, 0, to, prev, run, h, 0, est && k > 0);
+    prev = to;
+    run -= len[k];
+    if (run < 1) run = 1;
+  }
+  /* чистовые — после всех черновых: у поверхностей с квалитетом */
+  for (int k = 0; k < nod && finish; k++)
+    if ((odIT[k] && odIT[k] <= 11) || (!anyIT && ra > 0 && ra <= 3.2))
+      n = nm_tr_add(pl, n, NMT_OD, 1, od[k], od[k] + 2 * NM_HFINE, len[k], NM_NONE, odIT[k], est);
+  /* отверстие — одно, самое большое; заготовка сплошная (круг) — сверлить, потом расточить */
+  if (nin) {
+    double b = in[0];
+    int precise = (inIT[0] && inIT[0] <= 11) || (!anyIT && ra > 0 && ra <= 3.2);
+    double leave = precise ? NM_HFINE : 0;
+    if (rough) {
+      double d0 = b <= 25 ? b - 2 * leave : NM_DRILL0;
+      if (d0 < 1) d0 = b;
+      n = nm_tr_add(pl, n, NMT_DRILL, 0, d0, 0, L, NM_NONE, 0, 0);
+      if (b - 2 * leave - d0 > 0.1) n = nm_tr_add(pl, n, NMT_BORE, 0, b - 2 * leave, d0, L, (b - 2 * leave - d0) / 2, 0, 0);
+      if (b > 25) tn_item(note, ncap, L"отверстие: сверло Ø20 под расточку — оценка");
+    }
+    if (finish && precise) n = nm_tr_add(pl, n, NMT_BORE, 1, b, b - 2 * NM_HFINE, L, NM_NONE, inIT[0], 0);
+    if (nin > 1) tn_item(note, ncap, L"ступенчатое отверстие — считана одна ступень, проверить");
+  }
+  /* отверстия по оси, названные моделью («§AX 2 Ø6»): сверлить на токарной, глубина — оценкой 3d */
+  if (rough && s && s->holesAx > 0) {
+    const wchar_t *q = wcschr(s->ax, L'Ø');
+    double d;
+    const wchar_t *e;
+    if (q && nm_num(q + 1, &d, &e) && d > 0 && n < NM_TRS) {
+      n = nm_tr_add(pl, n, NMT_DRILL, 0, d, 0, 3 * d, NM_NONE, 0, 1);
+      pl[n - 1].cnt = s->holesAx;
+      tn_item(note, ncap, L"глубина отверстий по оси — оценка 3d");
+    }
+  }
+  if (rough) n = nm_tr_add(pl, n, NMT_FACE, 0, Dz, Dz, Dz / 2, NM_HFACE, 0, 0);
+  if (finish && s && s->chamfers > 0 && n < NM_TRS) {
+    n = nm_tr_add(pl, n, NMT_CHAMF, 0, od[0], od[0], 0, NM_NONE, 0, 0);
+    pl[n - 1].cnt = s->chamfers;
+  }
+  *setups = rough || nod > 1 || nin ? 2 : 1;
+  return n;
+}
+
+/* вид инструмента перехода — для числа смен резца и инструментов наладки */
+static int nm_tr_tool(const NmTrPlan *t) {
+  return t->type == NMT_FACE || (t->type == NMT_OD && !t->fine) ? 1
+         : t->type == NMT_OD                                    ? 2
+         : t->type == NMT_BORE                                  ? 3 + t->fine
+         : t->type == NMT_DRILL                                 ? 5
+                                                                : 6;
+}
+
+static void nm_set(NmCtx *c, const wchar_t *name, const wchar_t *s, double v, const wchar_t *why) {
+  NmPar *p = nm_par(c, name);
+  if (p) p->org = NMO_NONE;
+  nm_put(c, name, s, v, NMO_CALC, why);
+}
+
+/* То и Тв (переходы и измерения, без установки) по плану; okTv — все времена на переход нашлись */
+static void nm_turn_by_plan(NmJob *j, const NmTrPlan *pl, int n, double *to, double *tv, int *okTv) {
+  NmOp *o = j->o;
+  wchar_t s[300], what[96];
+  const NmPar *kp = nm_parc(&j->c, L"корка");
+  wchar_t crust[32];
+  tn_cpy(crust, 32, kp ? kp->s : L"прокат");
+  double Dz = pl[0].Dfrom;
+  int haveTo = 1, mainAt = -1;
+  *to = 0, *tv = 0;
+  o->ntr = 0;
+  /* главный переход — первый черновой проход по наружному Ø: его режимы — режимы операции
+     (окно «Режимы», строка «Режимы: …»); правка S или V там переходит на все переходы */
+  for (int i = 0; i < n && mainAt < 0; i++)
+    if (pl[i].type == NMT_OD && !pl[i].fine) mainAt = i;
+  for (int i = 0; i < n && mainAt < 0; i++)
+    if (pl[i].type == NMT_OD || pl[i].type == NMT_BORE) mainAt = i;
+  static const wchar_t *const kMain[] = {L"S", L"V", L"n", L"t", L"i", L"T"};
+  NmPar mainp[6];
+  int nmain = 0;
+  for (int i = 0; i < n; i++) {
+    const NmTrPlan *t = &pl[i];
+    NmCtx keep = j->c;
+    what[0] = 0;
+    if (t->type == NMT_FACE) {
+      tn_cpy(what, 96, L"Подрезать торец Ø");
+      tn_catnum(what, 96, t->D);
+    } else if (t->type == NMT_OD || t->type == NMT_BORE) {
+      tn_cpy(what, 96, t->type == NMT_OD ? (t->fine ? L"Точить начисто Ø" : L"Точить Ø") : t->fine ? L"Расточить начисто Ø" : L"Расточить Ø");
+      if (!t->fine) tn_catnum(what, 96, t->Dfrom), tn_cat(what, 96, L" → Ø");
+      tn_catnum(what, 96, t->D);
+      if (t->it) tn_cat(what, 96, L" IT"), tn_catnum(what, 96, t->it);
+      tn_cat(what, 96, L", l "), tn_catnum(what, 96, t->L);
+      if (t->est) tn_cat(what, 96, L" (оценка)");
+    } else if (t->type == NMT_DRILL) {
+      tn_cpy(what, 96, L"Сверлить Ø");
+      tn_catnum(what, 96, t->D);
+      tn_cat(what, 96, L", l "), tn_catnum(what, 96, t->L);
+      if (t->cnt > 1) tn_cat(what, 96, L", отверстий "), tn_catnum(what, 96, t->cnt);
+    } else {
+      tn_cpy(what, 96, L"Снять фаски, ");
+      tn_catnum(what, 96, t->cnt);
+    }
+    tn_cpy(s, 300, L"— переход ");
+    tn_catnum(s, 300, i + 1);
+    tn_cat(s, 300, L". ");
+    tn_cat(s, 300, what);
+    nm_line(j, s);
+    /* параметры перехода — поверх операции; после перехода всё как было */
+    int fine = t->fine, it = t->it ? t->it : 12;
+    nm_set(&j->c, L"вид", fine ? L"чистовая" : L"черновая", NM_NONE, NULL);
+    nm_set(&j->c, L"корка", fine || (t->type != NMT_FACE && t->Dfrom < Dz) ? L"без корки" : crust, NM_NONE,
+           L"по переходу");
+    if (fine) nm_put(&j->c, L"r", NULL, 0.8, NMO_DEF, L"оценка: радиус при вершине пластины");
+    nm_set(&j->c, L"квалитет", NULL, it, t->it ? L"с чертежа" : L"свободный размер");
+    double tto = NM_NONE, tp = 0, ti = 0;
+    if (t->type == NMT_DRILL) {
+      nm_set(&j->c, L"d", NULL, t->D, L"переход");
+      nm_set(&j->c, L"l", NULL, t->L, t->est ? L"оценка" : L"длина детали — насквозь");
+      nm_set(&j->c, L"отверстий", NULL, t->cnt, NULL);
+      nm_set(&j->c, L"глубина в d", NULL, t->L / t->D, L"l/d");
+      nm_set(&j->c, L"инструмент", L"быстрорежущая", NM_NONE, L"сверло Р6М5");
+      nm_set(&j->c, L"заточка", L"одинарная", NM_NONE, NULL);
+      nm_set(&j->c, L"отверстие", L"сквозное", NM_NONE, NULL);
+      const wchar_t *pref = j->pref;
+      j->pref = kNmKind[NMK_DRILL]; /* подачи, скорость и врезание сверла — таблицы сверлильной */
+      tto = nm_to_drill(j);
+      j->pref = pref;
+      if (!nm_look_pref(j, L"сверление", L"Тпер", 1, &tp)) *okTv = 0;
+      nm_set(&j->c, L"измеритель", L"штангенциркуль", NM_NONE, L"отверстие под расточку");
+      nm_set(&j->c, L"И", NULL, t->D, L"Ø отверстия");
+    } else if (t->type == NMT_CHAMF) {
+      tto = 0;
+      nm_line(j, L"То фасок — доли минуты, в норму не идёт");
+      nm_set(&j->c, L"переход", L"фаска", NM_NONE, NULL);
+      if (nm_look_pref(j, L"переход", L"Тпер", 1, &tp)) {
+        tp *= t->cnt;
+        tn_cpy(s, 300, L"   × фасок ");
+        tn_catnum(s, 300, t->cnt);
+        nm_line(j, s);
+      } else {
+        *okTv = 0;
+      }
+    } else {
+      nm_set(&j->c, L"D", NULL, t->D, L"переход");
+      nm_set(&j->c, L"Dзаг", NULL, t->Dfrom, L"Ø до перехода");
+      nm_set(&j->c, L"L", NULL, t->L, t->type == NMT_FACE ? L"торец: от Ø до центра" : t->est ? L"оценка" : L"переход");
+      if (!nm_na(t->h)) nm_set(&j->c, L"h", NULL, t->h, t->type == NMT_FACE ? L"оценка: припуск на торец" : L"разность Ø перехода");
+      /* черновой — проходами не глубже, чем берёт таблица подач у такого Ø (оценка) */
+      double tmax = t->type == NMT_BORE || t->D <= 20 ? 2 : t->D <= 40 ? 3 : 5;
+      if (!fine && !nm_na(t->h) && t->h > tmax) {
+        wchar_t w[80];
+        tn_cpy(w, 80, L"оценка: до ");
+        tn_catnum(w, 80, tmax);
+        tn_cat(w, 80, t->type == NMT_BORE ? L" мм за проход у расточки" : L" мм за проход у такого Ø");
+        nm_set(&j->c, L"i", NULL, ceil(t->h / tmax - 1e-9), w);
+      }
+      tto = nm_to_turn(j);
+      nm_set(&j->c, L"переход",
+             t->type == NMT_FACE ? L"торец по лимбу" : fine ? L"точение с пробной стружкой" : L"точение по лимбу", NM_NONE,
+             NULL);
+      nm_set(&j->c, L"И", NULL, t->type == NMT_FACE ? nm_v(&keep, L"L") : t->D, t->type == NMT_FACE ? L"длина детали" : L"Ø перехода");
+      if (!nm_look_pref(j, L"переход", L"Тпер", 1, &tp)) *okTv = 0;
+      nm_set(&j->c, L"измеритель",
+             t->type == NMT_FACE || it > 9 ? L"штангенциркуль" : t->type == NMT_BORE ? L"пробка" : L"скоба", NM_NONE,
+             L"по квалитету: до IT9 — скоба (отверстие — пробка), грубее — штангенциркуль");
+    }
+    int lastFace = t->type == NMT_FACE;
+    for (int k = i + 1; k < n && lastFace; k++) lastFace = pl[k].type != NMT_FACE;
+    if (t->type == NMT_FACE && !lastFace) {
+      nm_line(j, L"длину меряют один раз — после второго торца");
+    } else if (t->type == NMT_FACE) { /* длина детали — один раз на деталь, периодичность не берётся */
+      nm_set(&j->c, L"длина измерения", NULL, nm_v(&keep, L"L"), NULL);
+      nm_look_pref(j, L"измерение", L"Тизм", 0, &ti);
+    } else if (t->type != NMT_CHAMF) {
+      nm_set(&j->c, L"длина измерения", NULL, t->L, NULL);
+      nm_set(&j->c, L"поверхность измерения", L"цилиндрические", NM_NONE, NULL);
+      if (nm_look_pref(j, L"измерение", L"Тизм", 0, &ti)) ti *= nm_coefs(j, L"измерение.к", L"Kпер (периодичность)");
+    }
+    if (i == mainAt)
+      for (size_t k = 0; k < sizeof(kMain) / sizeof(kMain[0]); k++) {
+        const NmPar *mp = nm_parc(&j->c, kMain[k]);
+        if (mp && !nm_na(mp->v)) mainp[nmain++] = *mp;
+      }
+    if (nm_na(tto)) haveTo = 0;
+    else *to += tto;
+    *tv += tp + ti;
+    if (o->ntr < NM_TRS) {
+      NmTr *r = &o->tr[o->ntr++];
+      tn_cpy(r->what, 96, what);
+      r->to = tto;
+      r->tv = tp + ti;
+    }
+    tn_cpy(s, 300, L"  → То ");
+    if (nm_na(tto)) tn_cat(s, 300, L"— (нет)");
+    else tn_catnum(s, 300, tto);
+    tn_cat(s, 300, L" · Тв ");
+    tn_catnum(s, 300, tp + ti);
+    tn_cat(s, 300, L" мин");
+    nm_line(j, s);
+    j->c = keep;
+  }
+  for (int k = 0; k < nmain; k++) {
+    wchar_t w[120];
+    tn_cpy(w, 120, L"главный переход ");
+    tn_catnum(w, 120, mainAt + 1);
+    if (mainp[k].why[0]) tn_cat(w, 120, L": "), tn_cat(w, 120, mainp[k].why);
+    nm_put(&j->c, mainp[k].name, mainp[k].s[0] ? mainp[k].s : NULL, mainp[k].v, mainp[k].org, w);
+  }
+  if (!haveTo) *to = NM_NONE;
+}
+
 /* одна операция: То, Тв, Топ, Тшт, Тпз */
 static void nm_op_calc(NmJob *j) {
   NmOp *o = j->o;
   wchar_t s[300];
   o->to = o->tv = o->top = o->tsht = o->tpz = o->tshk = NM_NONE;
   j->pref = kNmKind[o->kind];
+  /* токарная — по переходам, если есть длина и диаметр; иначе одной поверхностью (покажет, чего нет) */
+  NmTrPlan plan[NM_TRS];
+  wchar_t pnote[300];
+  int setups = 1, np = o->kind == NMK_TURN && j->b->n ? nm_turn_plan(j, plan, &setups, pnote, 300) : 0;
+  double ptv = 0;
+  int pok = 1;
   const NmPar *given = nm_parc(&j->c, L"То");
-  if (given && given->org == NMO_ASK && !nm_na(given->v)) { /* То посчитано технологом (САМ, режимы) */
+  int givenTo = given && given->org == NMO_ASK && !nm_na(given->v);
+  if (np) {
+    tn_cpy(s, 300, L"переходов ");
+    tn_catnum(s, 300, np);
+    tn_cat(s, 300, L", установок ");
+    tn_catnum(s, 300, setups);
+    if (pnote[0]) tn_cat(s, 300, L"; оценкой: "), tn_cat(s, 300, pnote);
+    nm_line(j, s);
+    double pto;
+    j->inTo = 1;
+    nm_turn_by_plan(j, plan, np, &pto, &ptv, &pok);
+    j->inTo = 0;
+    if (!givenTo) o->to = pto, nm_putv(&j->c, L"То", o->to, NMO_CALC, L"сумма переходов");
+  }
+  if (givenTo) { /* То посчитано технологом (САМ, режимы) */
     o->to = given->v;
     s[0] = 0;
     nm_from(&j->c, L"То", L" мин", s, 300);
+    nm_line(j, s);
+  } else if (np) {
+    tn_cpy(s, 300, L"То = сумма переходов = ");
+    if (nm_na(o->to)) tn_cat(s, 300, L"— (у перехода нет То)");
+    else tn_catnum(s, 300, o->to), tn_cat(s, 300, L" мин");
     nm_line(j, s);
   } else {
     j->inTo = 1;
@@ -1710,6 +2056,41 @@ static void nm_op_calc(NmJob *j) {
   int okTv = 1;
   if (o->kind == NMK_CUT) {
     if (!nm_look_pref(j, L"установка", L"Тус", 0, &tus)) tus = 0;
+  } else if (np) {
+    okTv &= nm_look_pref(j, L"установка", L"Тус", 1, &tus) && pok;
+    if (setups > 1) { /* переустановка на другой торец — по карте с коэффициентом 0,8 */
+      double one = tus;
+      tus = one * (1 + 0.8 * (setups - 1));
+      tn_cpy(s, 300, L"   × установок ");
+      tn_catnum(s, 300, setups);
+      tn_cat(s, 300, L": ");
+      tn_catnum(s, 300, one);
+      tn_cat(s, 300, L" + 0,8·");
+      tn_catnum(s, 300, one);
+      tn_cat(s, 300, L" (переустановка, примечание к карте) = ");
+      tn_catnum(s, 300, tus);
+      nm_line(j, s);
+    }
+    /* приёмы при переходе — по плану: смена резца, оборотов и подачи между переходами */
+    int chg = 0, nTools = 0, rev = 0, fed = 0, seen[8] = {0};
+    for (int i = 0; i < np; i++) {
+      int tool = nm_tr_tool(&plan[i]);
+      if (!seen[tool]) seen[tool] = 1, nTools++;
+      if (!i) continue;
+      chg += tool != nm_tr_tool(&plan[i - 1]);
+      rev += plan[i].type != plan[i - 1].type || fabs(plan[i].Dfrom - plan[i - 1].Dfrom) > 0.1 * plan[i].Dfrom;
+      fed += plan[i].type != plan[i - 1].type || plan[i].fine != plan[i - 1].fine;
+    }
+    nm_putv(&j->c, L"смен резца", chg, NMO_CALC, L"по переходам");
+    nm_putv(&j->c, L"изменений оборотов", rev, NMO_CALC, L"по переходам: другой Ø или вид");
+    nm_putv(&j->c, L"изменений подачи", fed, NMO_CALC, L"по переходам: другой вид или чистовой");
+    nm_putv(&j->c, L"инструментов", nTools, NMO_CALC, L"по переходам");
+    nm_putv(&j->c, L"переходов", np, NMO_CALC, L"по переходам");
+    tper = ptv + nm_priems(j);
+    tn_cpy(s, 300, L"Тпер + Тизм по переходам = ");
+    tn_catnum(s, 300, ptv);
+    tn_cat(s, 300, L" мин");
+    nm_line(j, s);
   } else {
     okTv &= nm_look_pref(j, L"установка", L"Тус", 1, &tus);
     if (nm_look_pref(j, L"переход", L"Тпер", 1, &tper)) {
@@ -1873,6 +2254,7 @@ static void nm_ask(const wchar_t *text, NmCtx *c) {
            {L"смен резца", L"смен резца", 0, 0}, {L"изменений подачи", L"изменений подачи", 0, 0},
            {L"изменений оборотов", L"изменений оборотов", 0, 0}, {L"смен", L"смен", 0, 0},
            {L"измеритель", L"измеритель", 2, 0}, {L"доп", L"доп", 2, 0},
+           {L"ступени", L"ступени", 2, 0},    {L"расточка", L"Dотв", 0, 0},  {L"Dотв", L"Dотв", 0, 1},
            {L"переход", L"переходов", 0, 0},
            {L"инструмент", L"инструментов", 0, 0}, {L"измерен", L"измерений", 0, 0},
            {L"отверсти", L"отверстий", 0, 0},  {L"врезание", L"врезание", 0, 0},
@@ -1902,7 +2284,8 @@ static void nm_ask(const wchar_t *text, NmCtx *c) {
       if (k[i].word) {
         wchar_t w[64];
         int n = 0;
-        int list = !wcscmp(k[i].par, L"доп"); /* «доп резьба; люнет» — список до запятой */
+        /* «доп резьба; люнет», «ступени Ø30×80; Ø40×100» — список до запятой */
+        int list = !wcscmp(k[i].par, L"доп") || !wcscmp(k[i].par, L"ступени");
         while (*e && *e != L',' && (list || *e != L';') && *e != L'\n' && !(k[i].word == 1 && *e == L' ') && n < 63)
           w[n++] = *e++;
         while (n && w[n - 1] == L' ') n--;
@@ -2408,6 +2791,7 @@ static void nm_route(const NmBase *b, const TnRoute *r, const wchar_t *mass, con
     j->b = b;
     j->o = o;
     j->res = res;
+    j->r = r;
     nm_ask_op(ask, (i + 1) * 5, &j->c);
     nm_ctx_sheet(r, mass, &j->c);
     if (kind == NMK_EST || kind == NMK_FACT || kind == NMK_TECH) {
@@ -2504,6 +2888,20 @@ static void nm_text(const NmBase *b, const NmResult *res, const wchar_t *dir, wc
         tn_cat(out, cap, L" (неполная)");
       }
     }
+    if (o->ntr) { /* разбивка: откуда цифра — переход, его То и Тв */
+      tn_cat(out, cap, L"\n   по переходам (То · Тв без установки):");
+      for (int k = 0; k < o->ntr; k++) {
+        tn_cat(out, cap, L"\n   ");
+        tn_catnum(out, cap, k + 1);
+        tn_cat(out, cap, L". ");
+        tn_cat(out, cap, o->tr[k].what);
+        tn_cat(out, cap, L" — То ");
+        if (nm_na(o->tr[k].to)) tn_cat(out, cap, L"—");
+        else tn_catnum(out, cap, o->tr[k].to);
+        tn_cat(out, cap, L" · Тв ");
+        tn_catnum(out, cap, o->tr[k].tv);
+      }
+    }
     tn_cat(out, cap, o->how);
   }
   if (res->skip[0]) tn_cat(out, cap, L"\nПока не нормируются: "), tn_cat(out, cap, res->skip);
@@ -2578,7 +2976,13 @@ static void nm_modes_line(const NmResult *res, wchar_t *out, int cap) {
       tn_catnum(line, 400, !wcscmp(ps[k], L"V") ? (double)(long)(v + 0.5) : v);
       any = 1;
     }
-    if (!any) tn_cat(line, 400, L" не посчитаны");
+    if (!any && o->ntr) { /* у каждого перехода свои режимы — они в «подробно» */
+      tn_cat(line, 400, L" по переходам (");
+      tn_catnum(line, 400, o->ntr);
+      tn_cat(line, 400, L")");
+    } else if (!any) {
+      tn_cat(line, 400, L" не посчитаны");
+    }
   }
   if (!line[0]) return;
   tn_cat(out, cap, L"\n" NM_MODES_HEAD);
