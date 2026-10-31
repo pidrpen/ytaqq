@@ -1133,8 +1133,32 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
               lstrcpynW(p2.rows[0].c[DS_DES], L"ТСТ.180.002", DR_CELL), lstrcpynW(p2.rows[0].c[DS_NAME], L"Уголок", DR_CELL);
               lstrcpynW(p2.rows[1].c[DS_SECT], L"Стандартные изделия", DR_CELL), lstrcpynW(p2.rows[1].c[DS_NAME], L"Шайба 8 ГОСТ 11371-78", DR_CELL);
               p2.nrows = 2;
+              p2.rows[0].doubt[DS_QTY] = 1; /* модель сомневается в количестве строки продолжения */
               pks_spec_rows(&p1, rr);
               pks_spec_rows(&p2, rr);
+              st_check(rr->nrows == 4 && rr->rows[2].doubt && !rr->rows[0].doubt && !rr->rows[1].doubt && !rr->rows[3].doubt,
+                       L"сомнение строки спецификации (количество) переходит в строку состава — остальные без пометки");
+              { /* и попадает в «проверьте» строки состояния и карточки */
+                wchar_t keepD[120];
+                lstrcpynW(keepD, g_pksDoubt, 120);
+                g_pksDoubt[0] = 0;
+                PkStRes *ra = (PkStRes *)calloc(1, sizeof(PkStRes));
+                if (ra) {
+                  ra->parentRow = ra->row = -1;
+                  ra->how = 3, ra->asmDoc = TRUE;
+                  lstrcpynW(ra->des, L"ТСТ.180.000", DR_CELL), lstrcpynW(ra->kind, L"Сборочные единицы", 40);
+                  ra->rows = rr->rows, ra->nrows = rr->nrows;
+                  int itB = g_pk[PK_ITEMS].n, lnB = g_pk[PK_LINKS].n;
+                  pks_apply(ra);
+                  BOOL inDoubt = wcsstr(g_pksDoubt, L"ТСТ.180.002") && !wcsstr(g_pksDoubt, L"ТСТ.180.001");
+                  st_check(inDoubt, L"обозначение строки с сомнением — в «проверьте: …» (строка состояния и карточка ЭСИ)");
+                  XpTable *ia = &g_pk[PK_ITEMS], *la = &g_pk[PK_LINKS];
+                  for (int r = ia->n - 1; r >= itB; r--) pk_del_row(ia, r);
+                  for (int r = la->n - 1; r >= lnB; r--) pk_del_row(la, r);
+                  free(ra);
+                }
+                lstrcpynW(g_pksDoubt, keepD, 120);
+              }
               st_check(rr->nrows == 4 && !wcscmp(rr->rows[2].des, L"ТСТ.180.002") && !wcscmp(rr->rows[2].kind, rr->rows[1].kind) &&
                            rr->rows[1].kind[0] && wcscmp(rr->rows[3].kind, rr->rows[1].kind),
                        L"спецификация: строка листа-продолжения без раздела — раздел «Детали» с прошлой страницы; со своим разделом — свой");
