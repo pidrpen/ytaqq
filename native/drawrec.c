@@ -1825,7 +1825,10 @@ static BOOL dr_spec(DrImg *m, int thr, const DrLines *L, const DrStamp *s0, DrPa
   pg->rowsBy = pg->nrows ? 1 : 0;
   free(cell);
   free(conf);
-  dr_vl_spec(m, s->sl, top, s->rx, s->st, pg);
+  /* модели — с полем слева и над шапкой, как в замере 31.10: по тесной вырезке (ровно таблица) она на заводском
+     листе зациклилась до предела токенов */
+  int vy = top - (int)(8 * k), vx = s->sl - (int)(15 * k);
+  dr_vl_spec(m, vx < 0 ? 0 : vx, vy < 0 ? 0 : vy, s->rx + (int)(2 * k), s->st, pg);
   return TRUE;
 }
 
@@ -2415,6 +2418,15 @@ static BOOL dr_spec_doc_row(const DrSpecRow *o) {
   return FALSE;
 }
 
+/* строка — продолжение наименования строкой материала («Лист Б-ПН-0-20 ГОСТ 19903-74 / Ст3пс5…»): ни позиции, ни
+   количества, ни формата, а в «Обозначении» слово без цифр */
+static BOOL dr_spec_mat_line(const DrSpecRow *o) {
+  if (o->c[DS_POS][0] || o->c[DS_QTY][0] || o->c[DS_FMT][0] || !o->c[DS_DES][0]) return FALSE;
+  for (const wchar_t *q = o->c[DS_DES]; *q; q++)
+    if (dr_isdig(*q)) return FALSE;
+  return TRUE;
+}
+
 /* строки спецификации из ответа модели — вместо прочитанных Tesseract; FALSE — строк нет */
 static BOOL dr_json_spec(const wchar_t *j, DrPage *pg) {
   const wchar_t *p = j ? wcsstr(j, L"\"rows\"") : NULL;
@@ -2456,6 +2468,10 @@ static BOOL dr_json_spec(const wchar_t *j, DrPage *pg) {
     } else if (onlyName && n > 0) {
       size_t l = wcslen(rows[n - 1].c[DS_NAME]);
       _snwprintf(rows[n - 1].c[DS_NAME] + l, DR_CELL - l, L"%s%s", l ? L" " : L"", o->c[DS_NAME]);
+    } else if (n > 0 && dr_spec_mat_line(o)) { /* материал дробью под «Планкой»: «Лист» модель кладёт в обозначение */
+      size_t l = wcslen(rows[n - 1].c[DS_NAME]);
+      _snwprintf(rows[n - 1].c[DS_NAME] + l, DR_CELL - l, L"%s%s %s", l ? L" " : L"", o->c[DS_DES], o->c[DS_NAME]);
+      dr_trim(rows[n - 1].c[DS_NAME]);
     } else {
       BOOL doc = dr_spec_doc_row(o);
       if (doc) lstrcpynW(o->c[DS_SECT], L"Документация", DR_CELL); /* документ — по содержанию, где бы ни был заголовок */
@@ -2522,7 +2538,11 @@ static void dr_vl_spec(const DrImg *m, int x0, int y0, int x1, int y1, DrPage *p
   }
 #endif
   wchar_t *a = dr_vl_ask(&im, L"spec", kDrVlSpecQ, kDrVlSpecSchema, 2500);
-  if (a && dr_json_spec(a, pg)) ai_log(L"Спецификация: строки прочитала модель (%d)", pg->nrows);
+  /* ответ оборван на пределе (лист — не больше 30 строк, это ~1700 токенов): модель зациклилась — строки
+     Tesseract, если есть, с «проверьте» лучше обрывка */
+  BOOL cut = a && !wcschr(a, L']');
+  if (cut && pg->nrows) ai_log(L"Спецификация: ответ модели оборван (зациклилась) — строки Tesseract (%d)", pg->nrows);
+  else if (a && dr_json_spec(a, pg)) ai_log(L"Спецификация: строки прочитала модель (%d)", pg->nrows);
   free(a);
   dr_img_free(&im);
 }

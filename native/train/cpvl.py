@@ -388,6 +388,12 @@ def doc_row(r):
     return r['name'].lower().startswith(_DOC_PHRASES)
 
 
+def mat_line(r):
+    """drawrec.c dr_spec_mat_line: продолжение наименования строкой материала — ни поз., ни кол., ни формата,
+    в «Обозначении» слово без цифр"""
+    return not (r['pos'] or r['qty'] or r['fmt']) and bool(r['des']) and not any(c.isdigit() for c in r['des'])
+
+
 def spec_post(rows):
     """drawrec.c dr_json_spec: строка из одного заголовка раздела — раздел для строк под ней, строка из одного
     наименования — перенос к предыдущей, «Резерв» и пустые — прочь; документ — в «Документацию» по содержанию,
@@ -405,6 +411,8 @@ def spec_post(rows):
             pass
         elif only_name and out:
             out[-1] = {**out[-1], 'name': (out[-1]['name'] + ' ' + r['name']).strip()}
+        elif out and mat_line(r):  # материал дробью под «Планкой»: «Лист» модель кладёт в обозначение
+            out[-1] = {**out[-1], 'name': (out[-1]['name'] + ' ' + r['des'] + ' ' + r['name']).strip()}
         else:
             doc = doc_row(r)
             if doc:
