@@ -1063,6 +1063,62 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
           pk_fill(FALSE);
           DeleteFileW(sp);
           st_check(g_pk[PK_ITEMS].n == itBefore && g_pk[PK_LINKS].n == lnBefore, L"строки из файла убраны — листы как были");
+          { /* страницы одной спецификации файлами без шапки (как пишет spec_tsv.py ветки обучения): порядок имён, раздел
+               продолжения — с прошлой страницы, «Сборочный чертеж» без кода в обозначении — документом «…СБ» */
+            XpTable *it6 = &g_pk[PK_ITEMS];
+            xp_row(it6);
+            it6 = &g_pk[PK_ITEMS];
+            pk_put(it6, it6->n - 1, 0, L"ТСТ.200.000"), pk_put(it6, it6->n - 1, 1, L"Опора"), pk_put(it6, it6->n - 1, 2, L"Сборочные единицы");
+            lstrcpynW(g_pkCur, L"ТСТ.200.000", 200);
+            static wchar_t pg2[2][MAX_PATH];
+            _snwprintf(pg2[0], MAX_PATH, L"%ls\\0047.tif.p2.tsv", g_stDir); /* вторая страница — первой в списке */
+            _snwprintf(pg2[1], MAX_PATH, L"%ls\\0047.tif.tsv", g_stDir);
+            /* без BOM, LF */
+            HANDLE h6 = CreateFileW(pg2[1], GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+            if (h6 != INVALID_HANDLE_VALUE) {
+              const char *t1 = "\xD0\x94\xD0\xBE\xD0\xBA\xD1\x83\xD0\xBC\xD0\xB5\xD0\xBD\xD1\x82\xD0\xB0\xD1\x86\xD0\xB8\xD1\x8F\t\t"
+                               "\xD0\xA2\xD0\xA1\xD0\xA2.200.000\t\xD0\xA1\xD0\xB1\xD0\xBE\xD1\x80\xD0\xBE\xD1\x87\xD0\xBD\xD1\x8B\xD0\xB9 "
+                               "\xD1\x87\xD0\xB5\xD1\x80\xD1\x82\xD0\xB5\xD0\xB6\t\t\n"
+                               "\xD0\x94\xD0\xB5\xD1\x82\xD0\xB0\xD0\xBB\xD0\xB8\t1\t\xD0\xA2\xD0\xA1\xD0\xA2.200.001\t\xD0\x9B\xD0\xB0\xD0\xBF\xD0\xB0\t2\t\n";
+              DWORD w6;
+              WriteFile(h6, t1, (DWORD)strlen(t1), &w6, NULL);
+              CloseHandle(h6);
+            }
+            h6 = CreateFileW(pg2[0], GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+            if (h6 != INVALID_HANDLE_VALUE) {
+              const char *t2 = "\t2\t\xD0\xA2\xD0\xA1\xD0\xA2.200.002\t\xD0\xA0\xD0\xB5\xD0\xB1\xD1\x80\xD0\xBE\t4\t\n";
+              DWORD w6;
+              WriteFile(h6, t2, (DWORD)strlen(t2), &w6, NULL);
+              CloseHandle(h6);
+            }
+            int n6 = pk_spec_tsv_n(pg2, 2);
+            it6 = &g_pk[PK_ITEMS];
+            XpTable *ln6 = &g_pk[PK_LINKS];
+            int kSb = 0, k2 = -1, k1 = -1, q1 = 0, q2b = 0;
+            for (int r = 0; r < it6->n; r++) {
+              if (!wcscmp(xp_cell(it6, r, 0), L"ТСТ.200.000СБ") && !wcscmp(xp_cell(it6, r, 2), L"Документация")) kSb++;
+              if (!wcscmp(xp_cell(it6, r, 0), L"ТСТ.200.002")) k2 = r;
+              if (!wcscmp(xp_cell(it6, r, 0), L"ТСТ.200.001")) k1 = r;
+            }
+            for (int r = 0; r < ln6->n; r++) {
+              if (wcscmp(xp_cell(ln6, r, 0), L"ТСТ.200.000")) continue;
+              q1 += !wcscmp(xp_cell(ln6, r, 1), L"ТСТ.200.001") && !wcscmp(xp_cell(ln6, r, 2), L"2");
+              q2b += !wcscmp(xp_cell(ln6, r, 1), L"ТСТ.200.002") && !wcscmp(xp_cell(ln6, r, 2), L"4");
+            }
+            st_check(n6 == 3 && kSb == 1 && k1 >= 0 && k2 >= 0 && !wcscmp(xp_cell(it6, k2, 2), xp_cell(it6, k1, 2)) && q1 == 1 && q2b == 1,
+                     L"две страницы спецификации файлами без шапки: порядок страниц по имени, раздел продолжения — с первой страницы, "
+                     L"«Сборочный чертеж» — документом «…СБ», количество по строкам");
+            st_note(L"     страницы: строк состава %d, вид продолжения «%ls»", n6, k2 >= 0 ? xp_cell(it6, k2, 2) : L"-");
+            for (int r = it6->n - 1; r >= 0; r--)
+              if (!wcsncmp(xp_cell(it6, r, 0), L"ТСТ.200.", 8)) pk_del_row(it6, r);
+            for (int r = ln6->n - 1; r >= 0; r--)
+              if (!wcscmp(xp_cell(ln6, r, 0), L"ТСТ.200.000")) pk_del_row(ln6, r);
+            g_pkCur[0] = 0;
+            DeleteFileW(pg2[0]), DeleteFileW(pg2[1]);
+            pk_changed();
+            pk_fill(FALSE);
+            st_check(g_pk[PK_ITEMS].n == itBefore && g_pk[PK_LINKS].n == lnBefore, L"страницы из проверки убраны — листы как были");
+          }
           { /* лист-продолжение без заголовка раздела — раздел с прошлой страницы; спецификация без строк — пометка */
             PkStRes *rr = (PkStRes *)calloc(1, sizeof(PkStRes));
             DrPage p1, p2;
