@@ -155,8 +155,10 @@ static BOOL szm_asm_folder(const wchar_t *root, wchar_t (*list)[SZM_PATH], int n
   return TRUE;
 }
 
-/* головная сборка описания: первая строка ИЗДЕЛИЕ вида «Сборочные единицы», которая не входит ни в
-   один СОСТАВ как входящее; нет сборок — FALSE */
+/* головное изделие описания: первая строка ИЗДЕЛИЕ вида «Сборочные единицы», которая не входит ни в
+   один СОСТАВ как входящее; сборок нет (одна деталь, детали без сборки) — первое такое изделие, кроме
+   документации (с 31.10: на заводе отправляли одну деталь — папки под неё не было, ЭСИ и ТП ложились в
+   корень); нет и его — FALSE */
 static BOOL szm_head_asm(const wchar_t *text, wchar_t *des, int dcap, wchar_t *name, int ncap) {
   des[0] = name[0] = 0;
   /* «Только ТП» (с 2026.10.30): изделий в описании нет — сборку называет строка «# СБОРКА\t<обозн.>\t<наим.>» */
@@ -169,6 +171,7 @@ static BOOL szm_head_asm(const wchar_t *text, wchar_t *des, int dcap, wchar_t *n
       lstrcpynW(name, t + 1, (int)nl + 1 < ncap ? (int)nl + 1 : ncap);
       return des[0] != 0;
     }
+  for (int pass = 0; pass < 2; pass++)
   for (const wchar_t *p = text; p && *p;) {
     const wchar_t *e = wcspbrk(p, L"\r\n");
     size_t len = e ? (size_t)(e - p) : wcslen(p);
@@ -183,7 +186,7 @@ static BOOL szm_head_asm(const wchar_t *text, wchar_t *des, int dcap, wchar_t *n
         f[k][fl] = 0;
         q = t ? t + 1 : p + len;
       }
-      if (f[0][0] && wcsstr(f[2], L"борочн")) {
+      if (f[0][0] && (pass == 0 ? wcsstr(f[2], L"борочн") != NULL : !wcsstr(f[2], L"Документ"))) {
         /* входит ли куда-то как входящее: «СОСТАВ\t<сборка>\t<f[0]>\t» */
         wchar_t needle[220];
         _snwprintf(needle, 220, L"\t%s\t", f[0]);

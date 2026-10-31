@@ -557,3 +557,216 @@ static void ac_des_action(int which) {
     break;
   }
 }
+
+/* ---- «дерево ТП <обозначение>» (с 31.10): как устроен ТП в базе — только чтение (SELECT) ---------------------------
+   Для сверки с заводом: ТП, сделанный руками, и ТП, созданный функцией пакета, — «ТП → версия → операции» и
+   «вариант в версии → операции в варианте», у каких объектов есть нормы (Тпз/Тшт), профессии, станки, участок,
+   способ комплектования ТП. ТП ищется по обозначению (атрибут Designation) или по имени «<обозначение> […]».
+   Ответ — в чат (WM_AC_TREE из потока). */
+#define WM_AC_TREE (WM_APP + 89)
+
+/* обозначение в тексте: слово или «буквы цифры…» из двух слов, как ac_is_des; FALSE — нет */
+static BOOL tree_des_of(const wchar_t *a, wchar_t *out, int cap) {
+  out[0] = 0;
+  wchar_t buf[600];
+  lstrcpynW(buf, a, 600);
+  for (wchar_t *c = buf; *c; c++)
+    if (*c == 0xAB || *c == 0xBB || *c == L'"' || *c == L',' || *c == L';' || *c == L'?') *c = L' ';
+  wchar_t *w[60];
+  int n = 0;
+  for (wchar_t *c = buf; *c && n < 60;) {
+    while (*c == L' ' || *c == L'\t') *c++ = 0;
+    if (!*c) break;
+    w[n++] = c;
+    while (*c && *c != L' ' && *c != L'\t') c++;
+  }
+  for (int i = 0; i < n; i++) {
+    size_t l = wcslen(w[i]);
+    while (l && (w[i][l - 1] == L'.' || w[i][l - 1] == L':')) w[i][--l] = 0;
+    if (ac_is_des(w[i])) {
+      lstrcpynW(out, w[i], cap);
+      return TRUE;
+    }
+    if (i + 1 < n) {
+      wchar_t two[200];
+      _snwprintf(two, 200, L"%s %s", w[i], w[i + 1]);
+      two[199] = 0;
+      size_t l2 = wcslen(two);
+      while (l2 && (two[l2 - 1] == L'.' || two[l2 - 1] == L':')) two[--l2] = 0;
+      if (ac_is_des(two)) {
+        lstrcpynW(out, two, cap);
+        return TRUE;
+      }
+    }
+  }
+  return FALSE;
+}
+
+/* «дерево ТП …», «дерево техпроцесса …», «как устроен ТП …» */
+static BOOL tree_wanted(const wchar_t *a) {
+  wchar_t low[2000];
+  esi_low(a, low, 2000);
+  if (wcslen(low) > 300) return FALSE;
+  BOOL tp = tn_word(low, L"тп") || wcsstr(low, L"техпроцесс") || wcsstr(low, L"технологическ");
+  return tp && (wcsstr(low, L"дерев") || wcsstr(low, L"как устроен") || wcsstr(low, L"структур"));
+}
+
+static const wchar_t *tree_kind_ui(const wchar_t *key) {
+  if (!wcscmp(key, L"TSVersion")) return L"Версия ТП";
+  if (!wcscmp(key, L"TSVVariant")) return L"Вариант ТП в версии";
+  if (!wcscmp(key, L"TSVariant")) return L"Вариант ТП";
+  if (!wcscmp(key, L"TSOperation")) return L"операция";
+  if (!wcscmp(key, L"TSOperationVariant")) return L"операция в варианте";
+  return key;
+}
+
+/* операции под parent: строка на каждую и итог «нормы a из n, профессия b, станок c, участок d» */
+static void tree_ops(ShareBuf *b, const CardRow *rows, int n, long parent, const wchar_t *indent) {
+  int cnt = 0, fn = 0, fc = 0, fe = 0, fa = 0;
+  for (int i = 0; i < n; i++) {
+    if (rows[i].n2 != parent) continue;
+    if (wcscmp(rows[i].s1, L"TSOperation") && wcscmp(rows[i].s1, L"TSOperationVariant")) continue;
+    int fl = (int)(rows[i].n3 % 100);
+    cnt++;
+    fn += (fl & 1) != 0, fc += (fl & 2) != 0, fe += (fl & 4) != 0, fa += (fl & 8) != 0;
+    wchar_t num[40] = L"", code[40] = L"";
+    const wchar_t *p = rows[i].s2, *bar = wcschr(p, L'|');
+    if (bar) {
+      lstrcpynW(num, p, (int)(bar - p) + 1 < 40 ? (int)(bar - p) + 1 : 40);
+      const wchar_t *bar2 = wcschr(bar + 1, L'|');
+      if (bar2) lstrcpynW(code, bar + 1, (int)(bar2 - bar) < 40 ? (int)(bar2 - bar) : 40);
+    }
+    if (cnt <= 30)
+      sb_add(b, L"%s%s %s · нормы %s · профессия %s · станок %s · участок %s\n", indent, num[0] ? num : L"—", code[0] ? code : L"—",
+             fl & 1 ? L"есть" : L"нет", fl & 2 ? L"есть" : L"нет", fl & 4 ? L"есть" : L"нет", fl & 8 ? L"есть" : L"нет");
+  }
+  if (cnt > 30) sb_add(b, L"%s… ещё %d\n", indent, cnt - 30);
+  if (cnt) sb_add(b, L"%sитого %d: с нормами %d, с профессией %d, со станком %d, с участком %d\n", indent, cnt, fn, fc, fe, fa);
+  else sb_add(b, L"%sопераций нет\n", indent);
+}
+
+/* текст дерева ТП des (malloc; NULL — память) — в потоке и на стенде */
+static wchar_t *tree_build(const wchar_t *des) {
+  ShareBuf b;
+  memset(&b, 0, sizeof(b));
+  wchar_t d[200];
+  int k = 0;
+  for (const wchar_t *c = des; *c && k < 199; c++)
+    if (*c != L'\'') d[k++] = *c; /* в SQL — без кавычек */
+  d[k] = 0;
+  SQLHENV env = SQL_NULL_HENV;
+  SQLHDBC dbc = SQL_NULL_HDBC;
+  wchar_t err[300] = L"";
+  CardRow *rows = (CardRow *)malloc(sizeof(CardRow) * CARD_ROWS);
+  wchar_t *sql = (wchar_t *)malloc(sizeof(wchar_t) * 6000);
+  if (!rows || !sql || !g_szConnect(&env, &dbc, err, 300)) {
+    sb_add(&b, L"Дерево ТП «%s»: база «Союза» недоступна%s%s.", d, err[0] ? L" — " : L"", err);
+    goto done;
+  }
+  g_qTimeout = 30;
+  _snwprintf(sql, 6000,
+             L"WITH r AS (SELECT ts.InfoObjectId AS Id, 0 AS L FROM InfoObjects AS ts WITH(NOLOCK) "
+             L"JOIN Templates AS t WITH(NOLOCK) ON t.TemplateId=ts.TemplateId AND t.NameKey=N'TechnologicalStructure' "
+             L"WHERE ts.Erased=0 AND (LEFT(CAST(ts.Name AS NVARCHAR(400)), %d)=N'%s [' OR CAST(ts.Name AS NVARCHAR(400))=N'%s' "
+             L"OR EXISTS (SELECT 1 FROM InfoObjectAttributes AS a WITH(NOLOCK) JOIN NameKeys AS nk WITH(NOLOCK) ON nk.NameKeyId=a.NameKeyId "
+             L"AND nk.Value=N'Designation' WHERE a.OwnerId=ts.InfoObjectId AND a.Outdated=0 AND CAST(a.ShortText AS NVARCHAR(200))=N'%s')) "
+             L"UNION ALL SELECT c.InfoObjectId, r.L+1 FROM InfoObjects AS c WITH(NOLOCK) JOIN r ON c.ParentId=r.Id WHERE c.Erased=0 AND r.L<3) "
+             L"SELECT TOP 800 r.Id, t.NameKey, ISNULL(nr.S,N'') + N'|' + ISNULL(cd.S,N'') + N'|' + ISNULL(CAST(o.Name AS NVARCHAR(160)),N''), "
+             L"ISNULL(o.ParentId,0), r.L*100 "
+             L"+ CASE WHEN EXISTS (SELECT 1 FROM InfoObjectAttributes AS x WITH(NOLOCK) JOIN NameKeys AS y WITH(NOLOCK) ON y.NameKeyId=x.NameKeyId "
+             L"AND y.Value IN (N'SetupTime',N'TimePerPiece') WHERE x.OwnerId=r.Id AND x.Outdated=0) THEN 1 ELSE 0 END "
+             L"+ CASE WHEN EXISTS (SELECT 1 FROM InfoObjectAttributes AS x WITH(NOLOCK) JOIN NameKeys AS y WITH(NOLOCK) ON y.NameKeyId=x.NameKeyId "
+             L"AND y.Value IN (N'Craft',N'CraftList') WHERE x.OwnerId=r.Id AND x.Outdated=0) THEN 2 ELSE 0 END "
+             L"+ CASE WHEN EXISTS (SELECT 1 FROM InfoObjectAttributes AS x WITH(NOLOCK) JOIN NameKeys AS y WITH(NOLOCK) ON y.NameKeyId=x.NameKeyId "
+             L"AND y.Value IN (N'Equipment',N'EquipmentList') WHERE x.OwnerId=r.Id AND x.Outdated=0) THEN 4 ELSE 0 END "
+             L"+ CASE WHEN EXISTS (SELECT 1 FROM InfoObjectAttributes AS x WITH(NOLOCK) JOIN NameKeys AS y WITH(NOLOCK) ON y.NameKeyId=x.NameKeyId "
+             L"AND y.Value=N'Area' WHERE x.OwnerId=r.Id AND x.Outdated=0 AND ISNULL(x.Link,0)<>0) THEN 8 ELSE 0 END "
+             L"FROM r JOIN InfoObjects AS o WITH(NOLOCK) ON o.InfoObjectId=r.Id JOIN Templates AS t WITH(NOLOCK) ON t.TemplateId=o.TemplateId "
+             L"OUTER APPLY (SELECT TOP 1 CAST(a.ShortText AS NVARCHAR(20)) AS S FROM InfoObjectAttributes AS a WITH(NOLOCK) JOIN NameKeys AS nk WITH(NOLOCK) "
+             L"ON nk.NameKeyId=a.NameKeyId AND nk.Value=N'Number' WHERE a.OwnerId=r.Id AND a.Outdated=0) AS nr "
+             L"OUTER APPLY (SELECT TOP 1 CAST(c.ShortText AS NVARCHAR(20)) AS S FROM InfoObjectAttributes AS l WITH(NOLOCK) JOIN NameKeys AS nkl WITH(NOLOCK) "
+             L"ON nkl.NameKeyId=l.NameKeyId AND nkl.Value=N'Operation' JOIN InfoObjectAttributes AS c WITH(NOLOCK) ON c.OwnerId=l.Link AND c.Outdated=0 "
+             L"JOIN NameKeys AS nkc WITH(NOLOCK) ON nkc.NameKeyId=c.NameKeyId AND nkc.Value=N'Code' WHERE l.OwnerId=r.Id AND l.Outdated=0) AS cd "
+             L"ORDER BY r.L, o.ParentId, nr.S, r.Id",
+             (int)wcslen(d) + 2, d, d, d);
+  sql[5999] = 0;
+  int n = card_query(dbc, sql, rows, CARD_ROWS, err, 300);
+  if (n < 0) {
+    sb_add(&b, L"Дерево ТП «%s»: запрос не прошёл — %s", d, err);
+  } else if (n == 0) {
+    sb_add(&b, L"Дерево ТП «%s»: в базе такого ТП нет (ни по обозначению, ни по имени).", d);
+  } else {
+    int roots = 0;
+    for (int i = 0; i < n; i++) roots += rows[i].n3 / 100 == 0;
+    sb_add(&b, L"Дерево ТП «%s» — только чтение, в базе ничего не меняется. ТП: %d\n", d, roots);
+    for (int i = 0; i < n; i++) {
+      if (rows[i].n3 / 100 != 0) continue;
+      const wchar_t *nm = wcsrchr(rows[i].s2, L'|');
+      sb_add(&b, L"\nТП «%s» (объект %ld)\n", nm ? nm + 1 : rows[i].s2, rows[i].n1);
+      for (int j = 0; j < n; j++) { /* версии и варианты ТП */
+        if (rows[j].n2 != rows[i].n1) continue;
+        const wchar_t *nmj = wcsrchr(rows[j].s2, L'|');
+        sb_add(&b, L"  %s «%s» (объект %ld)\n", tree_kind_ui(rows[j].s1), nmj ? nmj + 1 : L"", rows[j].n1);
+        if (!wcscmp(rows[j].s1, L"TSVersion")) {
+          tree_ops(&b, rows, n, rows[j].n1, L"    ");
+          for (int q = 0; q < n; q++) /* вариант в версии и его операции */
+            if (rows[q].n2 == rows[j].n1 && !wcscmp(rows[q].s1, L"TSVVariant")) {
+              const wchar_t *nmq = wcsrchr(rows[q].s2, L'|');
+              sb_add(&b, L"    %s «%s» (объект %ld)\n", tree_kind_ui(rows[q].s1), nmq ? nmq + 1 : L"", rows[q].n1);
+              tree_ops(&b, rows, n, rows[q].n1, L"      ");
+            }
+        }
+      }
+    }
+    /* способ комплектования корня */
+    _snwprintf(sql, 6000,
+               L"SELECT TOP 20 a.OwnerId, ISNULL(CAST(nv.NameUI AS NVARCHAR(200)),N''), ISNULL(nv.NameKey,N''), 0, 0 FROM InfoObjectAttributes AS a WITH(NOLOCK) "
+               L"JOIN NameKeys AS nk WITH(NOLOCK) ON nk.NameKeyId=a.NameKeyId AND nk.Value=N'KindOfStorageItems' "
+               L"JOIN NamedValues AS nv WITH(NOLOCK) ON nv.NamedValueId=a.Link WHERE a.Outdated=0 AND a.OwnerId=%ld",
+               rows[0].n1);
+    CardRow k1[20];
+    int nk = card_query(dbc, sql, k1, 20, err, 300);
+    if (nk > 0) sb_add(&b, L"\nСпособ комплектования ТП: «%s» (%s)\n", k1[0].s1, k1[0].s2);
+  }
+done:
+  if (dbc != SQL_NULL_HDBC) SQLDisconnect(dbc), SQLFreeHandle(SQL_HANDLE_DBC, dbc);
+  if (env != SQL_NULL_HENV) SQLFreeHandle(SQL_HANDLE_ENV, env);
+  free(rows);
+  free(sql);
+  return b.w;
+}
+
+static DWORD WINAPI tree_thread(LPVOID arg) {
+  wchar_t *des = (wchar_t *)arg;
+  wchar_t *t = tree_build(des);
+  free(des);
+  if (!g_acWnd || !PostMessageW(g_acWnd, WM_AC_TREE, 0, (LPARAM)t)) free(t);
+  return 0;
+}
+
+/* команда чата; TRUE — забрана */
+static BOOL tree_chat_cmd(const wchar_t *a) {
+  if (!tree_wanted(a)) return FALSE;
+  ac_push(0, a);
+  wchar_t des[200];
+  if (!tree_des_of(a, des, 200)) {
+    ac_push(1, L"Напишите обозначение детали: «дерево ТП АБВГ.123456.001» — покажу, как устроен её ТП в «Союзе» (только чтение).");
+    return TRUE;
+  }
+  wchar_t *d = _wcsdup(des);
+  HANDLE th = d ? CreateThread(NULL, 0, tree_thread, d, 0, NULL) : NULL;
+  if (th) CloseHandle(th);
+  else free(d);
+  wchar_t m[300];
+  _snwprintf(m, 300, L"Читаю дерево ТП «%s» в базе «Союза» — только чтение…", des);
+  m[299] = 0;
+  ac_status(m);
+  return TRUE;
+}
+
+/* ответ потока */
+static void tree_report(wchar_t *t) {
+  ac_push(1, t ? t : L"Дерево ТП: ответа нет.");
+  ac_status(L"Дерево ТП прочитано — в базе ничего не менялось");
+  free(t);
+}

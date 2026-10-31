@@ -679,6 +679,8 @@ static void esi_detail(void);
 static void esi_cancel(void);
 static void esi_report(wchar_t *rep);
 static BOOL rt_chat_cmd(const wchar_t *a);
+static BOOL tree_chat_cmd(const wchar_t *a); /* ai_esi.c: «дерево ТП <обозначение>» — только чтение */
+static void tree_report(wchar_t *t);
 static BOOL prio_chat_cmd(const wchar_t *a);
 static void ac_text_links(void);                 /* обозначения и пути в ленте — ссылками */
 static BOOL ac_text_link_click(const wchar_t *t); /* щелчок по ним */
@@ -2757,7 +2759,7 @@ static void ac_send(void) {
     free(in);
     return;
   }
-  if (rt_chat_cmd(a) || prio_chat_cmd(a)) {
+  if (rt_chat_cmd(a) || prio_chat_cmd(a) || tree_chat_cmd(a)) {
     SetWindowTextW(g_acIn, L"");
     free(in);
     return;
@@ -3767,6 +3769,9 @@ static LRESULT CALLBACK AcProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
   }
   case WM_AC_LINK:
     ac_log_link_do(wParam);
+    return 0;
+  case WM_APP + 89: /* WM_AC_TREE (ai_esi.c): дерево ТП из потока */
+    tree_report((wchar_t *)lParam);
     return 0;
   case WM_AC_SZM_DONE: /* ответ «Союза» на отправку из чата (ai_esi.c) */
     esi_report((wchar_t *)lParam);

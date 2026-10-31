@@ -104,7 +104,23 @@ static BOOL pks_is_pdf(const wchar_t *p) {
 static void pks_spec_rows(const DrPage *pg, PkStRes *r) {
   for (int k = 0; k < pg->nrows && r->nrows < PKS_MAXROWS; k++) {
     const DrSpecRow *s = &pg->rows[k];
-    if (dr_is_docs(s->c[DS_SECT])) continue;
+    if (dr_is_docs(s->c[DS_SECT])) {
+      /* «Документация»: сборочный чертёж (СБ, ВО, ГЧ… в конце обозначения) — документом в состав сборки (с 31.10),
+         прочие документы (ПЗ, ВП, схемы) — мимо */
+      wchar_t d[DR_CELL], nm[DR_CELL], code[8];
+      lstrcpynW(d, s->c[DS_DES], DR_CELL);
+      lstrcpynW(nm, s->c[DS_NAME], DR_CELL);
+      if (!d[0] || pp_draw_doc_code(d, nm, code) != 1) continue;
+      if (!r->rows) r->rows = (PkStRow *)calloc(PKS_MAXROWS, sizeof(PkStRow));
+      if (!r->rows) return;
+      PkStRow *o = &r->rows[r->nrows++];
+      lstrcpynW(o->des, s->c[DS_DES], DR_CELL);
+      lstrcpynW(o->name, pp_doc_title(code), DR_CELL);
+      lstrcpynW(o->kind, L"Документация", 40);
+      lstrcpynW(o->qty, L"1", 32);
+      o->pos[0] = 0;
+      continue;
+    }
     const wchar_t *des = s->c[DS_DES][0] ? s->c[DS_DES] : s->c[DS_NAME];
     if (!des[0]) continue;
     if (!r->rows) r->rows = (PkStRow *)calloc(PKS_MAXROWS, sizeof(PkStRow));
@@ -760,6 +776,95 @@ static void pk_draw_pick(void) {
   pks_ops_pref();
   g_pkAiOps = TRUE;
   pk_stamp_pick();
+}
+
+/* Состав из файла спецификации (с 31.10): TSV UTF-8, строка — «Раздел<Tab>Поз.<Tab>Обозначение<Tab>Наименование<Tab>
+   Кол.<Tab>Примечание» (как DrSpecRow без формата и зоны); первая строка «#СБОРКА<Tab><обозначение><Tab><наименование>» —
+   чей это состав, иначе — выделенная сборка «Изделий» или выбранная позиция. Строки идут тем же путём, что строки
+   листа-спецификации (pks_spec_rows → pks_apply): позиции — в «Изделия», состав — сборке, СБ из «Документации» —
+   документом к ней; документы прочие — мимо. Для стенда и ручного импорта, пока модель не читает спецификации
+   (её строки ложатся в те же DrSpecRow, pg->rowsBy = 2; из файла — 3). Сколько строк состава; -1 — файл не прочитан */
+static int pk_spec_tsv(const wchar_t *path) {
+  wchar_t *t = share_read(path);
+  if (!t) return -1;
+  DrPage pg;
+  memset(&pg, 0, sizeof(pg));
+  pg.type = DRT_SPEC;
+  pg.rows = (DrSpecRow *)calloc(PKS_MAXROWS, sizeof(DrSpecRow));
+  PkStRes *r = (PkStRes *)calloc(1, sizeof(PkStRes));
+  if (!pg.rows || !r) {
+    free(pg.rows), free(r), free(t);
+    return -1;
+  }
+  r->parentRow = r->row = -1;
+  r->how = 3;
+  r->asmDoc = TRUE;
+  lstrcpynW(r->kind, L"Сборочные единицы", 40);
+  lstrcpynW(r->file, path, MAX_PATH);
+  wchar_t *pp = t, *line;
+  while ((line = share_next_line(&pp)) != NULL && pg.nrows < PKS_MAXROWS) {
+    wchar_t *f[8] = {0};
+    while (*line == 0xFEFF) line++; /* метка UTF-8 в начале файла */
+    if (!wcsncmp(line, L"#СБОРКА\t", 8) || !wcsncmp(line, L"# СБОРКА\t", 9)) {
+      int n = share_split(line, f, 8);
+      if (n >= 2) lstrcpynW(r->des, f[1], DR_CELL);
+      if (n >= 3) lstrcpynW(r->name, f[2], DR_CELL);
+      continue;
+    }
+    if (!line[0] || line[0] == L'#') continue;
+    int n = share_split(line, f, 8);
+    if (n < 3) continue;
+    DrSpecRow *o = &pg.rows[pg.nrows];
+    static const int kCol[6] = {DS_SECT, DS_POS, DS_DES, DS_NAME, DS_QTY, DS_NOTE};
+    for (int c = 0; c < 6 && c < n; c++) {
+      const wchar_t *v = f[c];
+      while (*v == L' ') v++;
+      lstrcpynW(o->c[kCol[c]], v, DR_CELL);
+      for (size_t l = wcslen(o->c[kCol[c]]); l && o->c[kCol[c]][l - 1] == L' '; l--) o->c[kCol[c]][l - 1] = 0;
+    }
+    if (o->c[DS_DES][0] || o->c[DS_NAME][0]) pg.nrows++;
+  }
+  free(t);
+  pg.rowsBy = 3;
+  if (!r->des[0]) { /* сборка — выделенная строка «Изделий» или выбранная позиция */
+    XpTable *it = &g_pk[PK_ITEMS];
+    int sr = g_pkSheet == PK_ITEMS && g_pkList ? pk_sel_row() : -1;
+    const wchar_t *d = sr >= 0 && sr < it->n && pks_is_asm(sr) ? xp_cell(it, sr, 0) : g_pkCur;
+    lstrcpynW(r->des, d, DR_CELL);
+  }
+  int links = -1;
+  if (r->des[0]) {
+    pks_spec_rows(&pg, r);
+    if (g_pkEditRow >= 0) pk_edit_end(TRUE);
+    int was = g_pksLinks;
+    pks_apply(r);
+    links = g_pksLinks - was;
+    pk_fill(FALSE);
+    pk_changed();
+  }
+  free(pg.rows);
+  free(r->rows);
+  free(r->route);
+  free(r);
+  return links;
+}
+
+static void pk_spec_tsv_pick(void) {
+  wchar_t file[MAX_PATH] = L"";
+  OPENFILENAMEW of;
+  memset(&of, 0, sizeof(of));
+  of.lStructSize = sizeof(of);
+  of.hwndOwner = g_pkWnd;
+  of.lpstrFilter = L"Строки спецификации (TSV, TXT)\0*.tsv;*.txt\0Все файлы\0*.*\0";
+  of.lpstrFile = file;
+  of.nMaxFile = MAX_PATH;
+  of.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+  if (!GetOpenFileNameW(&of)) return;
+  int n = pk_spec_tsv(file);
+  if (n < 0)
+    pk_status(L"Файл спецификации не прочитан — или нет строки «#СБОРКА<Tab>обозначение», а сборка не выделена");
+  else
+    pk_status(L"Из файла спецификации в состав сборки легло строк: %d — проверьте количество и разделы, затем «В Союз…»", n);
 }
 
 static void pk_stamp_ops(void) {
