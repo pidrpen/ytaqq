@@ -170,6 +170,9 @@ static void esi_card(void) {
     l += _snwprintf(t + l, 1800 - l, L"\nБез обозначения: %d — штамп не прочитался, впишите в «Проверить подробно».", noDes ? noDes : g_pksNoDes);
   if (g_pksDoubt[0]) l += _snwprintf(t + l, 1800 - l, L"\nПроверьте обозначения: %ls.", g_pksDoubt);
   if (g_pksOpsNo) l += _snwprintf(t + l, 1800 - l, L"\nБез маршрута: %d (лист не прочитался или это не чертёж детали).", g_pksOpsNo);
+  if (g_pksSpecEmpty)
+    l += _snwprintf(t + l, 1800 - l, L"\nСпецификаций без строк: %d (%ls) — состав не прочитан: впишите в «Проверить подробно» или загрузите из файла.",
+                    g_pksSpecEmpty, g_pksSpecEmptyDes);
   if (!op->n && det) l += _snwprintf(t + l, 1800 - l, L"\nОпераций нет: листы деталей не дали маршрута.");
   if (l < 1800 - 160)
     _snwprintf(t + l, 1800 - l, L"\n\nДействия:   В Союз   ·   Только ЭСИ   ·   Только ТП   ·   Проверить подробно   ·   Отмена");

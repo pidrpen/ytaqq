@@ -45,6 +45,9 @@ typedef struct {
   int doc;                  /* pp_draw_doc: 0 — чертёж детали, 1 — сборки, 2 — другой документ (ВП, ПЗ…) */
   BOOL ops, opsOnly;        /* составить и операции; только они (строка уже есть — по файлу) */
   wchar_t *route;           /* маршрут по листу, как в чате (tn_text + нормы); malloc, NULL — нет */
+  BOOL spec;                /* лист — спецификация (с 31.10): строк нет — не пустая сборка молча, а пометка */
+  BOOL specEmpty;           /* спецификация, а строк не прочитано */
+  wchar_t lastSect[40];     /* раздел последней строки: у листа-продолжения (2а) без заголовка — с прошлой страницы */
 } PkStRes;
 
 typedef struct PkStJob {
@@ -82,6 +85,8 @@ static int g_pksOrphN;
 /* операции сразу по чертежу детали: галочка в «Чертежи…» (package.ini); итог для строки состояния */
 static BOOL g_pkAiOps = TRUE, g_pkAiOpsRead;
 static int g_pksOps, g_pksOpsParts, g_pksOpsHad, g_pksOpsNo;
+static int g_pksSpecEmpty;           /* спецификаций без строк (с 31.10) */
+static wchar_t g_pksSpecEmptyDes[200]; /* их обозначения — в карточку и строку состояния */
 static BOOL g_esiChat;        /* чтение запущено из чата (ai_esi.c): по последнему файлу — карточка в чат */
 static void esi_card(void);   /* ai_esi.c */
 /* маршрут скана без обозначения: впишут обозначение — операции лягут к нему (по файлу строки) */
@@ -104,7 +109,11 @@ static BOOL pks_is_pdf(const wchar_t *p) {
 static void pks_spec_rows(const DrPage *pg, PkStRes *r) {
   for (int k = 0; k < pg->nrows && r->nrows < PKS_MAXROWS; k++) {
     const DrSpecRow *s = &pg->rows[k];
-    if (dr_is_docs(s->c[DS_SECT])) {
+    /* раздел: у строки свой, иначе — последний известный этой спецификации (лист-продолжение 2а без заголовка
+       раздела, с одного листа его не узнать; страницы идут по порядку) */
+    if (s->c[DS_SECT][0]) lstrcpynW(r->lastSect, s->c[DS_SECT], 40);
+    const wchar_t *sect = s->c[DS_SECT][0] ? s->c[DS_SECT] : r->lastSect;
+    if (dr_is_docs(sect)) {
       /* «Документация»: сборочный чертёж (СБ, ВО, ГЧ… в конце обозначения) — документом в состав сборки (с 31.10),
          прочие документы (ПЗ, ВП, схемы) — мимо */
       wchar_t d[DR_CELL], nm[DR_CELL], code[8];
@@ -128,7 +137,7 @@ static void pks_spec_rows(const DrPage *pg, PkStRes *r) {
     PkStRow *o = &r->rows[r->nrows++];
     lstrcpynW(o->des, des, DR_CELL);
     lstrcpynW(o->name, s->c[DS_DES][0] ? s->c[DS_NAME] : L"", DR_CELL);
-    lstrcpynW(o->kind, dr_kind_of(s->c[DS_SECT]), 40);
+    lstrcpynW(o->kind, dr_kind_of(sect), 40);
     lstrcpynW(o->qty, s->c[DS_QTY], 32);
     lstrcpynW(o->pos, s->c[DS_POS], 16);
   }
@@ -160,7 +169,18 @@ static void pks_from_page(DrPage *pg, PkStRes *r) {
     if (pg->f[DF_MAT][0] && !pg->doubt[DF_MAT]) lstrcpynW(r->mat, pg->f[DF_MAT], DR_CELL);
     if (pg->f[DF_MASS][0] && !pg->doubt[DF_MASS]) lstrcpynW(r->mass, pg->f[DF_MASS], 40);
   }
-  if (pg->type == DRT_SPEC) pks_spec_rows(pg, r);
+  if (pg->type == DRT_SPEC) r->spec = TRUE, pks_spec_rows(pg, r);
+}
+
+/* спецификация прочитана, а строк нет (модель выключена, Tesseract не узнал столбцы — «спецификация по шапке»):
+   не пустая сборка молча, а пометка «строки не прочитаны» (с 31.10). pgNote — что сказало чтение листа */
+static void pks_spec_check(PkStRes *r, const wchar_t *pgNote) {
+  if (!r->spec || r->nrows) return;
+  r->specEmpty = TRUE;
+  if (!r->note[0])
+    _snwprintf(r->note, 200, L"спецификация %ls: строки не прочитаны%ls%ls — состав впишите или «Ещё ▾ → Состав из файла спецификации»",
+               r->des[0] ? r->des : L"без обозначения", pgNote && pgNote[0] ? L" (" : L"", pgNote && pgNote[0] ? pgNote : L"");
+  r->note[199] = 0;
 }
 
 /* маршрут по прочитанному листу — тот же текст, что «Маршрут обработки» кладёт в чат (без «Лист:»):
@@ -205,6 +225,7 @@ static void pks_read(IWICImagingFactory *f, PkStRes *r) {
     if (!i) {
       pks_from_page(&pg, r);
       if (!r->how && pg.note[0]) lstrcpynW(why, pg.note, 200);
+      if (pg.type == DRT_SPEC && pg.note[0] && !why[0]) lstrcpynW(why, pg.note, 200);
       if (r->ops && (pg.type == DRT_DRAW || pg.type == DRT_OTHER) && !r->asmDoc)
         r->route = pks_route(&pg, r->mass[0] ? r->mass : pg.f[DF_MASS]);
     } else if (pg.type == DRT_SPEC) {
@@ -227,6 +248,7 @@ static void pks_read(IWICImagingFactory *f, PkStRes *r) {
       if (!r->kind[0]) lstrcpynW(r->kind, r->asmDoc ? L"Сборочные единицы" : !doc ? L"Детали" : L"", 40);
     }
   }
+  pks_spec_check(r, why);
   if (r->route && (r->asmDoc || r->doc || r->nrows)) {
     free(r->route); /* чертёж сборки, документ или спецификация — операций по ним нет */
     r->route = NULL;
@@ -546,6 +568,7 @@ static void pks_status(const wchar_t *note) {
   if (g_pksBy[2] || g_pksBy[1] || g_pksBy[3])
     _snwprintf(by, 120, L"; обозначения: моделью %d, Tesseract %d, из имени файла %d", g_pksBy[2], g_pksBy[1], g_pksBy[3]);
   if (g_pksWait) _snwprintf(wait, 120, L"; %d ждут обозначения сборки — впишите его", g_pksWait);
+  else if (g_pksSpecEmpty) _snwprintf(wait, 120, L"; спецификаций без строк %d — состав не прочитан, проверьте", g_pksSpecEmpty);
   pk_status(L"Чертежи: %d из %d — новых изделий %d, дополнено %d, в состав%ls%ls%ls %d%ls%ls%ls%ls%ls%ls%ls%ls%ls",
             g_pksDone, g_pksTotal, g_pksNew, g_pksMerged, g_pksParent[0] ? L" «" : L"", g_pksParent,
             g_pksParent[0] ? L"»" : L"", g_pksLinks, docs, ops, by, g_pksNoDes ? L"; без обозначения — впишите" : L"",
@@ -573,6 +596,12 @@ static void pk_stamp_done(void *p) {
       else g_pksOpsNo++;
     } else {
       int row = pks_apply(r);
+      if (r->specEmpty) {
+        g_pksSpecEmpty++;
+        size_t l = wcslen(g_pksSpecEmptyDes);
+        if (l < 150) _snwprintf(g_pksSpecEmptyDes + l, 200 - l, L"%ls%ls", l ? L", " : L"", r->des[0] ? r->des : L"?");
+        g_pksSpecEmptyDes[199] = 0;
+      }
       if (r->route) pks_ops(row, r->file, &r->route);
       else if (r->ops && !r->asmDoc && !r->doc && !r->nrows) g_pksOpsNo++;
     }
@@ -689,6 +718,7 @@ static void pks_enqueue(TmPaths *pl, int hit, BOOL opsOnly) {
   if (idle) { /* новый бросок после затишья — итог считать заново */
     g_pksDone = g_pksTotal = g_pksNew = g_pksMerged = g_pksLinks = g_pksNoDes = g_pksWait = g_pksDocs = 0;
     g_pksOps = g_pksOpsParts = g_pksOpsHad = g_pksOpsNo = 0;
+    g_pksSpecEmpty = 0, g_pksSpecEmptyDes[0] = 0;
     memset(g_pksBy, 0, sizeof(g_pksBy));
     g_pksDoubt[0] = g_pksParent[0] = 0;
   }

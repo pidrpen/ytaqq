@@ -2175,6 +2175,27 @@ static BOOL pk_check(BOOL quiet) {
       g_pkSendWarn++;
     }
   }
+  { /* сборка без состава (спецификация не прочиталась, состав не вписан) — не молча (с 31.10) */
+    wchar_t emp[400] = L"";
+    int ne3 = 0;
+    for (int r = 0; r < it->n; r++) {
+      const wchar_t *d3 = xp_cell(it, r, 0);
+      if (!d3[0] || !wcsstr(xp_cell(it, r, 2), L"борочн") || pk_row_from_soyuz(PK_ITEMS, r)) continue;
+      BOOL has = FALSE;
+      for (int q = 0; q < ln->n && !has; q++) has = !_wcsicmp(xp_cell(ln, q, 0), d3);
+      if (has) continue;
+      ne3++;
+      size_t l = wcslen(emp);
+      if (l < 300) _snwprintf(emp + l, 400 - l, L"%s%s", l ? L", " : L"", d3);
+    }
+    emp[399] = 0;
+    if (ne3) {
+      sb_add(&b, L"• Сборка без состава (%d): %s — спецификация не прочиталась или состав не вписан; «Состав» или «Ещё ▾ → Состав из "
+                 L"файла спецификации»\n",
+             ne3, emp);
+      g_pkSendWarn++;
+    }
+  }
   if (g_szmDictsAsked && !g_szmDicts.err[0] && g_szmDicts.na && !g_szmDicts.nb) { /* признак покупки — в базе списка нет */
     int withBuy = 0;
     for (int r = 0; r < it->n; r++) withBuy += xp_cell(it, r, 6)[0] != 0;

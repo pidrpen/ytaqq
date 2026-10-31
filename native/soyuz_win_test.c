@@ -1063,6 +1063,51 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
           pk_fill(FALSE);
           DeleteFileW(sp);
           st_check(g_pk[PK_ITEMS].n == itBefore && g_pk[PK_LINKS].n == lnBefore, L"строки из файла убраны — листы как были");
+          { /* лист-продолжение без заголовка раздела — раздел с прошлой страницы; спецификация без строк — пометка */
+            PkStRes *rr = (PkStRes *)calloc(1, sizeof(PkStRes));
+            DrPage p1, p2;
+            memset(&p1, 0, sizeof(p1)), memset(&p2, 0, sizeof(p2));
+            p1.rows = (DrSpecRow *)calloc(2, sizeof(DrSpecRow)), p2.rows = (DrSpecRow *)calloc(2, sizeof(DrSpecRow));
+            if (rr && p1.rows && p2.rows) {
+              lstrcpynW(p1.rows[0].c[DS_SECT], L"Сборочные единицы", DR_CELL), lstrcpynW(p1.rows[0].c[DS_DES], L"ТСТ.180.100", DR_CELL);
+              lstrcpynW(p1.rows[0].c[DS_NAME], L"Узел", DR_CELL);
+              lstrcpynW(p1.rows[1].c[DS_SECT], L"Детали", DR_CELL), lstrcpynW(p1.rows[1].c[DS_DES], L"ТСТ.180.001", DR_CELL);
+              lstrcpynW(p1.rows[1].c[DS_NAME], L"Планка", DR_CELL);
+              p1.nrows = 2;
+              lstrcpynW(p2.rows[0].c[DS_DES], L"ТСТ.180.002", DR_CELL), lstrcpynW(p2.rows[0].c[DS_NAME], L"Уголок", DR_CELL);
+              lstrcpynW(p2.rows[1].c[DS_SECT], L"Стандартные изделия", DR_CELL), lstrcpynW(p2.rows[1].c[DS_NAME], L"Шайба 8 ГОСТ 11371-78", DR_CELL);
+              p2.nrows = 2;
+              pks_spec_rows(&p1, rr);
+              pks_spec_rows(&p2, rr);
+              st_check(rr->nrows == 4 && !wcscmp(rr->rows[2].des, L"ТСТ.180.002") && !wcscmp(rr->rows[2].kind, rr->rows[1].kind) &&
+                           rr->rows[1].kind[0] && wcscmp(rr->rows[3].kind, rr->rows[1].kind),
+                       L"спецификация: строка листа-продолжения без раздела — раздел «Детали» с прошлой страницы; со своим разделом — свой");
+              st_note(L"     разделы: «%ls», «%ls», продолжение «%ls», «%ls»", rr->rows[0].kind, rr->rows[1].kind, rr->rows[2].kind, rr->rows[3].kind);
+              PkStRes e;
+              memset(&e, 0, sizeof(e));
+              e.spec = TRUE;
+              lstrcpynW(e.des, L"ТСТ.180.000", DR_CELL);
+              pks_spec_check(&e, L"спецификация по шапке, строк Tesseract нет");
+              PkStRes d;
+              memset(&d, 0, sizeof(d));
+              pks_spec_check(&d, L"");
+              st_check(e.specEmpty && wcsstr(e.note, L"строки не прочитаны") && wcsstr(e.note, L"ТСТ.180.000") && !d.specEmpty && !d.note[0],
+                       L"спецификация без строк — пометка «строки не прочитаны» с обозначением, не пустая сборка молча; чертёж — без пометки");
+              /* «Проверить»: сборка без состава */
+              XpTable *it5 = &g_pk[PK_ITEMS];
+              xp_row(it5);
+              it5 = &g_pk[PK_ITEMS];
+              pk_put(it5, it5->n - 1, 0, L"ТСТ.190.000"), pk_put(it5, it5->n - 1, 1, L"Кронштейн сборный"), pk_put(it5, it5->n - 1, 2, L"Сборочные единицы");
+              pk_check(TRUE);
+              BOOL warnEmpty = g_pkLastCheck && wcsstr(g_pkLastCheck, L"Сборка без состава") && wcsstr(g_pkLastCheck, L"ТСТ.190.000");
+              pk_del_row(it5, it5->n - 1);
+              pk_check(TRUE);
+              BOOL goneEmpty = !(g_pkLastCheck && wcsstr(g_pkLastCheck, L"ТСТ.190.000"));
+              st_check(warnEmpty && goneEmpty, L"«Проверить»: сборка без состава — предупреждение до отправки; убрали — его нет");
+            }
+            if (rr) free(rr->rows);
+            free(rr), free(p1.rows), free(p2.rows);
+          }
         }
         /* поле правки не остаётся поверх таблицы, когда список перестраивается */
         pk_edit_begin(0, 3);
