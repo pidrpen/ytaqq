@@ -780,12 +780,14 @@ static double nm_step(const wchar_t *row, double x, int *low) {
 /* ---- расчёт операции -------------------------------------------------------------- */
 
 /* EST — оценка, FACT — по факту, TECH — норма технолога (Тшт по массе детали, Настройки) */
-enum { NMK_NONE, NMK_TURN, NMK_DRILL, NMK_MILL, NMK_CUT, NMK_EST, NMK_FACT, NMK_TECH, NMK_SAW, NMK_GEAR, NMK_WELD };
+enum { NMK_NONE, NMK_TURN, NMK_DRILL, NMK_MILL, NMK_CUT, NMK_EST, NMK_FACT, NMK_TECH, NMK_SAW, NMK_GEAR, NMK_WELD,
+       NMK_MARK };
 /* класс операции — что у неё нормируется (правило технолога 30.10): мехобработка — Тпз и Тшт;
    заготовительные и вспомогательные — только Тшт (Тпз не нужен); контроль — без норм */
 enum { NMC_FULL, NMC_TSHT, NMC_NONE };
 static const wchar_t *const kNmKind[] = {L"", L"токарная", L"сверлильная", L"фрезерная", L"резка", L"оценка",
-                                         L"по факту", L"норма технолога", L"отрезная", L"зубодолбежная", L"сварка"};
+                                         L"по факту", L"норма технолога", L"отрезная", L"зубодолбежная", L"сварка",
+                                         L"разметка"};
 
 #define NM_TRS 16 /* переходов операции, расписанных по одному (токарная, фрезерная) */
 typedef struct {
@@ -2433,6 +2435,42 @@ static void nm_weld(NmJob *j) {
   o->full = ok;
 }
 
+
+/* ---- разметка отверстий (с 2026.10.31) -----------------------------------------------------
+   ОМН на слесарную обработку (1974): разметка осей отверстий по их числу (карта 1: по прямой —
+   радиальные на валу, по окружности — в торце) и кернение каждого центра под сверление по Ø
+   (карта 2; объёмная деталь — ×1,3). Время карт — штучное (Тпз, обслуживание и отдых в нём —
+   11 %, с. 5). Отверстий не знаем — разметка «по чертежу»: оценка, как раньше. */
+static void nm_est(NmJob *j);
+
+static void nm_mark(NmJob *j) {
+  NmOp *o = j->o;
+  wchar_t s[300];
+  double n = nm_v(&j->c, L"отверстий"), d = nm_v(&j->c, L"d");
+  if (nm_na(n) || n < 1 || nm_na(d)) {
+    o->kind = NMK_EST;
+    nm_est(j);
+    return;
+  }
+  o->to = o->tv = o->top = o->tsht = o->tpz = o->tshk = NM_NONE;
+  j->pref = kNmKind[NMK_MARK];
+  int round = j->r && j->r->cls == TN_ROT;
+  nm_put(&j->c, L"оси", L"прямая", NM_NONE, NMO_DEF, round ? L"отверстия не по оси вала — по прямой" : NULL);
+  double ta = 0, tk = 0, kv = round ? 1.3 : 1;
+  int ok = nm_look_pref(j, L"оси", L"разметка осей", 1, &ta);
+  ok &= nm_look_pref(j, L"кернение", L"кернение центра", 1, &tk);
+  o->tsht = ta + tk * n * kv;
+  tn_cpy(s, 300, L"Тшт = разметка осей + кернение·отверстий");
+  if (kv != 1) tn_cat(s, 300, L"·1,3 (объёмная деталь)");
+  tn_cat(s, 300, L" = ");
+  tn_catnum(s, 300, ta), tn_cat(s, 300, L" + "), tn_catnum(s, 300, tk), tn_cat(s, 300, L"·"), tn_catnum(s, 300, n);
+  if (kv != 1) tn_cat(s, 300, L"·1,3");
+  tn_cat(s, 300, L" = "), tn_catnum(s, 300, o->tsht), tn_cat(s, 300, L" мин (штучное: Тпз, обслуживание и отдых — в картах)");
+  nm_line(j, s);
+  o->to = o->tsht;
+  o->full = ok;
+}
+
 /* одна операция: То, Тв, Топ, Тшт, Тпз */
 static void nm_op_calc(NmJob *j) {
   NmOp *o = j->o;
@@ -3038,7 +3076,7 @@ static void nm_ask_op(const wchar_t *ask, int num, NmCtx *c) {
    (укрупнённо, не ОМН: Тшт = Тшт + на кг·масса, Тпз), термическая и покрытия — по факту (время
    цикла задаёт их технология). Класс операции (Настройки) — Тпз и Тшт, только Тшт или без норм;
    операции «без норм» в ответе одной строкой. */
-enum { NMS_OMN, NMS_CUT, NMS_EST, NMS_FACT, NMS_TECH, NMS_SAW, NMS_GEAR, NMS_WELD };
+enum { NMS_OMN, NMS_CUT, NMS_EST, NMS_FACT, NMS_TECH, NMS_SAW, NMS_GEAR, NMS_WELD, NMS_MARK };
 
 /* норма технолога на термическую обработку: Тшт по массе детали — до порога одна, тяжелее другая;
    массы нет — как у тяжёлой, с пометкой. Цифры — Настройки → «Нормирование» (norms.ini [heat]) */
@@ -3094,7 +3132,9 @@ static NmOpRule g_nmOps[] = {
     NM_R(L"Сварка", NMS_WELD,
          L"ОМН на сварку в защитных газах: по длине шва и катету (карта 6), зачистка (75), установка (82), длина шва (90)",
          NMC_TSHT),
-    NM_R(L"Разметка", NMS_EST, NM_SRC_EST, NMC_TSHT),
+    NM_R(L"Разметка", NMS_MARK,
+         L"ОМН слесарные: оси отверстий (карта 1) и кернение (карта 2) по числу и Ø отверстий; без них — оценка",
+         NMC_TSHT),
     NM_R(L"Слесарная", NMS_EST, NM_SRC_EST, NMC_TSHT),
     NM_R(L"Маркирование", NMS_EST, NM_SRC_EST, NMC_TSHT),
     NM_R(L"Контроль", NMS_EST, L"контроль не нормируется: ни Тпз, ни Тшт", NMC_NONE),
@@ -3236,6 +3276,7 @@ static void nm_route(const NmBase *b, const TnRoute *r, const wchar_t *mass, con
              : rule->how == NMS_SAW  ? NMK_SAW
              : rule->how == NMS_GEAR ? NMK_GEAR
              : rule->how == NMS_WELD ? NMK_WELD
+             : rule->how == NMS_MARK ? NMK_MARK
                                      : NMK_EST;
     if (!wcscmp(r->op[i].sub, L"зачистка ТО")) kind = NMK_TECH; /* слесарная после ТО — норма технолога */
     if (!b->n && kind != NMK_CUT) continue; /* без таблиц — только То резки по нормам завода */
@@ -3259,6 +3300,10 @@ static void nm_route(const NmBase *b, const TnRoute *r, const wchar_t *mass, con
       nm_est(j);
     } else if (kind == NMK_SAW) {
       nm_saw(j);
+    } else if (kind == NMK_MARK) {
+      double q;
+      if (nm_na(nm_v(&j->c, L"партия"))) nm_lim_def(j, L"партия", &q);
+      nm_mark(j);
     } else if (kind == NMK_WELD) {
       double q;
       if (nm_na(nm_v(&j->c, L"партия"))) nm_lim_def(j, L"партия", &q);

@@ -206,14 +206,14 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
   /* сверлильная: глубина и партия (партия — общая) */
   nut_type(kD, L"l", L"12");
   nut_type(kD, L"партия", L"50");
-  nut_check(!nm_na(nu_op(kD)->to), L"015: глубина 12 — То сверления");
+  nut_check(!nm_na(nu_op(kD)->to), L"020: глубина 12 — То сверления");
   nut_check(nut_near(nut_v(kT, L"партия"), 50) && nut_near(nut_v(kD, L"партия"), 50), L"партия — обеим операциям");
   nut_check(!nm_na(nu_op(kT)->tshk) && !nm_na(nu_op(kD)->tshk), L"с партией — Тшк у обеих");
   nut_shot(L"4-drill.png");
 
   wchar_t line[400];
   nu_overrides(line, 400, TRUE);
-  nut_check(!wcscmp(line, L"партия 50, 010: L 120, подача 0,3, 015: глубина 12"), L"строка для чата");
+  nut_check(!wcscmp(line, L"партия 50, 010: L 120, подача 0,3, 020: глубина 12"), L"строка для чата");
   wchar_t txt[400];
   _snwprintf(txt, 400, L"   строка: %ls\r\n", line);
   wcscat(g_nutReport, txt);
@@ -244,9 +244,9 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
   nut_check(wcsstr(ans, L"Маршрут обработки — черновик") == ans && wcsstr(ans, L"\n015 Сверлильная.\n\nНормы времени (ОМН") &&
                 wcsstr(ans, L"\n\nПосле норм — своё.") && !wcsstr(ans, L"не посчитаны"),
             L"нормы в ответе заменены на месте, маршрут и хвост целы");
-  nut_check(wcsstr(ans, L"\nРежимы: 010 V ") && wcsstr(ans, L"015 V ") && wcsstr(ans, L" — изменить · подробно"),
+  nut_check(wcsstr(ans, L"\nРежимы: 010 V ") && wcsstr(ans, L"020 V ") && wcsstr(ans, L" — изменить · подробно"),
             L"в ответе — строка режимов обеих операций");
-  nut_check(wcsstr(g_nmLast->ask, L"010: L 120") && wcsstr(g_nmLast->ask, L"015: глубина 12") && !g_nuBatch[0],
+  nut_check(wcsstr(g_nmLast->ask, L"010: L 120") && wcsstr(g_nmLast->ask, L"020: глубина 12") && !g_nuBatch[0],
             L"правки — в вопросе беседы, в окне сброшены");
   nut_check(!nm_na(nu_op(kT)->to) && nut_near(nut_v(kD, L"партия"), 50), L"окно после «Применить» считает то же");
   _snwprintf(txt, 400, L"   ответ: %ls\r\n", wcsstr(ans, L"Режимы:") ? wcsstr(ans, L"Режимы:") : L"?");

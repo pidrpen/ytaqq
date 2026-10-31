@@ -1114,6 +1114,28 @@ static void tn_opc(TnRoute *r, const wchar_t *num, const wchar_t *sub, const wch
 /* после термической обработки — слесарная: зачистить окалину и заусенцы (правило технолога). Уже
    стоит слесарная сразу за ТО — к ней переход, иначе своя операция; уточнение — для нормы зачистки
    (norms.c): «зачистка ТО» — своя, «+зачистка ТО» — добавлена к слесарной */
+/* отверстия не по оси тела вращения (радиальные, смещённые, в торце не по оси) сверлят по разметке:
+   перед первой сверлильной — «Разметка» (правило технолога 31.10). Осевые (центровые) сверлят на
+   токарной — у тела вращения сверлильная бывает только для неосевых */
+static void tn_mark_holes(TnRoute *r) {
+  if (r->cls != TN_ROT || r->n >= 24) return;
+  for (int i = 0; i < r->n; i++) {
+    if (wcscmp(r->op[i].code, L"4210")) continue;
+    if (i > 0 && !wcscmp(r->op[i - 1].code, L"0101")) return;
+    memmove(&r->op[i + 1], &r->op[i], sizeof(TnOp) * (size_t)(r->n - i));
+    r->n++;
+    TnOp *o = &r->op[i];
+    memset(o, 0, sizeof(*o));
+    tn_cpy(o->op, 128, tn_dir_name(L"0101"));
+    tn_cpy(o->code, 8, L"0101");
+    tn_cpy(o->sub, 24, L"оси отверстий");
+    tn_cpy(o->what, 300, L"Разметить и накернить центры отверстий не по оси");
+    if (r->s.holes > 0) tn_cat(o->what, 300, L": "), tn_catnum(o->what, 300, r->s.holes), tn_cat(o->what, 300, L" отв.");
+    tn_cpy(o->why, TN_TXT, L"отверстия не по оси вращения — сверлят по разметке");
+    return;
+  }
+}
+
 #define TN_CLEAN_HEAT L"Зачистить после термической обработки"
 static void tn_after_heat(TnRoute *r) {
   for (int i = 0; i < r->n; i++) {
@@ -1613,6 +1635,7 @@ static void tn_route(const wchar_t *name, const wchar_t *mat, const wchar_t *tex
   if (s->coatKind) tn_cat(w, 300, L", покрытие");
   tn_opc(r, L"0200", NULL, w, L"");
   tn_after_heat(r);
+  tn_mark_holes(r);
 }
 
 /* текст для чата и окна чертежа */

@@ -458,6 +458,14 @@ static void test_saw_gear(NmBase *b) {
   r.s.mat = TNM_STEEL_STAIN;
   nm_route(b, &r, L"1,5", L"норма: шов 200, катет 5", &res);
   has("нержавейка — карта не перенесена", res.op[0].how, L"карты на сварку этого материала");
+  /* разметка перед сверлением отверстий не по оси вала: оси (карта 1) + кернение (карта 2)·1,3 */
+  tn_route(L"Ось", L"Сталь 45 ГОСТ 1050-2013", L"2 отв. Ø6\n§AX 1 Ø10H7\nØ40\nØ30h9\n1x45°\nRa 3,2\n§GB d=40 l=120\n", &r);
+  nm_route(b, &r, L"1,2", NULL, &res);
+  int mk = -1;
+  for (int i = 0; i < res.n; i++)
+    if (!wcscmp(res.op[i].op, L"Разметка")) mk = i;
+  ok("разметка — своя норма по ОМН слесарных", mk >= 0 && res.op[mk].kind == NMK_MARK);
+  if (mk >= 0) has("разметка: оси + кернение·1,3", res.op[mk].how, L"Тшт = разметка осей + кернение·отверстий·1,3 (объёмная деталь)");
 }
 
 static void test_turn(NmBase *b) {
