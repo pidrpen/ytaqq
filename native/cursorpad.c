@@ -1183,6 +1183,15 @@ static void draw_banner(HDC dc, RECT r, const wchar_t *title) {
   DrawTextW(dc, title, -1, &t, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 }
 
+/* «Чертёж»: тень под окном блокнота (CS_DROPSHADOW) — слоистому окну DWM тени не даёт,
+   а без неё лист на белом фоне держится только рамкой. Действует со следующего показа */
+static void pad_shadow_sync(HWND h) {
+  if (!h) return;
+  LONG_PTR cs = GetClassLongPtrW(h, GCL_STYLE);
+  LONG_PTR want = chertezh_on() ? (cs | CS_DROPSHADOW) : (cs & ~(LONG_PTR)CS_DROPSHADOW);
+  if (want != cs) SetClassLongPtrW(h, GCL_STYLE, want);
+}
+
 static void apply_theme(void) {
   if (g_theme < 0 || g_theme >= THEME_COUNT) g_theme = 0;
   COL_PAPER = kThemes[g_theme].paper;
@@ -1192,6 +1201,7 @@ static void apply_theme(void) {
   COL_SAGE = kThemes[g_theme].sage;
   COL_LINE = blend_rgb(COL_INK, COL_PAPER, 224);
   ui_sync_tokens();
+  pad_shadow_sync(g_hwnd);
   ui_brush_retire(g_paper, g_paperDark); /* классы окон модулей ещё помнят эти кисти */
   if (g_paper) DeleteObject(g_paper);
   if (g_paperDark) DeleteObject(g_paperDark);
@@ -2364,8 +2374,24 @@ static void draw_chertezh_stamp(HDC hdc, RECT rc, int dpi, int fh, const wchar_t
   if (hint && hint[0]) {
     if (g_fontSmall) SelectObject(hdc, g_fontSmall);
     SetTextColor(hdc, COL_MUTED);
-    RECT t = {x, top, rc.right - MulDiv(6, dpi, 96), rc.bottom};
-    DrawTextW(hdc, hint, -1, &t, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    RECT t = {x, top, rc.right - MulDiv(8, dpi, 96), rc.bottom};
+    /* не влезает — короче по смыслу, а не обрывом посреди слова: до « · » и до « — » */
+    wchar_t sh[128];
+    lstrcpynW(sh, hint, 128);
+    for (;;) {
+      SIZE sz = {0, 0};
+      GetTextExtentPoint32W(hdc, sh, (int)wcslen(sh), &sz);
+      if (sz.cx <= t.right - t.left) break;
+      wchar_t *cut = wcsstr(sh, L" · ");
+      wchar_t *last = NULL;
+      for (wchar_t *q = cut; q; q = wcsstr(q + 3, L" · ")) last = q;
+      if (last) {
+        *last = 0; /* последняя часть долой: «Enter — найти · пусто — ищу скопированное» → «Enter — найти» */
+        continue;
+      }
+      break;
+    }
+    DrawTextW(hdc, sh, -1, &t, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
   }
 }
 
@@ -5201,6 +5227,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     g_fontSmall = make_font(L"Segoe UI Variable Small", 8, FW_NORMAL);
     if (!g_fontSmall) g_fontSmall = make_font(L"Segoe UI", 8, FW_NORMAL);
 
+    pad_shadow_sync(hwnd); /* до первого показа: тень «Чертежа» сразу */
     g_pin = mk_btn(hwnd, L"Закрепить", ID_PIN);
     /* «Сброс» с 2026.09.23.41 — пункт «Очистить блокнот…» в меню «Ещё» */
     g_clipHistBtn = mk_btn(hwnd, L"▾", ID_CLIPHIST);
@@ -5476,6 +5503,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     /* с 2026.10.21 цветной полосы по левому краю нет: цвет акцента — только у
        главной кнопки, выбранного и фокуса; край окна даёт рамка Windows */
     if (pth->ornate) draw_knight_frame(hdc, rc);
+    ui_sheet_frame(hdc, rc, hwnd); /* «Чертёж»: рамка листа по периметру, иначе окно сливалось с белым */
     if (hdc != pdc) {
       BitBlt(pdc, 0, 0, rc.right, rc.bottom, hdc, 0, 0, SRCCOPY);
       SelectObject(hdc, pold);
