@@ -41,6 +41,9 @@ static wchar_t g_desCodesUser[64];
 static HWND g_desCodesEdit;
 static wchar_t g_desCodesAuto[SR_CODES][8];
 static int g_desCodesAutoN, g_desCodesAutoAt = -1; /* посчитаны при g_filesN == g_desCodesAutoAt */
+static wchar_t g_desCodesDir[MAX_PATH]; /* папка читаемого листа: коды и по именам соседних файлов */
+static wchar_t g_desCodesDirC[SR_CODES][8];
+static int g_desCodesDirN;
 
 /* dir — это base или папка внутри неё */
 static BOOL path_under(const wchar_t *dir, const wchar_t *base) {
@@ -2008,7 +2011,7 @@ static int files_des_codes_auto(wchar_t out[][8], int max) {
       if (names) {
         for (int i = 0; i < ix->n; i += step)
           if (ix->ent[i].name) names[m++] = ix->ent[i].name;
-        g_desCodesAutoN = sr_codes_from_names(names, m, g_desCodesAuto, SR_CODES);
+        g_desCodesAutoN = sr_codes_from_names(names, m, g_desCodesAuto, SR_CODES, 5);
         free(names);
       }
     }
@@ -2020,13 +2023,62 @@ static int files_des_codes_auto(wchar_t out[][8], int max) {
   return n;
 }
 
-/* Свои буквенные коды обозначений — в out (до max), ответ — сколько: вписанные в Настройках, пусто — взявшиеся
-   сами по архиву. На стенде — CP_DES_CODES */
+/* Коды по именам файлов папки, где лежит лист (path): чертежи бросают в окно прямо из папки сборки, а архива
+   может не быть или в нём другие имена — у соседних файлов «КОД 1234-…». Папка та же — как было */
+static void files_des_codes_dir(const wchar_t *path) {
+  wchar_t dir[MAX_PATH], pat[MAX_PATH];
+  lstrcpynW(dir, path, MAX_PATH);
+  wchar_t *sl = wcsrchr(dir, L'\\');
+  if (!sl) return;
+  *sl = 0;
+  files_lock();
+  BOOL same = !_wcsicmp(dir, g_desCodesDir);
+  files_unlock();
+  if (same) return;
+  enum { kMax = 4000 };
+  wchar_t(*nm)[16] = (wchar_t(*)[16])malloc(sizeof(*nm) * kMax); /* код и начало номера — 16 знаков хватит */
+  const wchar_t **p = (const wchar_t **)malloc(sizeof(*p) * kMax);
+  wchar_t c[SR_CODES][8];
+  int n = 0, got = 0;
+  _snwprintf(pat, MAX_PATH, L"%s\\*", dir);
+  pat[MAX_PATH - 1] = 0;
+  WIN32_FIND_DATAW fd;
+  HANDLE h = nm && p ? FindFirstFileExW(pat, FindExInfoBasic, &fd, FindExSearchNameMatch, NULL, FIND_FIRST_EX_LARGE_FETCH)
+                     : INVALID_HANDLE_VALUE;
+  if (h != INVALID_HANDLE_VALUE) {
+    do
+      if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) lstrcpynW(nm[n], fd.cFileName, 16), p[n] = nm[n], n++;
+    while (n < kMax && FindNextFileW(h, &fd));
+    FindClose(h);
+    got = sr_codes_from_names(p, n, c, SR_CODES, 2);
+  }
+  free(nm);
+  free(p);
+  files_lock();
+  lstrcpynW(g_desCodesDir, dir, MAX_PATH);
+  memcpy(g_desCodesDirC, c, sizeof(c[0]) * (size_t)got);
+  g_desCodesDirN = got;
+  files_unlock();
+}
+
+/* Свои буквенные коды обозначений — в out (до max), ответ — сколько: вписанные в Настройках; пусто — взявшиеся
+   сами по папке читаемого листа и по архиву. На стенде — CP_DES_CODES */
 static int files_des_codes(wchar_t out[][8], int max) {
   const wchar_t *user = g_desCodesUser;
 #ifdef SET_TEST
   const wchar_t *env = _wgetenv(L"CP_DES_CODES");
   if (env && env[0]) user = env;
 #endif
-  return user[0] ? sr_codes_parse(user, out, max) : files_des_codes_auto(out, max);
+  if (user[0]) return sr_codes_parse(user, out, max);
+  wchar_t a[SR_CODES][8];
+  int na = files_des_codes_auto(a, SR_CODES), n = 0;
+  files_lock();
+  for (int i = 0; i < g_desCodesDirN && n < max; i++) wcscpy(out[n++], g_desCodesDirC[i]);
+  files_unlock();
+  for (int i = 0; i < na && n < max; i++) {
+    int j = 0;
+    while (j < n && wcscmp(out[j], a[i])) j++;
+    if (j == n) wcscpy(out[n++], a[i]);
+  }
+  return n;
 }

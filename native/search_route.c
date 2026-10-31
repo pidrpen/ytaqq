@@ -152,9 +152,9 @@ static inline int sr_codes_parse(const wchar_t *s, wchar_t out[][8], int max) {
 }
 
 /* Коды по именам файлов архива: заглавные буквы (2–5) перед номером — «КЛМ 1234-…», «КЛМ1234-…»; латиница,
-   похожая на кириллицу, — кириллица. Свой код — стоит перед номером не реже чем у 1 % таких имён и не меньше 5
-   раз; в out — до max кодов, самые частые первыми. Ответ — сколько */
-static inline int sr_codes_from_names(const wchar_t *const *names, int n, wchar_t out[][8], int max) {
+   похожая на кириллицу, — кириллица. Свой код — стоит перед номером не реже чем у 1 % таких имён и не меньше
+   minCnt раз (архив — 5, одна папка — 2); в out — до max кодов, самые частые первыми. Ответ — сколько */
+static inline int sr_codes_from_names(const wchar_t *const *names, int n, wchar_t out[][8], int max, int minCnt) {
   wchar_t code[64][6];
   int cnt[64], nc = 0, withNum = 0, got = 0;
   for (int i = 0; i < n; i++) {
@@ -177,7 +177,7 @@ static inline int sr_codes_from_names(const wchar_t *const *names, int n, wchar_
     int b = -1;
     for (int k = 0; k < nc; k++)
       if (cnt[k] > 0 && (b < 0 || cnt[k] > cnt[b])) b = k;
-    if (b < 0 || cnt[b] < 5 || cnt[b] * 100 < withNum) break;
+    if (b < 0 || cnt[b] < minCnt || cnt[b] * 100 < withNum) break;
     wcscpy(out[got++], code[b]);
     cnt[b] = 0;
   }

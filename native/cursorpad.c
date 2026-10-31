@@ -6107,6 +6107,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
     if (argv && argc >= 3 && !wcscmp(argv[1], L"--xptest")) export_test(argv[2]);
     if (argv && argc >= 4 && !wcscmp(argv[1], L"--drawrec")) dr_test(argc, argv);
     if (argv && argc >= 4 && !wcscmp(argv[1], L"--drspecjson")) dr_spec_json_test(argv[2], argv[3]);
+    if (argv && argc >= 4 && !wcscmp(argv[1], L"--pkread")) pks_test(argc, argv); /* путь окна «ЭСИ и ТП» без окна */
     if (argv && argc >= 4 && !wcscmp(argv[1], L"--rename-by-stamp")) rs_test(argc, argv);
     if (argv && argc >= 4 && !wcscmp(argv[1], L"--fqread")) fq_test(argc, argv);
     if (argv && argc >= 4 && (!wcscmp(argv[1], L"--linktest") || !wcscmp(argv[1], L"--foldertest"))) flk_test(argc, argv);
