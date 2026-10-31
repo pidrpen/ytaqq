@@ -15,7 +15,8 @@ import time
 import urllib.request
 
 HERE = pathlib.Path(__file__).resolve().parent
-TAGS = ('name', 'mat', 'sheet', 'des', 'spec')  # des — графа «Обозначение», spec — таблица спецификации
+TAGS = ('name', 'mat', 'sheet', 'des', 'spec', 'corner')  # des — графа «Обозначение», spec — таблица спецификации,
+# corner — угол листа, когда линии штампа не найдены (JSON: des, name, mat, mass)
 DR_CELL = 260  # drawrec.c
 CLS = ['ROT', 'FLAT', 'BODY', 'UNK', 'BAR', 'BENT', 'REWORK']  # techno.c TN_*
 # операция маршрута → группа для сверки с разметкой (Слесарная и Контрольная не считаются)
