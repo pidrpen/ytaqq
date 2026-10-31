@@ -74,6 +74,7 @@ typedef struct {
   BOOL vlLater;       /* модель — вторым проходом (dr_vl_later): черновик по Tesseract сразу */
   int vlStamp;        /* rename_by_stamp: 1 — модель читает только графу «Обозначение», 2 — и «Наименование»; лист — нет */
   BOOL stampOnly;     /* нужен только штамп (rename_by_stamp): строки спецификации модель не читает — это минуты */
+  double kmm;         /* точек на мм — по штампу или dpi файла; 0 — неизвестно (угол листа для модели) */
   void *vlKeep;       /* лист и штамп для второго прохода (DrVlKeep); NULL — нет */
   double secs;
 } DrPage;
@@ -429,6 +430,7 @@ typedef struct {
   int sl, st;   /* левый верх штампа */
   int form;     /* 1, 2, 3 (2а) или 0 */
   double hmm;   /* высота штампа, мм */
+  int fit;      /* сколько вертикалей левой части (0, 17, 40, 55, 65 мм) сошлось с масштабом: из 5 */
 } DrStamp;
 
 /* есть ли точка горизонтали в столбце x в строках y±r */
@@ -439,6 +441,28 @@ static BOOL dr_hband(const DrLines *L, int y, int x, int r) {
 }
 
 static int dr_cmp_int(const void *a, const void *b) { return *(const int *)a - *(const int *)b; }
+
+/* Сколько вертикалей левой части штампа — 0, 17, 40, 55, 65 мм от его левого края — стоит на месте при левом
+   крае sl и масштабе k: в нижних строках (Н.контр., Утв.) они есть у всех форм. Допуск ~1 мм: масштаб, ошибочный
+   на 5 % (копия в 95 %), уводит 55 и 65 мм на 3 мм — такой не сойдётся */
+static int dr_stamp_fit(const DrLines *L, int sl, int by, double k) {
+  static const int X[5] = {0, 17, 40, 55, 65};
+  const DrImg *m = L->m;
+  int y0 = by - (int)(9 * k), y1 = by - (int)(1.5 * k), tol = (int)(1.0 * k) + 2, fit = 0;
+  if (y0 < 0 || y1 <= y0) return 0;
+  for (int i = 0; i < 5; i++) {
+    int xc = sl + (int)(X[i] * k + 0.5);
+    BOOL ok = FALSE;
+    for (int x = xc - tol; x <= xc + tol && !ok; x++) {
+      if (x < 0 || x >= m->w) continue;
+      int cov = 0;
+      for (int y = y0; y < y1; y++) cov += L->vm[(size_t)y * m->w + x];
+      ok = cov >= 0.7 * (y1 - y0);
+    }
+    fit += ok;
+  }
+  return fit;
+}
 
 /* штамп при заданных нижней и правой линиях рамки (уже стоим на линии) */
 static BOOL dr_stamp_at(const DrLines *L, double dpi, int by, int rx, DrStamp *s, wchar_t *why, int cap) {
@@ -507,22 +531,25 @@ static BOOL dr_stamp_at(const DrLines *L, double dpi, int by, int rx, DrStamp *s
     Wm = len[(g0 + g1) / 2];
   }
   free(len);
-  /* ширина: по dpi скана — если он настоящий; по линиям — если лист
-     копировали с масштабом (заводские копии бывают в 94 % от натуральной).
-     Линия у правой рамки бывает и шире штампа (ведомости), поэтому по
-     линиям — только уже, чем по dpi, и не сильно: от 80 % */
+  /* ширина: по dpi скана — если он настоящий; по линиям — если лист копировали с масштабом: копии в 94–95 %
+     и уменьшенные форматы (A1 и A2 на A3 — 50 и 71 %, A3 на A4 — 71 %; dpi у такого файла — от меньшего листа).
+     Линия у правой рамки бывает и шире штампа (ведомости), поэтому по линиям — только уже, чем по dpi. Какой
+     масштаб верный, решают вертикали левой части штампа (dr_stamp_fit), а не первая вертикаль около 65 мм:
+     её неверный масштаб тоже находит — и штамп выходил выше («форма 2») или не находился вовсе */
   int Wd = dpiOk ? (int)(185 * dpi / 25.4 + 0.5) : 0, Wc[2], nw = 0;
   if (Wd) Wc[nw++] = Wd;
-  if (Wm && (!Wd || (Wm < Wd * 0.98 && Wm > Wd * 0.8))) Wc[nw++] = Wm;
-  int top = -1;
-  for (int i = 0; i < nw && top < 0; i++) {
-    s->k = Wc[i] / 185.0;
-    s->sl = rx - Wc[i];
+  if (Wm && (!Wd || (Wm < Wd * 0.98 && Wm > Wd * 0.3))) Wc[nw++] = Wm;
+  int top = -1, fit = -1;
+  for (int i = 0; i < nw; i++) {
+    double kk = Wc[i] / 185.0;
+    int sl = rx - Wc[i];
     /* высота: вертикаль в 65 мм от левого края штампа */
     /* ±5 мм: старые бланки и покоробленный скан расходятся с ГОСТ на 2–3 мм */
-    int x65 = s->sl + (int)(65 * s->k + 0.5), hw = (int)(5 * s->k) + 1, tol = (int)(2 * s->k) + 2;
-    top = dr_vup(L, x65, hw, by, tol, (int)(1.2 * s->k) + 2);
+    int x65 = sl + (int)(65 * kk + 0.5), hw = (int)(5 * kk) + 1, tol = (int)(2 * kk) + 2;
+    int t = dr_vup(L, x65, hw, by, tol, (int)(1.2 * kk) + 2), f = t >= 0 ? dr_stamp_fit(L, sl, by, kk) : -1;
+    if (t >= 0 && f > fit) top = t, fit = f, s->k = kk, s->sl = sl;
   }
+  s->fit = fit;
   if (top < 0) {
     _snwprintf(why, cap, L"не найдена граница граф штампа");
     return FALSE;
@@ -570,10 +597,17 @@ static BOOL dr_find_stamp(const DrLines *L, double dpi, DrStamp *s, wchar_t *why
     _snwprintf(why, cap, L"рамка листа не найдена");
     return FALSE;
   }
-  for (int i = 0; i < nb; i++)
+  /* низ — первая снаружи нижняя линия, у которой штамп нашёлся (у линии обреза копии вверх нет вертикали, а
+     внутренние линии штампа лежат выше рамки); правый край при этом низе — где вертикали левой части сошлись
+     лучше: на копиях за рамкой отпечатан обрез листа, и штамп от него сдвинут на 3–5 мм */
+  DrStamp t;
+  BOOL got = FALSE;
+  wchar_t w[200];
+  for (int i = 0; i < nb && !got; i++)
     for (int j = 0; j < nr; j++)
-      if (dr_stamp_at(L, dpi, byc[i], rxc[j], s, why, cap)) return TRUE;
-  return FALSE;
+      if (dr_stamp_at(L, dpi, byc[i], rxc[j], &t, w, 200) && (!got || t.fit > s->fit)) *s = t, got = TRUE;
+      else if (!got) lstrcpynW(why, w, cap);
+  return got;
 }
 
 /* ---- вырезки и Tesseract ------------------------------------------------------- */
@@ -1778,6 +1812,7 @@ static BOOL dr_spec(DrImg *m, int thr, const DrLines *L, const DrStamp *s0, DrPa
   dr_words_free(&ws);
   /* строки → позиции: разделы, продолжения наименования */
   wchar_t sect[DR_CELL] = {0};
+  int lastRow = -1; /* последняя строка сетки с текстом */
   pg->rows = (DrSpecRow *)calloc((size_t)nr, sizeof(DrSpecRow));
   pg->nrows = 0;
   for (int r = 0; r < nr && pg->rows; r++) {
@@ -1789,6 +1824,7 @@ static BOOL dr_spec(DrImg *m, int thr, const DrLines *L, const DrStamp *s0, DrPa
         if (c != DS_NAME) onlyName = FALSE;
       }
     }
+    if (any) lastRow = r;
     if (!any || (!cell[r][DS_DES][0] && dr_spec_reserve(cell[r][DS_NAME]))) continue; /* «Резерв» — не продолжение наименования */
     const wchar_t *hend;
     int hs = onlyName ? dr_section_ocr(cell[r][DS_NAME], &hend) : -1;
@@ -1827,8 +1863,13 @@ static BOOL dr_spec(DrImg *m, int thr, const DrLines *L, const DrStamp *s0, DrPa
   free(conf);
   /* модели — с полем слева и над шапкой, как в замере 31.10: по тесной вырезке (ровно таблица) она на заводском
      листе зациклилась до предела токенов */
-  int vy = top - (int)(8 * k), vx = s->sl - (int)(15 * k);
-  dr_vl_spec(m, vx < 0 ? 0 : vx, vy < 0 ? 0 : vy, s->rx + (int)(2 * k), s->st, pg);
+  int vy = top - (int)(8 * k), vx = s->sl - (int)(15 * k), vb = s->st;
+  BOOL fill = FALSE; /* только заполненная часть таблицы (до строки под последней с текстом): замер скорости */
+#ifdef SET_TEST
+  fill = getenv("CP_SPECFILL") != NULL;
+#endif
+  if (fill && lastRow >= 0 && lastRow + 2 < ny) vb = ys[lastRow + 2];
+  dr_vl_spec(m, vx < 0 ? 0 : vx, vy < 0 ? 0 : vy, s->rx + (int)(2 * k), vb, pg);
   return TRUE;
 }
 
@@ -2296,6 +2337,51 @@ static void dr_vl_name(const DrImg *m, const DrStamp *s, DrPage *pg, int hmm) {
   dr_img_free(&im);
 }
 
+/* ключи по-русски: с «des»/«name» модель путала графы — в обозначение писала наименование («Сухарь», «Ребро») */
+static const wchar_t kDrVlCornerQ[] =
+    L"На картинке — правый нижний угол листа чертежа с основной надписью (штампом) по ГОСТ 2.104. Перепиши из неё "
+    L"точно, как написано: обозначение — код документа из букв и цифр с точками и дефисом (крупно, в верхней графе, "
+    L"например «АБВГ.123456.001» или «КЛМ 1234-567.01.02»), наименование — название изделия словами (графа под "
+    L"обозначением), материал (дробью — слово слева, потом верх дроби, « / », низ дроби), масса. Чего нет — пустая "
+    L"строка. Ничего не придумывай.";
+static const char kDrVlCornerSchema[] =
+    "{\"type\":\"object\",\"properties\":{\"обозначение\":{\"type\":\"string\"},\"наименование\":{\"type\":\"string\"},"
+    "\"материал\":{\"type\":\"string\"},\"масса\":{\"type\":\"string\"}},\"required\":[\"обозначение\",\"наименование\","
+    "\"материал\",\"масса\"],\"additionalProperties\":false}";
+
+/* Штамп по линиям не найден (копия с обрезом листа, рамка не та, лист без рамки) — графы читает модель по углу
+   листа: правые 215 × нижние 80 мм по dpi файла (штамп 185 × 55 мм с запасом на рамку и копию в 95 %), без dpi —
+   доли листа. Одним вопросом — обозначение, наименование, материал, масса; пустые графы штампа — из ответа */
+static void dr_vl_corner(const DrImg *m, DrPage *pg) {
+  int x0, y0;
+  if (pg->kmm > 2) x0 = m->w - (int)(215 * pg->kmm), y0 = m->h - (int)(80 * pg->kmm);
+  else if (m->w > m->h) x0 = m->w * 45 / 100, y0 = m->h * 65 / 100; /* альбомный: штамп в правом нижнем углу */
+  else x0 = m->w / 4, y0 = m->h * 72 / 100;                           /* книжный A4: штамп внизу почти во всю ширину */
+  DrImg im;
+  if (!dr_img_part(m, x0, y0, m->w, m->h, 1, 1600, &im)) return;
+  wchar_t *a = dr_vl_ask(&im, L"corner", kDrVlCornerQ, kDrVlCornerSchema, 200);
+  dr_img_free(&im);
+  if (!a) return;
+  const wchar_t *end = a + wcslen(a);
+  wchar_t v[DR_CELL], t[DR_CELL];
+  dr_json_field(a, end, L"обозначение", pg->vlDes, DR_CELL);
+  dr_json_field(a, end, L"наименование", pg->vlName, DR_CELL);
+  dr_json_field(a, end, L"материал", pg->vlMat, DR_CELL);
+  dr_json_field(a, end, L"масса", v, DR_CELL);
+  free(a);
+  ai_log(L"Штамп по линиям не найден — графы прочитала модель по углу листа: «%s»", pg->vlDes);
+  if (dr_find_des(pg->vlDes, t, DR_CELL) && dr_des_ok(t)) {
+    if (!pg->f[DF_DES][0] || pg->doubt[DF_DES]) lstrcpynW(pg->f[DF_DES], t, DR_CELL), pg->doubt[DF_DES] = 0;
+    if (pg->type == DRT_OTHER) pg->type = DRT_DRAW; /* штамп с обозначением есть — это чертёж */
+  }
+  if (!pg->f[DF_NAME][0] && pg->vlName[0]) lstrcpynW(pg->f[DF_NAME], pg->vlName, DR_CELL);
+  if (!pg->f[DF_MAT][0] && pg->vlMat[0]) lstrcpynW(pg->f[DF_MAT], pg->vlMat, DR_CELL), pg->doubt[DF_MAT] = 0;
+  if (!pg->f[DF_MASS][0] && v[0] && dr_number(v, t, DR_CELL, TRUE)) {
+    dr_mass_kg(v, t, DR_CELL);
+    lstrcpynW(pg->f[DF_MASS], t, DR_CELL), pg->doubt[DF_MASS] = 0;
+  }
+}
+
 static BOOL dr_vl_dumping(void) {
 #ifdef SET_TEST
   return g_drVlDump[0] != 0;
@@ -2321,7 +2407,12 @@ static void dr_vl_read(const DrImg *m, const DrStamp *s, DrPage *pg, BOOL sheet)
       free(a);
       dr_img_free(&im);
     }
+  } else {
+    dr_vl_corner(m, pg); /* линии штампа не найдены — всё равно модель, по углу листа, а не пусто */
   }
+  wchar_t t[DR_CELL];
+  if (s && (pg->vlStamp || dr_vl_dumping()) && !(dr_find_des(pg->vlDes, t, DR_CELL) && dr_des_ok(t)))
+    dr_vl_corner(m, pg); /* штамп найден со сдвигом (обрез листа на копии) — графа мимо: по углу листа */
   if (sheet && dr_img_part(m, 0, 0, m->w, m->h, 1, 1600, &im)) {
     /* конструктивные элементы и габариты спрашиваем, только если стоит адаптер, обученный их
        называть (draw-lora2… — элементы, draw-lora3… — и габариты): без обучения модель их выдумывает */
@@ -2379,6 +2470,24 @@ static const char kDrVlSpecSchema[] =
     "\"name\":{\"type\":\"string\"},\"qty\":{\"type\":\"string\"},\"note\":{\"type\":\"string\"}},"
     "\"required\":[\"sect\",\"fmt\",\"zone\",\"pos\",\"des\",\"name\",\"qty\",\"note\"],\"additionalProperties\":false}}},"
     "\"required\":[\"rows\"],\"additionalProperties\":false}";
+#ifdef SET_TEST
+/* замер скорости (CP_SPECFMT=2): ответ короче — раздел один раз на группу строк, без «Формата» и «Зоны» */
+static const wchar_t kDrVlSpecQ2[] =
+    L"На картинке — таблица спецификации (ГОСТ 2.106). Перепиши все заполненные строки сверху вниз точно, как "
+    L"написано, ничего не придумывая, сгруппировав по разделам: заголовок раздела («Документация», «Сборочные "
+    L"единицы», «Детали», «Стандартные изделия», «Прочие изделия», «Материалы», «Комплекты») — sect группы, строки "
+    L"под ним — её rows; строки выше первого заголовка — группа с пустым sect. В строке: pos — «Поз.», des — "
+    L"«Обозначение», name — «Наименование», qty — «Кол.», note — «Примечание». Наименование, перенесённое на "
+    L"следующую строку таблицы, — в той же строке через пробел. Пустые строки и «Резерв» пропусти.";
+static const char kDrVlSpecSchema2[] =
+    "{\"type\":\"object\",\"properties\":{\"sections\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{"
+    "\"sect\":{\"type\":\"string\",\"enum\":[\"\",\"Документация\",\"Комплексы\",\"Сборочные единицы\",\"Детали\","
+    "\"Стандартные изделия\",\"Прочие изделия\",\"Материалы\",\"Комплекты\"]},\"rows\":{\"type\":\"array\",\"items\":{"
+    "\"type\":\"object\",\"properties\":{\"pos\":{\"type\":\"string\"},\"des\":{\"type\":\"string\"},\"name\":{\"type\":"
+    "\"string\"},\"qty\":{\"type\":\"string\"},\"note\":{\"type\":\"string\"}},\"required\":[\"pos\",\"des\",\"name\","
+    "\"qty\",\"note\"],\"additionalProperties\":false}}},\"required\":[\"sect\",\"rows\"],\"additionalProperties\":false}}},"
+    "\"required\":[\"sections\"],\"additionalProperties\":false}";
+#endif
 /* таблица плотная: при 1600 лист 200 dpi ужимался вдвое — буквы 3,5 мм в 14 точек. До 3000 по длинной стороне
    лист идёт как есть, остальное llama.cpp ужимает сама до своих 4096 токенов картинки (models.json) */
 #define DR_SPEC_SIDE 3000
@@ -2509,7 +2618,11 @@ static void dr_vl_spec(const DrImg *m, int x0, int y0, int x1, int y1, DrPage *p
   BOOL want = TRUE;
 #endif
   DrImg im;
-  if (!want || pg->stampOnly || !dr_vl_want() || !dr_img_part(m, x0, y0, x1, y1, 1, DR_SPEC_SIDE, &im)) return;
+  int side = DR_SPEC_SIDE;
+#ifdef SET_TEST
+  if (getenv("CP_SPECSIDE")) side = atoi(getenv("CP_SPECSIDE")); /* замер скорости: картинка меньше — токенов меньше */
+#endif
+  if (!want || pg->stampOnly || !dr_vl_want() || !dr_img_part(m, x0, y0, x1, y1, 1, side, &im)) return;
 #ifdef SET_TEST
   if (g_drVlDump[0]) { /* строки Tesseract — тем же JSON, что у модели: замер «как сейчас» (eval_model.py) */
     size_t cap = 64 + (size_t)pg->nrows * DS_N * (DR_CELL * 2 + 16), n = 0;
@@ -2537,7 +2650,12 @@ static void dr_vl_spec(const DrImg *m, int x0, int y0, int x1, int y1, DrPage *p
     }
   }
 #endif
-  wchar_t *a = dr_vl_ask(&im, L"spec", kDrVlSpecQ, kDrVlSpecSchema, 2500);
+  const wchar_t *q = kDrVlSpecQ;
+  const char *sch = kDrVlSpecSchema;
+#ifdef SET_TEST
+  if (getenv("CP_SPECFMT")) q = kDrVlSpecQ2, sch = kDrVlSpecSchema2; /* разбор такого ответа — только в замере (cpvl) */
+#endif
+  wchar_t *a = dr_vl_ask(&im, L"spec", q, sch, 2500);
   /* ответ оборван на пределе (лист — не больше 30 строк, это ~1700 токенов): модель зациклилась — строки
      Tesseract, если есть, с «проверьте» лучше обрывка */
   BOOL cut = a && !wcschr(a, L']');
@@ -2629,6 +2747,7 @@ static void dr_recognize(IWICImagingFactory *f, DrPage *pg) {
   }
 #endif
   double k = stamp ? s.k : (ts_dpi_known(dpi) ? dpi / 25.4 : 0);
+  pg->kmm = k;
   if (stamp) {
     pg->form = s.form;
     const DrBox *bx = s.form == 1 ? kDrForm1 : s.form == 2 ? kDrForm2 : kDrForm2a;
@@ -2728,8 +2847,8 @@ static void dr_recognize(IWICImagingFactory *f, DrPage *pg) {
         dr_vl_read(&m, stamp && s.form == 1 ? &s : NULL, pg, TRUE);
     } else if (dr_vl_want())
       dr_vl_read(&m, stamp && s.form == 1 ? &s : NULL, pg, TRUE);
-  } else if (pg->vlStamp && dr_vl_want() && stamp && s.form == 1 && (pg->type == DRT_DRAW || pg->type == DRT_OTHER))
-    dr_vl_read(&m, &s, pg, FALSE); /* rename_by_stamp: наименование — моделью, без вопросов по листу */
+  } else if (pg->vlStamp && dr_vl_want() && (pg->type == DRT_DRAW || pg->type == DRT_OTHER))
+    dr_vl_read(&m, stamp && s.form == 1 ? &s : NULL, pg, FALSE); /* штамп моделью, без вопросов по листу; не найден — по углу */
   if (!pg->f[DF_DES][0] && pg->type != DRT_OTHER) pg->doubt[DF_DES] = 1;
   /* формат листа: по масштабу штампа, без него — по dpi файла */
   if (k > 0) {

@@ -15,7 +15,8 @@ import time
 import urllib.request
 
 HERE = pathlib.Path(__file__).resolve().parent
-TAGS = ('name', 'mat', 'sheet', 'des', 'spec')  # des — графа «Обозначение», spec — таблица спецификации
+TAGS = ('name', 'mat', 'sheet', 'des', 'spec', 'corner')  # des — графа «Обозначение», spec — таблица спецификации,
+# corner — угол листа, когда линии штампа не найдены (JSON: des, name, mat, mass)
 DR_CELL = 260  # drawrec.c
 CLS = ['ROT', 'FLAT', 'BODY', 'UNK', 'BAR', 'BENT', 'REWORK']  # techno.c TN_*
 # операция маршрута → группа для сверки с разметкой (Слесарная и Контрольная не считаются)
@@ -364,6 +365,9 @@ def spec_rows(ans):
     except ValueError:
         return []
     rows = (j or {}).get('rows') if isinstance(j, dict) else None
+    if isinstance(j, dict) and isinstance(j.get('sections'), list):  # короткий ответ (CP_SPECFMT=2): раздел на группу
+        rows = [{**r, 'sect': g.get('sect', '')} for g in j['sections'] if isinstance(g, dict)
+                for r in g.get('rows') or [] if isinstance(r, dict)]
     return [{k: str(r.get(k) or '').strip() for k in SPEC_KEYS} for r in rows or [] if isinstance(r, dict)]
 
 
