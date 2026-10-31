@@ -225,7 +225,10 @@ static void pks_from_page(DrPage *pg, PkStRes *r) {
     r->how = 1;
     r->doubt = pg->doubt[DF_DES] || !dr_des_ok(v);
   }
-  if (!r->how) return;
+  if (!r->how) { /* обозначение штампа не прочиталось (возьмётся из имени файла) — строки спецификации всё равно её */
+    if (pg->type == DRT_SPEC) r->spec = TRUE, r->asmDoc = TRUE, lstrcpynW(r->kind, L"Сборочные единицы", 40), pks_spec_rows(pg, r);
+    return;
+  }
   wchar_t name[DR_CELL];
   lstrcpynW(name, rs_name(pg), DR_CELL);
   if (pks_name_junk(name)) name[0] = 0, r->nameJunk = TRUE; /* мусор — не вписывать, «проверьте» */
@@ -315,7 +318,7 @@ static void pks_read(IWICImagingFactory *f, PkStRes *r) {
       if (doc != 1) r->docCode[0] = 0;
       r->doc = doc;
       r->how = 3;
-      r->asmDoc = doc == 1;
+      r->asmDoc = doc == 1 || r->spec;
       if (!r->kind[0]) lstrcpynW(r->kind, r->asmDoc ? L"Сборочные единицы" : !doc ? L"Детали" : L"", 40);
     }
   }
@@ -1207,5 +1210,39 @@ static void pk_stamp_test_drop(void) {
   *o = 0;
   GlobalUnlock(g);
   PostMessageW(g_pkWnd, WM_DROPFILES, (WPARAM)g, 0);
+}
+
+/* --pkread выход.txt файл… — файлы тем же pks_read, что поток окна при броске: что ляжет строкой «Изделий»
+   (обозначение, наименование, вид, чем прочитано) и строками «Состава» (« ?» — «проверьте»). Окно не открывается,
+   черновик package.txt не трогается */
+static void pks_test(int argc, wchar_t **argv) {
+  CoInitializeEx(NULL, COINIT_MULTITHREADED);
+  IWICImagingFactory *f = NULL;
+  CoCreateInstance(&kTmClsidFactory, NULL, CLSCTX_INPROC_SERVER, &kTmIidFactory, (void **)&f);
+  ShareBuf b;
+  memset(&b, 0, sizeof(b));
+  static const wchar_t *const kHow[4] = {L"не прочитано", L"Tesseract", L"модель", L"имя файла"};
+  for (int i = 3; i < argc && f; i++) {
+    PkStRes *r = (PkStRes *)calloc(1, sizeof(PkStRes));
+    if (!r) break;
+    r->i = i - 3, r->n = argc - 3, r->parentRow = r->row = -1;
+    lstrcpynW(r->file, argv[i], MAX_PATH);
+    ULONGLONG t0 = GetTickCount64();
+    pks_read(f, r);
+    sb_add(&b, L"== %ls · %.1f с · %ls%ls · %ls · «%ls» · %ls%ls%ls\n", tm_base(r->file), (GetTickCount64() - t0) / 1000.0,
+           r->des[0] ? r->des : L"—", r->doubt ? L" ?" : L"", kHow[r->how & 3], r->name, r->kind[0] ? r->kind : L"—",
+           r->note[0] ? L" · " : L"", r->note);
+    for (int k = 0; k < r->nrows; k++) {
+      const PkStRow *o = &r->rows[k];
+      sb_add(&b, L"  %ls | %ls | %ls | %ls | поз %ls%ls\n", o->kind, o->des, o->name, o->qty, o->pos, o->doubt ? L" | ?" : L"");
+    }
+    free(r->rows);
+    free(r->route);
+    free(r);
+  }
+  if (b.w) share_write_ex(argv[2], b.w, TRUE);
+  free(b.w);
+  if (f) IWICImagingFactory_Release(f);
+  ExitProcess(0);
 }
 #endif

@@ -656,6 +656,7 @@ static int ag_rename_by_stamp(const AgJson *j, AgFs *fs, wchar_t *out, int cap, 
       pg->wantText = FALSE;
       pg->vlLater = FALSE;
       pg->vlStamp = withName ? 2 : 1;
+      pg->stampOnly = TRUE;
       dr_recognize(f, pg);
       const wchar_t *ext = wcsrchr(base, L'.');
       if (!ext) ext = L"";

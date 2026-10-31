@@ -241,7 +241,7 @@ int main(void) {
     names[k++] = L"ГОСТ 1050-2013.pdf";
     names[k++] = L"KLM 1234-999.tif"; /* латиница — тот же код */
     wchar_t codes[SR_CODES][8];
-    int n = sr_codes_from_names(names, k, codes, SR_CODES);
+    int n = sr_codes_from_names(names, k, codes, SR_CODES, 5);
     g_n++;
     if (!(n == 2 && !wcscmp(codes[0], L"КЛМ") && !wcscmp(codes[1], L"ПРС"))) {
       g_fail++;

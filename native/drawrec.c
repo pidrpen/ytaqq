@@ -73,6 +73,7 @@ typedef struct {
   BOOL wantText;      /* прочитать и весь лист (кнопка «Маршрут обработки») */
   BOOL vlLater;       /* модель — вторым проходом (dr_vl_later): черновик по Tesseract сразу */
   int vlStamp;        /* rename_by_stamp: 1 — модель читает только графу «Обозначение», 2 — и «Наименование»; лист — нет */
+  BOOL stampOnly;     /* нужен только штамп (rename_by_stamp): строки спецификации модель не читает — это минуты */
   void *vlKeep;       /* лист и штамп для второго прохода (DrVlKeep); NULL — нет */
   double secs;
 } DrPage;
@@ -1083,10 +1084,16 @@ static void dr_norm_des(const wchar_t *in, wchar_t *out, int cap) {
      взявшемуся сам по именам архива */
   wchar_t codes[SR_CODES][8];
   int nc = files_des_codes(codes, SR_CODES);
-  if (nc) {
+  /* код — первое слово из букв перед номером, хоть бы перед ним и был мусор («¢ АNЕ 3426-…») */
+  for (int i = 0; nc && out[i]; i++) {
+    if (i && out[i - 1] != L' ') continue;
+    int l = 0;
+    while (l < 6 && (dr_isupper_cyr(out[i + l]) || (out[i + l] >= L'A' && out[i + l] <= L'Z'))) l++;
+    if (l < 2 || !(dr_isdig(out[i + l]) || (out[i + l] == L' ' && dr_isdig(out[i + l + 1])))) continue;
     wchar_t was[DR_CELL];
     lstrcpynW(was, out, DR_CELL);
-    if (dr_des_fix_code(out, cap, codes, nc)) ai_log(L"Обозначение: «%s» → «%s» — буквенный код по своим", was, out);
+    if (dr_des_fix_code(out + i, cap - i, codes, nc)) ai_log(L"Обозначение: «%s» → «%s» — буквенный код по своим", was, out);
+    break;
   }
 }
 
@@ -1290,6 +1297,52 @@ static void dr_fix_latin(wchar_t *s) {
   }
 }
 
+/* Курсив ГОСТ: заглавную «С» в начале слова Tesseract читает «(» — «(ухарь», «(борочный чертеж». Скобка без
+   пары в том же слове перед строчной буквой — это «С» */
+static void dr_fix_paren_c(wchar_t *s) {
+  for (int i = 0; s[i]; i++) {
+    if (s[i] != L'(' || (i && s[i - 1] != L' ') || s[i + 1] < L'а' || s[i + 1] > L'я') continue;
+    int j = i + 1;
+    while (s[j] && s[j] != L' ' && s[j] != L')') j++;
+    if (s[j] != L')') s[i] = L'С';
+  }
+}
+
+/* Графа «Наименование», прочитанная Tesseract, — мусор: слова соседних граф штампа («№ докум.», «Подп.»,
+   «Разраб.», «Масштаб»…) или кириллица вперемешку с латинскими словами, у которых нет русской пары
+   («Гриспосодление SYOOTONOLXHOE», «fama Сидоренко Welz»: курсив ГОСТ, смещённая графа). DIN, ISO, AISI — свои */
+static BOOL dr_stamp_junk(const wchar_t *s) {
+  static const wchar_t *const kStampW[] = {L"докум", L"подп", L"разраб", L"пров", L"контр", L"утв", L"лит",
+                                           L"масса", L"масштаб", L"изм", L"листов", L"дата"};
+  static const wchar_t *const kLatOk[] = {L"DIN", L"ISO", L"AISI", L"ASTM", L"SAE", L"EN"};
+  BOOL cyr = FALSE, lat = FALSE;
+  for (const wchar_t *p = s; *p;) {
+    while (*p == L' ') p++;
+    wchar_t w[32];
+    int l = 0, nl = 0;
+    while (*p && *p != L' ') {
+      if (l < 31) w[l++] = *p;
+      nl += (*p >= L'A' && *p <= L'Z') || (*p >= L'a' && *p <= L'z');
+      cyr |= *p >= 0x400 && *p <= 0x4FF;
+      p++;
+    }
+    w[l] = 0;
+    if (wcschr(w, L'№')) return TRUE;
+    BOOL ok = FALSE;
+    for (size_t i = 0; i < sizeof(kLatOk) / sizeof(kLatOk[0]); i++) ok |= !wcscmp(w, kLatOk[i]);
+    if (nl >= 3 && !ok) lat = TRUE;
+    wchar_t low[32];
+    lstrcpynW(low, w[0] == L'(' ? w + 1 : w, 32);
+    CharLowerBuffW(low, (DWORD)wcslen(low));
+    for (int e = (int)wcslen(low); e > 0 && (low[e - 1] == L'.' || low[e - 1] == L','); e--) low[e - 1] = 0;
+    for (size_t i = 0; i < sizeof(kStampW) / sizeof(kStampW[0]); i++)
+      if (!wcscmp(low, kStampW[i]) || (wcslen(kStampW[i]) >= 5 && !wcsncmp(low, kStampW[i], wcslen(kStampW[i])) &&
+                                       wcslen(low) <= wcslen(kStampW[i]) + 2))
+        return TRUE;
+  }
+  return cyr && lat;
+}
+
 static void dr_field_set(DrPage *pg, int f, const wchar_t *raw, int conf) {
   wchar_t v[DR_CELL];
   lstrcpynW(v, raw, DR_CELL);
@@ -1327,8 +1380,9 @@ static void dr_field_set(DrPage *pg, int f, const wchar_t *raw, int conf) {
     bad = FALSE; /* пустой «Лист» у однолистового — по ГОСТ */
     break;
   default:
-    dr_fix_latin(v);
-    if (!v[0]) bad = FALSE;
+    dr_fix_paren_c(v), dr_fix_latin(v);
+    if (f == DF_NAME && dr_stamp_junk(v)) v[0] = 0, bad = TRUE; /* не вписывать: пусто и «проверьте» */
+    else if (!v[0]) bad = FALSE;
     break;
   }
   if (bad) {
@@ -1380,6 +1434,7 @@ static void dr_spec_cell(DrSpecRow *o, int c, const wchar_t *in, int conf) {
     dr_norm_fmt(t);
     bad = !dr_fmt_ok(t);
   }
+  if (c == DS_NAME) dr_fix_paren_c(t);
   if (c == DS_NAME || c == DS_NOTE) dr_fix_latin(t), dr_fix_thread(t);
   if (t[0] && (c == DS_POS || c == DS_QTY)) {
     if (dr_number(t, d, DR_CELL, c == DS_QTY)) lstrcpyW(t, d);
@@ -1395,6 +1450,76 @@ static BOOL dr_spec_reserve(const wchar_t *name) {
   lstrcpynW(low, name, 8);
   CharLowerBuffW(low, (DWORD)wcslen(low));
   return !wcsncmp(low, L"резерв", 6);
+}
+
+/* правок (вставка, удаление, замена буквы) от a до b; строки до 31 знака */
+static int dr_lev(const wchar_t *a, int la, const wchar_t *b, int lb) {
+  int d[32];
+  if (la > 31 || lb > 31) return 99;
+  for (int j = 0; j <= lb; j++) d[j] = j;
+  for (int i = 1; i <= la; i++) {
+    int prev = d[0];
+    d[0] = i;
+    for (int j = 1; j <= lb; j++) {
+      int t = d[j], v = prev + (a[i - 1] != b[j - 1]);
+      if (d[j] + 1 < v) v = d[j] + 1;
+      if (d[j - 1] + 1 < v) v = d[j - 1] + 1;
+      d[j] = v, prev = t;
+    }
+  }
+  return d[lb];
+}
+
+static const wchar_t *const kDrSectTitle[] = {L"Документация", L"Комплексы", L"Сборочные единицы", L"Детали",
+                                              L"Стандартные изделия", L"Прочие изделия", L"Материалы", L"Комплекты"};
+static const int kDrSectId[] = {0, 1, 2, 3, 4, 5, 6, 1}; /* номер раздела, как у dr_section */
+
+/* Заголовок раздела в словах Tesseract с w: курсив ГОСТ теряет и путает первую букву («(борочные»,
+   «(тандбартные изделия») — слово сверяется с названием по ГОСТ 2.106 с допуском в четверть букв (не
+   больше двух), у двухсловного — и второе, если оно есть. Ответ — номер в kDrSectTitle, *end — где
+   заголовок кончился; -1 — не заголовок */
+static int dr_section_ocr(const wchar_t *w, const wchar_t **end) {
+  while (*w && !IsCharAlphaW(*w)) w++;
+  for (size_t i = 0; i < sizeof(kDrSectTitle) / sizeof(kDrSectTitle[0]); i++) {
+    const wchar_t *t = kDrSectTitle[i], *p = w;
+    BOOL ok = TRUE;
+    for (int word = 0; ok && *t; word++) {
+      wchar_t a[32], b[32];
+      int la = 0, lb = 0;
+      while (*p && !IsCharAlphaW(*p) && word) p++; /* второе слово — через пробел и скобки */
+      while (*p && *p != L' ' && la < 31) a[la++] = *p++;
+      while (*t && *t != L' ' && lb < 31) b[lb++] = *t++;
+      while (*t == L' ') t++;
+      a[la] = b[lb] = 0;
+      if (word && !la) break; /* второго слова нет — хватит первого */
+      CharLowerBuffW(a, (DWORD)la), CharLowerBuffW(b, (DWORD)lb);
+      while (la && !IsCharAlphaW(a[la - 1])) a[--la] = 0;
+      int tol = lb / 4 < 2 ? lb / 4 : 2;
+      ok = dr_lev(a, la, b, lb) <= tol;
+    }
+    if (ok) {
+      if (end) *end = p;
+      return (int)i;
+    }
+  }
+  return -1;
+}
+
+/* Заголовок раздела, склеенный Tesseract со строкой («Кальцо i (тандбартные изделия»): двухсловный — или
+   после скобки — в середине наименования. Найден — вырезается из name, ответ — номер в kDrSectTitle; -1 — нет */
+static int dr_spec_cut_head(wchar_t *name) {
+  for (wchar_t *p = name; (p = wcschr(p, L' ')) != NULL; p++) {
+    const wchar_t *end;
+    int i = dr_section_ocr(p + 1, &end);
+    if (i < 0) continue;
+    BOOL paren = p[1] == L'(', two = FALSE; /* двухсловный — если в тексте оба слова */
+    for (const wchar_t *q = p + 1; q < end && !two; q++) two = *q == L' ' && wcschr(kDrSectTitle[i], L' ') != NULL;
+    if (!paren && !two) continue;
+    memmove(p, end, (wcslen(end) + 1) * sizeof(wchar_t));
+    dr_trim(name);
+    return i;
+  }
+  return -1;
 }
 
 static void dr_vl_spec(const DrImg *m, int x0, int y0, int x1, int y1, DrPage *pg);
@@ -1665,10 +1790,14 @@ static BOOL dr_spec(DrImg *m, int thr, const DrLines *L, const DrStamp *s0, DrPa
       }
     }
     if (!any || (!cell[r][DS_DES][0] && dr_spec_reserve(cell[r][DS_NAME]))) continue; /* «Резерв» — не продолжение наименования */
-    if (onlyName && dr_section(cell[r][DS_NAME]) >= 0) {
-      lstrcpynW(sect, cell[r][DS_NAME], DR_CELL);
+    const wchar_t *hend;
+    int hs = onlyName ? dr_section_ocr(cell[r][DS_NAME], &hend) : -1;
+    if (hs >= 0 && !*hend) { /* заголовок раздела — название по ГОСТ, а не как прочиталось («(борочные») */
+      lstrcpynW(sect, kDrSectTitle[hs], DR_CELL);
       continue;
     }
+    hs = dr_spec_cut_head(cell[r][DS_NAME]); /* заголовок, склеенный со строкой под ним: строка — уже в нём */
+    if (hs >= 0) lstrcpynW(sect, kDrSectTitle[hs], DR_CELL);
     if (onlyName && pg->nrows > 0) { /* продолжение наименования */
       DrSpecRow *p = &pg->rows[pg->nrows - 1];
       size_t l = wcslen(p->c[DS_NAME]);
@@ -1676,16 +1805,30 @@ static BOOL dr_spec(DrImg *m, int thr, const DrLines *L, const DrStamp *s0, DrPa
       if (conf[r][DS_NAME] < 70) p->doubt[DS_NAME] = 1;
       continue;
     }
+    if (!cell[r][DS_NAME][0] && !cell[r][DS_DES][0] && !cell[r][DS_QTY][0]) continue; /* от строки — один мусор */
     DrSpecRow *o = &pg->rows[pg->nrows++];
     lstrcpynW(o->c[DS_SECT], sect, DR_CELL);
+    o->doubt[DS_SECT] = !sect[0];
     for (int c = DS_FMT; c < DS_N; c++) dr_spec_cell(o, c, cell[r][c], conf[r][c]);
+    static const int kNum[2] = {DS_POS, DS_QTY};
+    for (int q = 0; q < 2; q++) { /* «д» вместо цифры — не число: пусто, «проверьте» */
+      wchar_t t[DR_CELL];
+      int c = kNum[q];
+      if (o->c[c][0] && !dr_number(o->c[c], t, DR_CELL, c == DS_QTY)) o->c[c][0] = 0, o->doubt[c] = 1;
+    }
   }
-  for (int r = 0; r < pg->nrows; r++) dr_fix_latin(pg->rows[r].c[DS_NAME]), dr_fix_thread(pg->rows[r].c[DS_NAME]);
+  for (int r = 0; r < pg->nrows; r++) {
+    wchar_t *nm = pg->rows[r].c[DS_NAME];
+    dr_fix_paren_c(nm), dr_fix_latin(nm), dr_fix_thread(nm);
+  }
   dr_spec_fix_des(pg);
   pg->rowsBy = pg->nrows ? 1 : 0;
   free(cell);
   free(conf);
-  dr_vl_spec(m, s->sl, top, s->rx, s->st, pg);
+  /* модели — с полем слева и над шапкой, как в замере 31.10: по тесной вырезке (ровно таблица) она на заводском
+     листе зациклилась до предела токенов */
+  int vy = top - (int)(8 * k), vx = s->sl - (int)(15 * k);
+  dr_vl_spec(m, vx < 0 ? 0 : vx, vy < 0 ? 0 : vy, s->rx + (int)(2 * k), s->st, pg);
   return TRUE;
 }
 
@@ -2140,6 +2283,19 @@ static void dr_vl_des(const DrImg *m, const DrStamp *s, DrPage *pg, int hmm) {
   dr_img_free(&im);
 }
 
+/* графа «Наименование» моделью: 65…135 мм по ширине, от 15 мм под верхом штампа высотой hmm до низа графы
+   (форма 1 — 25 мм над материалом, форма 2 — до низа штампа) */
+static void dr_vl_name(const DrImg *m, const DrStamp *s, DrPage *pg, int hmm) {
+  DrImg im;
+  int y0 = s->by - (int)((hmm - 14) * s->k), y1 = hmm == 55 ? s->by - (int)(14 * s->k) : s->by + (int)(1 * s->k);
+  if (!dr_img_part(m, s->sl + (int)(64 * s->k), y0, s->sl + (int)(136 * s->k), y1, 2, 0, &im)) return;
+  wchar_t *a = dr_vl_ask(&im, L"name", L"На картинке — графа «Наименование» основной надписи чертежа. Перепиши текст точно, как "
+                                       L"написано, одной строкой. Только текст.", NULL, 80);
+  dr_vl_line(a, pg->vlName, DR_CELL);
+  free(a);
+  dr_img_free(&im);
+}
+
 static BOOL dr_vl_dumping(void) {
 #ifdef SET_TEST
   return g_drVlDump[0] != 0;
@@ -2155,13 +2311,7 @@ static void dr_vl_read(const DrImg *m, const DrStamp *s, DrPage *pg, BOOL sheet)
   if (s) { /* графы штампа формы 1: наименование 65…135 × 15…40 мм, материал 65…135 × 40…55 мм от верха */
     int x0 = s->sl + (int)(64 * s->k), x1 = s->sl + (int)(136 * s->k);
     if (pg->vlStamp || dr_vl_dumping()) dr_vl_des(m, s, pg, 55);
-    if (pg->vlStamp != 1 && dr_img_part(m, x0, s->by - (int)(41 * s->k), x1, s->by - (int)(14 * s->k), 2, 0, &im)) {
-      a = dr_vl_ask(&im, L"name", L"На картинке — графа «Наименование» основной надписи чертежа. Перепиши текст точно, как "
-                         L"написано, одной строкой. Только текст.", NULL, 80);
-      dr_vl_line(a, pg->vlName, DR_CELL);
-      free(a);
-      dr_img_free(&im);
-    }
+    if (pg->vlStamp != 1) dr_vl_name(m, s, pg, 55);
     /* материал имени не нужен; маршруту по листу (ЭСИ и ТП: штамп и операции сразу) — нужен */
     if ((!pg->vlStamp || pg->wantText) && dr_img_part(m, x0, s->by - (int)(16 * s->k), x1, s->by + (int)(1 * s->k), 2, 0, &im)) {
       a = dr_vl_ask(&im, L"mat", L"На картинке — графа «Материал» основной надписи чертежа. Перепиши точно, как написано. Если "
@@ -2211,9 +2361,9 @@ static void dr_vl_read(const DrImg *m, const DrStamp *s, DrPage *pg, BOOL sheet)
 /* ---- спецификация моделью -------------------------------------------------------------
    Таблица целиком (от верха таблицы до штампа, во всю ширину) — строки JSON;
    раздел — у каждой строки, перенос наименования — одной строкой. Ответ ложится в те же DrSpecRow,
-   что и строки Tesseract: состав сборки (pk_stamp.c) берёт их как есть. Пока только для замера
-   (native/train: выгрузка, CP_SPECVL) — в работу, когда модель на спецификациях окажется точнее
-   Tesseract */
+   что и строки Tesseract: состав сборки (pk_stamp.c) берёт их как есть. С 31.10 — в работе: модель готова —
+   строки её, строки Tesseract — только запасом (модели нет или она ничего не вернула). Замер на заводских
+   копиях: модель 45 из 61 строки целиком, Tesseract по сетке — 20; на стенде — CP_SPECVL с CP_DRVL */
 static const wchar_t kDrVlSpecQ[] =
     L"На картинке — таблица спецификации (ГОСТ 2.106) с графами «Формат», «Зона», «Поз.», «Обозначение», "
     L"«Наименование», «Кол.», «Примечание». Перепиши все заполненные строки сверху вниз точно, как написано, "
@@ -2268,6 +2418,15 @@ static BOOL dr_spec_doc_row(const DrSpecRow *o) {
   return FALSE;
 }
 
+/* строка — продолжение наименования строкой материала («Лист Б-ПН-0-20 ГОСТ 19903-74 / Ст3пс5…»): ни позиции, ни
+   количества, ни формата, а в «Обозначении» слово без цифр */
+static BOOL dr_spec_mat_line(const DrSpecRow *o) {
+  if (o->c[DS_POS][0] || o->c[DS_QTY][0] || o->c[DS_FMT][0] || !o->c[DS_DES][0]) return FALSE;
+  for (const wchar_t *q = o->c[DS_DES]; *q; q++)
+    if (dr_isdig(*q)) return FALSE;
+  return TRUE;
+}
+
 /* строки спецификации из ответа модели — вместо прочитанных Tesseract; FALSE — строк нет */
 static BOOL dr_json_spec(const wchar_t *j, DrPage *pg) {
   const wchar_t *p = j ? wcsstr(j, L"\"rows\"") : NULL;
@@ -2309,6 +2468,10 @@ static BOOL dr_json_spec(const wchar_t *j, DrPage *pg) {
     } else if (onlyName && n > 0) {
       size_t l = wcslen(rows[n - 1].c[DS_NAME]);
       _snwprintf(rows[n - 1].c[DS_NAME] + l, DR_CELL - l, L"%s%s", l ? L" " : L"", o->c[DS_NAME]);
+    } else if (n > 0 && dr_spec_mat_line(o)) { /* материал дробью под «Планкой»: «Лист» модель кладёт в обозначение */
+      size_t l = wcslen(rows[n - 1].c[DS_NAME]);
+      _snwprintf(rows[n - 1].c[DS_NAME] + l, DR_CELL - l, L"%s%s %s", l ? L" " : L"", o->c[DS_DES], o->c[DS_NAME]);
+      dr_trim(rows[n - 1].c[DS_NAME]);
     } else {
       BOOL doc = dr_spec_doc_row(o);
       if (doc) lstrcpynW(o->c[DS_SECT], L"Документация", DR_CELL); /* документ — по содержанию, где бы ни был заголовок */
@@ -2343,10 +2506,10 @@ static void dr_vl_spec(const DrImg *m, int x0, int y0, int x1, int y1, DrPage *p
 #ifdef SET_TEST
   BOOL want = g_drVlDump[0] || getenv("CP_SPECVL");
 #else
-  BOOL want = getenv("CP_SPECVL") != NULL;
+  BOOL want = TRUE;
 #endif
   DrImg im;
-  if (!want || !dr_vl_want() || !dr_img_part(m, x0, y0, x1, y1, 1, DR_SPEC_SIDE, &im)) return;
+  if (!want || pg->stampOnly || !dr_vl_want() || !dr_img_part(m, x0, y0, x1, y1, 1, DR_SPEC_SIDE, &im)) return;
 #ifdef SET_TEST
   if (g_drVlDump[0]) { /* строки Tesseract — тем же JSON, что у модели: замер «как сейчас» (eval_model.py) */
     size_t cap = 64 + (size_t)pg->nrows * DS_N * (DR_CELL * 2 + 16), n = 0;
@@ -2375,9 +2538,45 @@ static void dr_vl_spec(const DrImg *m, int x0, int y0, int x1, int y1, DrPage *p
   }
 #endif
   wchar_t *a = dr_vl_ask(&im, L"spec", kDrVlSpecQ, kDrVlSpecSchema, 2500);
-  if (a && dr_json_spec(a, pg)) ai_log(L"Спецификация: строки прочитала модель (%d)", pg->nrows);
+  /* ответ оборван на пределе (лист — не больше 30 строк, это ~1700 токенов): модель зациклилась — строки
+     Tesseract, если есть, с «проверьте» лучше обрывка */
+  BOOL cut = a && !wcschr(a, L']');
+  if (cut && pg->nrows) ai_log(L"Спецификация: ответ модели оборван (зациклилась) — строки Tesseract (%d)", pg->nrows);
+  else if (a && dr_json_spec(a, pg)) ai_log(L"Спецификация: строки прочитала модель (%d)", pg->nrows);
   free(a);
   dr_img_free(&im);
+}
+
+/* Строки, прочитанные одним Tesseract (модели нет или она не ответила): «Сборочный чертеж» без номера —
+   Tesseract берёт от него только код («АNЕ») — обозначением самой сборки с «СБ» и под вопросом, в
+   «Документацию»; обозначение без цифр — под вопросом: всё это ляжет в состав с «проверьте» */
+static void dr_spec_tess_rows(DrPage *pg) {
+  wchar_t own[DR_CELL] = L"", v[DR_CELL];
+  if (pg->vlDes[0] && dr_find_des(pg->vlDes, v, DR_CELL) && dr_des_ok(v)) lstrcpynW(own, v, DR_CELL);
+  else if (pg->f[DF_DES][0] && !pg->doubt[DF_DES] && dr_des_ok(pg->f[DF_DES])) lstrcpynW(own, pg->f[DF_DES], DR_CELL);
+  else if (dr_find_des(tm_base(pg->path), v, DR_CELL) && dr_des_ok(v)) { /* штамп не прочитан — имя файла сборки */
+    int e = (int)wcslen(v);
+    if (e > 2 && !wcscmp(v + e - 2, L"СБ")) v[e - 2] = 0, dr_trim(v);
+    lstrcpynW(own, v, DR_CELL);
+  }
+  for (int r = 0; r < pg->nrows; r++) {
+    DrSpecRow *o = &pg->rows[r];
+    wchar_t *d = o->c[DS_DES], low[24];
+    BOOL dig = FALSE;
+    for (const wchar_t *q = d; *q; q++) dig |= dr_isdig(*q);
+    if (d[0] && !dig) o->doubt[DS_DES] = 1;
+    int sc = dr_section(o->c[DS_SECT]);
+    if (!d[0] && (sc == 2 || sc == 3)) o->doubt[DS_DES] = 1; /* у сборочной единицы и детали обозначение есть всегда */
+    const wchar_t *n = o->c[DS_NAME];
+    while (*n && !IsCharAlphaW(*n)) n++;
+    lstrcpynW(low, n, 24);
+    CharLowerBuffW(low, (DWORD)wcslen(low));
+    if (!wcsstr(low, L"борочный черт")) continue; /* «(борочный чертех»: курсив теряет «С» и путает «ж» */
+    lstrcpynW(o->c[DS_SECT], L"Документация", DR_CELL);
+    lstrcpynW(o->c[DS_NAME], L"Сборочный чертеж", DR_CELL);
+    o->doubt[DS_SECT] = 0;
+    if (!dig && own[0]) _snwprintf(d, DR_CELL, L"%sСБ", own), d[DR_CELL - 1] = 0, o->doubt[DS_DES] = 1;
+  }
 }
 
 static void dr_recognize(IWICImagingFactory *f, DrPage *pg) {
@@ -2389,6 +2588,7 @@ static void dr_recognize(IWICImagingFactory *f, DrPage *pg) {
   pg->type = DRT_OTHER;
   pg->form = 0;
   pg->rowsBy = 0;
+  files_des_codes_dir(pg->path); /* свои коды обозначений — и по именам файлов рядом с листом */
   DrImg m;
   double dpi = 96;
   HRESULT hr = dr_read(f, pg->path, pg->frame, &m, &dpi);
@@ -2469,12 +2669,19 @@ static void dr_recognize(IWICImagingFactory *f, DrPage *pg) {
       BOOL byHead = cols < 4 && dr_spec_header(&m, thr, &s, k, &head); /* столбцы от штампа мимо, а шапка есть */
       if (cols >= 4 || byHead) {
         pg->type = DRT_SPEC;
-        if (!dr_spec(&m, thr, &L, &s, pg) && byHead) { /* и сетка не подогналась: строки — только моделью */
-          lstrcpynW(pg->note, L"спецификация по шапке: таблица не разобрана — строки не прочитаны", 300);
-          dr_vl_spec(&m, s.sl - (int)(15 * k), head, s.rx, s.st, pg);
+        if (!dr_spec(&m, thr, &L, &s, pg)) { /* сетка не подогналась: строки — только моделью */
+          int y0 = byHead ? head : s.st - (int)(250 * k); /* без шапки — от верха рамки A4 */
+          dr_vl_spec(&m, s.sl - (int)(15 * k), y0 < 0 ? 0 : y0, s.rx, s.st, pg);
+          if (pg->rowsBy == 2) pg->note[0] = 0;
+          else lstrcpynW(pg->note, L"таблица спецификации не разобрана — строки не прочитаны", 300);
         }
-        /* обозначение спецификации — обозначение самой сборки (без «СБ»): моделью, как у чертежа */
-        if (s.form == 2 && (pg->vlStamp || dr_vl_dumping()) && dr_vl_want()) dr_vl_des(&m, &s, pg, 40);
+        /* обозначение спецификации — обозначение самой сборки (без «СБ»), наименование — её же: моделью, как у
+           чертежа (Tesseract на курсиве заводских копий даёт «Гриспосодление SYOOTONOLXHOE») */
+        if (s.form == 2 && (pg->vlStamp || dr_vl_dumping()) && dr_vl_want()) {
+          dr_vl_des(&m, &s, pg, 40);
+          if (pg->vlStamp != 1) dr_vl_name(&m, &s, pg, 40);
+        }
+        if (pg->rowsBy == 1) dr_spec_tess_rows(pg);
       }
     }
   } else {
