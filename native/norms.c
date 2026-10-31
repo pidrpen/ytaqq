@@ -2432,8 +2432,12 @@ static void nm_catmin(wchar_t *out, int cap, double v) {
 
 /* итог операции-оценки и «по факту» после «010 Слесарная: »; 1 — написан */
 static int nm_head_est(const NmOp *o, wchar_t *out, int cap) {
+  if (o->kind != NMK_FACT && o->kind != NMK_TECH && o->kind != NMK_EST) return 0;
+  /* строка всегда с «Тпз … ·»: так её узнаёт таблица норм в чате (ai_chat_format.h), «—» — Тпз нет */
+  if (nm_na(o->tpz)) tn_cat(out, cap, L"Тпз — · ");
+  else tn_cat(out, cap, L"Тпз "), nm_catmin(out, cap, o->tpz), tn_cat(out, cap, L" · ");
   if (o->kind == NMK_FACT) {
-    tn_cat(out, cap, L"по факту (не нормируется)");
+    tn_cat(out, cap, L"Тшт — (по факту, не нормируется)");
     return 1;
   }
   if (o->kind == NMK_TECH) {
@@ -2444,12 +2448,10 @@ static int nm_head_est(const NmOp *o, wchar_t *out, int cap) {
                          : L" (норма технолога)");
     return 1;
   }
-  if (o->kind != NMK_EST) return 0;
   if (nm_na(o->tsht)) {
-    tn_cat(out, cap, L"оценки нет");
+    tn_cat(out, cap, L"Тшт — (оценки нет)");
     return 1;
   }
-  if (!nm_na(o->tpz)) tn_cat(out, cap, L"Тпз "), nm_catmin(out, cap, o->tpz), tn_cat(out, cap, L" · ");
   tn_cat(out, cap, L"Тшт ≈ ");
   nm_catmin(out, cap, o->tsht);
   if (!nm_na(o->tshk)) tn_cat(out, cap, L" · Тшк ≈ "), nm_catmin(out, cap, o->tshk);
