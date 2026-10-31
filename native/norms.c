@@ -1701,10 +1701,13 @@ static double nm_priems(NmJob *j) {
    с коэффициентом 0,8 (примечания к картам 2 и 6). Отверстие из сплошной заготовки — сверлить
    (до Ø25 — в размер, больше — Ø20) и расточить. Чистовой проход — у поверхностей с квалитетом
    до IT11, а если квалитетов на листе нет — у всех при Ra 3,2 и чище. */
-enum { NMT_FACE, NMT_OD, NMT_BORE, NMT_DRILL, NMT_CHAMF };
+enum { NMT_FACE, NMT_OD, NMT_BORE, NMT_DRILL, NMT_CHAMF, NMT_PLANE };
 typedef struct {
-  int type, fine, it, est, cnt; /* est — длина оценкой; cnt — отверстий или фасок */
-  double D, Dfrom, L, h;        /* Ø после и до перехода; длина прохода; припуск на сторону */
+  int type, fine, it, est, cnt; /* est — длина (у фрезерной — припуск) оценкой; cnt — отверстий или фасок */
+  int side;                     /* фрезерная: 0 — плоскость, 1 — кромка вдоль L, 2 — торец вдоль B */
+  double D, Dfrom, L, h;        /* Ø после и до перехода (у фрезерной D — измеряемый размер); длина прохода;
+                                   припуск на сторону */
+  double B;                     /* фрезерная: ширина фрезерования */
 } NmTrPlan;
 #define NM_HFINE 0.5 /* припуск под чистовой проход на сторону — оценка, пока нет таблицы припусков */
 #define NM_HFACE 1.0 /* припуск на подрезку торца — оценка */
@@ -1713,7 +1716,7 @@ typedef struct {
 static int nm_tr_add(NmTrPlan *pl, int n, int type, int fine, double D, double Dfrom, double L, double h, int it,
                      int est) {
   if (n >= NM_TRS) return n;
-  NmTrPlan t = {type, fine, it, est, 1, D, Dfrom, L, h};
+  NmTrPlan t = {type, fine, it, est, 1, 0, D, Dfrom, L, h, 0};
   pl[n] = t;
   return n + 1;
 }
@@ -2004,6 +2007,159 @@ static void nm_turn_by_plan(NmJob *j, const NmTrPlan *pl, int n, double *to, dou
   if (!haveTo) *to = NM_NONE;
 }
 
+
+/* ---- фрезерная по переходам (с 2026.10.31) ----------------------------------------------
+   Плоскости (толщина из заготовки толще детали — обе, припуск пополам; толщина та же, но Ra 3,2
+   и чище — обе с зачисткой 0,5), кромки вдоль длины (полоса шире детали или контур после резки
+   «с припуском под фрезерование») и торцы (после пилы или резки) — каждый своим переходом:
+   своя ширина фрезерования, свой припуск, своя торцовая фреза (Dф ≈ 1,375·B, не меньше 50),
+   врезание и перебег по формуле 0,5·(Dф − √(Dф² − B²)) + 3 мм. Каждая сторона — своя установка
+   в тисках, вторая и дальше — с коэффициентом 0,8 (примечание к карте 9). */
+#define NM_HPLASMA 2.5 /* припуск на сторону контура после плазмы под фрезерование — оценка */
+#define NM_HSAW 1.5    /* припуск на торец после пилы — оценка */
+
+static int nm_mill_add(NmTrPlan *pl, int n, int side, double L, double B, double h, double D, int est) {
+  n = nm_tr_add(pl, n, NMT_PLANE, 0, D, 0, L, h, 0, est);
+  pl[n - 1].side = side;
+  pl[n - 1].B = B;
+  return n;
+}
+
+static int nm_mill_plan(const NmJob *j, NmTrPlan *pl, int *setups, wchar_t *note, int ncap) {
+  const NmCtx *c = &j->c;
+  const TnSigns *s = j->r ? &j->r->s : NULL;
+  *setups = 1;
+  note[0] = 0;
+  if (!s || !s->gL || !s->gB) return 0; /* габариты не с листа — одной плоскостью, как задано */
+  double L = s->gL, B = s->gB, S = s->thick ? s->thick : nm_v(c, L"толщина");
+  if (B > L) {
+    double t = B;
+    B = L, L = t;
+  }
+  /* заготовка: «Полоса 22х110» — толщина и ширина, «Лист 20» — толщина */
+  double Sb = NM_NONE, Bb = NM_NONE, a, b;
+  const wchar_t *e, *q;
+  int strip = 0;
+  if ((q = nm_pre(j->r->blank, L"Полоса ")) && nm_num(q, &a, &e)) {
+    strip = 1;
+    while (*e && !tn_isdig(*e) && (e - q) < 40) e++;
+    Sb = a;
+    if (nm_num(e, &b, &e)) Sb = a < b ? a : b, Bb = a < b ? b : a;
+  } else if ((q = nm_pre(j->r->blank, L"Лист ")) && nm_num(q, &a, &e)) {
+    Sb = a;
+  }
+  int cut = 0; /* контур вырезан с припуском под фрезерование */
+  for (int k = 0; k < j->r->n; k++) cut |= wcsstr(j->r->op[k].what, L"с припуском под фрезерование") != NULL;
+  int n = 0;
+  if (!nm_na(S) && !nm_na(Sb) && Sb - S > 0.2) {
+    n = nm_mill_add(pl, n, 0, L, B, (Sb - S) / 2, S, 0);
+    n = nm_mill_add(pl, n, 0, L, B, (Sb - S) / 2, S, 0);
+  } else if (s->raMin && s->raMin <= 3.2) {
+    n = nm_mill_add(pl, n, 0, L, B, 0.5, nm_na(S) ? B : S, 1);
+    n = nm_mill_add(pl, n, 0, L, B, 0.5, nm_na(S) ? B : S, 1);
+    tn_item(note, ncap, L"плоскости — зачистка 0,5 мм (Ra 3,2 и чище, толщина заготовки как у детали)");
+  }
+  if (!nm_na(S)) {
+    if (!nm_na(Bb) && Bb - B > 0.2) {
+      n = nm_mill_add(pl, n, 1, L, S, (Bb - B) / 2, B, 0);
+      n = nm_mill_add(pl, n, 1, L, S, (Bb - B) / 2, B, 0);
+    } else if (cut) {
+      n = nm_mill_add(pl, n, 1, L, S, NM_HPLASMA, B, 1);
+      n = nm_mill_add(pl, n, 1, L, S, NM_HPLASMA, B, 1);
+    }
+    if (cut || strip) {
+      n = nm_mill_add(pl, n, 2, B, S, cut ? NM_HPLASMA : NM_HSAW, L, 1);
+      n = nm_mill_add(pl, n, 2, B, S, cut ? NM_HPLASMA : NM_HSAW, L, 1);
+    }
+    if (cut) tn_item(note, ncap, L"припуск контура после резки — оценка 2,5 мм на сторону");
+    else if (strip) tn_item(note, ncap, L"припуск на торцы после пилы — оценка 1,5 мм");
+  } else if (cut || strip) {
+    tn_item(note, ncap, L"толщина детали не прочитана — кромки и торцы не расписаны");
+  }
+  if (!n) return 0;
+  *setups = n;
+  return n;
+}
+
+/* То и Тв фрезерной по плану: у каждой стороны своя ширина, фреза, врезание и измерение */
+static void nm_mill_by_plan(NmJob *j, const NmTrPlan *pl, int n, double *to, double *tv, int *okTv) {
+  NmOp *o = j->o;
+  wchar_t s[300], what[96];
+  int haveTo = 1, mainAt = 0;
+  *to = 0, *tv = 0;
+  o->ntr = 0;
+  static const wchar_t *const kMain[] = {L"Sz", L"V", L"n", L"Sм", L"t", L"i", L"Dф", L"z", L"T"};
+  NmPar mainp[9];
+  int nmain = 0;
+  for (int i = 0; i < n; i++) {
+    const NmTrPlan *t = &pl[i];
+    NmCtx keep = j->c;
+    tn_cpy(what, 96, t->side == 0 ? L"Фрезеровать плоскость " : t->side == 1 ? L"Фрезеровать кромку " : L"Фрезеровать торец ");
+    tn_catnum(what, 96, t->L), tn_cat(what, 96, L"×"), tn_catnum(what, 96, t->B);
+    tn_cat(what, 96, L", h "), tn_catnum(what, 96, t->h);
+    if (t->est) tn_cat(what, 96, L" (оценка)");
+    tn_cpy(s, 300, L"— переход ");
+    tn_catnum(s, 300, i + 1);
+    tn_cat(s, 300, L". ");
+    tn_cat(s, 300, what);
+    nm_line(j, s);
+    nm_set(&j->c, L"L", NULL, t->L, L"переход");
+    nm_set(&j->c, L"B", NULL, t->B, t->side ? L"кромка: ширина — толщина детали" : L"переход");
+    nm_set(&j->c, L"h", NULL, t->h, t->est ? L"оценка" : L"заготовка толще (шире) детали, пополам");
+    if (nm_parc(&keep, L"Dф") == NULL || nm_parc(&keep, L"Dф")->org < NMO_ASK) {
+      double Df = ceil(1.375 * t->B);
+      nm_set(&j->c, L"Dф", NULL, Df < 50 ? 50 : Df, L"оценка: (1,25–1,5)·B, не меньше 50; впишите свою фрезу");
+      if (nm_parc(&keep, L"z") == NULL || nm_parc(&keep, L"z")->org < NMO_ASK) {
+        NmPar *zp = nm_par(&j->c, L"z");
+        if (zp) zp->v = NM_NONE, zp->org = NMO_NONE;
+      }
+    }
+    double Df = nm_v(&j->c, L"Dф");
+    if (!nm_na(Df) && Df > t->B && (nm_parc(&keep, L"врезание") == NULL || nm_parc(&keep, L"врезание")->org < NMO_ASK)) {
+      double l1 = 0.5 * (Df - sqrt(Df * Df - t->B * t->B)) + 3;
+      nm_set(&j->c, L"врезание", NULL, l1, L"по формуле 0,5·(Dф − √(Dф² − B²)) + 3");
+      tn_cpy(s, 300, L"l1 (врезание и перебег) = 0,5·(Dф − √(Dф² − B²)) + 3 = 0,5·(");
+      tn_catnum(s, 300, Df), tn_cat(s, 300, L" − √("), tn_catnum(s, 300, Df), tn_cat(s, 300, L"² − "),
+          tn_catnum(s, 300, t->B), tn_cat(s, 300, L"²)) + 3 = "), tn_catnum(s, 300, l1), tn_cat(s, 300, L" мм");
+      nm_line(j, s);
+    }
+    double tto = nm_to_mill(j), tp = 0, ti = 0;
+    if (!nm_look_pref(j, L"переход", L"Тпер", 1, &tp)) *okTv = 0;
+    nm_set(&j->c, L"И", NULL, t->D, t->side == 0 ? L"толщина" : t->side == 1 ? L"ширина" : L"длина");
+    nm_set(&j->c, L"длина измерения", NULL, t->L, NULL);
+    if (nm_look_pref(j, L"измерение", L"Тизм", 0, &ti)) ti *= nm_coefs(j, L"измерение.к", L"Kпер (периодичность)");
+    if (i == mainAt)
+      for (size_t k = 0; k < sizeof(kMain) / sizeof(kMain[0]); k++) {
+        const NmPar *mp = nm_parc(&j->c, kMain[k]);
+        if (mp && !nm_na(mp->v)) mainp[nmain++] = *mp;
+      }
+    if (nm_na(tto)) haveTo = 0;
+    else *to += tto;
+    *tv += tp + ti;
+    if (o->ntr < NM_TRS) {
+      NmTr *r = &o->tr[o->ntr++];
+      tn_cpy(r->what, 96, what);
+      r->to = tto;
+      r->tv = tp + ti;
+    }
+    tn_cpy(s, 300, L"  → То ");
+    if (nm_na(tto)) tn_cat(s, 300, L"— (нет)");
+    else tn_catnum(s, 300, tto);
+    tn_cat(s, 300, L" · Тв ");
+    tn_catnum(s, 300, tp + ti);
+    tn_cat(s, 300, L" мин");
+    nm_line(j, s);
+    j->c = keep;
+  }
+  for (int k = 0; k < nmain; k++) {
+    wchar_t w[120];
+    tn_cpy(w, 120, L"главный переход 1");
+    if (mainp[k].why[0]) tn_cat(w, 120, L": "), tn_cat(w, 120, mainp[k].why);
+    nm_put(&j->c, mainp[k].name, mainp[k].s[0] ? mainp[k].s : NULL, mainp[k].v, mainp[k].org, w);
+  }
+  if (!haveTo) *to = NM_NONE;
+}
+
 /* одна операция: То, Тв, Топ, Тшт, Тпз */
 static void nm_op_calc(NmJob *j) {
   NmOp *o = j->o;
@@ -2013,7 +2169,10 @@ static void nm_op_calc(NmJob *j) {
   /* токарная — по переходам, если есть длина и диаметр; иначе одной поверхностью (покажет, чего нет) */
   NmTrPlan plan[NM_TRS];
   wchar_t pnote[300];
-  int setups = 1, np = o->kind == NMK_TURN && j->b->n ? nm_turn_plan(j, plan, &setups, pnote, 300) : 0;
+  int setups = 1, np = !j->b->n                ? 0
+                       : o->kind == NMK_TURN ? nm_turn_plan(j, plan, &setups, pnote, 300)
+                       : o->kind == NMK_MILL ? nm_mill_plan(j, plan, &setups, pnote, 300)
+                                             : 0;
   double ptv = 0;
   int pok = 1;
   const NmPar *given = nm_parc(&j->c, L"То");
@@ -2027,7 +2186,8 @@ static void nm_op_calc(NmJob *j) {
     nm_line(j, s);
     double pto;
     j->inTo = 1;
-    nm_turn_by_plan(j, plan, np, &pto, &ptv, &pok);
+    if (o->kind == NMK_TURN) nm_turn_by_plan(j, plan, np, &pto, &ptv, &pok);
+    else nm_mill_by_plan(j, plan, np, &pto, &ptv, &pok);
     j->inTo = 0;
     if (!givenTo) o->to = pto, nm_putv(&j->c, L"То", o->to, NMO_CALC, L"сумма переходов");
   }
@@ -2058,7 +2218,7 @@ static void nm_op_calc(NmJob *j) {
     if (!nm_look_pref(j, L"установка", L"Тус", 0, &tus)) tus = 0;
   } else if (np) {
     okTv &= nm_look_pref(j, L"установка", L"Тус", 1, &tus) && pok;
-    if (setups > 1) { /* переустановка на другой торец — по карте с коэффициентом 0,8 */
+    if (setups > 1) { /* переустановка (другой торец, другая сторона) — по карте с коэффициентом 0,8 */
       double one = tus;
       tus = one * (1 + 0.8 * (setups - 1));
       tn_cpy(s, 300, L"   × установок ");
@@ -2074,12 +2234,16 @@ static void nm_op_calc(NmJob *j) {
     /* приёмы при переходе — по плану: смена резца, оборотов и подачи между переходами */
     int chg = 0, nTools = 0, rev = 0, fed = 0, seen[8] = {0};
     for (int i = 0; i < np; i++) {
-      int tool = nm_tr_tool(&plan[i]);
+      /* фрезерная: фреза своя у плоскостей и у кромок с торцами (ширина другая) */
+      int tool = o->kind == NMK_MILL ? 1 + (plan[i].side > 0) : nm_tr_tool(&plan[i]);
       if (!seen[tool]) seen[tool] = 1, nTools++;
       if (!i) continue;
-      chg += tool != nm_tr_tool(&plan[i - 1]);
-      rev += plan[i].type != plan[i - 1].type || fabs(plan[i].Dfrom - plan[i - 1].Dfrom) > 0.1 * plan[i].Dfrom;
-      fed += plan[i].type != plan[i - 1].type || plan[i].fine != plan[i - 1].fine;
+      int prevTool = o->kind == NMK_MILL ? 1 + (plan[i - 1].side > 0) : nm_tr_tool(&plan[i - 1]);
+      chg += tool != prevTool;
+      rev += o->kind == NMK_MILL ? tool != prevTool
+                                 : plan[i].type != plan[i - 1].type || fabs(plan[i].Dfrom - plan[i - 1].Dfrom) > 0.1 * plan[i].Dfrom;
+      fed += o->kind == NMK_MILL ? plan[i].side != plan[i - 1].side
+                                 : plan[i].type != plan[i - 1].type || plan[i].fine != plan[i - 1].fine;
     }
     nm_putv(&j->c, L"смен резца", chg, NMO_CALC, L"по переходам");
     nm_putv(&j->c, L"изменений оборотов", rev, NMO_CALC, L"по переходам: другой Ø или вид");
