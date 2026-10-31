@@ -177,7 +177,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
   }
   nut_check(g_nuRes && g_nuRes->n == r.n - 1 && wcsstr(g_nuRes->off, L"Контроль") && kT >= 0 && kD >= 0,
             L"в окне — операции маршрута, кроме контроля (без норм), среди них токарная и сверлильная");
-  nut_check(g_nuRes->op[0].kind == NMK_EST && !nm_na(g_nuRes->op[0].tsht), L"005 Отрезная — оценка с Тшт");
+  nut_check(g_nuRes->op[0].kind == NMK_SAW && !nm_na(g_nuRes->op[0].tsht), L"005 Отрезная — на пиле, с Тшт");
   nut_check(nm_na(g_nuRes->op[kT].to) && wcsstr(g_nuRes->op[kT].toNeed, L"длина обработки L") != NULL,
             L"без длины То нет — окно говорит, что нужна L");
   nut_check(nut_near(nut_v(kT, L"σв"), 600), L"σв стали 45 — 600 из перечня материалов");

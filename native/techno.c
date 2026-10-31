@@ -91,6 +91,8 @@ typedef struct {
   int nDia;
   unsigned diaIn;         /* бит i — dia[i] внутренний */
   int chamfers;           /* фасок «…×45°» на листе */
+  double gearM;           /* модуль зубчатого венца из таблицы параметров; 0 — нет */
+  int gearZ;              /* число зубьев венца */
 } TnSigns;
 
 typedef struct {
@@ -910,6 +912,20 @@ static void tn_signs(const wchar_t *name, const wchar_t *mat, const wchar_t *tex
             tn_has(f, L"розбертк") || tn_has(f, L"сгиб") || tn_has(f, L"линии гиб") || tn_has(f, L"линия гиб");
   s->key = tn_has(f, L"шпон");
   s->gear = tn_has(f, L"модуль") && tn_has(f, L"зуб");
+  if (s->gear) { /* таблица параметров венца: «Модуль m 3», «Число зубьев z 40» — для нормы зубодолбления */
+    const wchar_t *q = wcsstr(f, L"модуль");
+    double v;
+    int len, sep;
+    q += 6;
+    for (int k = 0; *q && !tn_isdig(*q) && k < 8; k++) q++;
+    if (tn_num(q, &v, &len, &sep) && v > 0 && v < 40) s->gearM = v;
+    if ((q = wcsstr(f, L"число зуб")) != NULL) {
+      q += 9;
+      while (*q && tn_isletter(*q)) q++;
+      for (int k = 0; *q && !tn_isdig(*q) && k < 8; k++) q++;
+      if (tn_num(q, &v, &len, &sep) && v >= 6 && v < 1000) s->gearZ = (int)v;
+    }
+  }
   s->knurl = tn_has(f, L"накат") || tn_has(f, L"рифлен") || tn_has(f, L"сетчат"); /* «Рифление сетчатое 1,0 ГОСТ 21474» */
   s->edm = tn_has(f, L"эрозион") || tn_has(f, L"розион") || tn_has(f, L"электрораз");    /* «злектрозрозионным» */
   s->cutApart = tn_has(f, L"разрезать на");

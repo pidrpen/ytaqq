@@ -41,6 +41,17 @@ static int pk_norms_fill(BOOL quiet) {
           order[k - 1] = tmp;
         }
       memset(r, 0, sizeof(*r));
+      /* заготовка детали «Круг 40 ГОСТ 2590-2006 / Сталь 45 ГОСТ 1050-2013» — сечение и материал для отрезки */
+      for (int k = 0; k < g_pk[PK_BLANKS].n; k++)
+        if (!_wcsicmp(xp_cell(&g_pk[PK_BLANKS], k, 0), des)) {
+          const wchar_t *bl = xp_cell(&g_pk[PK_BLANKS], k, 1), *sl = wcsstr(bl, L" / ");
+          tn_signs(L"", bl, L"", &r->s);
+          int len = sl ? (int)(sl - bl) : (int)wcslen(bl);
+          if (len > TN_TXT - 1) len = TN_TXT - 1;
+          wcsncpy(r->blank, bl, (size_t)len);
+          r->blank[len] = 0;
+          break;
+        }
       for (int i = 0; i < n; i++) {
         const wchar_t *op = xp_cell(t, order[i], 2);
         while (*op == L' ') op++;
