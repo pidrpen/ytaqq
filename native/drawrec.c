@@ -1358,7 +1358,7 @@ static BOOL dr_spec_reserve(const wchar_t *name) {
   return !wcsncmp(low, L"резерв", 6);
 }
 
-static void dr_vl_spec(const DrImg *m, const DrStamp *s, int top, DrPage *pg);
+static void dr_vl_spec(const DrImg *m, int x0, int y0, int x1, int y1, DrPage *pg);
 
 static void dr_spec(DrImg *m, int thr, const DrLines *L, const DrStamp *s, DrPage *pg) {
   double k = s->k;
@@ -1488,7 +1488,39 @@ static void dr_spec(DrImg *m, int thr, const DrLines *L, const DrStamp *s, DrPag
   pg->rowsBy = pg->nrows ? 1 : 0;
   free(cell);
   free(conf);
-  dr_vl_spec(m, s, top, pg);
+  dr_vl_spec(m, s->sl, top, s->rx, s->st, pg);
+}
+
+/* Шапка таблицы спецификации словами: «Обозначение», «Наименование» и «Поз.», «Кол.» или «Примечание» в
+   полосе 70 мм сверху. Для копий, где столбцы не на своих местах: вокруг рамки отпечатан обрез листа, и
+   штамп находится со сдвигом и в масштабе по dpi (заводские копии 95 %) — dr_spec их не узнаёт, а модели
+   сетка не нужна. В *top — верх шапки (точки листа) */
+static BOOL dr_spec_header(const DrImg *m, int thr, const DrStamp *s, double k, int *top) {
+  int x0 = s->sl - (int)(15 * k), y1 = (int)(70 * k);
+  if (x0 < 0) x0 = 0;
+  if (y1 > s->st) y1 = s->st;
+  DrImg crop;
+  if (!dr_crop(m, thr, x0, 0, s->rx, y1, k, &crop)) return FALSE;
+  double up = k < 9 ? 11.8 / k : 1.0;
+  DrWords ws;
+  memset(&ws, 0, sizeof(ws));
+  wchar_t why[200] = {0};
+  BOOL ok = dr_tess(&crop, 1, 6, &ws, why, 200);
+  dr_img_free(&crop);
+  int des = -1, name = 0;
+  for (int i = 0; ok && i < ws.n; i++) {
+    wchar_t low[64];
+    lstrcpynW(low, ws.w[i].t, 64);
+    CharLowerBuffW(low, (DWORD)wcslen(low));
+    if (wcsstr(low, L"обознач") && des < 0) des = (int)((ws.w[i].y - 12) / up);
+    /* «Поз.», «Кол.», «Примечание» в узких повёрнутых графах Tesseract обычно не видит, а «Н» читает
+       как «Р» («Раименование») — хватает «Обозначения» и одного из остальных */
+    if (wcsstr(low, L"именов") || wcsstr(low, L"поз") || wcsstr(low, L"кол") || wcsstr(low, L"примеч")) name = 1;
+  }
+  dr_words_free(&ws);
+  if (des < 0 || !name) return FALSE;
+  *top = des - (int)(8 * k) < 0 ? 0 : des - (int)(8 * k);
+  return TRUE;
 }
 
 #ifdef SET_TEST
@@ -2056,14 +2088,14 @@ static BOOL dr_json_spec(const wchar_t *j, DrPage *pg) {
   return TRUE;
 }
 
-static void dr_vl_spec(const DrImg *m, const DrStamp *s, int top, DrPage *pg) {
+static void dr_vl_spec(const DrImg *m, int x0, int y0, int x1, int y1, DrPage *pg) {
 #ifdef SET_TEST
   BOOL want = g_drVlDump[0] || getenv("CP_SPECVL");
 #else
   BOOL want = getenv("CP_SPECVL") != NULL;
 #endif
   DrImg im;
-  if (!want || !dr_vl_want() || !dr_img_part(m, s->sl, top, s->rx, s->st, 1, DR_SPEC_SIDE, &im)) return;
+  if (!want || !dr_vl_want() || !dr_img_part(m, x0, y0, x1, y1, 1, DR_SPEC_SIDE, &im)) return;
 #ifdef SET_TEST
   if (g_drVlDump[0]) { /* строки Tesseract — тем же JSON, что у модели: замер «как сейчас» (eval_model.py) */
     size_t cap = 64 + (size_t)pg->nrows * DS_N * (DR_CELL * 2 + 16), n = 0;
@@ -2182,7 +2214,13 @@ static void dr_recognize(IWICImagingFactory *f, DrPage *pg) {
                          (int)(1.5 * k) + 2);
         if (top >= 0 && (s.st - top) / k >= 20) cols++;
       }
-      if (cols >= 4) {
+      int head = 0;
+      if (cols < 4 && dr_spec_header(&m, thr, &s, k, &head)) { /* столбцы не нашлись, а шапка есть */
+        pg->type = DRT_SPEC;
+        lstrcpynW(pg->note, L"спецификация по шапке: столбцы не на своих местах (копия с масштабом?) — строки не прочитаны", 300);
+        dr_vl_spec(&m, s.sl - (int)(15 * k), head, s.rx, s.st, pg);
+        if (s.form == 2 && (pg->vlStamp || dr_vl_dumping()) && dr_vl_want()) dr_vl_des(&m, &s, pg, 40);
+      } else if (cols >= 4) {
         pg->type = DRT_SPEC;
         dr_spec(&m, thr, &L, &s, pg);
         /* обозначение спецификации — обозначение самой сборки (без «СБ»): моделью, как у чертежа */

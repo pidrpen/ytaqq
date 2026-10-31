@@ -46,6 +46,8 @@ def score_sheet(lab, got, tess, tn, spec_tess=None):
         if spec_tess is not None:
             r['spec_tess'] = cpvl.score_spec(lab['rows'], cpvl.spec_rows(spec_tess))
         return r
+    if 'route' not in lab:  # размечено только обозначение (новые листы): маршрута не считаем
+        return r
     if got.get('name') is not None:
         r['name_ok'] = cpvl.norm(got['name']) == cpvl.norm(lab['name'])
     if got.get('mat') is not None:
@@ -118,6 +120,7 @@ def main():
     ap.add_argument('--tess-only', action='store_true')
     ap.add_argument('--answers', help='взять ответы модели из прежнего итога')
     ap.add_argument('--limit', type=int, default=0, help='для пробы: первые N листов')
+    ap.add_argument('--tags', help='спрашивать только эти вопросы, через запятую (например des,spec): меньше видеокарты')
     a = ap.parse_args()
 
     labels = cpvl.load_labels(a.labels)
@@ -143,7 +146,7 @@ def main():
             for k in keep:
                 for tag in cpvl.TAGS:
                     im = sheets[k][tag]
-                    if im is None or tag not in prompts:
+                    if im is None or tag not in prompts or (a.tags and tag not in a.tags.split(',')):
                         continue
                     t = time.time()
                     q = prompts[tag]
@@ -167,7 +170,7 @@ def main():
         res[k] = {'got': answers[k], **score_sheet(labels[k], answers[k], sheets[k]['tess'], a.tn,
                                                    sheets[k].get('spec_tess'))}
     n = len(res)
-    draw = {k: r for k, r in res.items() if labels[k].get('type') != 'spec'}
+    draw = {k: r for k, r in res.items() if 'route' in labels[k]}  # с маршрутом в разметке
 
     def cnt(key):
         v = [r[key] for r in res.values() if key in r]
@@ -214,6 +217,8 @@ def main():
             line = lambda s: f"{s['ok']}/{s['n']} целиком, обозн. {s['des_ok']}/{s['des_n']}, +{s['fp']} −{s['fn']}"
             print(f'СП {k[:34]:34} модель {line(r["spec"]) if "spec" in r else "—":34} '
                   f'Tesseract {line(r["spec_tess"]) if "spec_tess" in r else "—"}')
+            continue
+        if 'route' not in lab:
             continue
         miss = set(lab['route'][1].split()) - set(r['ops'])
         extra = set(r['ops']) - set(lab['route'][1].split())
