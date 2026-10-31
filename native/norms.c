@@ -2259,6 +2259,7 @@ static void nm_saw(NmJob *j) {
   const wchar_t *blank = j->r ? j->r->blank : L"";
   double F = nm_blank_area(blank, why, 80), to = NM_NONE;
   int g = j->r ? nm_saw_group(j->r->s.mat) : -1, okTo = 0;
+  j->inTo = 1;
   if (nm_na(F)) {
     nm_line(j, L"То — проверить: сечение заготовки не узнано (нужен сортамент: круг, квадрат, шестигранник, полоса, труба)");
     nm_need(j, L"сортамент заготовки");
@@ -2292,9 +2293,11 @@ static void nm_saw(NmJob *j) {
   nm_put(&j->c, L"поверхность", L"прокат", NM_NONE, NMO_DEF, NULL);
   nm_putv(&j->c, L"деталей", 1, NMO_DEF, NULL);
   nm_put(&j->c, L"вид подачи", L"механическая", NM_NONE, NMO_DEF, NULL);
+  j->inTo = 0;
   int okTv = nm_look_pref(j, L"установка", L"Тус", 1, &tus);
   okTv &= nm_look_pref(j, L"переход", L"Тпер", 1, &tper);
   nm_omn_tail(j, to, tus + tper, okTv, okTo);
+  if (!okTo) o->tsht = NM_NONE; /* без То — «проверить», числа нет */
 }
 
 /* ---- зубодолбление (с 2026.10.31) ---------------------------------------------------------
@@ -2313,8 +2316,10 @@ static void nm_gear(NmJob *j) {
   /* число зубьев колеса — «zк» с листа; «z» в вопросе у зубодолбёжной — тоже зубья колеса */
   if (nm_na(nm_v(&j->c, L"zк")) && nm_parc(&j->c, L"z") && nm_parc(&j->c, L"z")->org == NMO_ASK)
     nm_putv(&j->c, L"zк", nm_v(&j->c, L"z"), NMO_ASK, L"число зубьев колеса");
+  j->inTo = 1;
   int okm = nm_req(j, L"m", L"модуль зуба m"), okz = nm_req(j, L"zк", L"число зубьев колеса z"),
       okB = nm_req(j, L"B", L"ширина венца B");
+  j->inTo = 0;
   double m = nm_v(&j->c, L"m"), z = nm_v(&j->c, L"zк"), B = nm_v(&j->c, L"B"), to = NM_NONE, lp = 0;
   int okTo = 0;
   if (okm && okz && okB && m > 0 && z > 0 && B > 0) {
@@ -2351,6 +2356,7 @@ static void nm_gear(NmJob *j) {
   okTv &= nm_look_pref(j, L"переход", L"Тпер", 1, &tper);
   if (!nm_look_pref(j, L"совмещение", L"Тсовм (совместить профиль)", 0, &tsov)) tsov = 0;
   nm_omn_tail(j, to, tus + tper + tsov, okTv, okTo);
+  if (!okTo) o->tsht = NM_NONE; /* без m, z, B — «проверить», числа нет */
   /* Тпз: наладка + получение инструмента + пробная обработка */
   if (o->cls == NMC_FULL) {
     static const wchar_t *const parts[] = {L"наладка", L"получение", L"пробная"};
@@ -2387,7 +2393,9 @@ static void nm_weld(NmJob *j) {
   wchar_t s[300];
   o->to = o->tv = o->top = o->tsht = o->tpz = o->tshk = NM_NONE;
   j->pref = kNmKind[NMK_WELD];
+  j->inTo = 1; /* нехватки — и в строку операции */
   int okL = nm_req(j, L"Lшва", L"длина шва, мм («шов 200»)"), okk = nm_req(j, L"k", L"катет шва («катет 5»)");
+  j->inTo = 0;
   int mat = j->r ? j->r->s.mat : 0;
   if (mat == TNM_STEEL_STAIN || mat == TNM_ALU || mat == TNM_ALU_CAST || mat == TNM_COPPER || mat == TNM_BRASS ||
       mat == TNM_BRONZE) {
@@ -3229,6 +3237,14 @@ static void nm_est(NmJob *j) {
   double a = nm_field(&h, L"Тшт"), k = nm_field(&h, L"на кг"), pz = nm_field(&h, L"Тпз"), m = nm_v(&j->c, L"масса");
   if (nm_na(a)) return;
   if (nm_na(k)) k = 0;
+  if (k != 0 && nm_na(m)) { /* оценка растёт с массой детали — без массы числа нет, не из головы */
+    tn_cpy(s, 400, L"Тшт — проверить: оценка идёт от массы детали, а масса не задана (штамп или «норма: масса 2,4»); ");
+    tn_cat(s, 400, h.why);
+    nm_line(j, s);
+    nm_need(j, L"масса");
+    tn_item(o->toNeed, 200, L"масса");
+    return;
+  }
   o->tsht = a + (nm_na(m) ? 0 : k * m);
   o->tpz = nm_na(pz) || o->cls != NMC_FULL ? NM_NONE : pz; /* Тпз — только у мехобработки */
   tn_cpy(s, 400, L"Тшт ≈ ");
@@ -3237,7 +3253,6 @@ static void nm_est(NmJob *j) {
   tn_cat(s, 400, L" = ");
   tn_catnum(s, 400, o->tsht);
   tn_cat(s, 400, L" мин — оценка, проверить");
-  if (k != 0 && nm_na(m)) tn_cat(s, 400, L" (масса не задана — без поправки на массу)");
   tn_cat(s, 400, L"; ");
   tn_cat(s, 400, h.why);
   nm_line(j, s);
@@ -3330,6 +3345,12 @@ static void nm_catmin(wchar_t *out, int cap, double v) {
 
 /* итог операции-оценки и «по факту» после «010 Слесарная: »; 1 — написан */
 static int nm_head_est(const NmOp *o, wchar_t *out, int cap) {
+  if (o->kind >= NMK_SAW && nm_na(o->tsht)) { /* отрезка, зубодолбление, сварка, разметка без данных */
+    tn_cat(out, cap, L"Тпз — · Тшт — (проверить");
+    if (o->toNeed[0]) tn_cat(out, cap, L": нужно "), tn_cat(out, cap, o->toNeed);
+    tn_cat(out, cap, L")");
+    return 1;
+  }
   if (o->kind != NMK_FACT && o->kind != NMK_TECH && o->kind != NMK_EST) return 0;
   /* строка всегда с «Тпз … ·»: так её узнаёт таблица норм в чате (ai_chat_format.h), «—» — Тпз нет */
   if (nm_na(o->tpz)) tn_cat(out, cap, L"Тпз — · ");
@@ -3347,7 +3368,7 @@ static int nm_head_est(const NmOp *o, wchar_t *out, int cap) {
     return 1;
   }
   if (nm_na(o->tsht)) {
-    tn_cat(out, cap, L"Тшт — (оценки нет)");
+    tn_cat(out, cap, wcsstr(o->toNeed, L"масса") ? L"Тшт — (нет массы — проверить)" : L"Тшт — (оценки нет)");
     return 1;
   }
   tn_cat(out, cap, L"Тшт ≈ ");

@@ -468,6 +468,131 @@ static void test_saw_gear(NmBase *b) {
   if (mk >= 0) has("разметка: оси + кернение·1,3", res.op[mk].how, L"Тшт = разметка осей + кернение·отверстий·1,3 (объёмная деталь)");
 }
 
+
+/* ---- контрольный набор на настоящих таблицах (ревизия норм 31.10) ------------------------
+   Таблицы — из tables_data.h, как их встраивает сборка (ОМН, режимы, нормы резки). Случаи —
+   выдуманные, но правдоподобные заводские; коридор — открытые нормативы или прикидка: выход за
+   него больше чем в 2 раза — ошибка (так проскочила отрезка: нержавейка ⌀150 — 1,5 мин вместо
+   12–18). В скобках — сколько было до ревизии. */
+typedef struct {
+  const wchar_t *group, *path;
+  unsigned len;
+  const char *data;
+} BuiltinTable;
+#include "tables_data.h"
+
+static wchar_t *utf8w(const char *s) {
+  size_t n = strlen(s), k = 0;
+  wchar_t *w = (wchar_t *)malloc((n + 1) * sizeof(wchar_t));
+  if (!w) return NULL;
+  for (const unsigned char *p = (const unsigned char *)s; *p;) {
+    unsigned c = *p++;
+    if (c >= 0xF0) c = ((c & 7) << 18) | ((p[0] & 63u) << 12) | ((p[1] & 63u) << 6) | (p[2] & 63u), p += 3;
+    else if (c >= 0xE0) c = ((c & 15) << 12) | ((p[0] & 63u) << 6) | (p[1] & 63u), p += 2;
+    else if (c >= 0xC0) c = ((c & 31) << 6) | (p[0] & 63u), p += 1;
+    w[k++] = (wchar_t)c;
+  }
+  w[k] = 0;
+  return w;
+}
+
+static void real_base(NmBase *b) {
+  memset(b, 0, sizeof(*b));
+  for (int i = 0; i < TABLES_COUNT; i++)
+    if (!wcscmp(kTables[i].group, L"norms") && !nm_base_add(b, utf8w(kTables[i].data), kTables[i].path)) {
+      g_fail++;
+      printf("FAIL таблица репозитория не прочиталась: ");
+      out8(kTables[i].path);
+      printf("\n");
+    }
+}
+
+static const NmOp *op_named(const NmResult *res, const wchar_t *name) {
+  for (int i = 0; i < res->n; i++)
+    if (!wcscmp(res->op[i].op, name)) return &res->op[i];
+  return NULL;
+}
+
+/* Тшт операции op в коридоре [lo, hi]; маршрут — по листу (name, mat, text) или одна операция */
+static void ctl_case(NmBase *b, const char *what, const wchar_t *name, const wchar_t *mat, const wchar_t *text,
+                     const wchar_t *mass, const wchar_t *ask, const wchar_t *op, double lo, double hi) {
+  static TnRoute r;
+  static NmResult res;
+  if (text) {
+    tn_route(name, mat, text, &r);
+  } else {
+    memset(&r, 0, sizeof(r));
+    r.n = 1;
+    tn_cpy(r.op[0].op, 128, op);
+    r.s.mat = TNM_STEEL;
+  }
+  nm_route(b, &r, mass, ask, &res);
+  const NmOp *o = op_named(&res, op);
+  g_n++;
+  if (!o || nm_na(o->tsht) || o->tsht < lo || o->tsht > hi) {
+    g_fail++;
+    printf("FAIL контроль «%s»: Тшт %.3f, ждали %.2f…%.2f\n", what, o && !nm_na(o->tsht) ? o->tsht : -1.0, lo, hi);
+  }
+}
+
+static void test_control(void) {
+  static NmBase b;
+  real_base(&b);
+  ok("таблицы репозитория прочитаны", b.n > 60 && !b.err[0]);
+  /* отрезка на пиле: сечение / производительность + ОМН (было: 1 + 0,2·масса детали) */
+  ctl_case(&b, "отрезка круг 30, сталь 45 (было 1,1)", L"Вал", L"Круг 30 ГОСТ 2590-2006 / 45 ГОСТ 1050-2013",
+           L"Ø28\n1x45°\nRa 6,3\n§GB d=28 l=100\n", L"0,48", NULL, L"Отрезная", 0.3, 1.5);
+  ctl_case(&b, "отрезка круг 30, 12Х18Н10Т (было 1,1)", L"Вал", L"Круг 30 ГОСТ 2590-2006 / 12Х18Н10Т ГОСТ 5632-2014",
+           L"Ø28\n1x45°\nRa 6,3\n§GB d=28 l=100\n", L"0,48", NULL, L"Отрезная", 0.5, 2);
+  ctl_case(&b, "отрезка круг 150, сталь 45 (было 3,1)", L"Диск", L"Круг 150 ГОСТ 2590-2006 / 45 ГОСТ 1050-2013",
+           L"Ø145\n1x45°\nRa 6,3\n§GB d=145 l=80\n", L"10,4", NULL, L"Отрезная", 5, 10);
+  ctl_case(&b, "отрезка круг 150, 12Х18Н10Т — завод 12–18 (было 1,5)", L"Втулка",
+           L"Круг 150 ГОСТ 2590-2006 / 12Х18Н10Т ГОСТ 5632-2014", L"Ø145\nØ110\n1x45°\nRa 6,3\n§GB d=145 l=40\n", L"2,5",
+           NULL, L"Отрезная", 12, 20);
+  /* токарная по переходам (было: одна поверхность Dmax × L) */
+  ctl_case(&b, "токарная вал Ø40/Ø30×180 (было 3,0)", L"Вал", L"Круг 45 ГОСТ 2590-2006 / 45 ГОСТ 1050-2013",
+           L"Ø40\nØ30\n1x45°\nRa 6,3\n§GB d=40 l=180\n", L"1,8", L"норма: партия 50", L"Токарная", 3.5, 9);
+  ctl_case(&b, "токарная втулка Ø60/Ø40H9×50 (было 2,5)", L"Втулка", L"Круг 65 ГОСТ 2590-2006 / 45 ГОСТ 1050-2013",
+           L"Ø60\nØ40H9\n1x45°\nRa 3,2\n§GB d=60 l=50\n", L"0,62", L"норма: партия 50", L"Токарная", 4, 12);
+  ctl_case(&b, "токарная диск Ø145×80 из Ø150 (было 3,5)", L"Диск", L"Круг 150 ГОСТ 2590-2006 / 45 ГОСТ 1050-2013",
+           L"Ø145\n1x45°\nRa 6,3\n§GB d=145 l=80\n", L"10,4", L"норма: партия 10", L"Токарная", 4, 13);
+  /* фрезерная по переходам (было: одна плоскость за проход) */
+  ctl_case(&b, "фрезерная планка 200×100×20 из полосы (было 1,5)", L"Планка",
+           L"Полоса 22х110 ГОСТ 103-2006 / 45 ГОСТ 1050-2013", L"Ra 3,2\n§GB l=200 b=100 s=20\n", L"3,1",
+           L"норма: партия 20", L"Фрезерная", 4, 12);
+  /* без изменений, было в пределах */
+  ctl_case(&b, "сверлильная 4 отв. Ø17 в плите S 20", L"Плита", L"Лист 20 ГОСТ 19903-15 / Ст3сп ГОСТ 14637-89",
+           L"4 отв. Ø17\n§GB l=300 b=200 s=20\n", L"9,4", L"норма: периметр 1200, партия 20", L"Сверлильная", 2, 6);
+  ctl_case(&b, "лазер лист 4, периметр 860", L"Пластина", L"Лист 4 ГОСТ 19903-15 / Ст3сп ГОСТ 14637-89",
+           L"4 отв. Ø13\n§GB l=200 b=150 s=4\n", L"0,9", L"норма: периметр 860, партия 20", L"Термическая резка лазерная",
+           0.3, 1);
+  ctl_case(&b, "плазма лист 20, периметр 1210", L"Пластина", L"Лист 20 ГОСТ 19903-15 / Ст3сп ГОСТ 14637-89",
+           L"4 отв. Ø17\n§GB l=300 b=200 s=20\n", L"9,4", L"норма: периметр 1210, партия 20",
+           L"Термическая резка плазменно-дуговая", 0.8, 2.5);
+  /* зубодолбление (было: «оценки нет»), сварка (было 6,5 и 55), гибка */
+  ctl_case(&b, "зубодолбёжная m3 z40 b30 (было — пусто)", NULL, NULL, NULL, L"2,2", L"норма: m 3, z 40, B 30",
+           L"Зубодолбежная", 8, 25);
+  ctl_case(&b, "сварка шов 200 к5 (было 6,5)", NULL, NULL, NULL, L"1,5", L"норма: шов 200, катет 5", L"Сварка", 0.8, 3);
+  ctl_case(&b, "сварка швы 5 м к5, рама (было 55)", NULL, NULL, NULL, L"30", L"норма: шов 5000, катет 5, швов 10",
+           L"Сварка", 10, 45);
+  ctl_case(&b, "гибка 2 гиба, 0,4 кг (оценка)", NULL, NULL, NULL, L"0,4", NULL, L"Гибка", 0.5, 3);
+  /* термическая и зачистка — нормы технолога */
+  ctl_case(&b, "термическая 2,4 кг — 3 мин", L"Вал", L"Круг 50 ГОСТ 2590-2006 / 45 ГОСТ 1050-2013",
+           L"Ø40h7\nØ50\n1x45°\nRa 6,3\n1. 28...32 HRC\n§GB d=50 l=120\n", L"2,4", NULL, L"Термическая обработка", 3, 3);
+  /* нет данных — «проверить», числа нет (было: 1, 5 и 1,5 мин из таблицы оценок) */
+  static TnRoute r;
+  static NmResult res;
+  static const wchar_t *const bare[] = {L"Отрезная", L"Сварка", L"Гибка"};
+  memset(&r, 0, sizeof(r));
+  for (int i = 0; i < 3; i++) tn_cpy(r.op[r.n++].op, 128, bare[i]);
+  nm_route(&b, &r, L"", NULL, &res);
+  int none = res.n == 3;
+  for (int i = 0; i < res.n; i++) none &= nm_na(res.op[i].tsht) || !res.op[i].full;
+  ok("без сортамента, шва и массы — чисел из головы нет", none && nm_na(res.op[1].tsht) && nm_na(res.op[2].tsht) &&
+                                                            nm_na(res.op[0].to));
+  nm_base_free(&b);
+}
+
 static void test_turn(NmBase *b) {
   static TnRoute r;
   static NmResult res;
@@ -693,8 +818,8 @@ static void test_classes(NmBase *b) {
   nm_route(b, &r, L"2,4", NULL, &res);
   ok("вал по названиям: Тпз только у токарных, контроль без норм", res.n == 7 && tpz_only_turn(&res));
   const NmOp *cut = op_at(&res, 0), *heat = op_at(&res, 2), *fit = op_at(&res, 3);
-  ok("Тшт у заготовительной и вспомогательных есть", cut && heat && fit && !nm_na(cut->tsht) && heat->tsht == 3 &&
-                                                         !nm_na(fit->tsht));
+  ok("Тшт у вспомогательных есть, у отрезной без заготовки — проверить", cut && heat && fit && nm_na(cut->tsht) &&
+                                                                             heat->tsht == 3 && !nm_na(fit->tsht));
   if (fit) near("слесарная: оценка 1,5 + 0,3·2,4, без Тпз", fit->tsht, 1.5 + 0.3 * 2.4);
   /* тот же вал маршрутом по листу: отрезная, токарная, термическая, слесарная, токарная, …, контроль */
   TnRoute *tr = (TnRoute *)calloc(1, sizeof(TnRoute));
@@ -1051,6 +1176,7 @@ int main(int argc, char **argv) {
   test_turn(&b);
   test_turn_plan(&b);
   test_saw_gear(&b);
+  test_control();
   test_drill(&b);
   test_mill(&b);
   test_cut(&b);
