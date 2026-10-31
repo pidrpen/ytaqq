@@ -121,11 +121,16 @@ static void pks_spec_rows(const DrPage *pg, PkStRes *r) {
       lstrcpynW(d, s->c[DS_DES], DR_CELL);
       lstrcpynW(nm, s->c[DS_NAME], DR_CELL);
       if (!d[0] || pp_draw_doc_code(d, nm, code) != 1) continue;
+      /* рукописное «СБ», прочитанное как «.05» (модель): «<обозначение сборки>.05» — это её СБ; остальное — как есть,
+         сомнение строки покажет «проверьте» */
+      size_t dl = wcslen(d), al = wcslen(r->des);
+      if (al && dl == al + 3 && !wcscmp(d + al, L".05") && !_wcsnicmp(d, r->des, al)) d[al] = 0;
       if (!r->rows) r->rows = (PkStRow *)calloc(PKS_MAXROWS, sizeof(PkStRow));
       if (!r->rows) return;
       PkStRow *o = &r->rows[r->nrows++];
       _snwprintf(o->des, DR_CELL, L"%ls%ls", d, code); /* «…000СБ»; код только в наименовании — допишется */
       o->des[DR_CELL - 1] = 0;
+      o->doubt = s->doubt[DS_DES] || s->doubt[DS_SECT];
       lstrcpynW(o->name, pp_doc_title(code), DR_CELL);
       lstrcpynW(o->kind, L"Документация", 40);
       lstrcpynW(o->qty, L"1", 32);
@@ -142,7 +147,8 @@ static void pks_spec_rows(const DrPage *pg, PkStRes *r) {
     lstrcpynW(o->kind, dr_kind_of(sect), 40);
     lstrcpynW(o->qty, s->c[DS_QTY], 32);
     lstrcpynW(o->pos, s->c[DS_POS], 16);
-    o->doubt = s->doubt[DS_DES] || s->doubt[DS_QTY] || s->doubt[DS_POS] || (!s->c[DS_DES][0] && s->doubt[DS_NAME]);
+    /* раздел под сомнением (модель вывела заголовок не там) — тоже «проверьте» */
+    o->doubt = s->doubt[DS_DES] || s->doubt[DS_QTY] || s->doubt[DS_POS] || s->doubt[DS_SECT] || (!s->c[DS_DES][0] && s->doubt[DS_NAME]);
   }
 }
 
