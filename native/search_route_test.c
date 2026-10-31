@@ -75,6 +75,20 @@ static void sb(const wchar_t *in, const wchar_t *want, int fixes) {
   printf("»\n");
 }
 
+static void code(const wchar_t *in, const wchar_t codes[][8], int n, const wchar_t *want, int fixes) {
+  wchar_t s[100];
+  wcscpy(s, in);
+  int f = dr_des_fix_code(s, 100, codes, n);
+  g_n++;
+  if (f == fixes && !wcscmp(s, want)) return;
+  g_fail++;
+  printf("FAIL код «");
+  out8(in);
+  printf("»: %d «", f);
+  out8(s);
+  printf("»\n");
+}
+
 static void txt(const wchar_t *in, const wchar_t *want, int fixes, const wchar_t *first) {
   wchar_t s[400], f[60];
   wcscpy(s, in);
@@ -217,6 +231,42 @@ int main(void) {
   sb(L"3424-с6", L"3424-с6", 0);
   sb(L"Ст3с6", L"Ст3с6", 0);
   sb(L"14637-89 С6", L"14637-89 С6", 0);   /* номер ГОСТ — не ядро обозначения */
+  /* свои буквенные коды: по именам архива и поправка одной буквы (коды выдуманные) */
+  {
+    const wchar_t *names[40];
+    int k = 0;
+    for (int i = 0; i < 20; i++) names[k++] = L"КЛМ 1234-567.01.02.tif";
+    for (int i = 0; i < 8; i++) names[k++] = L"ПРС5678-012.00.00.01.TIF";
+    for (int i = 0; i < 4; i++) names[k++] = L"Сборка.tif";
+    names[k++] = L"ГОСТ 1050-2013.pdf";
+    names[k++] = L"KLM 1234-999.tif"; /* латиница — тот же код */
+    wchar_t codes[SR_CODES][8];
+    int n = sr_codes_from_names(names, k, codes, SR_CODES);
+    g_n++;
+    if (!(n == 2 && !wcscmp(codes[0], L"КЛМ") && !wcscmp(codes[1], L"ПРС"))) {
+      g_fail++;
+      printf("FAIL коды по именам: %d\n", n);
+    }
+    code(L"КЛН 1234-567.01.02", codes, n, L"КЛМ 1234-567.01.02", 1);
+    code(L"ПЛС5678-012.00.00.01", codes, n, L"ПРС5678-012.00.00.01", 1);
+    code(L"КЛМ 1234-567.01.02", codes, n, L"КЛМ 1234-567.01.02", 0);
+    code(L"АБВ 1234-567", codes, n, L"АБВ 1234-567", 0); /* чужой, не похож — не трогать */
+    code(L"ГОСТ 1050-2013", codes, n, L"ГОСТ 1050-2013", 0);
+    code(L"Болт М8", codes, n, L"Болт М8", 0);
+    code(L"ГОСЕ 1050-2013", codes, n, L"ГОСЕ 1050-2013", 0);
+    code(L"КNМ 1234-567.01.02", codes, n, L"КЛМ 1234-567.01.02", 1); /* латиница без пары */
+    code(L"КМ 1234-567.01.02", codes, n, L"КЛМ 1234-567.01.02", 1); /* буква пропала */
+    code(L"КЛММ 1234-567", codes, n, L"КЛММ 1234-567", 0);
+    wchar_t two[1][8] = {L"ТС"};
+    code(L"ТУ 14-1-1234", two, 1, L"ТУ 14-1-1234", 0); /* код стандарта и двухбуквенный — не трогать */
+    wchar_t u[SR_CODES][8];
+    int un = sr_codes_parse(L"клм, TMX;ГОСТ  Ж ВЕРБЛЮД2", u, SR_CODES);
+    g_n++;
+    if (!(un == 2 && !wcscmp(u[0], L"КЛМ") && !wcscmp(u[1], L"ТМХ"))) {
+      g_fail++;
+      printf("FAIL коды из Настроек: %d\n", un);
+    }
+  }
   /* то же в тексте F6: только обозначения, латинская «c» — тоже */
   txt(L"321-23-с632", L"321-23-сб32", 1, L"321-23-сб32");
   txt(L"Лист 1 АБВГ.123456.000С6 Сборочный чертёж", L"Лист 1 АБВГ.123456.000СБ Сборочный чертёж", 1,

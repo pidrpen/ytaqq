@@ -35,6 +35,12 @@ static wchar_t g_filesWatch[MAX_PATH];
 static wchar_t g_walkWatch[MAX_PATH]; /* снимок для идущего обхода */
 static HWND g_filesWatchEdit;
 static volatile LONG g_filesUserStop; /* обход остановили кнопкой, а не выходом */
+/* Буквенные коды своих обозначений («КЛМ» в «КЛМ 1234-…»): по ним распознавание чертежа правит букву кода,
+   прочитанную не так. Вписаны в Настройках — эти; пусто — сами по именам файлов архива */
+static wchar_t g_desCodesUser[64];
+static HWND g_desCodesEdit;
+static wchar_t g_desCodesAuto[SR_CODES][8];
+static int g_desCodesAutoN, g_desCodesAutoAt = -1; /* посчитаны при g_filesN == g_desCodesAutoAt */
 
 /* dir — это base или папка внутри неё */
 static BOOL path_under(const wchar_t *dir, const wchar_t *base) {
@@ -1932,6 +1938,9 @@ static void load_files_pref(void) {
         if (line[0]) MultiByteToWideChar(CP_UTF8, 0, line, -1, g_filesRoot, MAX_PATH);
       } else if (!strncmp(line, "watch ", 6)) {
         MultiByteToWideChar(CP_UTF8, 0, line + 6, -1, g_filesWatch, MAX_PATH);
+      } else if (!strncmp(line, "codes ", 6)) {
+        MultiByteToWideChar(CP_UTF8, 0, line + 6, -1, g_desCodesUser, 64);
+        g_desCodesUser[63] = 0;
       } else if (!strncmp(line, "notify ", 7)) {
         g_filesNotify = atoi(line + 7) != 0;
       } else if (!strncmp(line, "plan ", 5)) {
@@ -1969,9 +1978,55 @@ static void save_files_pref(void) {
     if (ul <= 0) utf[used - 6] = 0;
     else strcat(utf, "\n");
   }
+  if (g_desCodesUser[0]) {
+    used = strlen(utf);
+    memcpy(utf + used, "codes ", 6);
+    used += 6;
+    ul = WideCharToMultiByte(CP_UTF8, 0, g_desCodesUser, -1, utf + used, (int)(sizeof(utf) - used - 2), NULL, NULL);
+    if (ul <= 0) utf[used - 6] = 0;
+    else strcat(utf, "\n");
+  }
   HANDLE h = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
   if (h == INVALID_HANDLE_VALUE) return;
   DWORD w = 0;
   WriteFile(h, utf, (DWORD)strlen(utf), &w, NULL);
   CloseHandle(h);
+}
+
+/* ---- коды своих обозначений ------------------------------------------------ */
+
+/* Коды, взявшиеся сами: самые частые перед номером в именах файлов архива (пересчёт, когда индекс сменился) */
+static int files_des_codes_auto(wchar_t out[][8], int max) {
+  files_lock();
+  if (g_desCodesAutoAt != g_filesN) {
+    g_desCodesAutoN = 0;
+    FileIdx *ix = g_idx;
+    if (ix && ix->n > 0) {
+      /* в большом архиве хватает каждого k-го имени: коды те же, а счёт — доли секунды */
+      int step = ix->n > 200000 ? ix->n / 200000 : 1, m = 0;
+      const wchar_t **names = (const wchar_t **)malloc(sizeof(const wchar_t *) * (size_t)(ix->n / step + 1));
+      if (names) {
+        for (int i = 0; i < ix->n; i += step)
+          if (ix->ent[i].name) names[m++] = ix->ent[i].name;
+        g_desCodesAutoN = sr_codes_from_names(names, m, g_desCodesAuto, SR_CODES);
+        free(names);
+      }
+    }
+    g_desCodesAutoAt = g_filesN;
+  }
+  int n = g_desCodesAutoN < max ? g_desCodesAutoN : max;
+  memcpy(out, g_desCodesAuto, sizeof(g_desCodesAuto[0]) * (size_t)n);
+  files_unlock();
+  return n;
+}
+
+/* Свои буквенные коды обозначений — в out (до max), ответ — сколько: вписанные в Настройках, пусто — взявшиеся
+   сами по архиву. На стенде — CP_DES_CODES */
+static int files_des_codes(wchar_t out[][8], int max) {
+  const wchar_t *user = g_desCodesUser;
+#ifdef SET_TEST
+  const wchar_t *env = _wgetenv(L"CP_DES_CODES");
+  if (env && env[0]) user = env;
+#endif
+  return user[0] ? sr_codes_parse(user, out, max) : files_des_codes_auto(out, max);
 }

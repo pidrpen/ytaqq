@@ -164,6 +164,7 @@
 #define ID_FILES_BAR 139
 #define ID_WATCH_EDIT 158
 #define ID_WATCH_BROWSE 159
+#define ID_DES_CODES 172 /* коды своих обозначений: распознавание правит букву кода */
 #define ID_SHARE_EDIT 155
 #define ID_SHARE_BROWSE 156
 #define ID_SHARE_SERVE 169
@@ -3701,6 +3702,34 @@ static void files_apply_watch(void) {
   show_status(g_filesWatch[0] ? L"Слежу за выбранной папкой" : L"Слежу за всей папкой архива");
 }
 
+/* Подсказка в пустом поле кодов обозначений: какие взялись сами по архиву (после нового индекса — заново) */
+static void des_codes_cue(void) {
+  static int s_at = -2;
+  if (!g_desCodesEdit || s_at == g_filesN) return;
+  s_at = g_filesN;
+  wchar_t c[SR_CODES][8], t[96];
+  int n = files_des_codes_auto(c, SR_CODES);
+  int l = _snwprintf(t, 96, n ? L"сами по архиву: " : L"сами по архиву — пока не нашлись");
+  for (int i = 0; i < n && l > 0 && l < 80; i++) l += _snwprintf(t + l, 96 - l, i ? L", %s" : L"%s", c[i]);
+  t[95] = 0;
+  SendMessageW(g_desCodesEdit, 0x1501, TRUE, (LPARAM)t);
+}
+
+/* Коды обозначений из поля: как разобрались, через запятую; пусто — снова сами по архиву */
+static void des_codes_apply(void) {
+  if (!g_desCodesEdit) return;
+  wchar_t w[64], c[SR_CODES][8];
+  GetWindowTextW(g_desCodesEdit, w, 64);
+  int n = sr_codes_parse(w, c, SR_CODES), l = 0;
+  w[0] = 0;
+  for (int i = 0; i < n; i++) l += _snwprintf(w + l, 64 - l, i ? L", %s" : L"%s", c[i]);
+  SetWindowTextW(g_desCodesEdit, w);
+  if (!wcscmp(w, g_desCodesUser)) return;
+  lstrcpynW(g_desCodesUser, w, 64);
+  save_files_pref();
+  show_status(w[0] ? L"Коды обозначений — вписанные" : L"Коды обозначений — сами по архиву");
+}
+
 static void share_apply_root(void) {
   if (!g_shareEdit) return;
   wchar_t w[MAX_PATH];
@@ -4050,6 +4079,9 @@ static void layout_settings(void) {
       y = sd_stack(L"Следить за изменениями", L"Папка внутри архива; пусто — вся папка");
       set_place(g_filesWatchEdit, x0, y, iw - browseW - gap, btnH);
       set_place(GetDlgItem(g_setHwnd, ID_WATCH_BROWSE), x1 - browseW, y, browseW, btnH);
+      sd_stack_end(y + btnH);
+      y = sd_stack(L"Коды обозначений", L"Буквы перед номером своих чертежей; пусто — сами по архиву");
+      set_place(g_desCodesEdit, x0, y, iw, btnH);
       sd_stack_end(y + btnH);
       sd_card_end();
       sd_group(L"PLM");
@@ -4563,6 +4595,7 @@ static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
       return 0;
     }
     if (LOWORD(wParam) == ID_WATCH_EDIT && HIWORD(wParam) == EN_KILLFOCUS) files_apply_watch();
+    if (LOWORD(wParam) == ID_DES_CODES && HIWORD(wParam) == EN_KILLFOCUS) des_codes_apply();
     if (LOWORD(wParam) == ID_FILES_NOTIFY) {
       g_filesNotify = (SendMessageW(g_chkNotify, BM_GETCHECK, 0, 0) == BST_CHECKED);
       watch_enable();
@@ -4968,6 +5001,8 @@ static void create_settings(HWND owner) {
                                      WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
                                      0, 0, 200, 26, g_setHwnd, (HMENU)(INT_PTR)ID_WATCH_EDIT, NULL, NULL);
   mk_btn(g_setHwnd, L"Обзор…", ID_WATCH_BROWSE);
+  g_desCodesEdit = CreateWindowExW(0, L"EDIT", g_desCodesUser, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 0, 0, 200, 26,
+                                   g_setHwnd, (HMENU)(INT_PTR)ID_DES_CODES, NULL, NULL);
   g_plmServer = CreateWindowExW(0, L"EDIT", g_sqlHost,
                                 WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
                                 0, 0, 120, 26, g_setHwnd, (HMENU)(INT_PTR)ID_PLM_SERVER, NULL, NULL);
@@ -5091,6 +5126,10 @@ static void create_settings(HWND owner) {
   if (g_filesWatchEdit) {
     SendMessageW(g_filesWatchEdit, WM_SETFONT, (WPARAM)g_fontBody, TRUE);
     SendMessageW(g_filesWatchEdit, 0x1501, TRUE, (LPARAM)L"следить: вся папка архива");
+  }
+  if (g_desCodesEdit) {
+    SendMessageW(g_desCodesEdit, WM_SETFONT, (WPARAM)g_fontBody, TRUE);
+    des_codes_cue();
   }
   watch_enable();
   update_engine_buttons();
@@ -5651,6 +5690,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     KillTimer(hwnd, TIMER_FILES_TICK);
     if (lParam) files_full_done();
     files_refresh_status();
+    des_codes_cue(); /* новый индекс — коды по архиву могли смениться */
     wchar_t m[160];
     if (wParam)
       _snwprintf(m, 160, L"JSON обновлён: %d файлов", (int)wParam);

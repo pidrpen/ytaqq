@@ -1069,12 +1069,24 @@ static void dr_norm_des(const wchar_t *in, wchar_t *out, int cap) {
         memmove(out + i + 1, out + j, (wcslen(out + j) + 1) * sizeof(wchar_t));
       }
     }
-  /* хвост из букв, прилипший к цифрам: «…01.02СБ» → «…01.02 СБ» */
+  /* «СБ» в хвосте, прочитанное «Сb», «(Б», «СЬ» */
   int l = (int)wcslen(out), k = l;
+  if (l >= 3 && dr_isdig(out[l - 3]) && wcschr(L"Сс(", out[l - 2]) && wcschr(L"bБЬь", out[l - 1]))
+    out[l - 2] = L'С', out[l - 1] = L'Б';
+  /* хвост из букв, прилипший к цифрам: «…01.02СБ» → «…01.02 СБ» */
   while (k > 0 && dr_isupper_cyr(out[k - 1])) k--;
   if (k > 0 && k < l && l - k <= 3 && dr_isdig(out[k - 1]) && l + 1 < cap) {
     memmove(out + k + 1, out + k, (size_t)(l - k + 1) * sizeof(wchar_t));
     out[k] = L' ';
+  }
+  /* свой буквенный код, прочитанный не так (Tesseract на курсиве: «Д» → «Л»): к своему — из Настроек или
+     взявшемуся сам по именам архива */
+  wchar_t codes[SR_CODES][8];
+  int nc = files_des_codes(codes, SR_CODES);
+  if (nc) {
+    wchar_t was[DR_CELL];
+    lstrcpynW(was, out, DR_CELL);
+    if (dr_des_fix_code(out, cap, codes, nc)) ai_log(L"Обозначение: «%s» → «%s» — буквенный код по своим", was, out);
   }
 }
 
@@ -1503,6 +1515,26 @@ static void dr_spec_fix_des(DrPage *pg) {
       lstrcpynW(d, t, DR_CELL);
       pg->rows[r].doubt[DS_DES] = !dr_des_ok(d);
     }
+  }
+  /* буквенный код, потерянный одной строкой: у соседей «КОД 1234-…», у неё «1234-…» с тем же номером изделия */
+  for (int r = 0; r < pg->nrows; r++) {
+    wchar_t *d = pg->rows[r].c[DS_DES];
+    const wchar_t *h = wcschr(d, L'-'), *code = NULL;
+    if (!dr_isdig(d[0]) || !h || h - d < 3 || h - d > 5) continue;
+    int len = (int)(h - d) + 1, cl = 0, same = 0;
+    for (int q = 0; q < pg->nrows && same >= 0; q++) {
+      const wchar_t *e = pg->rows[q].c[DS_DES];
+      int l = 0;
+      while (l < 6 && dr_isupper_cyr(e[l])) l++;
+      if (l < 2 || l > 5 || e[l] != L' ' || wcsncmp(e + l + 1, d, (size_t)len)) continue;
+      if (code && (cl != l || wcsncmp(code, e, (size_t)l))) same = -1; /* у соседей разные коды — не угадать */
+      else code = e, cl = l, same++;
+    }
+    int n = (int)wcslen(d);
+    if (same < 2 || n + cl + 1 >= DR_CELL) continue;
+    memmove(d + cl + 1, d, (size_t)(n + 1) * sizeof(wchar_t));
+    memcpy(d, code, (size_t)cl * sizeof(wchar_t));
+    d[cl] = L' ';
   }
 }
 
