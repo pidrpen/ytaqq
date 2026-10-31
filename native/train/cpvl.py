@@ -365,6 +365,9 @@ def spec_rows(ans):
     except ValueError:
         return []
     rows = (j or {}).get('rows') if isinstance(j, dict) else None
+    if isinstance(j, dict) and isinstance(j.get('sections'), list):  # короткий ответ (CP_SPECFMT=2): раздел на группу
+        rows = [{**r, 'sect': g.get('sect', '')} for g in j['sections'] if isinstance(g, dict)
+                for r in g.get('rows') or [] if isinstance(r, dict)]
     return [{k: str(r.get(k) or '').strip() for k in SPEC_KEYS} for r in rows or [] if isinstance(r, dict)]
 
 

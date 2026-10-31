@@ -2337,14 +2337,17 @@ static void dr_vl_name(const DrImg *m, const DrStamp *s, DrPage *pg, int hmm) {
   dr_img_free(&im);
 }
 
+/* ключи по-русски: с «des»/«name» модель путала графы — в обозначение писала наименование («Сухарь», «Ребро») */
 static const wchar_t kDrVlCornerQ[] =
     L"На картинке — правый нижний угол листа чертежа с основной надписью (штампом) по ГОСТ 2.104. Перепиши из неё "
-    L"точно, как написано: des — обозначение (крупно, над наименованием), name — наименование изделия, mat — материал "
-    L"(дробью — слово слева, потом верх дроби, « / », низ дроби), mass — массу. Чего нет — пустая строка. Ничего не "
-    L"придумывай.";
+    L"точно, как написано: обозначение — код документа из букв и цифр с точками и дефисом (крупно, в верхней графе, "
+    L"например «АБВГ.123456.001» или «КЛМ 1234-567.01.02»), наименование — название изделия словами (графа под "
+    L"обозначением), материал (дробью — слово слева, потом верх дроби, « / », низ дроби), масса. Чего нет — пустая "
+    L"строка. Ничего не придумывай.";
 static const char kDrVlCornerSchema[] =
-    "{\"type\":\"object\",\"properties\":{\"des\":{\"type\":\"string\"},\"name\":{\"type\":\"string\"},\"mat\":{\"type\":"
-    "\"string\"},\"mass\":{\"type\":\"string\"}},\"required\":[\"des\",\"name\",\"mat\",\"mass\"],\"additionalProperties\":false}";
+    "{\"type\":\"object\",\"properties\":{\"обозначение\":{\"type\":\"string\"},\"наименование\":{\"type\":\"string\"},"
+    "\"материал\":{\"type\":\"string\"},\"масса\":{\"type\":\"string\"}},\"required\":[\"обозначение\",\"наименование\","
+    "\"материал\",\"масса\"],\"additionalProperties\":false}";
 
 /* Штамп по линиям не найден (копия с обрезом листа, рамка не та, лист без рамки) — графы читает модель по углу
    листа: правые 215 × нижние 80 мм по dpi файла (штамп 185 × 55 мм с запасом на рамку и копию в 95 %), без dpi —
@@ -2361,10 +2364,10 @@ static void dr_vl_corner(const DrImg *m, DrPage *pg) {
   if (!a) return;
   const wchar_t *end = a + wcslen(a);
   wchar_t v[DR_CELL], t[DR_CELL];
-  dr_json_field(a, end, L"des", pg->vlDes, DR_CELL);
-  dr_json_field(a, end, L"name", pg->vlName, DR_CELL);
-  dr_json_field(a, end, L"mat", pg->vlMat, DR_CELL);
-  dr_json_field(a, end, L"mass", v, DR_CELL);
+  dr_json_field(a, end, L"обозначение", pg->vlDes, DR_CELL);
+  dr_json_field(a, end, L"наименование", pg->vlName, DR_CELL);
+  dr_json_field(a, end, L"материал", pg->vlMat, DR_CELL);
+  dr_json_field(a, end, L"масса", v, DR_CELL);
   free(a);
   ai_log(L"Штамп по линиям не найден — графы прочитала модель по углу листа: «%s»", pg->vlDes);
   if (dr_find_des(pg->vlDes, t, DR_CELL) && dr_des_ok(t)) {
@@ -2467,6 +2470,24 @@ static const char kDrVlSpecSchema[] =
     "\"name\":{\"type\":\"string\"},\"qty\":{\"type\":\"string\"},\"note\":{\"type\":\"string\"}},"
     "\"required\":[\"sect\",\"fmt\",\"zone\",\"pos\",\"des\",\"name\",\"qty\",\"note\"],\"additionalProperties\":false}}},"
     "\"required\":[\"rows\"],\"additionalProperties\":false}";
+#ifdef SET_TEST
+/* замер скорости (CP_SPECFMT=2): ответ короче — раздел один раз на группу строк, без «Формата» и «Зоны» */
+static const wchar_t kDrVlSpecQ2[] =
+    L"На картинке — таблица спецификации (ГОСТ 2.106). Перепиши все заполненные строки сверху вниз точно, как "
+    L"написано, ничего не придумывая, сгруппировав по разделам: заголовок раздела («Документация», «Сборочные "
+    L"единицы», «Детали», «Стандартные изделия», «Прочие изделия», «Материалы», «Комплекты») — sect группы, строки "
+    L"под ним — её rows; строки выше первого заголовка — группа с пустым sect. В строке: pos — «Поз.», des — "
+    L"«Обозначение», name — «Наименование», qty — «Кол.», note — «Примечание». Наименование, перенесённое на "
+    L"следующую строку таблицы, — в той же строке через пробел. Пустые строки и «Резерв» пропусти.";
+static const char kDrVlSpecSchema2[] =
+    "{\"type\":\"object\",\"properties\":{\"sections\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{"
+    "\"sect\":{\"type\":\"string\",\"enum\":[\"\",\"Документация\",\"Комплексы\",\"Сборочные единицы\",\"Детали\","
+    "\"Стандартные изделия\",\"Прочие изделия\",\"Материалы\",\"Комплекты\"]},\"rows\":{\"type\":\"array\",\"items\":{"
+    "\"type\":\"object\",\"properties\":{\"pos\":{\"type\":\"string\"},\"des\":{\"type\":\"string\"},\"name\":{\"type\":"
+    "\"string\"},\"qty\":{\"type\":\"string\"},\"note\":{\"type\":\"string\"}},\"required\":[\"pos\",\"des\",\"name\","
+    "\"qty\",\"note\"],\"additionalProperties\":false}}},\"required\":[\"sect\",\"rows\"],\"additionalProperties\":false}}},"
+    "\"required\":[\"sections\"],\"additionalProperties\":false}";
+#endif
 /* таблица плотная: при 1600 лист 200 dpi ужимался вдвое — буквы 3,5 мм в 14 точек. До 3000 по длинной стороне
    лист идёт как есть, остальное llama.cpp ужимает сама до своих 4096 токенов картинки (models.json) */
 #define DR_SPEC_SIDE 3000
@@ -2629,7 +2650,12 @@ static void dr_vl_spec(const DrImg *m, int x0, int y0, int x1, int y1, DrPage *p
     }
   }
 #endif
-  wchar_t *a = dr_vl_ask(&im, L"spec", kDrVlSpecQ, kDrVlSpecSchema, 2500);
+  const wchar_t *q = kDrVlSpecQ;
+  const char *sch = kDrVlSpecSchema;
+#ifdef SET_TEST
+  if (getenv("CP_SPECFMT")) q = kDrVlSpecQ2, sch = kDrVlSpecSchema2; /* разбор такого ответа — только в замере (cpvl) */
+#endif
+  wchar_t *a = dr_vl_ask(&im, L"spec", q, sch, 2500);
   /* ответ оборван на пределе (лист — не больше 30 строк, это ~1700 токенов): модель зациклилась — строки
      Tesseract, если есть, с «проверьте» лучше обрывка */
   BOOL cut = a && !wcschr(a, L']');
