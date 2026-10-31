@@ -24,6 +24,7 @@
 
 typedef struct {
   wchar_t des[DR_CELL], name[DR_CELL], kind[40], qty[32], pos[16];
+  BOOL doubt; /* модель или Tesseract сомневается в обозначении, количестве или позиции — «проверьте» (с 31.10) */
 } PkStRow;
 
 typedef struct {
@@ -45,6 +46,9 @@ typedef struct {
   int doc;                  /* pp_draw_doc: 0 — чертёж детали, 1 — сборки, 2 — другой документ (ВП, ПЗ…) */
   BOOL ops, opsOnly;        /* составить и операции; только они (строка уже есть — по файлу) */
   wchar_t *route;           /* маршрут по листу, как в чате (tn_text + нормы); malloc, NULL — нет */
+  BOOL spec;                /* лист — спецификация (с 31.10): строк нет — не пустая сборка молча, а пометка */
+  BOOL specEmpty;           /* спецификация, а строк не прочитано */
+  wchar_t lastSect[40];     /* раздел последней строки: у листа-продолжения (2а) без заголовка — с прошлой страницы */
 } PkStRes;
 
 typedef struct PkStJob {
@@ -82,6 +86,8 @@ static int g_pksOrphN;
 /* операции сразу по чертежу детали: галочка в «Чертежи…» (package.ini); итог для строки состояния */
 static BOOL g_pkAiOps = TRUE, g_pkAiOpsRead;
 static int g_pksOps, g_pksOpsParts, g_pksOpsHad, g_pksOpsNo;
+static int g_pksSpecEmpty;           /* спецификаций без строк (с 31.10) */
+static wchar_t g_pksSpecEmptyDes[200]; /* их обозначения — в карточку и строку состояния */
 static BOOL g_esiChat;        /* чтение запущено из чата (ai_esi.c): по последнему файлу — карточка в чат */
 static void esi_card(void);   /* ai_esi.c */
 /* маршрут скана без обозначения: впишут обозначение — операции лягут к нему (по файлу строки) */
@@ -104,7 +110,28 @@ static BOOL pks_is_pdf(const wchar_t *p) {
 static void pks_spec_rows(const DrPage *pg, PkStRes *r) {
   for (int k = 0; k < pg->nrows && r->nrows < PKS_MAXROWS; k++) {
     const DrSpecRow *s = &pg->rows[k];
-    if (dr_is_docs(s->c[DS_SECT])) continue;
+    /* раздел: у строки свой, иначе — последний известный этой спецификации (лист-продолжение 2а без заголовка
+       раздела, с одного листа его не узнать; страницы идут по порядку) */
+    if (s->c[DS_SECT][0]) lstrcpynW(r->lastSect, s->c[DS_SECT], 40);
+    const wchar_t *sect = s->c[DS_SECT][0] ? s->c[DS_SECT] : r->lastSect;
+    if (dr_is_docs(sect)) {
+      /* «Документация»: сборочный чертёж (СБ, ВО, ГЧ… в конце обозначения) — документом в состав сборки (с 31.10),
+         прочие документы (ПЗ, ВП, схемы) — мимо */
+      wchar_t d[DR_CELL], nm[DR_CELL], code[8];
+      lstrcpynW(d, s->c[DS_DES], DR_CELL);
+      lstrcpynW(nm, s->c[DS_NAME], DR_CELL);
+      if (!d[0] || pp_draw_doc_code(d, nm, code) != 1) continue;
+      if (!r->rows) r->rows = (PkStRow *)calloc(PKS_MAXROWS, sizeof(PkStRow));
+      if (!r->rows) return;
+      PkStRow *o = &r->rows[r->nrows++];
+      _snwprintf(o->des, DR_CELL, L"%ls%ls", d, code); /* «…000СБ»; код только в наименовании — допишется */
+      o->des[DR_CELL - 1] = 0;
+      lstrcpynW(o->name, pp_doc_title(code), DR_CELL);
+      lstrcpynW(o->kind, L"Документация", 40);
+      lstrcpynW(o->qty, L"1", 32);
+      o->pos[0] = 0;
+      continue;
+    }
     const wchar_t *des = s->c[DS_DES][0] ? s->c[DS_DES] : s->c[DS_NAME];
     if (!des[0]) continue;
     if (!r->rows) r->rows = (PkStRow *)calloc(PKS_MAXROWS, sizeof(PkStRow));
@@ -112,9 +139,10 @@ static void pks_spec_rows(const DrPage *pg, PkStRes *r) {
     PkStRow *o = &r->rows[r->nrows++];
     lstrcpynW(o->des, des, DR_CELL);
     lstrcpynW(o->name, s->c[DS_DES][0] ? s->c[DS_NAME] : L"", DR_CELL);
-    lstrcpynW(o->kind, dr_kind_of(s->c[DS_SECT]), 40);
+    lstrcpynW(o->kind, dr_kind_of(sect), 40);
     lstrcpynW(o->qty, s->c[DS_QTY], 32);
     lstrcpynW(o->pos, s->c[DS_POS], 16);
+    o->doubt = s->doubt[DS_DES] || s->doubt[DS_QTY] || s->doubt[DS_POS] || (!s->c[DS_DES][0] && s->doubt[DS_NAME]);
   }
 }
 
@@ -144,7 +172,18 @@ static void pks_from_page(DrPage *pg, PkStRes *r) {
     if (pg->f[DF_MAT][0] && !pg->doubt[DF_MAT]) lstrcpynW(r->mat, pg->f[DF_MAT], DR_CELL);
     if (pg->f[DF_MASS][0] && !pg->doubt[DF_MASS]) lstrcpynW(r->mass, pg->f[DF_MASS], 40);
   }
-  if (pg->type == DRT_SPEC) pks_spec_rows(pg, r);
+  if (pg->type == DRT_SPEC) r->spec = TRUE, pks_spec_rows(pg, r);
+}
+
+/* спецификация прочитана, а строк нет (модель выключена, Tesseract не узнал столбцы — «спецификация по шапке»):
+   не пустая сборка молча, а пометка «строки не прочитаны» (с 31.10). pgNote — что сказало чтение листа */
+static void pks_spec_check(PkStRes *r, const wchar_t *pgNote) {
+  if (!r->spec || r->nrows) return;
+  r->specEmpty = TRUE;
+  if (!r->note[0])
+    _snwprintf(r->note, 200, L"спецификация %ls: строки не прочитаны%ls%ls — состав впишите или «Ещё ▾ → Состав из файла спецификации»",
+               r->des[0] ? r->des : L"без обозначения", pgNote && pgNote[0] ? L" (" : L"", pgNote && pgNote[0] ? pgNote : L"");
+  r->note[199] = 0;
 }
 
 /* маршрут по прочитанному листу — тот же текст, что «Маршрут обработки» кладёт в чат (без «Лист:»):
@@ -189,6 +228,7 @@ static void pks_read(IWICImagingFactory *f, PkStRes *r) {
     if (!i) {
       pks_from_page(&pg, r);
       if (!r->how && pg.note[0]) lstrcpynW(why, pg.note, 200);
+      if (pg.type == DRT_SPEC && pg.note[0] && !why[0]) lstrcpynW(why, pg.note, 200);
       if (r->ops && (pg.type == DRT_DRAW || pg.type == DRT_OTHER) && !r->asmDoc)
         r->route = pks_route(&pg, r->mass[0] ? r->mass : pg.f[DF_MASS]);
     } else if (pg.type == DRT_SPEC) {
@@ -211,6 +251,7 @@ static void pks_read(IWICImagingFactory *f, PkStRes *r) {
       if (!r->kind[0]) lstrcpynW(r->kind, r->asmDoc ? L"Сборочные единицы" : !doc ? L"Детали" : L"", 40);
     }
   }
+  pks_spec_check(r, why);
   if (r->route && (r->asmDoc || r->doc || r->nrows)) {
     free(r->route); /* чертёж сборки, документ или спецификация — операций по ним нет */
     r->route = NULL;
@@ -418,6 +459,8 @@ static int pks_apply(PkStRes *r) {
       des = xp_cell(it, row, 0); /* строки переехали */
     }
     if (pks_link(des, s->des, s->qty, s->pos)) g_pksLinks++;
+    if (s->doubt && !wcsstr(g_pksDoubt, s->des) && wcslen(g_pksDoubt) + wcslen(s->des) + 3 < 120) /* сомнение строки — «проверьте» */
+      wcscat(g_pksDoubt, g_pksDoubt[0] ? L", " : L""), wcscat(g_pksDoubt, s->des);
   }
   if (r->nrows) lstrcpynW(g_pksParent, des, 200);
   if (docDraw) pks_doc_row(row, r);
@@ -530,6 +573,7 @@ static void pks_status(const wchar_t *note) {
   if (g_pksBy[2] || g_pksBy[1] || g_pksBy[3])
     _snwprintf(by, 120, L"; обозначения: моделью %d, Tesseract %d, из имени файла %d", g_pksBy[2], g_pksBy[1], g_pksBy[3]);
   if (g_pksWait) _snwprintf(wait, 120, L"; %d ждут обозначения сборки — впишите его", g_pksWait);
+  else if (g_pksSpecEmpty) _snwprintf(wait, 120, L"; спецификаций без строк %d — состав не прочитан, проверьте", g_pksSpecEmpty);
   pk_status(L"Чертежи: %d из %d — новых изделий %d, дополнено %d, в состав%ls%ls%ls %d%ls%ls%ls%ls%ls%ls%ls%ls%ls",
             g_pksDone, g_pksTotal, g_pksNew, g_pksMerged, g_pksParent[0] ? L" «" : L"", g_pksParent,
             g_pksParent[0] ? L"»" : L"", g_pksLinks, docs, ops, by, g_pksNoDes ? L"; без обозначения — впишите" : L"",
@@ -557,6 +601,12 @@ static void pk_stamp_done(void *p) {
       else g_pksOpsNo++;
     } else {
       int row = pks_apply(r);
+      if (r->specEmpty) {
+        g_pksSpecEmpty++;
+        size_t l = wcslen(g_pksSpecEmptyDes);
+        if (l < 150) _snwprintf(g_pksSpecEmptyDes + l, 200 - l, L"%ls%ls", l ? L", " : L"", r->des[0] ? r->des : L"?");
+        g_pksSpecEmptyDes[199] = 0;
+      }
       if (r->route) pks_ops(row, r->file, &r->route);
       else if (r->ops && !r->asmDoc && !r->doc && !r->nrows) g_pksOpsNo++;
     }
@@ -673,6 +723,7 @@ static void pks_enqueue(TmPaths *pl, int hit, BOOL opsOnly) {
   if (idle) { /* новый бросок после затишья — итог считать заново */
     g_pksDone = g_pksTotal = g_pksNew = g_pksMerged = g_pksLinks = g_pksNoDes = g_pksWait = g_pksDocs = 0;
     g_pksOps = g_pksOpsParts = g_pksOpsHad = g_pksOpsNo = 0;
+    g_pksSpecEmpty = 0, g_pksSpecEmptyDes[0] = 0;
     memset(g_pksBy, 0, sizeof(g_pksBy));
     g_pksDoubt[0] = g_pksParent[0] = 0;
   }
@@ -760,6 +811,153 @@ static void pk_draw_pick(void) {
   pks_ops_pref();
   g_pkAiOps = TRUE;
   pk_stamp_pick();
+}
+
+/* Состав из файла спецификации (с 31.10): TSV UTF-8, строка — «Раздел<Tab>Поз.<Tab>Обозначение<Tab>Наименование<Tab>
+   Кол.<Tab>Примечание» (как DrSpecRow без формата и зоны); первая строка «#СБОРКА<Tab><обозначение><Tab><наименование>» —
+   чей это состав, иначе — выделенная сборка «Изделий» или выбранная позиция. Строки идут тем же путём, что строки
+   листа-спецификации (pks_spec_rows → pks_apply): позиции — в «Изделия», состав — сборке, СБ из «Документации» —
+   документом к ней; документы прочие — мимо. Для стенда и ручного импорта, пока модель не читает спецификации
+   (её строки ложатся в те же DrSpecRow, pg->rowsBy = 2; из файла — 3). Сколько строк состава; -1 — файл не прочитан */
+/* порядок страниц: имя без «.tsv»/«.txt», числа как числа; короче — раньше («0047.tif» до «0047.tif.p2») */
+static int pk_tsv_cmp(const void *x, const void *y) {
+  wchar_t a[MAX_PATH], b[MAX_PATH];
+  lstrcpynW(a, (const wchar_t *)x, MAX_PATH);
+  lstrcpynW(b, (const wchar_t *)y, MAX_PATH);
+  for (wchar_t *q = a; q; q = NULL) {
+    wchar_t *d = wcsrchr(q, L'.');
+    if (d && (!_wcsicmp(d, L".tsv") || !_wcsicmp(d, L".txt"))) *d = 0;
+  }
+  for (wchar_t *q = b; q; q = NULL) {
+    wchar_t *d = wcsrchr(q, L'.');
+    if (d && (!_wcsicmp(d, L".tsv") || !_wcsicmp(d, L".txt"))) *d = 0;
+  }
+  size_t la = wcslen(a), lb = wcslen(b);
+  if (la < lb && !_wcsnicmp(a, b, la)) return -1;
+  if (lb < la && !_wcsnicmp(a, b, lb)) return 1;
+  int r = CompareStringW(LOCALE_USER_DEFAULT, NORM_IGNORECASE | SORT_DIGITSASNUMBERS, a, -1, b, -1);
+  return r ? r - 2 : _wcsicmp(a, b);
+}
+
+/* Состав из файлов спецификации (с 31.10): TSV UTF-8 (с BOM или без, LF или CRLF), строка — «Раздел<Tab>Поз.<Tab>
+   Обозначение<Tab>Наименование<Tab>Кол.<Tab>Примечание» (как DrSpecRow без формата и зоны; так пишет spec_tsv.py ветки
+   обучения: по файлу на страницу, без шапки). Несколько файлов — страницы одной спецификации, по порядку имён
+   (pk_tsv_cmp): у страницы-продолжения без раздела раздел берётся с прошлой страницы (PkStRes.lastSect). Чей это
+   состав: строка «#СБОРКА<Tab><обозначение><Tab><наименование>» в любом файле, иначе — выделенная сборка «Изделий»
+   или выбранная позиция. Строки идут тем же путём, что строки листа-спецификации (pks_spec_rows → pks_apply):
+   позиции — в «Изделия», состав — сборке, сборочный чертёж из «Документации» — документом к ней, прочие документы —
+   мимо. Сколько строк состава; -1 — файлы не прочитаны или сборки нет */
+static int pk_spec_tsv_n(wchar_t (*paths)[MAX_PATH], int np) {
+  if (np <= 0) return -1;
+  if (np > 1) qsort(paths, (size_t)np, sizeof(*paths), pk_tsv_cmp);
+  PkStRes *r = (PkStRes *)calloc(1, sizeof(PkStRes));
+  if (!r) return -1;
+  r->parentRow = r->row = -1;
+  r->how = 3;
+  r->asmDoc = TRUE;
+  r->spec = TRUE;
+  lstrcpynW(r->kind, L"Сборочные единицы", 40);
+  lstrcpynW(r->file, paths[0], MAX_PATH);
+  DrPage *pages = (DrPage *)calloc((size_t)np, sizeof(DrPage));
+  int read = 0;
+  for (int i = 0; pages && i < np; i++) {
+    wchar_t *t = share_read(paths[i]);
+    if (!t) continue;
+    read++;
+    DrPage *pg = &pages[i];
+    pg->type = DRT_SPEC;
+    pg->rowsBy = 3;
+    pg->rows = (DrSpecRow *)calloc(PKS_MAXROWS, sizeof(DrSpecRow));
+    wchar_t *pp = t, *line;
+    while (pg->rows && (line = share_next_line(&pp)) != NULL && pg->nrows < PKS_MAXROWS) {
+      wchar_t *f[8] = {0};
+      while (*line == 0xFEFF) line++; /* метка UTF-8 в начале файла */
+      if (!wcsncmp(line, L"#СБОРКА\t", 8) || !wcsncmp(line, L"# СБОРКА\t", 9)) {
+        int n = share_split(line, f, 8);
+        if (n >= 2 && !r->des[0]) lstrcpynW(r->des, f[1], DR_CELL);
+        if (n >= 3 && !r->name[0]) lstrcpynW(r->name, f[2], DR_CELL);
+        continue;
+      }
+      if (!line[0] || line[0] == L'#') continue;
+      int n = share_split(line, f, 8);
+      if (n < 3) continue;
+      DrSpecRow *o = &pg->rows[pg->nrows];
+      static const int kCol[6] = {DS_SECT, DS_POS, DS_DES, DS_NAME, DS_QTY, DS_NOTE};
+      for (int c = 0; c < 6 && c < n; c++) {
+        const wchar_t *v = f[c];
+        while (*v == L' ') v++;
+        lstrcpynW(o->c[kCol[c]], v, DR_CELL);
+        for (size_t l = wcslen(o->c[kCol[c]]); l && o->c[kCol[c]][l - 1] == L' '; l--) o->c[kCol[c]][l - 1] = 0;
+      }
+      if (o->c[DS_DES][0] || o->c[DS_NAME][0]) pg->nrows++;
+    }
+    free(t);
+  }
+  int links = -1;
+  if (read && !r->des[0]) { /* сборка — выделенная строка «Изделий» или выбранная позиция */
+    XpTable *it = &g_pk[PK_ITEMS];
+    int sr = g_pkSheet == PK_ITEMS && g_pkList ? pk_sel_row() : -1;
+    const wchar_t *d = sr >= 0 && sr < it->n && pks_is_asm(sr) ? xp_cell(it, sr, 0) : g_pkCur;
+    lstrcpynW(r->des, d, DR_CELL);
+  }
+  if (read && r->des[0]) {
+    for (int i = 0; i < np; i++) pks_spec_rows(&pages[i], r); /* по порядку: раздел переходит со страницы на страницу */
+    pks_spec_check(r, L"в файлах нет строк");
+    if (g_pkEditRow >= 0) pk_edit_end(TRUE);
+    int was = g_pksLinks;
+    pks_apply(r);
+    links = g_pksLinks - was;
+    pk_fill(FALSE);
+    pk_changed();
+    if (r->specEmpty) pk_status(L"%ls", r->note);
+  }
+  for (int i = 0; pages && i < np; i++) free(pages[i].rows);
+  free(pages);
+  free(r->rows);
+  free(r->route);
+  free(r);
+  return links;
+}
+
+static inline int pk_spec_tsv(const wchar_t *path) { /* inline: один файл — стенду; окно зовёт pk_spec_tsv_n */
+  wchar_t one[1][MAX_PATH];
+  lstrcpynW(one[0], path, MAX_PATH);
+  return pk_spec_tsv_n(one, 1);
+}
+
+static void pk_spec_tsv_pick(void) {
+  enum { CAP = 32768 };
+  wchar_t *buf = (wchar_t *)calloc(CAP, sizeof(wchar_t));
+  if (!buf) return;
+  OPENFILENAMEW of;
+  memset(&of, 0, sizeof(of));
+  of.lStructSize = sizeof(of);
+  of.hwndOwner = g_pkWnd;
+  of.lpstrFilter = L"Строки спецификации (TSV, TXT)\0*.tsv;*.txt\0Все файлы\0*.*\0";
+  of.lpstrFile = buf;
+  of.nMaxFile = CAP;
+  of.lpstrTitle = L"Страницы одной спецификации (можно несколько — по порядку имён)";
+  of.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR | OFN_ALLOWMULTISELECT | OFN_EXPLORER;
+  if (!GetOpenFileNameW(&of)) {
+    free(buf);
+    return;
+  }
+  /* один файл — полный путь; несколько — «папка\0имя\0имя\0\0» */
+  wchar_t (*paths)[MAX_PATH] = (wchar_t (*)[MAX_PATH])calloc(200, sizeof(*paths));
+  int np = 0;
+  const wchar_t *first = buf, *next = buf + wcslen(buf) + 1;
+  if (paths && !*next) lstrcpynW(paths[np++], first, MAX_PATH);
+  for (const wchar_t *q = next; paths && *next && *q && np < 200; q += wcslen(q) + 1) {
+    _snwprintf(paths[np], MAX_PATH, L"%ls\\%ls", first, q);
+    paths[np++][MAX_PATH - 1] = 0;
+  }
+  free(buf);
+  int n = paths ? pk_spec_tsv_n(paths, np) : -1;
+  free(paths);
+  if (n < 0)
+    pk_status(L"Файл спецификации не прочитан — или нет строки «#СБОРКА<Tab>обозначение», а сборка не выделена");
+  else
+    pk_status(L"Из файла спецификации в состав сборки легло строк: %d — проверьте количество и разделы, затем «В Союз…»", n);
 }
 
 static void pk_stamp_ops(void) {

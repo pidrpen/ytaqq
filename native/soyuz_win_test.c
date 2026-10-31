@@ -619,8 +619,9 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
                                 L"СОСТАВ\tАБВГ.123456.000\tАБВГ.123456.100\t1\r\n",
                                 hd, 200, hn, 200) &&
                        !wcscmp(hd, L"АБВГ.123456.000") && !wcscmp(hn, L"Редуктор") &&
-                       !szm_head_asm(L"ИЗДЕЛИЕ\tАБВГ.123456.001\tВал\tДетали\t\t\r\n", hd, 200, hn, 200),
-                   L"головная сборка описания — та, что никуда не входит; одни детали — сборки нет");
+                       szm_head_asm(L"ИЗДЕЛИЕ\tАБВГ.123456.001\tВал\tДетали\t\t\r\n", hd, 200, hn, 200) && !wcscmp(hd, L"АБВГ.123456.001") &&
+                       !szm_head_asm(L"ИЗДЕЛИЕ\tАБВГ.123456.000СБ\tСборочный чертеж\tДокументация\t\t\r\n", hd, 200, hn, 200),
+                   L"головное изделие: сборка, что никуда не входит; сборки нет — деталь (папка под неё, с 31.10); одни документы — нет");
           { /* описание из окна при новой папке — со строкой СОЗДАТЬ_ПАПКИ */
             wchar_t *keep = g_szmText;
             g_szmText = _wcsdup(L"ИЗДЕЛИЕ\tАБВГ.123456.000\tРедуктор\tСборочные единицы\t\t\r\nТП\tАБВГ.123456.001\t005\t4110\t31\t\t15\t4\r\n");
@@ -956,6 +957,238 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
         pk_changed();
         if (g_pkSheet == PK_OPS) pk_fill(FALSE);
         st_check(g_pk[PK_OPS].n == 7, L"чужая деталь убрана — на листе снова семь строк");
+        { /* «дерево ТП <обозначение>» (ai_esi.c) — только чтение; домашний ТП ТСТ.110.004: 3 операции в версии и в варианте */
+          wchar_t td[200];
+          BOOL w1 = tree_wanted(L"дерево ТП ТСТ.110.004"), w2 = tree_wanted(L"покажи дерево каталогов"),
+               d1 = tree_des_of(L"покажи дерево ТП «ТСТ.110.004»?", td, 200) && !wcscmp(td, L"ТСТ.110.004");
+          wchar_t *tt = tree_build(L"ТСТ.110.004");
+          st_check(w1 && !w2 && d1 && tt && wcsstr(tt, L"Версия ТП") && wcsstr(tt, L"Вариант ТП в версии") && wcsstr(tt, L"итого 3") &&
+                       wcsstr(tt, L"Способ комплектования"),
+                   L"«дерево ТП ТСТ.110.004»: команда узнаётся, версия → 3 операции, вариант в версии → 3 операции в варианте, способ комплектования");
+          if (tt) {
+            wchar_t first[600];
+            lstrcpynW(first, tt, 600);
+            for (wchar_t *c = first; *c; c++)
+              if (*c == L'\n') *c = L' ';
+            st_note(L"     дерево: %ls", first);
+          }
+          free(tt);
+          wchar_t *t2 = tree_build(L"ТСТ.999.999");
+          st_check(t2 && wcsstr(t2, L"такого ТП нет"), L"дерево ТП несуществующей детали — «такого ТП нет»");
+          free(t2);
+        }
+        { /* обозначение изделия поправили в ячейке (как «с6 → сб» после чтения) — операции, заготовки и состав переезжают к нему */
+          XpTable *it3 = &g_pk[PK_ITEMS];
+          xp_row(it3);
+          it3 = &g_pk[PK_ITEMS];
+          int row = it3->n - 1;
+          pk_put(it3, row, 0, L"ТСТ.170.0С6"), pk_put(it3, row, 1, L"Планка опорная"), pk_put(it3, row, 2, L"Детали");
+          XpTable *op3 = &g_pk[PK_OPS];
+          for (int i = 0; i < 2; i++) {
+            xp_row(op3);
+            op3 = &g_pk[PK_OPS];
+            pk_put(op3, op3->n - 1, 0, L"ТСТ.170.0С6");
+            pk_put(op3, op3->n - 1, 1, i ? L"010" : L"005");
+            pk_put(op3, op3->n - 1, 2, i ? L"4110 Токарная" : L"4280 Отрезная");
+          }
+          XpTable *bl3 = &g_pk[PK_BLANKS];
+          xp_row(bl3);
+          bl3 = &g_pk[PK_BLANKS];
+          pk_put(bl3, bl3->n - 1, 0, L"ТСТ.170.0С6");
+          pk_put(bl3, bl3->n - 1, 1, L"Круг 40 ГОСТ 2590-2006 / Сталь 45 ГОСТ 1050-2013");
+          int sheetWas = g_pkSheet;
+          g_pkSheet = PK_ITEMS;
+          pk_fill(TRUE);
+          pk_edit_begin(row, 0);
+          SetWindowTextW(g_pkEditCtl, L"ТСТ.170.0СБ");
+          pk_edit_end(TRUE);
+          op3 = &g_pk[PK_OPS], bl3 = &g_pk[PK_BLANKS], it3 = &g_pk[PK_ITEMS];
+          int opsNew = 0, opsOld = 0, blNew = 0;
+          for (int r = 0; r < op3->n; r++) {
+            opsNew += !wcscmp(xp_cell(op3, r, 0), L"ТСТ.170.0СБ") && !pk_is_transport(xp_cell(op3, r, 2));
+            opsOld += !wcscmp(xp_cell(op3, r, 0), L"ТСТ.170.0С6");
+          }
+          for (int r = 0; r < bl3->n; r++) blNew += !wcscmp(xp_cell(bl3, r, 0), L"ТСТ.170.0СБ");
+          st_check(!wcscmp(xp_cell(it3, row, 0), L"ТСТ.170.0СБ") && opsNew == 2 && opsOld == 0 && blNew == 1,
+                   L"обозначение изделия поправили в ячейке («0С6» → «0СБ») — его операции и заготовка переехали, у старого ничего не осталось");
+          st_note(L"     после правки: операций у нового %d, у старого %d, заготовок у нового %d", opsNew, opsOld, blNew);
+          /* убрать */
+          for (int r = op3->n - 1; r >= 0; r--)
+            if (!wcsncmp(xp_cell(op3, r, 0), L"ТСТ.170.", 8)) pk_del_row(op3, r);
+          for (int r = bl3->n - 1; r >= 0; r--)
+            if (!wcsncmp(xp_cell(bl3, r, 0), L"ТСТ.170.", 8)) pk_del_row(bl3, r);
+          for (int r = it3->n - 1; r >= 0; r--)
+            if (!wcsncmp(xp_cell(it3, r, 0), L"ТСТ.170.", 8)) pk_del_row(it3, r);
+          g_pkSheet = sheetWas;
+          pk_changed();
+          pk_fill(TRUE);
+          st_check(g_pk[PK_OPS].n == 7, L"деталь из проверки убрана — на листе «Операции» снова семь строк");
+        }
+        { /* состав из файла спецификации (TSV, как строки листа-спецификации): позиции, количество, СБ — документом */
+          wchar_t sp[MAX_PATH];
+          _snwprintf(sp, MAX_PATH, L"%ls\\spec-test.tsv", g_stDir);
+          szm_write_part(sp, L"#СБОРКА\tТСТ.160.000\tРама сварная\r\n"
+                             L"Документация\t\tТСТ.160.000СБ\tСборочный чертеж\t\t\r\n"
+                             L"Документация\t\tТСТ.160.000ПЗ\tПояснительная записка\t\t\r\n"
+                             L"Детали\t1\tТСТ.160.001\tПланка\t2\t\r\n"
+                             L"Детали\t2\tТСТ.160.002\tУголок\t4\t\r\n"
+                             L"Стандартные изделия\t3\t\tБолт М8-6gx20 ГОСТ 7798-70\t8\t\r\n");
+          int itBefore = g_pk[PK_ITEMS].n, lnBefore = g_pk[PK_LINKS].n;
+          int nl = pk_spec_tsv(sp);
+          XpTable *it4 = &g_pk[PK_ITEMS], *ln4 = &g_pk[PK_LINKS];
+          int hasAsm = 0, hasSb = 0, hasPz = 0, q2 = 0, q4 = 0, q8 = 0, sbLink = 0;
+          for (int r = 0; r < it4->n; r++) {
+            const wchar_t *d4 = xp_cell(it4, r, 0);
+            if (!wcscmp(d4, L"ТСТ.160.000") && wcsstr(xp_cell(it4, r, 2), L"борочн")) hasAsm++;
+            if (!wcscmp(d4, L"ТСТ.160.000СБ") && !wcscmp(xp_cell(it4, r, 2), L"Документация")) hasSb++;
+            if (!wcscmp(d4, L"ТСТ.160.000ПЗ")) hasPz++;
+          }
+          for (int r = 0; r < ln4->n; r++) {
+            if (wcscmp(xp_cell(ln4, r, 0), L"ТСТ.160.000")) continue;
+            const wchar_t *c4 = xp_cell(ln4, r, 1), *q = xp_cell(ln4, r, 2);
+            if (!wcscmp(c4, L"ТСТ.160.001") && !wcscmp(q, L"2")) q2++;
+            if (!wcscmp(c4, L"ТСТ.160.002") && !wcscmp(q, L"4")) q4++;
+            if (wcsstr(c4, L"Болт М8") && !wcscmp(q, L"8")) q8++;
+            if (!wcscmp(c4, L"ТСТ.160.000СБ")) sbLink++;
+          }
+          st_check(nl == 4 && hasAsm == 1 && hasSb == 1 && !hasPz && q2 == 1 && q4 == 1 && q8 == 1 && sbLink == 1,
+                   L"состав из файла спецификации: сборка, 2 детали и стандартное с количеством, СБ из «Документации» — документом в состав, ПЗ — мимо");
+          st_note(L"     из файла: строк состава %d, изделий +%d, состава +%d", nl, g_pk[PK_ITEMS].n - itBefore, g_pk[PK_LINKS].n - lnBefore);
+          /* убрать: дальше стенд ждёт прежние листы */
+          for (int r = it4->n - 1; r >= 0; r--)
+            if (!wcsncmp(xp_cell(it4, r, 0), L"ТСТ.160.", 8) || wcsstr(xp_cell(it4, r, 0), L"Болт М8")) pk_del_row(it4, r);
+          for (int r = ln4->n - 1; r >= 0; r--)
+            if (!wcscmp(xp_cell(ln4, r, 0), L"ТСТ.160.000")) pk_del_row(ln4, r);
+          pk_changed();
+          pk_fill(FALSE);
+          DeleteFileW(sp);
+          st_check(g_pk[PK_ITEMS].n == itBefore && g_pk[PK_LINKS].n == lnBefore, L"строки из файла убраны — листы как были");
+          { /* страницы одной спецификации файлами без шапки (как пишет spec_tsv.py ветки обучения): порядок имён, раздел
+               продолжения — с прошлой страницы, «Сборочный чертеж» без кода в обозначении — документом «…СБ» */
+            XpTable *it6 = &g_pk[PK_ITEMS];
+            xp_row(it6);
+            it6 = &g_pk[PK_ITEMS];
+            pk_put(it6, it6->n - 1, 0, L"ТСТ.200.000"), pk_put(it6, it6->n - 1, 1, L"Опора"), pk_put(it6, it6->n - 1, 2, L"Сборочные единицы");
+            lstrcpynW(g_pkCur, L"ТСТ.200.000", 200);
+            static wchar_t pg2[2][MAX_PATH];
+            _snwprintf(pg2[0], MAX_PATH, L"%ls\\0047.tif.p2.tsv", g_stDir); /* вторая страница — первой в списке */
+            _snwprintf(pg2[1], MAX_PATH, L"%ls\\0047.tif.tsv", g_stDir);
+            /* без BOM, LF */
+            HANDLE h6 = CreateFileW(pg2[1], GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+            if (h6 != INVALID_HANDLE_VALUE) {
+              const char *t1 = "\xD0\x94\xD0\xBE\xD0\xBA\xD1\x83\xD0\xBC\xD0\xB5\xD0\xBD\xD1\x82\xD0\xB0\xD1\x86\xD0\xB8\xD1\x8F\t\t"
+                               "\xD0\xA2\xD0\xA1\xD0\xA2.200.000\t\xD0\xA1\xD0\xB1\xD0\xBE\xD1\x80\xD0\xBE\xD1\x87\xD0\xBD\xD1\x8B\xD0\xB9 "
+                               "\xD1\x87\xD0\xB5\xD1\x80\xD1\x82\xD0\xB5\xD0\xB6\t\t\n"
+                               "\xD0\x94\xD0\xB5\xD1\x82\xD0\xB0\xD0\xBB\xD0\xB8\t1\t\xD0\xA2\xD0\xA1\xD0\xA2.200.001\t\xD0\x9B\xD0\xB0\xD0\xBF\xD0\xB0\t2\t\n";
+              DWORD w6;
+              WriteFile(h6, t1, (DWORD)strlen(t1), &w6, NULL);
+              CloseHandle(h6);
+            }
+            h6 = CreateFileW(pg2[0], GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+            if (h6 != INVALID_HANDLE_VALUE) {
+              const char *t2 = "\t2\t\xD0\xA2\xD0\xA1\xD0\xA2.200.002\t\xD0\xA0\xD0\xB5\xD0\xB1\xD1\x80\xD0\xBE\t4\t\n";
+              DWORD w6;
+              WriteFile(h6, t2, (DWORD)strlen(t2), &w6, NULL);
+              CloseHandle(h6);
+            }
+            int n6 = pk_spec_tsv_n(pg2, 2);
+            it6 = &g_pk[PK_ITEMS];
+            XpTable *ln6 = &g_pk[PK_LINKS];
+            int kSb = 0, k2 = -1, k1 = -1, q1 = 0, q2b = 0;
+            for (int r = 0; r < it6->n; r++) {
+              if (!wcscmp(xp_cell(it6, r, 0), L"ТСТ.200.000СБ") && !wcscmp(xp_cell(it6, r, 2), L"Документация")) kSb++;
+              if (!wcscmp(xp_cell(it6, r, 0), L"ТСТ.200.002")) k2 = r;
+              if (!wcscmp(xp_cell(it6, r, 0), L"ТСТ.200.001")) k1 = r;
+            }
+            for (int r = 0; r < ln6->n; r++) {
+              if (wcscmp(xp_cell(ln6, r, 0), L"ТСТ.200.000")) continue;
+              q1 += !wcscmp(xp_cell(ln6, r, 1), L"ТСТ.200.001") && !wcscmp(xp_cell(ln6, r, 2), L"2");
+              q2b += !wcscmp(xp_cell(ln6, r, 1), L"ТСТ.200.002") && !wcscmp(xp_cell(ln6, r, 2), L"4");
+            }
+            st_check(n6 == 3 && kSb == 1 && k1 >= 0 && k2 >= 0 && !wcscmp(xp_cell(it6, k2, 2), xp_cell(it6, k1, 2)) && q1 == 1 && q2b == 1,
+                     L"две страницы спецификации файлами без шапки: порядок страниц по имени, раздел продолжения — с первой страницы, "
+                     L"«Сборочный чертеж» — документом «…СБ», количество по строкам");
+            st_note(L"     страницы: строк состава %d, вид продолжения «%ls»", n6, k2 >= 0 ? xp_cell(it6, k2, 2) : L"-");
+            for (int r = it6->n - 1; r >= 0; r--)
+              if (!wcsncmp(xp_cell(it6, r, 0), L"ТСТ.200.", 8)) pk_del_row(it6, r);
+            for (int r = ln6->n - 1; r >= 0; r--)
+              if (!wcscmp(xp_cell(ln6, r, 0), L"ТСТ.200.000")) pk_del_row(ln6, r);
+            g_pkCur[0] = 0;
+            DeleteFileW(pg2[0]), DeleteFileW(pg2[1]);
+            pk_changed();
+            pk_fill(FALSE);
+            st_check(g_pk[PK_ITEMS].n == itBefore && g_pk[PK_LINKS].n == lnBefore, L"страницы из проверки убраны — листы как были");
+          }
+          { /* лист-продолжение без заголовка раздела — раздел с прошлой страницы; спецификация без строк — пометка */
+            PkStRes *rr = (PkStRes *)calloc(1, sizeof(PkStRes));
+            DrPage p1, p2;
+            memset(&p1, 0, sizeof(p1)), memset(&p2, 0, sizeof(p2));
+            p1.rows = (DrSpecRow *)calloc(2, sizeof(DrSpecRow)), p2.rows = (DrSpecRow *)calloc(2, sizeof(DrSpecRow));
+            if (rr && p1.rows && p2.rows) {
+              lstrcpynW(p1.rows[0].c[DS_SECT], L"Сборочные единицы", DR_CELL), lstrcpynW(p1.rows[0].c[DS_DES], L"ТСТ.180.100", DR_CELL);
+              lstrcpynW(p1.rows[0].c[DS_NAME], L"Узел", DR_CELL);
+              lstrcpynW(p1.rows[1].c[DS_SECT], L"Детали", DR_CELL), lstrcpynW(p1.rows[1].c[DS_DES], L"ТСТ.180.001", DR_CELL);
+              lstrcpynW(p1.rows[1].c[DS_NAME], L"Планка", DR_CELL);
+              p1.nrows = 2;
+              lstrcpynW(p2.rows[0].c[DS_DES], L"ТСТ.180.002", DR_CELL), lstrcpynW(p2.rows[0].c[DS_NAME], L"Уголок", DR_CELL);
+              lstrcpynW(p2.rows[1].c[DS_SECT], L"Стандартные изделия", DR_CELL), lstrcpynW(p2.rows[1].c[DS_NAME], L"Шайба 8 ГОСТ 11371-78", DR_CELL);
+              p2.nrows = 2;
+              p2.rows[0].doubt[DS_QTY] = 1; /* модель сомневается в количестве строки продолжения */
+              pks_spec_rows(&p1, rr);
+              pks_spec_rows(&p2, rr);
+              st_check(rr->nrows == 4 && rr->rows[2].doubt && !rr->rows[0].doubt && !rr->rows[1].doubt && !rr->rows[3].doubt,
+                       L"сомнение строки спецификации (количество) переходит в строку состава — остальные без пометки");
+              { /* и попадает в «проверьте» строки состояния и карточки */
+                wchar_t keepD[120];
+                lstrcpynW(keepD, g_pksDoubt, 120);
+                g_pksDoubt[0] = 0;
+                PkStRes *ra = (PkStRes *)calloc(1, sizeof(PkStRes));
+                if (ra) {
+                  ra->parentRow = ra->row = -1;
+                  ra->how = 3, ra->asmDoc = TRUE;
+                  lstrcpynW(ra->des, L"ТСТ.180.000", DR_CELL), lstrcpynW(ra->kind, L"Сборочные единицы", 40);
+                  ra->rows = rr->rows, ra->nrows = rr->nrows;
+                  int itB = g_pk[PK_ITEMS].n, lnB = g_pk[PK_LINKS].n;
+                  pks_apply(ra);
+                  BOOL inDoubt = wcsstr(g_pksDoubt, L"ТСТ.180.002") && !wcsstr(g_pksDoubt, L"ТСТ.180.001");
+                  st_check(inDoubt, L"обозначение строки с сомнением — в «проверьте: …» (строка состояния и карточка ЭСИ)");
+                  XpTable *ia = &g_pk[PK_ITEMS], *la = &g_pk[PK_LINKS];
+                  for (int r = ia->n - 1; r >= itB; r--) pk_del_row(ia, r);
+                  for (int r = la->n - 1; r >= lnB; r--) pk_del_row(la, r);
+                  free(ra);
+                }
+                lstrcpynW(g_pksDoubt, keepD, 120);
+              }
+              st_check(rr->nrows == 4 && !wcscmp(rr->rows[2].des, L"ТСТ.180.002") && !wcscmp(rr->rows[2].kind, rr->rows[1].kind) &&
+                           rr->rows[1].kind[0] && wcscmp(rr->rows[3].kind, rr->rows[1].kind),
+                       L"спецификация: строка листа-продолжения без раздела — раздел «Детали» с прошлой страницы; со своим разделом — свой");
+              st_note(L"     разделы: «%ls», «%ls», продолжение «%ls», «%ls»", rr->rows[0].kind, rr->rows[1].kind, rr->rows[2].kind, rr->rows[3].kind);
+              PkStRes e;
+              memset(&e, 0, sizeof(e));
+              e.spec = TRUE;
+              lstrcpynW(e.des, L"ТСТ.180.000", DR_CELL);
+              pks_spec_check(&e, L"спецификация по шапке, строк Tesseract нет");
+              PkStRes d;
+              memset(&d, 0, sizeof(d));
+              pks_spec_check(&d, L"");
+              st_check(e.specEmpty && wcsstr(e.note, L"строки не прочитаны") && wcsstr(e.note, L"ТСТ.180.000") && !d.specEmpty && !d.note[0],
+                       L"спецификация без строк — пометка «строки не прочитаны» с обозначением, не пустая сборка молча; чертёж — без пометки");
+              /* «Проверить»: сборка без состава */
+              XpTable *it5 = &g_pk[PK_ITEMS];
+              xp_row(it5);
+              it5 = &g_pk[PK_ITEMS];
+              pk_put(it5, it5->n - 1, 0, L"ТСТ.190.000"), pk_put(it5, it5->n - 1, 1, L"Кронштейн сборный"), pk_put(it5, it5->n - 1, 2, L"Сборочные единицы");
+              pk_check(TRUE);
+              BOOL warnEmpty = g_pkLastCheck && wcsstr(g_pkLastCheck, L"Сборка без состава") && wcsstr(g_pkLastCheck, L"ТСТ.190.000");
+              pk_del_row(it5, it5->n - 1);
+              pk_check(TRUE);
+              BOOL goneEmpty = !(g_pkLastCheck && wcsstr(g_pkLastCheck, L"ТСТ.190.000"));
+              st_check(warnEmpty && goneEmpty, L"«Проверить»: сборка без состава — предупреждение до отправки; убрали — его нет");
+            }
+            if (rr) free(rr->rows);
+            free(rr), free(p1.rows), free(p2.rows);
+          }
+        }
         /* поле правки не остаётся поверх таблицы, когда список перестраивается */
         pk_edit_begin(0, 3);
         BOOL shown = g_pkCombo && IsWindowVisible(g_pkCombo);

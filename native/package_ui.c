@@ -50,6 +50,7 @@
 #define ID_PK_SOYESI 331     /*   только ЭСИ — изделия, состав, чертежи */
 #define ID_PK_SOYTP 332      /*   только ТП — операции и заготовки к изделиям, уже заведённым в «Союзе» */
 #define ID_PK_QCRAFT 333     /* строка быстрого ТП: профессия (с 2026.10.30) */
+#define ID_PK_SPECTSV 334    /* «Ещё ▾»: состав из файла спецификации (TSV) — для стенда и ручного импорта (с 31.10) */
 #define PK_OP_CRAFT 7        /* лист «Операции»: столбец «Профессия» — последний (kPkOpsHead) */
 #define WM_PK_ESI (WM_APP + 99) /* lParam — RtJob*, освобождает окно */
 /* чертежи, брошенные мышью (pk_stamp.c): штамп читает рабочий поток */
@@ -131,6 +132,7 @@ static void pk_stamp_ops(void);                 /* pk_stamp.c: операции 
 static BOOL pk_stamp_ops_on(void);              /* pk_stamp.c: чертёж детали — сразу и операции */
 static void pks_ops_toggle(void);               /* pk_stamp.c: та галочка */
 static void pk_draw_pick(void);                 /* pk_stamp.c: «Чертежи…» — выбрать файлы, сразу и операции */
+static void pk_spec_tsv_pick(void);             /* pk_stamp.c: состав из файла спецификации (TSV) */
 
 /* Строки, пришедшие из «Союза» («Из Союза»): изделие и связь там уже есть. Пока строка как
    была — в «Союз» не идёт (у изделия функция выровняла бы наименование, пустое стёрла бы);
@@ -1066,6 +1068,28 @@ static void pk_edit_begin(int r, int c) {
   else SendMessageW(g_pkEdit, EM_SETSEL, 0, -1);
 }
 
+/* обозначение изделия поменяли (правка ячейки «Изделий», в том числе исправление «с6 → сб» после чтения) — его
+   операции, заготовки и строки состава переезжают на новое (с 31.10: раньше оставались у старого и терялись при
+   отправке). Сколько строк переехало */
+static void pk_q_trim(wchar_t *s);
+static int pk_rename_des(const wchar_t *was, const wchar_t *now) {
+  wchar_t w[200], nw[200];
+  lstrcpynW(w, was ? was : L"", 200);
+  lstrcpynW(nw, now ? now : L"", 200);
+  pk_q_trim(w), pk_q_trim(nw);
+  if (!w[0] || !nw[0] || !_wcsicmp(w, nw)) return 0;
+  static const int kSheet[4] = {PK_OPS, PK_BLANKS, PK_LINKS, PK_LINKS}, kCol[4] = {0, 0, 0, 1};
+  int n = 0;
+  for (int k = 0; k < 4; k++) {
+    XpTable *t = &g_pk[kSheet[k]];
+    for (int r = 0; r < t->n; r++)
+      if (!_wcsicmp(xp_cell(t, r, kCol[k]), w)) pk_put(t, r, kCol[k], nw), n++;
+  }
+  if (!_wcsicmp(g_pkCur, w)) lstrcpynW(g_pkCur, nw, 200);
+  if (!_wcsicmp(g_pkFilt, w)) lstrcpynW(g_pkFilt, nw, 200);
+  return n;
+}
+
 static void pk_edit_end(BOOL commit) {
   int r = g_pkEditRow, c = g_pkEditCol;
   g_pkEditRow = g_pkEditCol = -1; /* до ShowWindow: уход фокуса не должен сохранить второй раз */
@@ -1075,7 +1099,14 @@ static void pk_edit_end(BOOL commit) {
     wchar_t v[600];
     GetWindowTextW(ctl, v, 600);
     pk_none_fix(ctl, v, 600);
+    int moved = 0;
+    if (g_pkSheet == PK_ITEMS && c == 0) { /* операции, заготовки и состав — за обозначением */
+      wchar_t was[200];
+      lstrcpynW(was, xp_cell(&g_pk[PK_ITEMS], r, 0), 200);
+      moved = pk_rename_des(was, v);
+    }
     pk_put(&g_pk[g_pkSheet], r, c, v);
+    if (moved) pk_status(L"Обозначение «%s»: операции, заготовки и строки состава (%d) переехали к нему", xp_cell(&g_pk[PK_ITEMS], r, 0), moved);
     pk_set_item(r);
     if (g_pkSheet == PK_ITEMS && c == 0) pk_stamp_typed(r);
     pk_changed();
@@ -2144,6 +2175,27 @@ static BOOL pk_check(BOOL quiet) {
       g_pkSendWarn++;
     }
   }
+  { /* сборка без состава (спецификация не прочиталась, состав не вписан) — не молча (с 31.10) */
+    wchar_t emp[400] = L"";
+    int ne3 = 0;
+    for (int r = 0; r < it->n; r++) {
+      const wchar_t *d3 = xp_cell(it, r, 0);
+      if (!d3[0] || !wcsstr(xp_cell(it, r, 2), L"борочн") || pk_row_from_soyuz(PK_ITEMS, r)) continue;
+      BOOL has = FALSE;
+      for (int q = 0; q < ln->n && !has; q++) has = !_wcsicmp(xp_cell(ln, q, 0), d3);
+      if (has) continue;
+      ne3++;
+      size_t l = wcslen(emp);
+      if (l < 300) _snwprintf(emp + l, 400 - l, L"%s%s", l ? L", " : L"", d3);
+    }
+    emp[399] = 0;
+    if (ne3) {
+      sb_add(&b, L"• Сборка без состава (%d): %s — спецификация не прочиталась или состав не вписан; «Состав» или «Ещё ▾ → Состав из "
+                 L"файла спецификации»\n",
+             ne3, emp);
+      g_pkSendWarn++;
+    }
+  }
   if (g_szmDictsAsked && !g_szmDicts.err[0] && g_szmDicts.na && !g_szmDicts.nb) { /* признак покупки — в базе списка нет */
     int withBuy = 0;
     for (int r = 0; r < it->n; r++) withBuy += xp_cell(it, r, 6)[0] != 0;
@@ -2775,6 +2827,7 @@ static LRESULT CALLBACK PkProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
                   L"Чертёж детали — сразу и операции (мини-ИИ читает лист, маршрут и нормы — правила технолога)");
       AppendMenuW(m, MF_STRING, ID_PK_DRAWOPS, L"Операции по чертежам — деталям с файлом и без операций (выделены — только им)");
       AppendMenuW(m, MF_SEPARATOR, 0, NULL);
+      AppendMenuW(m, MF_STRING, ID_PK_SPECTSV, L"Состав из файла спецификации (TSV: раздел, поз., обозначение, наименование, кол.)…");
       AppendMenuW(m, MF_STRING, ID_PK_FROMXP, L"Из выгрузки из PLM…");
       AppendMenuW(m, MF_STRING, ID_PK_SAVE, L"Сохранить пакет .xlsx для «Загрузить ЭСИ из CursorPad»…");
       AppendMenuW(m, MF_SEPARATOR, 0, NULL);
@@ -2795,6 +2848,7 @@ static LRESULT CALLBACK PkProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
     if (id == ID_PK_DRAWFIND) pk_find_drawings();
     if (id == ID_PK_DRAWTOGGLE) pks_ops_toggle();
     if (id == ID_PK_DRAWOPS) pk_stamp_ops();
+    if (id == ID_PK_SPECTSV) pk_spec_tsv_pick();
     return 0;
   }
   case WM_KEYDOWN:
