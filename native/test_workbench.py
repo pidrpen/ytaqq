@@ -31,7 +31,8 @@ for name,size in [('one-размер.png',(320,160)),('Фото-размер.png
 assert len(PdfReader(root/'out/Пакет чертежей.pdf').pages)==3
 assert not (root/'out/one.zip').exists()
 history=json.loads((root/'conversions/history.json').read_text());assert any(e['state']=='undone' for e in history['entries'])
-assert len(history['entries'])==4
+assert len(history['entries'])==5
+assert sorted(p.name for p in (root/'swap').iterdir())==['Лист.pdf']
 for path,digest in before.items():assert hashlib.sha256(path.read_bytes()).hexdigest()==digest
 desktop=root/'desktop'
 assert (desktop/'Новая папка').is_dir() and (desktop/'Новая папка (2)').is_dir()

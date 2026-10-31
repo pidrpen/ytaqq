@@ -398,7 +398,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
       (void)w;
       wchar_t *pt = NULL, pnote[200];
       PkSent sent;
-      int pn = pk_soyuz_text(&pt, pnote, 200, &sent);
+      int pn = pk_soyuz_text(&pt, pnote, 200, &sent, PK_SEND_ALL);
       st_check(pn == 1 && pt && wcsstr(pt, L"ИЗДЕЛИЕ\tТСТ.120.000\tУзел пробный\tСборочные единицы\t\t\t") &&
                    wcsstr(pt, L"СОСТАВ\tТСТ.120.000\tТСТ.110.004\t2\t\r\n") &&
                    wcsstr(pt, L"ТП\tТСТ.110.004\t5\t4110\t31\t16К20, Токарно-винторезный станок\t15\t4\r\n") &&
@@ -406,6 +406,42 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
                L"пакет → описание: изделие, состав, код 4110 по названию «Токарная», участок 31; неизвестная — пропущена");
       if (pt) st_note(L"     %ls", pt);
       free(pt);
+      /* с 2026.10.30: ЭСИ и ТП — по отдельности (меню «В Союз…») */
+      pt = NULL;
+      pk_soyuz_text(&pt, pnote, 200, &sent, PK_SEND_ESI);
+      st_check(pt && wcsstr(pt, L"ИЗДЕЛИЕ\tТСТ.120.000\t") && wcsstr(pt, L"СОСТАВ\tТСТ.120.000\tТСТ.110.004\t") &&
+                   !wcsstr(pt, L"\nТП\t") && wcsncmp(pt, L"ТП\t", 3) && sent.ops == 0 && !szm_has_line(pt, L"ТП\t"),
+               L"«Только ЭСИ»: изделие и состав, строк ТП нет");
+      free(pt);
+      pt = NULL;
+      int tn = pk_soyuz_text(&pt, pnote, 200, &sent, PK_SEND_TP);
+      wchar_t hd[200], hn[200];
+      st_check(tn == 1 && pt && !wcsstr(pt, L"ИЗДЕЛИЕ\t") && !wcsstr(pt, L"СОСТАВ\t") &&
+                   !wcsncmp(pt, L"# СБОРКА\tТСТ.120.000\tУзел пробный\r\n", 35) &&
+                   wcsstr(pt, L"ТП\tТСТ.110.004\t5\t4110\t31\t") && szm_head_asm(pt, hd, 200, hn, 200) &&
+                   !wcscmp(hd, L"ТСТ.120.000") && !wcscmp(hn, L"Узел пробный"),
+               L"«Только ТП»: операции без изделий и состава, сборка — строкой «# СБОРКА» (папка ТП сборки)");
+      free(pt);
+      /* с 2026.10.30: профессия — последним полем строки ТП (пакет 1.0.0.11); справочник — «Код, Наименование» */
+      pk_put(&g_pk[PK_OPS], 0, PK_OP_CRAFT, L"19149, Токарь");
+      pt = NULL;
+      pk_soyuz_text(&pt, pnote, 200, &sent, PK_SEND_TP);
+      st_check(pt && wcsstr(pt, L"ТП\tТСТ.110.004\t5\t4110\t31\t16К20, Токарно-винторезный станок\t15\t4\t19149, Токарь\r\n") != NULL,
+               L"профессия «19149, Токарь» — последним полем строки ТП");
+      free(pt);
+      pk_put(&g_pk[PK_OPS], 0, PK_OP_CRAFT, NULL);
+      {
+        wchar_t(*oc)[200] = g_szmDicts.craft;
+        int on = g_szmDicts.nc;
+        static wchar_t kc[2][200] = {L"19149, Токарь", L"18466, Слесарь механосборочных работ"};
+        g_szmDicts.craft = kc, g_szmDicts.nc = 2;
+        wchar_t c1[200], c2[200], c3[200], c4[200];
+        BOOL ok = pk_craft_dict(L"токарь", c1, 200) && pk_craft_dict(L"18466", c2, 200) && pk_craft_dict(L"слес", c3, 200) &&
+                  !pk_craft_dict(L"Фрезеровщик", c4, 200);
+        st_check(ok && !wcscmp(c1, L"19149, Токарь") && !wcscmp(c2, kc[1]) && !wcscmp(c3, kc[1]),
+                 L"профессия по вписанному: название, код, начало названия; чужой нет");
+        g_szmDicts.craft = oc, g_szmDicts.nc = on;
+      }
       /* с 2026.10.29: строки из «Союза» («Из Союза») не уходят, заготовка и чертёж — уходят */
       pk_soy_add_item(L"ТСТ.120.000", L"Узел пробный", FALSE);
       pk_soy_add_link(L"ТСТ.120.000", L"ТСТ.110.004");
@@ -416,7 +452,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
       pk_put(&g_pk[PK_BLANKS], 0, 3, L"D=40;L=265");
       pk_put(&g_pk[PK_ITEMS], 0, 5, L"C:\\Чертежи\\ТСТ.120.000.pdf");
       pt = NULL;
-      pk_soyuz_text(&pt, pnote, 200, &sent);
+      pk_soyuz_text(&pt, pnote, 200, &sent, PK_SEND_ALL);
       st_check(pt && !wcsstr(pt, L"ИЗДЕЛИЕ\t") && !wcsstr(pt, L"СОСТАВ\t") &&
                    wcsstr(pt, L"ЗАГОТОВКА\tТСТ.110.004\tКруг 40 ГОСТ 2590-2006 / Сталь 45 ГОСТ 1050-2013\t3,1\tD=40;L=265\r\n") &&
                    wcsstr(pt, L"ЧЕРТЕЖ\tТСТ.120.000\tC:\\Чертежи\\ТСТ.120.000.pdf\r\n") && sent.blanks == 1 && sent.draws == 1,
@@ -927,7 +963,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
         st_check(shown && !IsWindowVisible(g_pkCombo) && g_pkEditRow < 0,
                  L"список перестроили во время правки ячейки — правка закончена, поле не висит над шапкой");
       }
-      pk_to_soyuz();
+      pk_to_soyuz(PK_SEND_ALL);
       for (int t = 0; t < 100 && SendMessageW(g_szmCombo, CB_GETCOUNT, 0, 0) == 0; t++) st_pump(100);
       int nf = (int)SendMessageW(g_szmCombo, CB_GETCOUNT, 0, 0);
       st_check(g_szmText && wcsstr(g_szmText, L"СОСТАВ\t") && nf >= 5, L"«В Союз…»: окно папки открыто с описанием, папок из базы не меньше 5");

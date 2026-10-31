@@ -54,6 +54,13 @@ static int cvx_lab(HINSTANCE instance) {
   swprintf(g_cvxSelection.paths[1],MAX_PATH,L"%ls\\inputs\\pages.pdf",g_dataDir);cvx_list();
   SendMessageW(g_cvxAction,CB_SETCURSEL,14,0);cvx_run();if(!cvx_lab_wait()||!cvx_lab_exists(L"Пакет чертежей.pdf"))return 8;
   cvx_toggle_history();if(g_cvxHistoryOpen||IsWindowVisible(g_cvxHistory))return 26;
+  { /* «Подмена» из дуги кольца: PDF встаёт рядом вместо PNG, исходника больше нет */
+    static CvSelection swap;wchar_t dir[MAX_PATH],from[MAX_PATH],pdf[MAX_PATH];
+    swprintf(dir,MAX_PATH,L"%ls\\swap",g_dataDir);CreateDirectoryW(dir,NULL);swprintf(from,MAX_PATH,L"%ls\\inputs\\one.png",g_dataDir);
+    swap.count=1;swprintf(swap.paths[0],MAX_PATH,L"%ls\\Лист.png",dir);swprintf(pdf,MAX_PATH,L"%ls\\Лист.pdf",dir);
+    if(!CopyFileW(from,swap.paths[0],TRUE)||!cvx_dispatch(&swap,4|CV_REPLACE)||!cvx_lab_wait())return 60;
+    if(GetFileAttributesW(pdf)==INVALID_FILE_ATTRIBUTES||GetFileAttributesW(swap.paths[0])!=INVALID_FILE_ATTRIBUTES)return 61;
+  }
   wchar_t screenshot[MAX_PATH];swprintf(screenshot,MAX_PATH,L"%ls\\workbench.bmp",g_dataDir);cvx_controls();cvx_hint();cvx_lab_capture(screenshot);
   g_cvxSelection.count=1;cvx_list();
   /* Capture the exact resize scenario from the user's screenshot. */

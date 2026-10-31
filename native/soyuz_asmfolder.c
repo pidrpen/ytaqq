@@ -159,6 +159,16 @@ static BOOL szm_asm_folder(const wchar_t *root, wchar_t (*list)[SZM_PATH], int n
    один СОСТАВ как входящее; нет сборок — FALSE */
 static BOOL szm_head_asm(const wchar_t *text, wchar_t *des, int dcap, wchar_t *name, int ncap) {
   des[0] = name[0] = 0;
+  /* «Только ТП» (с 2026.10.30): изделий в описании нет — сборку называет строка «# СБОРКА\t<обозн.>\t<наим.>» */
+  for (const wchar_t *p = text; p && *p; p = wcschr(p, L'\n'), p = p ? p + 1 : NULL)
+    if (!wcsncmp(p, L"# СБОРКА\t", 9)) {
+      const wchar_t *d = p + 9, *t = wcschr(d, L'\t'), *e = wcspbrk(d, L"\r\n");
+      if (!t || (e && t > e)) continue;
+      lstrcpynW(des, d, (int)(t - d) + 1 < dcap ? (int)(t - d) + 1 : dcap);
+      size_t nl = e ? (size_t)(e - t - 1) : wcslen(t + 1);
+      lstrcpynW(name, t + 1, (int)nl + 1 < ncap ? (int)nl + 1 : ncap);
+      return des[0] != 0;
+    }
   for (const wchar_t *p = text; p && *p;) {
     const wchar_t *e = wcspbrk(p, L"\r\n");
     size_t len = e ? (size_t)(e - p) : wcslen(p);
@@ -213,9 +223,10 @@ static BOOL szm_propose_text(const wchar_t *text, const wchar_t *folder, const w
   *mk = FALSE;
   wchar_t des[200], name[200];
   if (!g_szmFold || !szm_head_asm(text, des, 200, name, 200)) return FALSE;
-  BOOL any = FALSE;
-  if (szm_asm_folder(folder, g_szmFold->path, g_szmFold->n, des, name, &out[0])) any = TRUE;
-  if (tp && tp[0] && szm_asm_folder(tp, g_szmFold->tp, g_szmFold->ntp, des, name, &out[1])) any = TRUE;
+  BOOL any = FALSE; /* «Только ЭСИ» — без папки ТП, «Только ТП» — без папки изделий (с 2026.10.30) */
+  if (szm_has_line(text, L"ИЗДЕЛИЕ\t") && szm_asm_folder(folder, g_szmFold->path, g_szmFold->n, des, name, &out[0])) any = TRUE;
+  if (tp && tp[0] && szm_has_line(text, L"ТП\t") && szm_asm_folder(tp, g_szmFold->tp, g_szmFold->ntp, des, name, &out[1]))
+    any = TRUE;
   *mk = (out[0].path[0] && !out[0].exists) || (out[1].path[0] && !out[1].exists);
   return any;
 }

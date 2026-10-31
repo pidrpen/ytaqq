@@ -596,9 +596,14 @@ static int tm_fseek(void *ctx, uint64_t pos) {
    а сохранить поверх одного из исходников можно без вреда. */
 static BOOL tm_write_doc(IWICImagingFactory *f, const TmPage *pages, int n, BOOL pdf, const wchar_t *out,
                          TmResult *r) {
-  wchar_t tmp[MAX_PATH + 8];
-  _snwprintf(tmp, MAX_PATH + 8, L"%s.part", out);
-  tmp[MAX_PATH + 7] = 0;
+  /* черновик — во временной папке этого ПК, не рядом с результатом: в сетевом архиве
+     чертежей часто можно добавить файл, но нельзя создать и удалить лишний */
+  wchar_t tmp[MAX_PATH + 8], dir[MAX_PATH];
+  DWORD n0 = GetTempPathW(MAX_PATH, dir);
+  if (!n0 || n0 >= MAX_PATH || !GetTempFileNameW(dir, L"cpm", 0, tmp)) {
+    _snwprintf(tmp, MAX_PATH + 8, L"%s.part", out);
+    tmp[MAX_PATH + 7] = 0;
+  }
   HANDLE h = CreateFileW(tmp, GENERIC_READ | GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
   if (h == INVALID_HANDLE_VALUE) {
     wchar_t why[120];
@@ -664,7 +669,7 @@ static BOOL tm_write_doc(IWICImagingFactory *f, const TmPage *pages, int n, BOOL
   }
   r->bytes = o.pos;
   CloseHandle(h);
-  if (ok && !MoveFileExW(tmp, out, MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED)) {
+  if (ok && !MoveFileExW(tmp, out, MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED | MOVEFILE_WRITE_THROUGH)) {
     ok = FALSE;
     wchar_t why[120];
     tm_why(HRESULT_FROM_WIN32(GetLastError()), why, 120);
@@ -2644,5 +2649,39 @@ static BOOL tm_open_pack(wchar_t (*paths)[MAX_PATH], int n, const wchar_t *name)
   for (int i = 0; i < n; i++) tm_paths_add(&l, paths[i]);
   lstrcpynW(g_tmSuggest, name ? name : L"", MAX_PATH);
   tm_load_paths_ex(&l, FALSE);
+  return TRUE;
+}
+
+/* «Один TIFF» из кольца Shift: без окна и вопросов. Страницы — в порядке выделения,
+   файл «<первый>_объединено.tif» встаёт рядом с первым исходником и ничего не затирает.
+   Итог приходит в окно кольца (WM_TM_DONE), хода и «Отмены» у кольца нет. */
+static volatile LONG g_tmRingCancel;
+
+static void tm_ring_name(const wchar_t *first, wchar_t *out) {
+  wchar_t base[MAX_PATH];
+  lstrcpynW(base, first, MAX_PATH);
+  wchar_t *dot = wcsrchr(base, L'.');
+  if (dot && dot > wcsrchr(base, L'\\')) *dot = 0;
+  _snwprintf(out, MAX_PATH, L"%s_объединено.tif", base);
+  out[MAX_PATH - 1] = 0;
+  for (int k = 2; k < 1000 && GetFileAttributesW(out) != INVALID_FILE_ATTRIBUTES; k++) {
+    _snwprintf(out, MAX_PATH, L"%s_объединено (%d).tif", base, k);
+    out[MAX_PATH - 1] = 0;
+  }
+}
+
+static BOOL tm_merge_quiet(wchar_t (*paths)[MAX_PATH], int n, HWND notify) {
+  if (!n || !notify) return FALSE;
+  tm_common_init();
+  if (g_tmRunning || g_tmExporting || g_tmLoadPending) return FALSE; /* окно объединения занято своим */
+  TmPaths l = {0};
+  for (int i = 0; i < n; i++) tm_paths_add(&l, paths[i]);
+  TmJob *j = tm_job_paths(TJ_TIFF, &l);
+  if (!j) return FALSE;
+  tm_ring_name(paths[0], j->out);
+  j->wnd = notify;
+  j->cancel = &g_tmRingCancel;
+  InterlockedExchange(&g_tmRingCancel, 0);
+  tm_submit(j);
   return TRUE;
 }

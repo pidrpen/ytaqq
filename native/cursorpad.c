@@ -273,8 +273,10 @@ static const PadTheme kThemes[THEME_COUNT] = {
      L"Мягкая", L"Segoe UI Variable Text", L"Segoe UI", L"Segoe UI Variable Display",
      L"Segoe UI Variable Small", -1, BTN_TONE, HEAD_PLAIN, 2, FALSE},
     /* чертёжный лист: прямые углы, контуры, узкий технический шрифт,
-       заголовки прописными — как основная надпись */
-    {RGB(255, 255, 255), RGB(244, 245, 247), RGB(20, 24, 31), RGB(100, 108, 120), RGB(30, 58, 95),
+       заголовки прописными — как основная надпись. С 2026.10.30 — вид по умолчанию
+       (вариант А «Чертёж» макета): чёрные линии, тёплый серый вторым фоном и акцент
+       «красным карандашом»; главное окно и меню «Ещё» рисуются по-своему (chertezh_on) */
+    {RGB(255, 255, 255), RGB(241, 239, 232), RGB(22, 24, 29), RGB(75, 79, 87), RGB(180, 56, 10),
      L"Чертёж", L"Bahnschrift", L"Segoe UI", L"Bahnschrift", L"Bahnschrift", 0, BTN_LINE,
      HEAD_RULE, 1, TRUE},
     /* рыцарская: пергамент с фактурой, алые знамёна с золотом, стальные
@@ -343,7 +345,10 @@ static HWND g_ocr;
 static HWND g_btnUp;
 static HWND g_btnHk; /* «Горячие клавиши…» — окно hotkeys.c */
 static HWND g_btnTheme[THEME_COUNT];
-static int g_theme = 0;
+#define THEME_CHERTEZH 3 /* «Чертёж» — вид по умолчанию с 2026.10.30 */
+static int g_theme = THEME_CHERTEZH;
+/* главное окно и меню «Ещё» как чертёжный лист: ячейки, номера строк, штамп внизу */
+static BOOL chertezh_on(void) { return g_theme == THEME_CHERTEZH; }
 static HWND g_tbBg;
 static HWND g_tbFg;
 static HWND g_btnIdle[IDLE_OPTIONS]; /* бой при бездействии: через сколько */
@@ -395,6 +400,7 @@ static HWND g_filesRootEdit;
 static HWND g_btnIdx;
 static HWND g_filesStat;
 static HFONT g_fontMono;
+static HFONT g_fontMonoSm; /* «Чертёж»: номера строк, штамп, версия и клавиши — моноширинным */
 /* Карточка теперь в своём окне: находки не затираются, и можно
    смотреть список и карточку рядом. У каждого окна своё место, размер
    и масштаб текста. */
@@ -1286,11 +1292,12 @@ static void load_cursor_pref(void) {
   /* «Современный» набор: стиль, размер, обводка, тень, цвет темы, анимация, эффект; нет в файле — светлый, всё включено */
   int kSt = -1, kSz = -1, kOut = -1, kSh = -1, kAcc = -1, kAn = -1, kFx = -1;
   int setW = 0, setH = 0; /* размер окна Настроек; нет в файле — по умолчанию */
+  int look = 0; /* 1 — вид «Чертёж» уже предложен; нет в файле (до 2026.10.30) — включить его один раз */
   sscanf(buf, "%15s %d %d %15s %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d"
-              " %d %d %d %d %d %d %d %d %d", skin,
+              " %d %d %d %d %d %d %d %d %d %d", skin,
          &bg, &fg, eng, &autoOn, &theme, &aw, &ah, &cw, &ch, &pt, &keep, &ax, &ay, &cx, &cy, &cpt,
          &ox, &oy, &ow, &oh, &opt, &sparkle, &padMode, &flame, &catFx, &fxPick, &tab, &order, &idle, &idleSz, &idleWatch,
-         &ringStyle, &ringBlur, &ringDots, &ringAnim, &kSt, &kSz, &kOut, &kSh, &kAcc, &kAn, &kFx, &setW, &setH);
+         &ringStyle, &ringBlur, &ringDots, &ringAnim, &kSt, &kSz, &kOut, &kSh, &kAcc, &kAn, &kFx, &setW, &setH, &look);
   if (setW >= 360 && setW <= 8000) g_setUserW = setW;
   if (setH >= 240 && setH <= 8000) g_setUserH = setH;
   if (kSt >= 0 && kSt < KIT_STYLES) g_kitStyle = kSt;
@@ -1371,6 +1378,9 @@ static void load_cursor_pref(void) {
   if (autoOn == 0 || autoOn == 1) g_autostart = autoOn ? TRUE : FALSE;
   else g_autostart = autostart_get();
   if (theme >= 0 && theme < THEME_COUNT) g_theme = theme;
+  /* пользователь выбрал вариант «Чертёж» — при первом запуске новой версии он и встаёт;
+     дальше тема — какую выберут в Настройках («Кастомизация» → «Тема») */
+  if (look != 1) g_theme = THEME_CHERTEZH;
 }
 
 static void save_cursor_pref(void) {
@@ -1387,7 +1397,7 @@ static void save_cursor_pref(void) {
   int order = 0;
   for (int i = 0; i < SEC_COUNT; i++) order = order * 10 + g_tabOrder[i];
   snprintf(buf, sizeof(buf), "%s %d %d %s %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d"
-                             " %d %d %d %d %d %d %d %d %d\n",
+                             " %d %d %d %d %d %d %d %d %d 1\n",
            v, g_alphaFollow, g_alphaPinned, e, g_autostart ? 1 : 0, g_theme, g_ansW, g_ansH,
            g_cardW, g_cardH, g_ansPt, g_ansKeepPos ? 1 : 0, g_ansX, g_ansY, g_cardX, g_cardY,
            g_cardPt, g_ocrX, g_ocrY, g_ocrW, g_ocrH, g_ocrPt, g_sparkle ? 1 : 0, g_padMode,
@@ -2245,6 +2255,119 @@ static void draw_gutter_thumbs(HDC hdc, int dpi, int th, int fh) {
   }
 }
 
+/* «Чертёж» (с 2026.10.30): поле номеров слева от заметок — номер строки (01, 02…, как Ctrl+1…9),
+   вертикальная черта по краю поля и черта под каждой строкой, вровень с чертой в самом поле */
+static int pad_note_slots(void) {
+  int len = g_edit ? GetWindowTextLengthW(g_edit) : 0, n = 0;
+  if (len <= 0) return 0;
+  wchar_t *buf = (wchar_t *)malloc(((size_t)len + 1) * sizeof(wchar_t));
+  if (!buf) return 0;
+  GetWindowTextW(g_edit, buf, len + 1);
+  for (int i = 0; i < len;) {
+    int st = i;
+    while (i < len && buf[i] != L'\n' && buf[i] != L'\r') i++;
+    if (i > st) n++;
+    while (i < len && (buf[i] == L'\r' || buf[i] == L'\n')) i++;
+  }
+  free(buf);
+  return n;
+}
+
+static void draw_chertezh_gutter(HDC hdc, int dpi) {
+  if (!g_edit || !IsWindowVisible(g_edit)) return;
+  RECT er;
+  GetWindowRect(g_edit, &er);
+  MapWindowPoints(HWND_DESKTOP, g_hwnd, (POINT *)&er, 2);
+  int gut = MulDiv(GUTTER, dpi, 96);
+  HBRUSH ink = CreateSolidBrush(COL_INK);
+  RECT v = {gut - 4, er.top, gut - 3, er.bottom};
+  FillRect(hdc, &v, ink);
+  DeleteObject(ink);
+  int len = GetWindowTextLengthW(g_edit);
+  if (len <= 0) return;
+  wchar_t *buf = (wchar_t *)malloc(((size_t)len + 1) * sizeof(wchar_t));
+  if (!buf) return;
+  GetWindowTextW(g_edit, buf, len + 1);
+  HFONT ef = (HFONT)SendMessageW(g_edit, WM_GETFONT, 0, 0);
+  HDC edc = GetDC(g_edit);
+  int lh = 18;
+  if (edc) {
+    HGDIOBJ of = ef ? SelectObject(edc, ef) : NULL;
+    TEXTMETRICW tm;
+    GetTextMetricsW(edc, &tm);
+    lh = tm.tmHeight;
+    if (of) SelectObject(edc, of);
+    ReleaseDC(g_edit, edc);
+  }
+  HBRUSH rule = CreateSolidBrush(blend_rgb(COL_LINE, COL_PAPER, 40));
+  if (g_fontMonoSm) SelectObject(hdc, g_fontMonoSm);
+  SetBkMode(hdc, TRANSPARENT);
+  SetTextColor(hdc, COL_MUTED);
+  int slot = 0, eh = er.bottom - er.top;
+  for (int i = 0; i < len;) {
+    int st = i;
+    while (i < len && buf[i] != L'\n' && buf[i] != L'\r') i++;
+    int en = i;
+    while (i < len && (buf[i] == L'\r' || buf[i] == L'\n')) i++;
+    if (en == st) continue;
+    slot++;
+    LRESULT p1 = SendMessageW(g_edit, EM_POSFROMCHAR, (WPARAM)st, 0);
+    LRESULT p2 = SendMessageW(g_edit, EM_POSFROMCHAR, (WPARAM)(en - 1), 0);
+    if (p1 == -1 || p2 == -1) continue;
+    int y1 = (short)HIWORD(p1), y2 = (short)HIWORD(p2);
+    if (y1 > eh) break;
+    if (y1 < 0 || y1 + lh > eh) continue;
+    if (y2 + lh <= eh) {
+      RECT r = {0, er.top + y2 + lh - 1, gut - 4, er.top + y2 + lh};
+      FillRect(hdc, &r, rule);
+    }
+    {
+      wchar_t line[64];
+      int n = en - st < 63 ? en - st : 63;
+      memcpy(line, buf + st, (size_t)n * sizeof(wchar_t));
+      line[n] = 0;
+      if (parse_img_id(line)) continue; /* у картинки в поле — её миниатюра */
+    }
+    wchar_t d[8];
+    _snwprintf(d, 8, L"%02d", slot);
+    RECT nr = {0, er.top + y1, gut - 7, er.top + y1 + lh};
+    DrawTextW(hdc, d, -1, &nr, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+  }
+  DeleteObject(rule);
+  free(buf);
+}
+
+/* штамп внизу окна, как основная надпись: режим | строк | окно | подсказка — ячейками */
+static void draw_chertezh_stamp(HDC hdc, RECT rc, int dpi, int fh, const wchar_t *hint) {
+  int top = rc.bottom - fh, x = MulDiv(8, dpi, 96), pad = MulDiv(7, dpi, 96);
+  wchar_t cell[3][32];
+  lstrcpynW(cell[0], g_padMode == 1 ? L"ПОИСК" : L"БЛОКНОТ", 32);
+  _snwprintf(cell[1], 32, L"%d СТР.", pad_note_slots());
+  lstrcpynW(cell[2], g_follow ? L"ЗА КУРСОРОМ" : L"ЗАКРЕПЛЕНО", 32);
+  HBRUSH ink = CreateSolidBrush(COL_INK);
+  SetBkMode(hdc, TRANSPARENT);
+  for (int i = 0; i < 3; i++) {
+    if (i == 1 && g_padMode == 1) continue; /* в поиске строки не считаем */
+    if (g_fontMonoSm) SelectObject(hdc, g_fontMonoSm);
+    SetTextColor(hdc, COL_INK);
+    SIZE sz = {40, 10};
+    GetTextExtentPoint32W(hdc, cell[i], (int)wcslen(cell[i]), &sz);
+    RECT t = {x, top, x + sz.cx, rc.bottom};
+    DrawTextW(hdc, cell[i], -1, &t, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    x += sz.cx + pad;
+    RECT sep = {x, top + 2, x + 1, rc.bottom};
+    FillRect(hdc, &sep, ink);
+    x += pad;
+  }
+  DeleteObject(ink);
+  if (hint && hint[0]) {
+    if (g_fontSmall) SelectObject(hdc, g_fontSmall);
+    SetTextColor(hdc, COL_MUTED);
+    RECT t = {x, top, rc.right - MulDiv(6, dpi, 96), rc.bottom};
+    DrawTextW(hdc, hint, -1, &t, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+  }
+}
+
 static void send_paste(void) {
   INPUT in[4];
   memset(in, 0, sizeof(in));
@@ -2891,6 +3014,28 @@ static void draw_pad_button(const DRAWITEMSTRUCT *dis) {
   }
   /* «Блокнот | Поиск» — половинки одного переключателя: выбранная — светлая
      «таблетка» на тёмной подложке, другая — просто надпись */
+  if ((id == ID_NOTES_TAB || id == ID_ASK_TAB) && chertezh_on()) {
+    /* «Чертёж»: две ячейки — выбранная на белом с чертой акцента снизу, другая на сером */
+    BOOL act = (id == ID_NOTES_TAB && g_padMode == 0) || (id == ID_ASK_TAB && g_padMode == 1);
+    HBRUSH fb = act ? g_paper : g_paperDark;
+    FillRect(dis->hDC, &rc, fb);
+    if (act) {
+      HBRUSH ab = CreateSolidBrush(COL_SAGE);
+      RECT bar = {rc.left, rc.bottom - 3, rc.right, rc.bottom};
+      FillRect(dis->hDC, &bar, ab);
+      DeleteObject(ab);
+    }
+    wchar_t up[32];
+    lstrcpynW(up, t, 32);
+    CharUpperBuffW(up, (DWORD)wcslen(up));
+    SetBkMode(dis->hDC, TRANSPARENT);
+    SetTextColor(dis->hDC, disab ? COL_MUTED : act ? COL_INK : COL_MUTED);
+    if (g_fontUi) SelectObject(dis->hDC, g_fontUi);
+    int ox = SetTextCharacterExtra(dis->hDC, 1);
+    DrawTextW(dis->hDC, up, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    SetTextCharacterExtra(dis->hDC, ox);
+    return;
+  }
   if (id == ID_NOTES_TAB || id == ID_ASK_TAB) {
     BOOL act = (id == ID_NOTES_TAB && g_padMode == 0) || (id == ID_ASK_TAB && g_padMode == 1);
     HBRUSH sb = CreateSolidBrush(seg_fill_color());
@@ -3291,7 +3436,15 @@ static void draw_slot_marks(HWND ed) {
     if (y1 > cl.bottom) break; /* дальше — ниже края поля */
     /* только целиком видимые: обрезанная снизу рамка налезает на кнопки */
     if (y1 < 0 || y1 + lh > cl.bottom) continue;
-    if (slot <= 9 && g_hkName[HK_SNIP][0] && y2 + lh + 2 <= cl.bottom) { /* номер для Ctrl+1…9 (рамок с .41 нет — вид «A») */
+    if (chertezh_on() && y2 + lh <= cl.bottom) { /* «Чертёж»: черта под строкой, номер — слева, в поле окна */
+      HPEN rule = CreatePen(PS_SOLID, 1, blend_rgb(COL_LINE, COL_PAPER, 40));
+      HGDIOBJ opr = SelectObject(dc, rule);
+      MoveToEx(dc, 0, y2 + lh - 1, NULL);
+      LineTo(dc, cl.right, y2 + lh - 1);
+      SelectObject(dc, opr);
+      DeleteObject(rule);
+    }
+    if (!chertezh_on() && slot <= 9 && g_hkName[HK_SNIP][0] && y2 + lh + 2 <= cl.bottom) { /* номер для Ctrl+1…9 (рамок с .41 нет — вид «A») */
       (void)x1;
       (void)textRight;
       wchar_t d[4];
@@ -3313,7 +3466,8 @@ static void draw_slot_marks(HWND ed) {
       HBRUSH hb = CreateSolidBrush(bgc);
       HGDIOBJ ob = SelectObject(dc, hb);
       HGDIOBJ op = SelectObject(dc, GetStockObject(NULL_PEN));
-      RoundRect(dc, br.left, br.top, br.right + 1, br.bottom + 1, 6, 6);
+      if (chertezh_on()) Rectangle(dc, br.left, br.top, br.right + 1, br.bottom + 1); /* «Чертёж» — прямые углы */
+      else RoundRect(dc, br.left, br.top, br.right + 1, br.bottom + 1, 6, 6);
       SelectObject(dc, op);
       SelectObject(dc, ob);
       DeleteObject(hb);
@@ -5004,6 +5158,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
        разъезжаются, поэтому для неё держим моноширинный */
     g_fontMono = make_font(L"Consolas", 10, FW_NORMAL);
     if (!g_fontMono) g_fontMono = make_font(L"Courier New", 10, FW_NORMAL);
+    g_fontMonoSm = make_font(font_exists(L"Cascadia Mono") ? L"Cascadia Mono" : L"Consolas", 8, FW_NORMAL);
     g_fontSmall = make_font(L"Segoe UI Variable Small", 8, FW_NORMAL);
     if (!g_fontSmall) g_fontSmall = make_font(L"Segoe UI", 8, FW_NORMAL);
 
@@ -5185,8 +5340,27 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     int padx = MulDiv(PAD, dpi, 96);
     RECT ttext = {padx + MulDiv(6, dpi, 96), MulDiv(4, dpi, 96), rc.right / 2, th0 - MulDiv(14, dpi, 96)};
     RECT vtext = {padx + MulDiv(6, dpi, 96), th0 - MulDiv(18, dpi, 96), rc.right / 2, th0 - 2};
-    /* подложка переключателя «Блокнот | Поиск» */
-    if (g_btnNotes && g_btnAsk && !pth->ornate) {
+    /* подложка переключателя «Блокнот | Поиск»; у «Чертежа» — рамка ячеек и черты шапки */
+    if (g_btnNotes && g_btnAsk && chertezh_on()) {
+      RECT a, b;
+      GetWindowRect(g_btnNotes, &a);
+      GetWindowRect(g_btnAsk, &b);
+      MapWindowPoints(HWND_DESKTOP, hwnd, (POINT *)&a, 2);
+      MapWindowPoints(HWND_DESKTOP, hwnd, (POINT *)&b, 2);
+      HBRUSH ink = CreateSolidBrush(COL_INK);
+      RECT fr = {a.left - 1, a.top - 1, b.right + 1, b.bottom + 1};
+      FrameRect(hdc, &fr, ink);
+      RECT mid = {a.right, a.top, a.right + 1, a.bottom};
+      FillRect(hdc, &mid, ink);
+      RECT r0 = {0, th0 - 1, rc.right, th0}; /* шапка | ряд режимов */
+      FillRect(hdc, &r0, ink);
+      DeleteObject(ink);
+      int clipH = MulDiv(CLIP_H, dpi, 96);
+      HBRUSH hl = CreateSolidBrush(blend_rgb(COL_LINE, COL_INK, 60));
+      RECT r1 = {0, th + clipH, rc.right, th + clipH + 1}; /* под буфером копии */
+      FillRect(hdc, &r1, hl);
+      DeleteObject(hl);
+    } else if (g_btnNotes && g_btnAsk && !pth->ornate) {
       RECT a, b;
       GetWindowRect(g_btnNotes, &a);
       GetWindowRect(g_btnAsk, &b);
@@ -5216,7 +5390,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         }
         ht[127] = 0;
       }
-      DrawTextW(hdc, ht, -1, &ft, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+      if (chertezh_on()) draw_chertezh_stamp(hdc, rc, dpi, fh, ht);
+      else DrawTextW(hdc, ht, -1, &ft, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     }
     if (g_statusOn) {
       SetTextColor(hdc, COL_INK);
@@ -5234,12 +5409,19 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         SetTextColor(hdc, KN_CRIMSON);
       }
       if (g_fontDisplay) SelectObject(hdc, g_fontDisplay);
-      DrawTextW(hdc, L"CursorPad", -1, &ttext, DT_LEFT | DT_BOTTOM | DT_SINGLELINE);
+      if (chertezh_on()) { /* «Чертёж»: прописными вразрядку, версия — моноширинным */
+        int ox = SetTextCharacterExtra(hdc, MulDiv(2, dpi, 96));
+        DrawTextW(hdc, L"CURSORPAD", -1, &ttext, DT_LEFT | DT_BOTTOM | DT_SINGLELINE);
+        SetTextCharacterExtra(hdc, ox);
+      } else {
+        DrawTextW(hdc, L"CursorPad", -1, &ttext, DT_LEFT | DT_BOTTOM | DT_SINGLELINE);
+      }
       SetTextColor(hdc, COL_MUTED);
-      if (g_fontSmall) SelectObject(hdc, g_fontSmall);
+      if (g_fontSmall) SelectObject(hdc, chertezh_on() && g_fontMonoSm ? g_fontMonoSm : g_fontSmall);
       DrawTextW(hdc, APP_VERSION_STR, -1, &vtext, DT_LEFT | DT_TOP | DT_SINGLELINE);
     }
     if (g_padMode == 0) {
+      if (chertezh_on()) draw_chertezh_gutter(hdc, dpi);
       draw_gutter_thumbs(hdc, dpi, th, fh);
     } else if (g_btnAi) {
       /* режим поиска: «Где:» перед ярлыками */

@@ -7,7 +7,8 @@
 #define TIMER_CONVERT 1739
 #define WM_CONVERT_DONE (WM_APP + 139)
 #define WM_CV_CREATE (WM_APP + 141) /* wParam — что создать на столе или в папке Проводника: 1 папка, 2 TXT, 3 Word, 4 Excel, 5 карта заказа */
-#define WM_CV_TIFF_MERGE (WM_APP + 142) /* lParam — CvSelection*: в окно «Объединение TIFF / PDF» */
+#define WM_CV_TIFF_MERGE (WM_APP + 142) /* lParam — CvSelection* (malloc): «Один TIFF» — объединить сразу, без окна */
+#define CV_REPLACE 0x100 /* к номеру действия: «Подмена» из дуги — результат вместо исходника */
 #define WM_CV_LINK (WM_APP + 144) /* lParam — CvSelection* (malloc), wParam — путь к папке (иначе к файлу): «Ссылка» в буфер */
 static HWND g_cvWnd; /* кольцо; дуга «Ссылки» — в нём же */
 static BOOL g_cvOle, g_cvRegistered, g_cvWord, g_cvExcel;
@@ -31,8 +32,10 @@ static DWORD g_cvDataAttempt, g_cvEnteredAt;
 enum { CV_READ_WAIT, CV_READ_OK, CV_READ_FOLDERS, CV_READ_MANY, CV_READ_FAILED };
 static int g_cvRead, g_cvSkipped; /* g_cvSkipped — сколько папок пропущено */
 static BOOL cvx_dispatch(const CvSelection *selection, int action);
-/* «Ссылка» (24): подержали на плитке — вокруг кольца её дуга, «Включая файл» (25) и «До файла» (26) */
+/* подержали на плитке — вокруг кольца её дуга: у «Ссылки» (24) «Включая файл» (25) и «До файла» (26),
+   у преобразований «Копия рядом» и «Подмена» */
 static DWORD g_cvLinkSince;
+static int g_cvDwellTile = -1;
 static void cv_link_dwell(void);
 static void cv_sub_hide(void);
 static void cvx_show(void);
@@ -52,6 +55,22 @@ static DWORD WINAPI cv_worker(void *parameter) {
   CvJob *job = (CvJob *)parameter; cv_convert(job);
   if (!PostMessageW(g_hwnd, WM_CONVERT_DONE, 0, (LPARAM)job)) { free(job); InterlockedExchange(&g_cvBusy, 0); }
   return 0;
+}
+#endif
+#ifndef CV_RING_TEST
+static CvSelection *g_cvMergeDrop; /* «Один TIFF» с «Подменой»: эти исходники удаляются после записи результата */
+/* «Подмена»: исходники — в Корзину (на сетевом диске Windows удаляет насовсем); результат keep не трогается.
+   Возвращает, сколько удалить не удалось. */
+static int cv_drop_sources(const CvSelection *s, const wchar_t *keep) {
+  int kept = 0;
+  for (int i = 0; i < s->count; i++) {
+    if (!_wcsicmp(s->paths[i], keep) || GetFileAttributesW(s->paths[i]) == INVALID_FILE_ATTRIBUTES) continue;
+    wchar_t from[MAX_PATH + 1] = {0}; lstrcpynW(from, s->paths[i], MAX_PATH); /* двойной ноль в конце */
+    SHFILEOPSTRUCTW op = {0}; op.wFunc = FO_DELETE; op.pFrom = from;
+    op.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI;
+    if ((SHFileOperationW(&op) || op.fAnyOperationsAborted || GetFileAttributesW(s->paths[i]) != INVALID_FILE_ATTRIBUTES) && !DeleteFileW(s->paths[i])) kept++;
+  }
+  return kept;
 }
 #endif
 static void cv_done(CvJob *job) {
@@ -194,7 +213,7 @@ static BOOL cvx_can(int action, const wchar_t *path) {
   if (action==7 || action==15) return TRUE;
   if (action<4) return image>=0 || pdf; /* PDF → картинки: по странице, 300 dpi */
   if (action==18) return image==3;      /* разделить многостраничный TIFF */
-  if (action==19) return image>=0;      /* один TIFF — в окне объединения */
+  if (action==19) return image>=0;      /* один TIFF — объединяется сразу */
   if (action==8 || action==9) return image>=0;
   if (action==4) return image>=0 || word || excel;
   if (action==5) return word;
@@ -239,18 +258,21 @@ static void cv_sub_hide(void) {
   if (!g_cvSubOn) return;
   g_cvSubOn = FALSE; g_cvSubHover = -1; g_cvLinkSince = 0; memset(g_cvSubLevel, 0, sizeof(g_cvSubLevel));
 }
-/* «Ссылка» под мышью 250 мс — выезжает дуга; другая плитка или центр кольца — убирается */
+/* у каких плиток есть дуга: «Ссылка» и преобразования, что идут сразу, без окна параметров */
+static BOOL cv_has_arc(int action) {
+  return action == 24 || (action >= 0 && action <= 7) || action == 10 || action == 14 || action == 18 || action == 19;
+}
+/* плитка с дугой под мышью 250 мс — выезжает её дуга; другая плитка или центр кольца — убирается */
 static void cv_link_dwell(void) {
   if (g_cvCreate || !g_cvWnd || !IsWindowVisible(g_cvWnd)) return;
-  BOOL onLink = g_cvCount && g_cvHover >= 0 && g_cvFormats[g_cvHover] == 24;
   if (g_cvSubOn) {
-    if (!g_cvCount || g_cvInHub || (g_cvHover >= 0 && !onLink)) { cv_sub_hide(); cv_redraw(); }
-    return;
+    if (g_cvCount && !g_cvInHub && (g_cvHover < 0 || g_cvHover == g_cvSubTile)) return;
+    cv_sub_hide(); cv_redraw(); /* ушли на другую плитку — у неё может быть своя дуга */
   }
-  if (!onLink) { g_cvLinkSince = 0; return; }
+  if (!g_cvCount || g_cvHover < 0 || !cv_has_arc(g_cvFormats[g_cvHover])) { g_cvLinkSince = 0; return; }
   DWORD now = GetTickCount() | 1;
-  if (!g_cvLinkSince) g_cvLinkSince = now;
-  else if (now - g_cvLinkSince >= 250) cv_sub_show();
+  if (!g_cvLinkSince || g_cvDwellTile != g_cvHover) { g_cvLinkSince = now; g_cvDwellTile = g_cvHover; }
+  else if (now - g_cvLinkSince >= 250) { g_cvSubTile = g_cvHover; cv_sub_show(); }
 }
 static void cv_read_pending(void) {
   if(!g_cvPendingData)return;
@@ -308,7 +330,12 @@ static BOOL cv_accept(IDataObject *data, int action) {
 }
 static HRESULT STDMETHODCALLTYPE cv_drop(IDropTarget *self, IDataObject *data, DWORD keys, POINTL position, DWORD *effect) {
   cv_over(self, keys, position, effect);
-  *effect = cv_accept(data, g_cvHover >= 0 ? g_cvFormats[g_cvHover] : g_cvSubHover >= 0 ? 25 + g_cvSubHover : -1) ? DROPEFFECT_COPY : DROPEFFECT_NONE;
+  int action = g_cvHover >= 0 ? g_cvFormats[g_cvHover] : -1;
+  if (action < 0 && g_cvSubHover >= 0 && g_cvSubTile >= 0 && g_cvSubTile < g_cvCount) { /* сегмент дуги */
+    int tile = g_cvFormats[g_cvSubTile];
+    action = tile == 24 ? 25 + g_cvSubHover : tile | (g_cvSubHover ? CV_REPLACE : 0);
+  }
+  *effect = cv_accept(data, action) ? DROPEFFECT_COPY : DROPEFFECT_NONE;
   g_cvDismissed = TRUE; cv_hide(); return S_OK;
 }
 static IDropTargetVtbl g_cvVtbl = {cv_query, cv_addref, cv_release, cv_enter, cv_over, cv_leave, cv_drop};
@@ -317,10 +344,27 @@ static LRESULT CALLBACK cv_proc(HWND hwnd, UINT message, WPARAM wp, LPARAM lp) {
 #ifndef CV_RING_TEST
   if(message==WM_CV_CREATE){dc_create((int)wp,g_cvOrigin,hwnd);return 0;}
   if(message==WM_CV_CREATED){dc_created((BOOL)wp,(wchar_t*)lp);return 0;}
-  if(message==WM_CV_TIFF_MERGE){ /* уже после сброса: окно с вопросом не держит Проводник */
-    CvSelection *s=(CvSelection*)lp;wchar_t name[MAX_PATH];const wchar_t *slash=wcsrchr(s->paths[0],L'\\');
-    lstrcpynW(name,slash?slash+1:s->paths[0],MAX_PATH);wchar_t *dot=wcsrchr(name,L'.');if(dot)*dot=0;
-    tm_open_pack(s->paths,s->count,name);free(s);return 0;
+  if(message==WM_CV_TIFF_MERGE){ /* уже после сброса; «Один TIFF» — сразу, без окна объединения; wp — «Подмена» */
+    CvSelection *s=(CvSelection*)lp;
+    if(InterlockedCompareExchange(&g_cvBusy,1,0)) show_status(L"Конвертер занят другим заданием — повторите после него.");
+    else if(tm_merge_quiet(s->paths,s->count,hwnd)) { show_status(L"Объединяю в один TIFF…"); if(wp){free(g_cvMergeDrop);g_cvMergeDrop=s;s=NULL;} }
+    else { InterlockedExchange(&g_cvBusy,0); show_status(L"Объединение TIFF сейчас занято — закройте окно «Объединение TIFF / PDF» или дождитесь конца."); }
+    free(s);return 0;
+  }
+  if(message==WM_TM_DONE){ /* итог «Одного TIFF» */
+    TmResult *r=(TmResult*)lp;CvJob *job=(CvJob*)calloc(1,sizeof(*job));
+    if(job){
+      job->format=3;lstrcpynW(job->label,L"Один TIFF",80);
+      if(r->ok){
+        lstrcpynW(job->out,r->out,MAX_PATH);
+        _snwprintf(job->summary,1600,L"Объединено в один TIFF: %ls · страниц: %d. Исходники сохранены.",tm_base(r->out),r->pages);job->summary[1599]=0;
+        if(g_cvMergeDrop){int kept=cv_drop_sources(g_cvMergeDrop,r->out);
+          _snwprintf(job->summary,1600,L"Один TIFF: %ls · страниц: %d. Исходники заменены: %d%ls",tm_base(r->out),r->pages,g_cvMergeDrop->count-kept,kept?L"; часть удалить не удалось — они остались.":L".");job->summary[1599]=0;}
+      } else lstrcpynW(job->error,r->err[0]?r->err:L"Нет страниц для объединения.",400);
+      cv_done(job);
+    } else InterlockedExchange(&g_cvBusy,0);
+    free(g_cvMergeDrop);g_cvMergeDrop=NULL;
+    free(r);return 0;
   }
   if(message==WM_CV_LINK){flk_send((const CvSelection*)lp,wp!=0);free((void*)lp);return 0;} /* после сброса, как и выше; wp — путь к папке */
 #endif
@@ -357,9 +401,10 @@ static void cv_shutdown(void) {
   if (g_cvOle) { OleUninitialize(); g_cvOle = FALSE; }
 }
 #ifdef CV_RING_TEST
-static int g_cvTestLink; /* какая «Ссылка» (24–26) ушла бы в буфер */
+static int g_cvTestLink, g_cvTestReplace; /* какая «Ссылка» (24–26) ушла бы в буфер; какая «Подмена» запущена */
 static BOOL cvx_dispatch(const CvSelection *selection,int action) {
   if(action>=24&&action<=26){g_cvTestLink=action;return TRUE;}
+  if(action&CV_REPLACE){g_cvTestReplace=action;return TRUE;}
   if(action>=7 || selection->count!=1 || InterlockedCompareExchange(&g_cvBusy,1,0)) return FALSE;
   CvJob *job=(CvJob*)calloc(1,sizeof(*job)); if(!job) { g_cvBusy=0; return FALSE; }
   lstrcpynW(job->src,selection->paths[0],MAX_PATH); job->format=action;

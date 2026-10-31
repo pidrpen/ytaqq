@@ -7,6 +7,7 @@ static const char *kCvxOps[]={"convert","convert","convert","convert","to_pdf","
 typedef struct {
   CvJob result; CvSelection files; int action,format,mode,size,kb,rotation;
   wchar_t pages[256],directory[MAX_PATH],entry[80],run[MAX_PATH]; char *report;
+  BOOL replace; /* «Подмена» из полукольца: результат встаёт вместо исходника, исходник удаляется */
 } CvxJob;
 static BOOL g_cvxHistoryOpen;
 static HFONT g_cvxFont;
@@ -127,7 +128,10 @@ static void cvx_exec(CvxJob *job) {
   wchar_t scratch[CV_FILES][MAX_PATH];int scratchCount=0,filesCount=0,preparedCount=0;
   int state=aq_prepare(&control,deadline,root);
   if(state!=AI_OK){lstrcpynW(r->error,L"Не удалось подготовить локальные инструменты. Проверьте журнал ИИ.",400);goto done;}
-  swprintf(python,MAX_PATH,L"%ls\\python.exe",root);swprintf(script,MAX_PATH,L"%ls\\convert_files.py",root);
+  swprintf(python,MAX_PATH,L"%ls\\python.exe",root);
+  /* исполнитель — из exe (RCDATA 314): правится с выпуском, без пересборки комплекта ИИ */
+  swprintf(script,MAX_PATH,L"%ls\\convert_files.py",job->run);
+  if(!extract_rcdata(314,script))swprintf(script,MAX_PATH,L"%ls\\convert_files.py",root);
   swprintf(input,MAX_PATH,L"%ls\\request.json",job->run);swprintf(output,MAX_PATH,L"%ls\\response.json",job->run);
   swprintf(cancel,MAX_PATH,L"%ls\\cancel",job->run);swprintf(history,MAX_PATH,L"%ls\\conversions\\history.json",g_dataDir);
   cx_raw(&files,"[");cx_raw(&prepared,"[");
@@ -154,9 +158,12 @@ static void cvx_exec(CvxJob *job) {
   wchar_t renderer[MAX_PATH];swprintf(renderer,MAX_PATH,L"%ls\\CursorPadOcr.exe",g_dataDir);cx_field(&wire,"pdf_renderer",renderer);
   cx_field(&wire,"history",history);cx_field(&wire,"cancel",cancel);cx_field(&wire,"entry_id",job->entry);cx_field(&wire,"pages",job->pages);
   cx_field(&wire,"output_dir",job->directory);if(job->files.count)cx_field(&wire,"anchor",job->files.paths[0]);
+  if(job->replace){ /* что удалить после записи результата — исходники выделения, не временные PDF из Word/Excel */
+    cx_raw(&wire,",\"sources\":[");for(int i=0;i<job->files.count;i++){if(i)cx_raw(&wire,",");cx_string(&wire,job->files.paths[i]);}cx_raw(&wire,"]");
+  }
   cx_raw(&wire,",\"files\":");cx_raw(&wire,files.text);cx_raw(&wire,",\"prepared\":");cx_raw(&wire,prepared.text);
-  char options[240];snprintf(options,sizeof(options),",\"format\":\"%ls\",\"resize_mode\":\"%s\",\"width\":%d,\"percent\":%d,\"max_bytes\":%lld,\"rotation\":%d}",
-      kCvFormats[job->format].ext,job->mode==1?"percent":"width",job->size,job->size,(long long)job->kb*1024,job->rotation);
+  char options[240];snprintf(options,sizeof(options),",\"format\":\"%ls\",\"resize_mode\":\"%s\",\"width\":%d,\"percent\":%d,\"max_bytes\":%lld,\"rotation\":%d%s}",
+      kCvFormats[job->format].ext,job->mode==1?"percent":"width",job->size,job->size,(long long)job->kb*1024,job->rotation,job->replace?",\"replace\":true":"");
   cx_raw(&wire,options);
   if(!files.ok||!prepared.ok||!wire.ok||!aq_write(input,wire.text)){lstrcpynW(r->error,L"Не удалось записать задание конвертера.",400);goto done;}
   if(g_cvxCancelled)aq_write(cancel,"");
@@ -170,7 +177,8 @@ done:
   free(control.text);free(request);free(files.text);free(prepared.text);free(wire.text);
   for(int i=0;i<scratchCount;i++)DeleteFileW(scratch[i]);
   swprintf(input,MAX_PATH,L"%ls\\request.json",job->run);swprintf(output,MAX_PATH,L"%ls\\response.json",job->run);swprintf(cancel,MAX_PATH,L"%ls\\cancel",job->run);
-  DeleteFileW(input);DeleteFileW(output);DeleteFileW(cancel);RemoveDirectoryW(job->run);
+  DeleteFileW(input);DeleteFileW(output);DeleteFileW(cancel);
+  swprintf(input,MAX_PATH,L"%ls\\convert_files.py",job->run);DeleteFileW(input);RemoveDirectoryW(job->run);
 }
 static DWORD WINAPI cvx_worker(void *parameter) {
   CvxJob *job=(CvxJob*)parameter;cvx_exec(job);
@@ -375,18 +383,20 @@ static void cvx_show(void) {
   }
   ShowWindow(g_cvxWnd,SW_SHOWNORMAL);SetForegroundWindow(g_cvxWnd);cvx_controls();cvx_hint();if(g_cvxHistoryOpen&&!g_cvBusy)cvx_history(15);
 }
+/* 10 «Объединить PDF» и 14 «Всё в один PDF» идут без окна параметров: порядок — как в выделении, файл рядом с первым */
 static BOOL cvx_dispatch(const CvSelection *selection,int action) {
+  BOOL replace=(action&CV_REPLACE)!=0;action&=~CV_REPLACE;
   if(action>=24&&action<=26){ /* «Ссылка»: 24, 25 — путь к файлу, 26 — к его папке; буфер — после сброса */
     CvSelection *copy=(CvSelection*)malloc(sizeof(*copy));if(!copy)return FALSE;*copy=*selection;
     if(!PostMessageW(g_cvWnd,WM_CV_LINK,action==26,(LPARAM)copy)){free(copy);return FALSE;}
     return TRUE;
   }
-  if(action==19){ /* один TIFF — в окне объединения: там порядок страниц и «Сохранить как TIFF» */
+  if(action==19){ /* один TIFF — сразу, без окна: страницы в порядке выделения (convert.c → tm_merge_quiet) */
     CvSelection *copy=(CvSelection*)malloc(sizeof(*copy));if(!copy)return FALSE;*copy=*selection;
-    if(!PostMessageW(g_cvWnd,WM_CV_TIFF_MERGE,0,(LPARAM)copy)){free(copy);return FALSE;}
+    if(!PostMessageW(g_cvWnd,WM_CV_TIFF_MERGE,replace,(LPARAM)copy)){free(copy);return FALSE;}
     return TRUE;
   }
-  if(action>=8&&action!=18){cvx_show();g_cvxSelection=*selection;cvx_list();int chosen=action==15?(cvx_all(selection,10)?10:cvx_all(selection,8)?8:cvx_all(selection,14)?14:7):action;SendMessageW(g_cvxAction,CB_SETCURSEL,chosen,0);cvx_controls();cvx_hint();return TRUE;}
-  CvxJob *job=(CvxJob*)calloc(1,sizeof(*job));if(!job)return FALSE;job->files=*selection;job->action=action;job->format=action<4?action:0;job->kb=1024;job->size=1920;job->rotation=90;return cvx_start(job);
+  if(action>=8&&action!=18&&action!=10&&action!=14){if(replace)return FALSE;cvx_show();g_cvxSelection=*selection;cvx_list();int chosen=action==15?(cvx_all(selection,10)?10:cvx_all(selection,8)?8:cvx_all(selection,14)?14:7):action;SendMessageW(g_cvxAction,CB_SETCURSEL,chosen,0);cvx_controls();cvx_hint();return TRUE;}
+  CvxJob *job=(CvxJob*)calloc(1,sizeof(*job));if(!job)return FALSE;job->files=*selection;job->action=action;job->format=action<4?action:0;job->kb=1024;job->size=1920;job->rotation=90;job->replace=replace;return cvx_start(job);
 }
 static void cvx_shutdown(void) {if(g_cvxWnd){DestroyWindow(g_cvxWnd);g_cvxWnd=NULL;}if(g_cvxFont){DeleteObject(g_cvxFont);g_cvxFont=NULL;}}

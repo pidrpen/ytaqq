@@ -96,6 +96,8 @@ END
 312 RCDATA "cp-soyuz.exe"
 /* бланк «Карта заказа» для кольца «Создать» (desktop_create.c); собран karta-zakaza/make_template.py в pidrpen/slack */
 313 RCDATA "karta_zakaza.docx"
+/* исполнитель «Обработки файлов»: пишется в папку задания и идёт Python-ом комплекта ИИ (convert_workbench.c) */
+314 RCDATA "convert_files.py"
 340 CURSOR "cursors/k6_static.cur"
 341 CURSOR "cursors/k6_ibeam.cur"
 342 CURSOR "cursors/k6_hand.cur"

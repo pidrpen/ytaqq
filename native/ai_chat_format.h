@@ -24,7 +24,7 @@ static void ac_rtf_char(AcRtf *b, wchar_t c) {
   ac_rtf_add(b, value);
 }
 static void ac_rtf_begin(AcRtf *b) {
-  ac_rtf_add(b, "{\\rtf1\\ansi\\deff0\\uc1{\\fonttbl{\\f0 Segoe UI;}{\\f1 Consolas;}}"
+  ac_rtf_add(b, "{\\rtf1\\ansi\\deff0\\uc1{\\fonttbl{\\f0 Segoe UI;}{\\f1 Consolas;}{\\f2 Consolas;}}"
                 "{\\colortbl;\\red30\\green41\\blue59;\\red37\\green99\\blue150;\\red100\\green116\\blue139;}"
                 "\\viewkind4\\f0\\fs22\\cf1 ");
 }
@@ -109,6 +109,94 @@ static void ac_route_line(AcRtf *b, int kind, const wchar_t *p, const wchar_t *e
     ac_rtf_span(b, mark, e);
   }
 }
+/* ---- нормы таблицей (с 2026.10.30, вид «Чертёж») -------------------------------------
+   Строки норм norms.c («010 Токарная черновая: Тпз 18 мин · Тшт 12,4 мин (неполная)») идут
+   подряд — они рисуются таблицей № | операция | Тпз, мин | Тшт, мин | пометка. Числа берутся
+   ровно как их написал расчёт (с «≈», «—»), ничего не пересчитывается и не досочиняется;
+   участка в расчёте норм нет — и столбца нет. Таблица — строки верхнего уровня: пузырь ответа
+   (ac_rtf_bubble) перед ней закрывается и после неё открывается снова, по меткам
+   \cpnormbeg / \cpnormend, которые до RichEdit не доходят. Ширина — g_acNormTw (твипы). */
+static int g_acNormTw = 9000;
+
+/* «Тпз 18 мин», «Тшт ≈ 12,4 мин» в строке [p, e): значение между «name » и « мин» (или « · », конец) */
+static BOOL ac_norm_val(const wchar_t *p, const wchar_t *e, const wchar_t *name, const wchar_t **vb,
+                        const wchar_t **ve, const wchar_t **after) {
+  size_t n = wcslen(name);
+  for (const wchar_t *q = p; q + n <= e; q++) {
+    if (wcsncmp(q, name, n)) continue;
+    if (q > p && q[-1] != L' ') continue;
+    const wchar_t *v = q + n, *w = v;
+    while (w < e && !(w + 4 <= e && !wcsncmp(w, L" мин", 4)) && !(w + 3 <= e && !wcsncmp(w, L" · ", 3)) &&
+           *w != L'(')
+      w++;
+    while (w > v && w[-1] == L' ') w--;
+    *vb = v, *ve = w;
+    *after = w + 4 <= e && !wcsncmp(w, L" мин", 4) ? w + 4 : w;
+    return TRUE;
+  }
+  return FALSE;
+}
+
+static void ac_norm_borders(AcRtf *b, BOOL head) {
+  ac_rtf_add(b, head ? "\\clbrdrt\\brdrs\\brdrw20\\brdrcf6\\clbrdrb\\brdrs\\brdrw20\\brdrcf6"
+                     : "\\clbrdrb\\brdrs\\brdrw10\\brdrcf6");
+  ac_rtf_add(b, "\\clbrdrl\\brdrs\\brdrw10\\brdrcf6\\clbrdrr\\brdrs\\brdrw10\\brdrcf6");
+  if (head) ac_rtf_add(b, "\\clcbpat8");
+}
+
+static void ac_norm_row_def(AcRtf *b, BOOL head) {
+  static const int pct[5] = {9, 42, 57, 72, 100}; /* правые края столбцов, % ширины */
+  char t[96];
+  const int left = 320; /* вровень с текстом ответа: отступ пузыря и абзаца */
+  snprintf(t, sizeof(t), "\\trowd\\trgaph80\\trleft%d\\trpaddl90\\trpaddr90\\trpaddfl3\\trpaddfr3%s ", left,
+           head ? "\\trhdr" : "");
+  ac_rtf_add(b, t);
+  for (int i = 0; i < 5; i++) {
+    ac_norm_borders(b, head);
+    snprintf(t, sizeof(t), "\\cellx%d ", left + (g_acNormTw - left - 200) * pct[i] / 100);
+    ac_rtf_add(b, t);
+  }
+}
+
+static void ac_norm_cell(AcRtf *b, const wchar_t *p, const wchar_t *e, BOOL mono, BOOL right) {
+  ac_rtf_add(b, right ? "\\pard\\intbl\\qr\\sa0\\sb0 " : "\\pard\\intbl\\ql\\sa0\\sb0 ");
+  ac_rtf_add(b, mono ? "\\f2\\fs20 " : "\\f0\\fs21 "); /* \f2 — тот же Consolas, но без подсветки кода (\f1) */
+  while (p < e && *p == L' ') p++;
+  while (e > p && (e[-1] == L' ' || e[-1] == L'·')) e--;
+  ac_rtf_span(b, p, e);
+  ac_rtf_add(b, "\\f0\\fs22\\cell ");
+}
+
+static void ac_norm_head(AcRtf *b) {
+  static const wchar_t *const h[5] = {L"№", L"ОПЕРАЦИЯ", L"ТПЗ, МИН", L"ТШТ, МИН", L"ПОМЕТКА"};
+  ac_norm_row_def(b, TRUE);
+  for (int i = 0; i < 5; i++) {
+    ac_rtf_add(b, i == 2 || i == 3 ? "\\pard\\intbl\\qr\\sa0\\sb0\\cf3\\fs16 " : "\\pard\\intbl\\ql\\sa0\\sb0\\cf3\\fs16 ");
+    ac_rtf_span(b, h[i], h[i] + wcslen(h[i]));
+    ac_rtf_add(b, "\\cf1\\fs22\\cell ");
+  }
+  ac_rtf_add(b, "\\row ");
+}
+
+/* одна строка норм [p, e), mark — «: » после названия */
+static void ac_norm_row(AcRtf *b, const wchar_t *p, const wchar_t *e, const wchar_t *mark) {
+  const wchar_t *r = mark + 2, *pzb = NULL, *pze = NULL, *shb = NULL, *she = NULL, *a1 = r, *a2 = r;
+  BOOL pz = ac_norm_val(r, e, L"Тпз ", &pzb, &pze, &a1);
+  BOOL sh = ac_norm_val(r, e, L"Тшт ", &shb, &she, &a2);
+  ac_norm_row_def(b, FALSE);
+  ac_norm_cell(b, p, p + 3, TRUE, FALSE);   /* 010 */
+  ac_norm_cell(b, p + 4, mark, FALSE, FALSE); /* название */
+  if (pz) ac_norm_cell(b, pzb, pze, TRUE, TRUE);
+  else ac_norm_cell(b, r, r, TRUE, TRUE);
+  if (sh) ac_norm_cell(b, shb, she, TRUE, TRUE);
+  else ac_norm_cell(b, r, r, TRUE, TRUE);
+  /* пометка: что осталось после чисел — «(неполная)», «Тшк 3 мин», «по факту», «То 2,5 мин» */
+  const wchar_t *rest = sh ? a2 : pz ? a1 : r;
+  if (!pz && !sh) rest = r;
+  ac_norm_cell(b, rest, e, FALSE, FALSE);
+  ac_rtf_add(b, "\\row ");
+}
+
 static void ac_rtf_message(AcRtf *b, const wchar_t *text, BOOL assistant, BOOL picture) {
   ac_rtf_add(b, assistant ? "\\pard\\sb180\\sa80\\cf2\\b\\fs22 " : "\\pard\\sb180\\sa80\\cf3\\b\\fs22 ");
   const wchar_t *label = assistant ? L"ИИ" : L"Вы";
@@ -126,6 +214,22 @@ static void ac_rtf_message(AcRtf *b, const wchar_t *text, BOOL assistant, BOOL p
       while (*e && *e != L'\n' && *e != L'\r') e++;
       int kind = ac_route_kind(p, e, &mark);
       if (tabs && kind != ACR_NORM) ac_rtf_add(b, AC_RTF_BODY), tabs = FALSE; /* после колонок норм — обычный абзац */
+      if (kind == ACR_NORM && !wcsncmp(mark, L": Тпз ", 6)) { /* нормы подряд — таблицей */
+        ac_rtf_add(b, "\\cpnormbeg ");
+        ac_norm_head(b);
+        for (;;) {
+          ac_norm_row(b, p, e, mark);
+          p = e;
+          while (*p == L'\r' || *p == L'\n') p++;
+          const wchar_t *e2 = p;
+          while (*e2 && *e2 != L'\n' && *e2 != L'\r') e2++;
+          if (!*p || ac_route_kind(p, e2, &mark) != ACR_NORM) break;
+          e = e2;
+        }
+        ac_rtf_add(b, "\\cpnormend " AC_RTF_BODY "\\f0\\fs22 ");
+        lineStart = TRUE;
+        continue;
+      }
       if (kind) {
         ac_route_line(b, kind, p, e, mark);
         tabs = tabs || kind == ACR_NORM;
