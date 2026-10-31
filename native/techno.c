@@ -84,6 +84,15 @@ typedef struct {
   int coatKind;           /* TC_… */
   double dmax;            /* наибольший Ø со знаком Ø — уверенно; 0 — нет */
   int rot;                /* признаки тела вращения: Ø, резьбы, фаски ×45° */
+  /* все Ø со знаком на листе, без повторов, кроме выносок отверстий («4 отв. Ø13») и строк модели «§…»:
+     ступени и расточки для переходов токарной (norms.c); внутренний — поле допуска прописной (Ø40H9) */
+  double dia[12];
+  int diaIT[12];          /* квалитет по полю допуска после Ø; 0 — не прочитан */
+  int nDia;
+  unsigned diaIn;         /* бит i — dia[i] внутренний */
+  int chamfers;           /* фасок «…×45°» на листе */
+  double gearM;           /* модуль зубчатого венца из таблицы параметров; 0 — нет */
+  int gearZ;              /* число зубьев венца */
 } TnSigns;
 
 typedef struct {
@@ -750,6 +759,34 @@ static void tn_coat(const wchar_t *t, const wchar_t *f, TnSigns *s) {
   }
 }
 
+/* Ø со знаком в список ступеней: e — сразу за числом. Выноски отверстий («4 отв. Ø13») и строки
+   модели «§AX 2 Ø6» — мимо: их сверлят, а не точат. Поле допуска прописной буквой — внутренний */
+static void tn_dia_add(const wchar_t *t, const wchar_t *p, const wchar_t *e, double v, TnSigns *s) {
+  const wchar_t *b = p;
+  while (b > t && b[-1] != L'\n') b--;
+  if (*b == L'§') return;
+  for (const wchar_t *q = b; q < p; q++)
+    if ((q[0] == L'о' || q[0] == L'О') && q[1] == L'т' && (q[2] == L'в' || q[2] == L'б')) return;
+  int it = 0, in = 0;
+  if (*e && wcschr(L"hHgfekKnpmjJsdGFEDN", *e)) {
+    const wchar_t *q = e + 1;
+    if ((*e == L'j' || *e == L'J') && *q == L's') q++;
+    while (tn_isdig(*q) && it < 100) it = it * 10 + (*q++ - L'0');
+    if (it < 4 || it > 14) it = 0;
+    else in = *e >= L'A' && *e <= L'Z';
+  }
+  for (int i = 0; i < s->nDia; i++)
+    if (s->dia[i] == v && (((s->diaIn >> i) & 1) == (unsigned)in || !it)) {
+      if (it && (!s->diaIT[i] || it < s->diaIT[i])) s->diaIT[i] = it;
+      return;
+    }
+  if (s->nDia >= 12) return;
+  s->dia[s->nDia] = v;
+  s->diaIT[s->nDia] = it;
+  if (in) s->diaIn |= 1u << s->nDia;
+  s->nDia++;
+}
+
 /* ---- все признаки ------------------------------------------------------------------ */
 
 static void tn_signs(const wchar_t *name, const wchar_t *mat, const wchar_t *text, TnSigns *s) {
@@ -875,6 +912,20 @@ static void tn_signs(const wchar_t *name, const wchar_t *mat, const wchar_t *tex
             tn_has(f, L"розбертк") || tn_has(f, L"сгиб") || tn_has(f, L"линии гиб") || tn_has(f, L"линия гиб");
   s->key = tn_has(f, L"шпон");
   s->gear = tn_has(f, L"модуль") && tn_has(f, L"зуб");
+  if (s->gear) { /* таблица параметров венца: «Модуль m 3», «Число зубьев z 40» — для нормы зубодолбления */
+    const wchar_t *q = wcsstr(f, L"модуль");
+    double v;
+    int len, sep;
+    q += 6;
+    for (int k = 0; *q && !tn_isdig(*q) && k < 8; k++) q++;
+    if (tn_num(q, &v, &len, &sep) && v > 0 && v < 40) s->gearM = v;
+    if ((q = wcsstr(f, L"число зуб")) != NULL) {
+      q += 9;
+      while (*q && tn_isletter(*q)) q++;
+      for (int k = 0; *q && !tn_isdig(*q) && k < 8; k++) q++;
+      if (tn_num(q, &v, &len, &sep) && v >= 6 && v < 1000) s->gearZ = (int)v;
+    }
+  }
   s->knurl = tn_has(f, L"накат") || tn_has(f, L"рифлен") || tn_has(f, L"сетчат"); /* «Рифление сетчатое 1,0 ГОСТ 21474» */
   s->edm = tn_has(f, L"эрозион") || tn_has(f, L"розион") || tn_has(f, L"электрораз");    /* «злектрозрозионным» */
   s->cutApart = tn_has(f, L"разрезать на");
@@ -928,12 +979,13 @@ static void tn_signs(const wchar_t *name, const wchar_t *mat, const wchar_t *tex
     if (!tn_num(q, &v, &len, &sep) || v < 1 || v > 2000 || (maybe && len < 2)) continue;
     s->rot++;
     if (sure && v > s->dmax) s->dmax = v;
+    if (sure) tn_dia_add(t, p, q + len, v, s);
   }
   if (s->gD) s->dmax = s->gD; /* наибольший Ø, который модель нашла среди размеров, точнее любого «Ø» в тексте */
   for (const wchar_t *p = f; *p; p++)
-    if (tn_isdig(*p) && (p[1] == L'х' || p[1] == L'×') && p[2] == L'4' && p[3] == L'5') s->rot++;
+    if (tn_isdig(*p) && (p[1] == L'х' || p[1] == L'×') && p[2] == L'4' && p[3] == L'5') s->rot++, s->chamfers++;
   for (const wchar_t *p = f; *p; p++)
-    if (tn_isdig(*p) && p[1] == L' ' && (p[2] == L'х' || p[2] == L'×') && p[3] == L'4' && p[4] == L'5') s->rot++;
+    if (tn_isdig(*p) && p[1] == L' ' && (p[2] == L'х' || p[2] == L'×') && p[3] == L'4' && p[4] == L'5') s->rot++, s->chamfers++;
   /* наименование, если штампа нет: слово вида детали в именительном падеже */
   if (!s->name[0]) {
     static const wchar_t *const kw[] = {
@@ -1062,6 +1114,28 @@ static void tn_opc(TnRoute *r, const wchar_t *num, const wchar_t *sub, const wch
 /* после термической обработки — слесарная: зачистить окалину и заусенцы (правило технолога). Уже
    стоит слесарная сразу за ТО — к ней переход, иначе своя операция; уточнение — для нормы зачистки
    (norms.c): «зачистка ТО» — своя, «+зачистка ТО» — добавлена к слесарной */
+/* отверстия не по оси тела вращения (радиальные, смещённые, в торце не по оси) сверлят по разметке:
+   перед первой сверлильной — «Разметка» (правило технолога 31.10). Осевые (центровые) сверлят на
+   токарной — у тела вращения сверлильная бывает только для неосевых */
+static void tn_mark_holes(TnRoute *r) {
+  if (r->cls != TN_ROT || r->n >= 24) return;
+  for (int i = 0; i < r->n; i++) {
+    if (wcscmp(r->op[i].code, L"4210")) continue;
+    if (i > 0 && !wcscmp(r->op[i - 1].code, L"0101")) return;
+    memmove(&r->op[i + 1], &r->op[i], sizeof(TnOp) * (size_t)(r->n - i));
+    r->n++;
+    TnOp *o = &r->op[i];
+    memset(o, 0, sizeof(*o));
+    tn_cpy(o->op, 128, tn_dir_name(L"0101"));
+    tn_cpy(o->code, 8, L"0101");
+    tn_cpy(o->sub, 24, L"оси отверстий");
+    tn_cpy(o->what, 300, L"Разметить и накернить центры отверстий не по оси");
+    if (r->s.holes > 0) tn_cat(o->what, 300, L": "), tn_catnum(o->what, 300, r->s.holes), tn_cat(o->what, 300, L" отв.");
+    tn_cpy(o->why, TN_TXT, L"отверстия не по оси вращения — сверлят по разметке");
+    return;
+  }
+}
+
 #define TN_CLEAN_HEAT L"Зачистить после термической обработки"
 static void tn_after_heat(TnRoute *r) {
   for (int i = 0; i < r->n; i++) {
@@ -1561,6 +1635,7 @@ static void tn_route(const wchar_t *name, const wchar_t *mat, const wchar_t *tex
   if (s->coatKind) tn_cat(w, 300, L", покрытие");
   tn_opc(r, L"0200", NULL, w, L"");
   tn_after_heat(r);
+  tn_mark_holes(r);
 }
 
 /* текст для чата и окна чертежа */

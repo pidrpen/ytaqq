@@ -77,6 +77,25 @@ int main(void) {
   SendMessageW(edit, EM_EXSETSEL, 0, (LPARAM)&r_why);
   SendMessageW(edit, EM_GETCHARFORMAT, SCF_SELECTION, (LPARAM)&f2);
   CHECK(!(f2.dwEffects & CFE_BOLD) && f2.crTextColor == RGB(100, 116, 139)); /* «почему» — серым (cf3) */
-  free(r2.text); DestroyWindow(edit);
+  free(r2.text);
+  /* нормы маршрута подряд — одна таблица; у операций без Тпз (заготовительная, вспомогательная) — «Тпз —» */
+  const wchar_t *route3 = L"Нормы времени (ОМН; проверяет технолог):\n"
+    L"005 Отрезная: Тпз — · Тшт ≈ 1,48 мин (оценка, проверить)\n"
+    L"010 Токарная: Тпз 14 мин · Тшт 3,04 мин · Тшк 3,32 мин\n"
+    L"015 Термическая обработка: Тпз — · Тшт 3 мин (норма технолога)\n"
+    L"020 Слесарная: Тпз — · Тшт 0,5 мин (норма технолога)\n"
+    L"Без норм (Настройки → Нормирование): Контроль";
+  AcRtf r3 = {0}; ac_rtf_begin(&r3);
+  ac_rtf_message(&r3, route3, TRUE, FALSE); ac_rtf_add(&r3, "}"); CHECK(!r3.failed);
+  const char *beg = strstr(r3.text, "\\cpnormbeg");
+  CHECK(beg && !strstr(beg + 1, "\\cpnormbeg")); /* одна таблица, не три куска */
+  int rows = 0;
+  for (const char *q = r3.text; (q = strstr(q, "\\row ")) != NULL; q++) rows++;
+  CHECK(rows == 5); /* шапка и четыре операции */
+  Source s3 = {&r3, 0}; EDITSTREAM in3 = {(DWORD_PTR)&s3, 0, stream};
+  SendMessageW(edit, EM_STREAMIN, SF_RTF, (LPARAM)&in3); CHECK(!in3.dwError);
+  SendMessageW(edit, EM_GETTEXTEX, (WPARAM)&get, (LPARAM)text);
+  CHECK(wcsstr(text, L"≈ 1,48") && wcsstr(text, L"норма технолога") && wcsstr(text, L"Без норм"));
+  free(r3.text); DestroyWindow(edit);
   puts("PASS: RichEdit Unicode, Markdown, numbered headings, literal code/paths, escaping, bold, route and norm lines"); return 0;
 }

@@ -11,9 +11,15 @@
 #define ID_NL_OP 4940 /* + номер правила операции (g_nmOps) — класс: Тпз и Тшт, только Тшт, без норм */
 #define ID_NL_HEAT 4930 /* + 0 — порог массы, 1 — Тшт до порога, 2 — тяжелее, 3 — зачистка после (норма технолога на ТО) */
 #define ID_NL_EDIT 4900 /* + параметр·3 + столбец: 0 — от, 1 — до, 2 — по умолчанию */
+#define ID_NL_SAW 5000  /* + группа материала (NMW_…) — производительность пилы, см²/мин */
+#define ID_NL_GEAR 5010 /* + 0 — V, 1 — Sкр, 2 — Sрад (зубодолбление) */
 
 static HWND g_nlEdit[NM_LIMS][3];
-static HWND g_nlFactory, g_nlOp[NM_OPRULES], g_nlHeat[4];
+static HWND g_nlFactory, g_nlOp[NM_OPRULES], g_nlHeat[4], g_nlSaw[NMW_N], g_nlGear[3];
+static const wchar_t *const kNlSawKey[NMW_N] = {L"carbon", L"alloy", L"tool", L"stain", L"iron", L"alu", L"copper"};
+static const wchar_t *const kNlGearKey[3] = {L"V", L"Skr", L"Srad"};
+static double *nl_gear(int c) { return c == 0 ? &g_nmGear.V : c == 1 ? &g_nmGear.Skr : &g_nmGear.Srad; }
+static wchar_t g_nlSawTitle[NMW_N][48];
 static const wchar_t *const kNlHeatKey[4] = {L"limit", L"light", L"heavy", L"clean"};
 static double *nl_heat(int c) {
   return c == 0 ? &g_nmHeat.limit : c == 1 ? &g_nmHeat.light : c == 2 ? &g_nmHeat.heavy : &g_nmHeat.clean;
@@ -67,6 +73,21 @@ static void nl_load(void) {
     GetPrivateProfileStringW(L"heat", kNlHeatKey[c], L"", v, 64, p);
     if (v[0] && nm_num(v, &x, &e)) *nl_heat(c) = x;
   }
+  static const double saw0[NMW_N] = NM_SAW0;
+  for (int c = 0; c < NMW_N; c++) { /* [saw] carbon=30 … — производительность пилы, см²/мин */
+    double x;
+    const wchar_t *e;
+    g_nmSaw[c] = saw0[c];
+    GetPrivateProfileStringW(L"saw", kNlSawKey[c], L"", v, 64, p);
+    if (v[0] && nm_num(v, &x, &e) && x > 0) g_nmSaw[c] = x;
+  }
+  g_nmGear = (NmGear)NM_GEAR0;
+  for (int c = 0; c < 3; c++) { /* [gear] V=20 Skr=0.25 Srad=0.03 — режимы зубодолбления */
+    double x;
+    const wchar_t *e;
+    GetPrivateProfileStringW(L"gear", kNlGearKey[c], L"", v, 64, p);
+    if (v[0] && nm_num(v, &x, &e) && x > 0) *nl_gear(c) = x;
+  }
   /* [ops] Сварка=full — Тпз и Тшт, tsht — только Тшт, none — без норм; нет строки — класс по умолчанию;
      до 30.10 там была галочка: «0» — без норм, «1» — по умолчанию */
   for (int k = 0; k < NM_OPRULES; k++) {
@@ -103,6 +124,16 @@ static void nl_save(void) {
       else _snwprintf(v, 64, L"%g", x), v[63] = 0;
       WritePrivateProfileStringW(L"limits", key, v, p);
     }
+  for (int c = 0; c < NMW_N; c++) {
+    _snwprintf(v, 64, L"%g", g_nmSaw[c]);
+    v[63] = 0;
+    WritePrivateProfileStringW(L"saw", kNlSawKey[c], v, p);
+  }
+  for (int c = 0; c < 3; c++) {
+    _snwprintf(v, 64, L"%g", *nl_gear(c));
+    v[63] = 0;
+    WritePrivateProfileStringW(L"gear", kNlGearKey[c], v, p);
+  }
 }
 
 static void nl_refresh(void) {
@@ -114,6 +145,12 @@ static void nl_refresh(void) {
   }
   for (int k = 0; k < NM_OPRULES; k++)
     if (g_nlOp[k]) SendMessageW(g_nlOp[k], CB_SETCURSEL, (WPARAM)g_nmOps[k].cls, 0);
+  for (int c = 0; c < NMW_N + 3; c++) {
+    wchar_t v[48];
+    tn_numstr(c < NMW_N ? g_nmSaw[c] : *nl_gear(c - NMW_N), v, 48);
+    HWND h = c < NMW_N ? g_nlSaw[c] : g_nlGear[c - NMW_N];
+    if (h) SetWindowTextW(h, v);
+  }
   for (int k = 0; k < NM_LIMS; k++)
     for (int c = 0; c < 3; c++) {
       wchar_t v[48] = L"";
@@ -146,6 +183,15 @@ static void nl_create(HWND p) {
                                   70, 26, p, (HMENU)(INT_PTR)(ID_NL_HEAT + c), NULL, NULL);
     SendMessageW(g_nlHeat[c], WM_SETFONT, (WPARAM)g_fontBody, TRUE);
     SendMessageW(g_nlHeat[c], EM_SETLIMITTEXT, 12, 0);
+  }
+  for (int c = 0; c < NMW_N + 3; c++) {
+    int id = c < NMW_N ? ID_NL_SAW + c : ID_NL_GEAR + c - NMW_N;
+    HWND h = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL | ES_CENTER, 0, -4000, 70,
+                             26, p, (HMENU)(INT_PTR)id, NULL, NULL);
+    SendMessageW(h, WM_SETFONT, (WPARAM)g_fontBody, TRUE);
+    SendMessageW(h, EM_SETLIMITTEXT, 12, 0);
+    if (c < NMW_N) g_nlSaw[c] = h;
+    else g_nlGear[c - NMW_N] = h;
   }
   for (int k = 0; k < NM_OPRULES; k++) {
     g_nlOp[k] = CreateWindowExW(0, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST, 0, -4000, 150,
@@ -195,6 +241,25 @@ static void nl_layout(int btnH) {
   sd_row(L"Слесарная после ТО: зачистить, мин", L"маршрут ставит её сразу за термической обработкой", &g_nlHeat[3], &hw,
          1, btnH);
   sd_card_end();
+  sd_group(L"Отрезка на пиле — производительность, см²/мин");
+  sd_card_begin();
+  sd_stack_end(sd_stack(NULL, L"Оценка CursorPad: открытых нормативов на машинное время пилы нет. То = площадь сечения "
+                              L"заготовки / производительность; установка, переход, обслуживание и отдых — по ОМН. "
+                              L"Подгоните под свои пилы: ⌀150 из нержавейки за 15 мин — это 177/15 ≈ 12.") - 12);
+  for (int c = 0; c < NMW_N; c++) {
+    tn_cpy(g_nlSawTitle[c], 48, kNmSawName[c]);
+    if (g_nlSawTitle[c][0] >= L'а' && g_nlSawTitle[c][0] <= L'я') g_nlSawTitle[c][0] = (wchar_t)(g_nlSawTitle[c][0] - 32);
+    sd_row(g_nlSawTitle[c], NULL, &g_nlSaw[c], &hw, 1, btnH);
+  }
+  sd_card_end();
+  sd_group(L"Зубодолбление — режимы");
+  sd_card_begin();
+  sd_stack_end(sd_stack(NULL, L"Оценка CursorPad для То = 2,25·m/(Sрад·nдв) + π·m·z·i/(Sкр·nдв); Тв, обслуживание, отдых "
+                              L"и Тпз — по ОМН. Модуль, число зубьев и ширину венца — в чате: «норма: m 3, z 40, B 30».") - 12);
+  sd_row(L"Скорость V, м/мин", L"двойных ходов долбяка — 1000·V/(2·(B + перебег))", &g_nlGear[0], &hw, 1, btnH);
+  sd_row(L"Круговая подача Sкр, мм на двойной ход", NULL, &g_nlGear[1], &hw, 1, btnH);
+  sd_row(L"Радиальная подача Sрад, мм на двойной ход", L"врезание на высоту зуба 2,25·m", &g_nlGear[2], &hw, 1, btnH);
+  sd_card_end();
 }
 
 /* подписи столбцов над полями первой строки */
@@ -228,6 +293,22 @@ static BOOL nl_command(HWND hwnd, int id, int code) {
       const wchar_t *t = nm_skipsp(v);
       if (nm_num(t, &x, &e) && !*nm_skipsp(e) && x > 0) { /* пусто и недописанное — не трогаем */
         *nl_heat(id - ID_NL_HEAT) = x;
+        nl_save();
+      }
+    }
+    return TRUE;
+  }
+  if ((id >= ID_NL_SAW && id < ID_NL_SAW + NMW_N) || (id >= ID_NL_GEAR && id < ID_NL_GEAR + 3)) {
+    if (code == EN_CHANGE && !g_nlFill) {
+      wchar_t v[48];
+      double x;
+      const wchar_t *e;
+      int saw = id < ID_NL_GEAR, c = saw ? id - ID_NL_SAW : id - ID_NL_GEAR;
+      GetWindowTextW(saw ? g_nlSaw[c] : g_nlGear[c], v, 48);
+      const wchar_t *t = nm_skipsp(v);
+      if (nm_num(t, &x, &e) && !*nm_skipsp(e) && x > 0) { /* пусто и недописанное — не трогаем */
+        if (saw) g_nmSaw[c] = x;
+        else *nl_gear(c) = x;
         nl_save();
       }
     }
