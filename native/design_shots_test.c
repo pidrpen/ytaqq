@@ -496,6 +496,116 @@ static void dst_more_menu(const wchar_t *name) {
   DeleteDC(mem);
 }
 
+/* значок программы так, как его берёт Проводник: PrivateExtractIconsW из exe, каждого
+   размера отдельно; на светлом и тёмном фоне, на панели задач, ярлыком и «крупными значками» */
+static void dst_fill(BYTE *px, int W, int x0, int y0, int w, int h, COLORREF c) {
+  for (int y = y0; y < y0 + h; y++)
+    for (int x = x0; x < x0 + w; x++) {
+      BYTE *p = px + ((size_t)y * W + x) * 4;
+      p[0] = GetBValue(c), p[1] = GetGValue(c), p[2] = GetRValue(c), p[3] = 255;
+    }
+}
+
+static int dst_icon_at(HDC mem, const wchar_t *exe, int sz, int x, int y) {
+  HICON ic = NULL;
+  UINT got = PrivateExtractIconsW(exe, 0, sz, sz, &ic, NULL, 1, 0);
+  if (!got || !ic) return 0;
+  DrawIconEx(mem, x, y, ic, sz, sz, 0, NULL, DI_NORMAL);
+  DestroyIcon(ic);
+  return 1;
+}
+
+static void dst_icon_sheet(const wchar_t *exe) {
+  static const int sizes[8] = {16, 20, 24, 32, 40, 48, 64, 256};
+  const int W = 1180, H = 760;
+  BITMAPINFO bi;
+  memset(&bi, 0, sizeof(bi));
+  bi.bmiHeader.biSize = sizeof(bi.bmiHeader);
+  bi.bmiHeader.biWidth = W;
+  bi.bmiHeader.biHeight = -H;
+  bi.bmiHeader.biPlanes = 1;
+  bi.bmiHeader.biBitCount = 32;
+  void *bits = NULL;
+  HDC mem = CreateCompatibleDC(NULL);
+  HBITMAP bm = CreateDIBSection(mem, &bi, DIB_RGB_COLORS, &bits, NULL, 0);
+  if (!bm) return;
+  HGDIOBJ old = SelectObject(mem, bm);
+  BYTE *px = (BYTE *)bits;
+  dst_fill(px, W, 0, 0, W, H, RGB(255, 255, 255));
+  dst_fill(px, W, 0, 0, W, 300, RGB(243, 243, 243));
+  dst_fill(px, W, 0, 300, W, 300, RGB(32, 32, 32));
+  GdiFlush();
+  int ok = 0, x = 20;
+  for (int i = 0; i < 8; i++) { /* все размеры из exe: светлый и тёмный ряд */
+    int sz = sizes[i];
+    ok += dst_icon_at(mem, exe, sz, x, 280 - sz);
+    dst_icon_at(mem, exe, sz, x, 580 - sz);
+    x += sz + 24;
+  }
+  /* панель задач: светлая и тёмная полоса 48, значок 24 и черта открытого окна */
+  dst_fill(px, W, 20, 620, 260, 48, RGB(243, 243, 243));
+  dst_fill(px, W, 300, 620, 260, 48, RGB(32, 32, 32));
+  GdiFlush();
+  for (int t = 0; t < 2; t++) {
+    int bx = 20 + t * 280;
+    for (int k = 0; k < 4; k++) {
+      int ix = bx + 40 + k * 52;
+      if (k == 2) {
+        dst_icon_at(mem, exe, 24, ix, 630);
+        GdiFlush();
+        dst_fill(px, W, ix + 5, 662, 14, 3, t ? RGB(167, 171, 177) : RGB(91, 95, 102));
+      } else {
+        GdiFlush();
+        dst_fill(px, W, ix + 1, 631, 22, 22, t ? RGB(74, 77, 82) : RGB(196, 199, 204));
+      }
+    }
+  }
+  /* ярлык на рабочем столе: 48 и подпись */
+  GdiFlush();
+  dst_fill(px, W, 580, 610, 140, 140, RGB(47, 88, 102));
+  dst_icon_at(mem, exe, 48, 626, 630);
+  SetBkMode(mem, TRANSPARENT);
+  HFONT f = CreateFontW(-12, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
+  HGDIOBJ of = SelectObject(mem, f);
+  SetTextColor(mem, RGB(0, 0, 0));
+  RECT tr = {581, 687, 721, 707};
+  DrawTextW(mem, L"CursorPad", -1, &tr, DT_CENTER | DT_SINGLELINE);
+  SetTextColor(mem, RGB(255, 255, 255));
+  OffsetRect(&tr, -1, -1);
+  DrawTextW(mem, L"CursorPad", -1, &tr, DT_CENTER | DT_SINGLELINE);
+  /* Проводник, «крупные значки»: 96 (из 256) и подпись «CursorPad.exe» */
+  GdiFlush();
+  dst_fill(px, W, 740, 610, 160, 140, RGB(255, 255, 255));
+  dst_icon_at(mem, exe, 96, 772, 616);
+  SetTextColor(mem, RGB(0, 0, 0));
+  RECT er = {740, 716, 900, 736};
+  DrawTextW(mem, L"CursorPad.exe", -1, &er, DT_CENTER | DT_SINGLELINE);
+  /* окну — значок программы (WM_SETICON в ui_chrome_once): у Настроек, они настоящие и в стенде */
+  if (!IsWindowVisible(g_setHwnd)) toggle_settings();
+  dst_pump(200);
+  HICON win = g_setHwnd ? (HICON)SendMessageW(g_setHwnd, WM_GETICON, ICON_SMALL, 0) : NULL;
+  if (win) DrawIconEx(mem, 940, 640, win, 16, 16, 0, NULL, DI_NORMAL);
+  BOOL own = win && win == app_icon(TRUE);
+  RECT lr = {964, 636, 1176, 660};
+  DrawTextW(mem, own ? L"← окно Настроек: значок программы" : L"← окно Настроек: НЕ тот значок", -1, &lr, DT_LEFT | DT_SINGLELINE);
+  {
+    wchar_t ln[120];
+    _snwprintf(ln, 120, L"%ls значок окна Настроек — значок программы", own ? L"ok  " : L"FAIL");
+    dst_log(ln);
+  }
+  SelectObject(mem, of);
+  DeleteObject(f);
+  GdiFlush();
+  for (size_t i = 0; i < (size_t)W * H; i++) px[i * 4 + 3] = 255;
+  dst_png(L"icon-sheet.png", px, W, H);
+  wchar_t line[200];
+  _snwprintf(line, 200, L"%ls значок из exe: %d из 8 размеров", ok == 8 ? L"ok  " : L"FAIL", ok);
+  dst_log(line);
+  SelectObject(mem, old);
+  DeleteObject(bm);
+  DeleteDC(mem);
+}
+
 static void dst_chat_fill(void) {
   if (g_acN) return;
   ac_push(0, L"Посмотри чертёж вала и скажи, как его обрабатывать");
@@ -582,6 +692,14 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
   if (g_follow) toggle_follow(); /* закреплено: кнопки живые, как при работе в окне */
   dst_pump(100);
 
+  if (argc >= 3 && !wcscmp(argv[2], L"icon")) { /* значок из exe (по умолчанию build/dev/CursorPad.exe) */
+    dst_icon_sheet(argc >= 4 ? argv[3] : L"build\\dev\\CursorPad.exe");
+    char rep[8000];
+    int kk = WideCharToMultiByte(CP_UTF8, 0, g_dstReport, -1, rep, sizeof(rep), NULL, NULL);
+    dst_write(L"report.txt", rep, kk > 0 ? (DWORD)kk - 1 : 0);
+    LocalFree(argv);
+    return 0;
+  }
   if (argc >= 3 && !wcscmp(argv[2], L"mods")) { /* окна модулей в светлой и четырёх темах «Кастомизации» */
     static const int th[6] = {0, 3, 5, 6, 7, 8};
     static const wchar_t *const thn[6] = {L"obychnaya", L"chertezh", L"steklo", L"grafit", L"sinka", L"tseh"};

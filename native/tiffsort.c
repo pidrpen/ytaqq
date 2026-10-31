@@ -982,7 +982,8 @@ static void tiffsort_show(void) {
     wc.hInstance = g_inst;
     wc.hCursor = LoadCursorW(NULL, IDC_ARROW);
     wc.lpszClassName = L"CursorPadTiffSort";
-    wc.hIcon = LoadIconW(NULL, IDI_APPLICATION);
+    wc.hIcon = app_icon(FALSE);
+    wc.hIconSm = app_icon(TRUE);
     RegisterClassExW(&wc);
     wc.lpfnWndProc = TsCanvasProc;
     wc.lpszClassName = L"CursorPadTiffSortCanvas";

@@ -934,6 +934,10 @@ static LRESULT CALLBACK ui_frame_proc(HWND h, UINT m, WPARAM w, LPARAM l, UINT_P
 }
 
 static void ui_chrome_once(HWND h) {
+  if (!SendMessageW(h, WM_GETICON, ICON_BIG, 0)) { /* панель задач и Alt+Tab — значок программы */
+    SendMessageW(h, WM_SETICON, ICON_BIG, (LPARAM)app_icon(FALSE));
+    SendMessageW(h, WM_SETICON, ICON_SMALL, (LPARAM)app_icon(TRUE));
+  }
   if (!GetPropW(h, L"CpUiFrame")) {
     SetPropW(h, L"CpUiFrame", (HANDLE)1);
     SetWindowSubclass(h, ui_frame_proc, 0x5548, 0);

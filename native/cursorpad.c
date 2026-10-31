@@ -473,6 +473,21 @@ static int g_ocrPt = 11;
 static HFONT g_ocrFontZoom;
 static BOOL g_statusOn = FALSE;
 static HINSTANCE g_inst;
+/* значок программы (с 2026.10.31): cursorpad.ico из make_icon.py, ICON 1 в cursorpad.rc —
+   у exe и ярлыка его показывает Проводник; окнам — классам (hIcon/hIconSm) и WM_SETICON
+   при показе (ui_chrome_once), трею — малый. Каждый размер грузится один раз */
+#define IDI_CURSORPAD 1
+static HICON app_icon(BOOL small) {
+  static HICON big, sm;
+  HICON *h = small ? &sm : &big;
+  if (!*h) {
+    int cx = GetSystemMetrics(small ? SM_CXSMICON : SM_CXICON), cy = GetSystemMetrics(small ? SM_CYSMICON : SM_CYICON);
+    *h = (HICON)LoadImageW(g_inst ? g_inst : GetModuleHandleW(NULL), MAKEINTRESOURCEW(IDI_CURSORPAD), IMAGE_ICON, cx, cy,
+                           LR_DEFAULTCOLOR);
+    if (!*h) *h = LoadIconW(NULL, IDI_APPLICATION);
+  }
+  return *h;
+}
 static int g_skin = 1; /* 0 system, 1 sword, 2 gauntlet, 3 fairy, 4 dragon, 5 black cat, 6 rias,
                           7…13 нарисованные кодом стили (styles.c), последний — «Баклажан» */
 static BOOL g_sparkle = TRUE; /* у «Феи» — звёздочки при нажатии */
@@ -3303,7 +3318,7 @@ static void add_tray(HWND hwnd) {
   g_nid.uID = TRAY_UID;
   g_nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
   g_nid.uCallbackMessage = WM_TRAY;
-  g_nid.hIcon = LoadIconW(NULL, IDI_APPLICATION);
+  g_nid.hIcon = app_icon(TRUE);
   tray_tip_text(g_nid.szTip, 128);
   g_trayAdded = Shell_NotifyIconW(NIM_ADD, &g_nid);
 }
@@ -6053,8 +6068,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
   wc.hCursor = LoadCursorW(NULL, IDC_ARROW);
   wc.hbrBackground = CreateSolidBrush(COL_PAPER);
   wc.lpszClassName = L"CursorPadWindow";
-  wc.hIcon = LoadIconW(NULL, IDI_APPLICATION);
-  wc.hIconSm = wc.hIcon;
+  wc.hIcon = app_icon(FALSE);
+  wc.hIconSm = app_icon(TRUE);
   if (!RegisterClassExW(&wc)) return 1;
 
   POINT p;

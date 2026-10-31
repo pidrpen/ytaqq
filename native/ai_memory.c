@@ -399,7 +399,8 @@ static void mm_show(void) {
     wc.hCursor = LoadCursorW(NULL, IDC_ARROW);
     wc.hbrBackground = bg_brush(TRUE);
     wc.lpszClassName = L"CursorPadMemory";
-    wc.hIcon = LoadIconW(NULL, IDI_APPLICATION);
+    wc.hIcon = app_icon(FALSE);
+    wc.hIconSm = app_icon(TRUE);
     RegisterClassExW(&wc);
     MmGeom g;
     mm_geom(MEMO_PX(620), &g);
