@@ -1,7 +1,10 @@
-2026103102
-2026.10.31.2
-sha256 28a5f6500ddd280648e62dc1af20edfd39caf86e773062b145a90edb303ab08d
-== 0 signature-rsa-sha256 nnGs2A8UqCwvV/FZ2hUyDnd8hW84qCVFT9QYzqKHka1uYYYivkNqK3W9N7Cg9VCjzLx+uLejvovKCtJZnK89N6kC731B+xqe9GLFjwY00VY33iYSdwX+j1KfjoAxYDyQEBs4Vwvzg2zcWgZmhKqVWeL+cvm09hvgaCY+b6B7Uo0EDdr/Rsnsx2e32CIog9aW9hvFsyuRbe3fbRiliVsVR3Gl5CMgOxqeF1L7vafeni46LgRZeqhEEQsVff0WorPKP7fPFMG72JfDFIPRMlh0I8ZTNbByENNiCJ60vNwe9Fe6rtgzrnAzuosA5SkRiY2IPxKP797F4UWIqSoMAaa7+j55VsWIGjCM5mTRof6BAteuueVmXRs30aDjNoEC/kNwaf2QMrZmyMuWzZ7muxPWc2FF1A4f80pcQOVHmKxPWhE20n512bhJ16DG1W1z/DtVXoy3r7jh/8LV4hpyFUIE9TVGrrRoP9hVk1Egf5Yefk41cdm5VnzY/6SiCxasAfRu
+2026110101
+2026.11.1.1
+sha256 9e575f52caa75a00a56a65e76dc672a616b6ba3a94e1a50edf132c9a7cfe2445
+== 0 signature-rsa-sha256 Ym5jxJxFQuiwzCGif8YJPdOoOLzjwUBgrovjCezApgsUOnbQiXDrjdc3Q1kStqSatr3/0oM1vXBXr8ec0kzrj+koK1uZfHr4YtFLuljTISu0QAlR4b4H6cMoEKatzaA9ULRT1neK7eOubqS/A7GoS8NgFDyTun4V8a3h2cBshUl6Q/2FWimfD9u0b+BMm44qZW/UrZ0HgWxQ7WsC2X0CiRXBSdyGhzy2ScqhX0mGHMc/cUIlGZu9SFEpOpw95Zqc7Ld8iy5oKpLkkQB5cUKDZqY98hEual89LPlMon/bNV1FY8Z8+pQFO4MvQIYi/MU4b48H5BXoxWx17VQN3aoa2DfMqXhSxhdoXFQxGj5H/XjAtQKwVFPUUza2oCpz3XZAKEaMcGBZraoORgOTZ7zOInFebwV5/brJ6ZJaJNsTrzAN+scyQjnYmGoQudp+CBK1XtOaw67Q7atS3QRIY/s3TRwrMd5BWQnl5xgzO7YqNDia+ZkytxeLXxcKMKTseVZN
+== 2026.11.1.1
+Штамп находится и на заводских копиях: рамка ищется по линиям листа, белые поля за рамкой и уменьшенные форматы больше не мешают, штамп первого листа не принимается за «форму 2». Модель теперь читает штамп каждого чертежа — обозначение, наименование и материал не берутся молча из имени файла; если штамп всё же не нашёлся, модель читает правый нижний угол листа. В окне «ЭСИ и ТП» на сборке из двенадцати заводских листов модель прочитала все обозначения сама, а состав обеих сборок совпал со спецификациями.
+
 == 2026.10.31.2
 Исправлено чтение спецификаций в окне «ЭСИ и ТП»: в 2026.10.31.1 в состав попадали черновые строки Tesseract с мусором. Теперь строки спецификации читает модель — состав сборки собирается из неё вместе с наименованиями и количеством; без модели Tesseract остаётся запасом, и всё сомнительное идёт в «проверьте», а заголовки разделов в изделия не попадают. Окно больше не читает чертежи молча без ИИ: включает его само или спрашивает, и пишет, чем читали. Наименование детали берётся из спецификации её сборки, мусор со штампа и из строки маршрута не вписывается; код завода в обозначении исправляется по именам соседних файлов. У CursorPad появился свой значок — курсор с размерной линией — на ярлыке, в Проводнике, на панели задач, в Alt+Tab и в трее (если Windows показывает старый значок, он сменится после обновления кэша значков). В виде «Чертёж» у окон появилась рамка листа и тень — на белом фоне окно больше не сливается.
 
