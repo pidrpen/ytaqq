@@ -61,6 +61,14 @@ static int pk_norms_fill(BOOL quiet) {
         tn_cpy(r->op[r->n].op, 48, op);
         rowOf[r->n++] = order[i];
       }
+      /* слесарная сразу за механической — зачистка после неё (ОМН слесарные), за ТО — зачистка после ТО */
+      for (int i = 1; i < r->n; i++) {
+        if (wcsncmp(r->op[i].op, L"Слесарная", 9) || r->op[i].op[9]) continue;
+        if (tn_is_mech(r->op[i - 1].code))
+          tn_cpy(r->op[i].sub, 24, L"после "), tn_cat(r->op[i].sub, 24, r->op[i - 1].code);
+        else if (!wcsncmp(r->op[i - 1].code, L"5", 1) && r->op[i - 1].code[3])
+          tn_cpy(r->op[i].sub, 24, L"зачистка ТО");
+      }
       const wchar_t *mass = L"";
       for (int k = 0; k < g_pk[PK_ITEMS].n; k++)
         if (!_wcsicmp(xp_cell(&g_pk[PK_ITEMS], k, 0), des)) {

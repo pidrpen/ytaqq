@@ -13,12 +13,16 @@
 #define ID_NL_EDIT 4900 /* + параметр·3 + столбец: 0 — от, 1 — до, 2 — по умолчанию */
 #define ID_NL_SAW 5000  /* + группа материала (NMW_…) — производительность пилы, см²/мин */
 #define ID_NL_GEAR 5010 /* + 0 — V, 1 — Sкр, 2 — Sрад (зубодолбление) */
+#define ID_NL_ROUTE 5020 /* + 0 — граница HRC, 1 — порог Ø круга (где в маршруте ТО, techno.c) */
 
 static HWND g_nlEdit[NM_LIMS][3];
 static HWND g_nlFactory, g_nlOp[NM_OPRULES], g_nlHeat[4], g_nlSaw[NMW_N], g_nlGear[3];
 static const wchar_t *const kNlSawKey[NMW_N] = {L"carbon", L"alloy", L"tool", L"stain", L"iron", L"alu", L"copper"};
 static const wchar_t *const kNlGearKey[3] = {L"V", L"Skr", L"Srad"};
 static double *nl_gear(int c) { return c == 0 ? &g_nmGear.V : c == 1 ? &g_nmGear.Skr : &g_nmGear.Srad; }
+static HWND g_nlRoute[2];
+static const wchar_t *const kNlRouteKey[2] = {L"hrc", L"dia"};
+static double *nl_route(int c) { return c == 0 ? &g_tnHeatHrc : &g_tnHeatDia; }
 static wchar_t g_nlSawTitle[NMW_N][48];
 static const wchar_t *const kNlHeatKey[4] = {L"limit", L"light", L"heavy", L"clean"};
 static double *nl_heat(int c) {
@@ -81,6 +85,13 @@ static void nl_load(void) {
     GetPrivateProfileStringW(L"saw", kNlSawKey[c], L"", v, 64, p);
     if (v[0] && nm_num(v, &x, &e) && x > 0) g_nmSaw[c] = x;
   }
+  g_tnHeatHrc = 45, g_tnHeatDia = 80;
+  for (int c = 0; c < 2; c++) { /* [route] hrc=45 dia=80 — где в маршруте термообработка */
+    double x;
+    const wchar_t *e;
+    GetPrivateProfileStringW(L"route", kNlRouteKey[c], L"", v, 64, p);
+    if (v[0] && nm_num(v, &x, &e) && x > 0) *nl_route(c) = x;
+  }
   g_nmGear = (NmGear)NM_GEAR0;
   for (int c = 0; c < 3; c++) { /* [gear] V=20 Skr=0.25 Srad=0.03 — режимы зубодолбления */
     double x;
@@ -134,6 +145,11 @@ static void nl_save(void) {
     v[63] = 0;
     WritePrivateProfileStringW(L"gear", kNlGearKey[c], v, p);
   }
+  for (int c = 0; c < 2; c++) {
+    _snwprintf(v, 64, L"%g", *nl_route(c));
+    v[63] = 0;
+    WritePrivateProfileStringW(L"route", kNlRouteKey[c], v, p);
+  }
 }
 
 static void nl_refresh(void) {
@@ -145,6 +161,11 @@ static void nl_refresh(void) {
   }
   for (int k = 0; k < NM_OPRULES; k++)
     if (g_nlOp[k]) SendMessageW(g_nlOp[k], CB_SETCURSEL, (WPARAM)g_nmOps[k].cls, 0);
+  for (int c = 0; c < 2; c++) {
+    wchar_t v[48];
+    tn_numstr(*nl_route(c), v, 48);
+    if (g_nlRoute[c]) SetWindowTextW(g_nlRoute[c], v);
+  }
   for (int c = 0; c < NMW_N + 3; c++) {
     wchar_t v[48];
     tn_numstr(c < NMW_N ? g_nmSaw[c] : *nl_gear(c - NMW_N), v, 48);
@@ -183,6 +204,12 @@ static void nl_create(HWND p) {
                                   70, 26, p, (HMENU)(INT_PTR)(ID_NL_HEAT + c), NULL, NULL);
     SendMessageW(g_nlHeat[c], WM_SETFONT, (WPARAM)g_fontBody, TRUE);
     SendMessageW(g_nlHeat[c], EM_SETLIMITTEXT, 12, 0);
+  }
+  for (int c = 0; c < 2; c++) {
+    g_nlRoute[c] = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL | ES_CENTER, 0, -4000,
+                                   70, 26, p, (HMENU)(INT_PTR)(ID_NL_ROUTE + c), NULL, NULL);
+    SendMessageW(g_nlRoute[c], WM_SETFONT, (WPARAM)g_fontBody, TRUE);
+    SendMessageW(g_nlRoute[c], EM_SETLIMITTEXT, 12, 0);
   }
   for (int c = 0; c < NMW_N + 3; c++) {
     int id = c < NMW_N ? ID_NL_SAW + c : ID_NL_GEAR + c - NMW_N;
@@ -241,6 +268,14 @@ static void nl_layout(int btnH) {
   sd_row(L"Слесарная после ТО: зачистить, мин", L"маршрут ставит её сразу за термической обработкой", &g_nlHeat[3], &hw,
          1, btnH);
   sd_card_end();
+  sd_group(L"Где в маршруте термообработка");
+  sd_card_begin();
+  sd_stack_end(sd_stack(NULL, L"Твёрдость до границы и круг заготовки до порога — ТО сразу на заготовке, токарная одна. "
+                              L"Круг больше — черновая с припуском, ТО, чистовая. Твёрже — токарная, ТО, шлифование. "
+                              L"После каждой механической операции — слесарная (ОМН слесарные, карта 16).") - 12);
+  sd_row(L"Граница твёрдости, HRC", L"HB переводится в HRC", &g_nlRoute[0], &hw, 1, btnH);
+  sd_row(L"Круг заготовки до, мм", L"ТО на заготовке — без предварительной токарной", &g_nlRoute[1], &hw, 1, btnH);
+  sd_card_end();
   sd_group(L"Отрезка на пиле — производительность, см²/мин");
   sd_card_begin();
   sd_stack_end(sd_stack(NULL, L"Оценка CursorPad: открытых нормативов на машинное время пилы нет. То = площадь сечения "
@@ -293,6 +328,20 @@ static BOOL nl_command(HWND hwnd, int id, int code) {
       const wchar_t *t = nm_skipsp(v);
       if (nm_num(t, &x, &e) && !*nm_skipsp(e) && x > 0) { /* пусто и недописанное — не трогаем */
         *nl_heat(id - ID_NL_HEAT) = x;
+        nl_save();
+      }
+    }
+    return TRUE;
+  }
+  if (id >= ID_NL_ROUTE && id < ID_NL_ROUTE + 2) {
+    if (code == EN_CHANGE && !g_nlFill) {
+      wchar_t v[48];
+      double x;
+      const wchar_t *e;
+      GetWindowTextW(g_nlRoute[id - ID_NL_ROUTE], v, 48);
+      const wchar_t *t = nm_skipsp(v);
+      if (nm_num(t, &x, &e) && !*nm_skipsp(e) && x > 0) { /* пусто и недописанное — не трогаем */
+        *nl_route(id - ID_NL_ROUTE) = x;
         nl_save();
       }
     }

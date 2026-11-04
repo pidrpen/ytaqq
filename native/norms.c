@@ -781,13 +781,13 @@ static double nm_step(const wchar_t *row, double x, int *low) {
 
 /* EST — оценка, FACT — по факту, TECH — норма технолога (Тшт по массе детали, Настройки) */
 enum { NMK_NONE, NMK_TURN, NMK_DRILL, NMK_MILL, NMK_CUT, NMK_EST, NMK_FACT, NMK_TECH, NMK_SAW, NMK_GEAR, NMK_WELD,
-       NMK_MARK };
+       NMK_MARK, NMK_DEBURR };
 /* класс операции — что у неё нормируется (правило технолога 30.10): мехобработка — Тпз и Тшт;
    заготовительные и вспомогательные — только Тшт (Тпз не нужен); контроль — без норм */
 enum { NMC_FULL, NMC_TSHT, NMC_NONE };
 static const wchar_t *const kNmKind[] = {L"", L"токарная", L"сверлильная", L"фрезерная", L"резка", L"оценка",
                                          L"по факту", L"норма технолога", L"отрезная", L"зубодолбежная", L"сварка",
-                                         L"разметка"};
+                                         L"разметка", L"слесарная"};
 
 #define NM_TRS 16 /* переходов операции, расписанных по одному (токарная, фрезерная) */
 typedef struct {
@@ -2451,6 +2451,78 @@ static void nm_weld(NmJob *j) {
    11 %, с. 5). Отверстий не знаем — разметка «по чертежу»: оценка, как раньше. */
 static void nm_est(NmJob *j);
 
+/* ---- слесарная после механической операции (с 2026.11.04) -----------------------------------
+   ОМН на слесарную обработку (1974), карта 16: зачистка заусенцев и притупление острых кромок
+   напильником после механической обработки — на кромку по её Ø (цилиндрические) или по длине
+   контура (плоские), × коэффициент материала, + закрепление в тисках по массе. Кромки — той
+   операции, после которой (уточнение «после NNNN»): токарная и шлифовальная — кромки ступеней
+   (у наибольшего Ø — две) и отверстия, сверлильная — по две у каждого отверстия, фрезерная —
+   контур плоской детали с двух сторон. Время карты штучное. Кромок не знаем — оценка, как раньше. */
+static void nm_deburr(NmJob *j) {
+  NmOp *o = j->o;
+  wchar_t s[300];
+  const TnSigns *sg = j->r ? &j->r->s : NULL;
+  long code = wcstol(o->sub + wcslen(L"после "), NULL, 10);
+  int turn = (code >= 4100 && code <= 4149) || (code >= 4150 && code <= 4199) || code == 2153;
+  int drill = code >= 4200 && code <= 4229;
+  int mill = code >= 4230 && code <= 4279;
+  double edges[16], sumT = 0, t;
+  int inner[16], ne = 0, ok = 1;
+  if (turn && sg) { /* наружные: у наибольшего Ø две кромки, у остальных по одной; отверстие — две */
+    double od[6], in[3];
+    int oi[6], ii[3], nod = 0, nin = 0;
+    for (int i = 0; i < sg->nDia; i++) {
+      if ((sg->diaIn >> i) & 1) nm_dia_put(in, ii, &nin, 3, sg->dia[i], 0);
+      else nm_dia_put(od, oi, &nod, 6, sg->dia[i], 0);
+    }
+    if (!nod && sg->dmax) nm_dia_put(od, oi, &nod, 6, sg->dmax, 0);
+    for (int k = 0; k < nod && ne < 14; k++) {
+      edges[ne] = od[k], inner[ne++] = 0;
+      if (!k) edges[ne] = od[k], inner[ne++] = 0;
+    }
+    if (nin) edges[ne] = in[0], inner[ne++] = 1, edges[ne] = in[0], inner[ne++] = 1;
+  } else if (drill && sg && sg->holes > 0) {
+    double d = sg->holeMin ? sg->holeMin : NM_NONE;
+    for (int k = 0; k < sg->holes && ne < 14 && !nm_na(d); k++)
+      edges[ne] = d, inner[ne++] = 1, edges[ne] = d, inner[ne++] = 1;
+  }
+  int contour = mill && sg && sg->gL && sg->gB;
+  if (!ne && !contour) { /* кромок не знаем — оценка по массе, как было */
+    o->kind = NMK_EST;
+    nm_est(j);
+    return;
+  }
+  o->to = o->tv = o->top = o->tsht = o->tpz = o->tshk = NM_NONE;
+  j->pref = kNmKind[NMK_DEBURR];
+  for (int k = 0; k < ne; k++) {
+    NmCtx keep = j->c;
+    nm_set(&j->c, L"контур", inner[k] ? L"внутренний" : L"наружный", NM_NONE, NULL);
+    nm_set(&j->c, L"D", NULL, edges[k], L"кромка");
+    if (nm_look_pref(j, L"кромка", inner[k] ? L"кромка отверстия" : L"кромка", 1, &t)) sumT += t;
+    else ok = 0;
+    j->c = keep;
+  }
+  if (contour) { /* плоская: контур детали с двух сторон */
+    double per = 2 * (sg->gL + sg->gB);
+    NmCtx keep = j->c;
+    nm_set(&j->c, L"контур", L"прямолинейный", NM_NONE, NULL);
+    nm_set(&j->c, L"длина контура", NULL, per, L"периметр 2·(L + B)");
+    if (nm_look_pref(j, L"контур", L"контур (одна сторона)", 1, &t)) sumT += 2 * t;
+    else ok = 0;
+    j->c = keep;
+  }
+  double k = 1, tv = 0;
+  if (!nm_look_pref(j, L"кромка.к", L"K (материал)", 0, &k)) k = 1;
+  if (!nm_na(nm_v(&j->c, L"масса")) && !nm_look_pref(j, L"тиски", L"в тисках", 0, &tv)) tv = 0;
+  o->tsht = sumT * k + tv;
+  tn_cpy(s, 300, L"Тшт = кромки·K + тиски = ");
+  tn_catnum(s, 300, sumT), tn_cat(s, 300, L"·"), tn_catnum(s, 300, k), tn_cat(s, 300, L" + "), tn_catnum(s, 300, tv);
+  tn_cat(s, 300, L" = "), tn_catnum(s, 300, o->tsht), tn_cat(s, 300, L" мин (штучное: Тпз, обслуживание и отдых — в карте)");
+  nm_line(j, s);
+  o->to = o->tsht;
+  o->full = ok;
+}
+
 static void nm_mark(NmJob *j) {
   NmOp *o = j->o;
   wchar_t s[300];
@@ -3294,6 +3366,7 @@ static void nm_route(const NmBase *b, const TnRoute *r, const wchar_t *mass, con
              : rule->how == NMS_MARK ? NMK_MARK
                                      : NMK_EST;
     if (!wcscmp(r->op[i].sub, L"зачистка ТО")) kind = NMK_TECH; /* слесарная после ТО — норма технолога */
+    if (!wcsncmp(r->op[i].sub, L"после ", 6)) kind = NMK_DEBURR;  /* после механической — ОМН слесарные */
     if (!b->n && kind != NMK_CUT) continue; /* без таблиц — только То резки по нормам завода */
     NmOp *o = &res->op[res->n++];
     memset(o, 0, sizeof(*o));
@@ -3315,6 +3388,10 @@ static void nm_route(const NmBase *b, const TnRoute *r, const wchar_t *mass, con
       nm_est(j);
     } else if (kind == NMK_SAW) {
       nm_saw(j);
+    } else if (kind == NMK_DEBURR) {
+      double q;
+      if (nm_na(nm_v(&j->c, L"партия"))) nm_lim_def(j, L"партия", &q);
+      nm_deburr(j);
     } else if (kind == NMK_MARK) {
       double q;
       if (nm_na(nm_v(&j->c, L"партия"))) nm_lim_def(j, L"партия", &q);
