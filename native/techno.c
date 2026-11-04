@@ -1082,6 +1082,34 @@ static const double kTnRound[] = {
 /* припуск на диаметр при обработке из проката (упрощённо, по справочнику технолога) */
 static double tn_allow(double d) { return d <= 30 ? 2 : d <= 80 ? 3 : d <= 180 ? 4 : 5; }
 
+/* где в маршруте термообработка (правило технолога 04.11): до g_tnHeatHrc HRC и круг заготовки до
+   g_tnHeatDia мм — сразу на заготовке, токарная одна; Ø больше — черновая → ТО → чистовая; твёрже —
+   токарная с припуском → ТО → шлифование. Настройки → «Нормирование», norms.ini [route] */
+static double g_tnHeatHrc = 45, g_tnHeatDia = 80;
+
+/* HB → HRC: таблица соответствия твёрдостей (ГОСТ 8.064, округлённо), между точками — прямой */
+static double tn_hb2hrc(double hb) {
+  static const double t[][2] = {{230, 20}, {250, 24}, {270, 28}, {300, 32}, {330, 36}, {350, 38}, {370, 40},
+                                {400, 43}, {430, 46}, {450, 47}, {480, 50}, {500, 51}, {550, 55}, {600, 58}};
+  int n = (int)(sizeof(t) / sizeof(t[0]));
+  if (hb <= t[0][0]) return t[0][1];
+  for (int i = 1; i < n; i++)
+    if (hb <= t[i][0]) return t[i - 1][1] + (hb - t[i - 1][0]) * (t[i][1] - t[i - 1][1]) / (t[i][0] - t[i - 1][0]);
+  return t[n - 1][1];
+}
+
+/* Ø круга заготовки: «Круг 50 ГОСТ 2590» маршрута, сортамент с листа или наибольший Ø + припуск; 0 — нет */
+static double tn_blank_d(const TnRoute *r) {
+  const wchar_t *k = r->blank;
+  if (!wcsncmp(k, L"Круг ", 5)) {
+    double v;
+    int len, sep;
+    if (tn_num(k + 5, &v, &len, &sep) && v > 0) return v;
+  }
+  if (r->s.sort == TNS_ROUND && r->s.sortSize) return r->s.sortSize;
+  return r->s.dmax ? r->s.dmax + tn_allow(r->s.dmax) : 0;
+}
+
 /* названия операций — из справочника операций (ops_1c.h — тот же, что в 1С и «Союзе»), не строками
    в коде: по номеру «4110» — «Токарная». Справочник подключают и другие части (pad_extra.c) */
 #ifndef OPS_1C_INCLUDED
@@ -1133,6 +1161,43 @@ static void tn_mark_holes(TnRoute *r) {
     if (r->s.holes > 0) tn_cat(o->what, 300, L": "), tn_catnum(o->what, 300, r->s.holes), tn_cat(o->what, 300, L" отв.");
     tn_cpy(o->why, TN_TXT, L"отверстия не по оси вращения — сверлят по разметке");
     return;
+  }
+}
+
+/* слесарная после каждой механической операции (правило технолога 04.11): зачистить заусенцы и
+   притупить острые кромки — норма по ОМН слесарных (norms.c, карта 16, по кромкам этой операции).
+   Уточнение «после NNNN» — номер операции, после которой. Слесарная уже стоит следом — своей нет,
+   уточнение — ей. Заготовительные (отрезка, резка) — без */
+static int tn_is_mech(const wchar_t *code) {
+  long c = wcstol(code, NULL, 10);
+  return (c >= 4100 && c <= 4299 && !(c >= 4280 && c <= 4287)) || c == 2153 || c == 7509;
+}
+
+static void tn_deburr(TnRoute *r) {
+  for (int i = 0; i < r->n; i++) {
+    if (!tn_is_mech(r->op[i].code)) continue;
+    wchar_t sub[24];
+    tn_cpy(sub, 24, L"после ");
+    tn_cat(sub, 24, r->op[i].code);
+    TnOp *next = i + 1 < r->n ? &r->op[i + 1] : NULL;
+    if (next && !wcscmp(next->code, L"0108")) {
+      if (!next->sub[0]) tn_cpy(next->sub, 24, sub);
+      continue;
+    }
+    if (r->n >= 24) return;
+    memmove(&r->op[i + 2], &r->op[i + 1], sizeof(TnOp) * (size_t)(r->n - i - 1));
+    r->n++;
+    TnOp *o = &r->op[i + 1];
+    memset(o, 0, sizeof(*o));
+    tn_cpy(o->op, 128, tn_dir_name(L"0108"));
+    tn_cpy(o->code, 8, L"0108");
+    tn_cpy(o->sub, 24, sub);
+    tn_cpy(o->what, 300, L"Зачистить заусенцы, притупить острые кромки");
+    tn_cpy(o->why, TN_TXT, L"после механической обработки: ");
+    size_t at = wcslen(o->why);
+    tn_cat(o->why, TN_TXT, r->op[i].op);
+    if (o->why[at] >= L'А' && o->why[at] <= L'Я') o->why[at] = (wchar_t)(o->why[at] + 32);
+    i++;
   }
 }
 
@@ -1368,9 +1433,13 @@ static void tn_route(const wchar_t *name, const wchar_t *mat, const wchar_t *tex
                            (!s->hrcHi && s->hbHi > 350));
   int temper = !cement && !harden &&
                ((s->heat & TNH_TEMPER) || (s->hrcHi && s->hrcHi <= 35) || (!s->hrcHi && s->hbHi && s->hbHi <= 350));
-  int hard = cement || harden;
+  /* до порога HRC (45; HB — переводом) резец ещё берёт: такая ТО — до чистовой токарной или сразу на
+     заготовке; твёрже — после механообработки, потом шлифование */
+  double hrcTop = s->hrcHi ? s->hrcHi : s->hbHi ? tn_hb2hrc(s->hbHi) : 0;
+  int softHeat = !cement && (harden || temper) && (hrcTop ? hrcTop <= g_tnHeatHrc : temper);
+  int hard = cement || (harden && !softHeat);
   int grind = (s->raMin && s->raMin <= 0.8) || (s->itMin && s->itMin <= 6) || (s->band && s->band <= 0.02) ||
-              (hard && s->hrcHi >= 45) ||
+              (hard && hrcTop >= g_tnHeatHrc) ||
               (hard && ((s->raMin && s->raMin <= 1.6) || (s->itMin && s->itMin <= 7) || (s->band && s->band <= 0.03)));
   /* цветные металлы не шлифуют — круг засаливается: тонкое (алмазное) точение */
   int fineTurn = grind && (s->mat == TNM_ALU || s->mat == TNM_ALU_CAST || s->mat == TNM_COPPER ||
@@ -1378,15 +1447,31 @@ static void tn_route(const wchar_t *name, const wchar_t *mat, const wchar_t *tex
   if (fineTurn) grind = 0;
   /* «калить в заготовке» — ТО сразу после отрезки, потом обработка уже твёрдого металла */
   int heatFirst = s->heatFirst && (harden || temper);
-  /* черновая и чистовая токарные — только с основанием: улучшение между ними при точных поверхностях
-     (IT9 и точнее, Ra 3,2 и чище, допуск до 0,05). Без точности улучшают заготовку — токарная одна;
-     закалка со шлифованием — одна токарная с припуском под шлифование */
-  int precise = (s->itMin && s->itMin <= 9) || (s->raMin && s->raMin <= 3.2) || (s->band && s->band <= 0.05);
-  int twoTurn = r->cls == TN_ROT && temper && precise && !heatFirst;
+  /* ТО до порога HRC у тела вращения: круг заготовки до порога Ø — ТО сразу на заготовке, токарная
+     одна (твёрдость и Ø невелики — предварительно точить незачем); больше — черновая с припуском →
+     ТО → чистовая (поводки уходят в припуск). Твёрже порога — одна токарная с припуском, ТО после
+     механообработки, потом шлифование */
+  double blankD = tn_blank_d(r);
+  int twoTurn = 0;
   const wchar_t *heatWhy = L"ТТ: калить в заготовке — до механообработки";
-  if (r->cls == TN_ROT && temper && !precise && !heatFirst) {
-    heatFirst = 1;
-    heatWhy = L"точных поверхностей нет — улучшение заготовки до обработки, токарная одна";
+  wchar_t heatWhyBuf[TN_TXT];
+  /* Ø круга не прочитан — по точности, как до 04.11: точные поверхности — две токарные, нет — ТО на заготовке */
+  int precise = (s->itMin && s->itMin <= 9) || (s->raMin && s->raMin <= 3.2) || (s->band && s->band <= 0.05);
+  if (r->cls == TN_ROT && softHeat && !heatFirst && !blankD) {
+    if (precise) twoTurn = 1;
+    else heatFirst = 1, heatWhy = L"точных поверхностей нет — ТО заготовки до обработки, токарная одна";
+  } else if (r->cls == TN_ROT && softHeat && !heatFirst) {
+    if (blankD <= g_tnHeatDia) {
+      heatFirst = 1;
+      tn_cpy(heatWhyBuf, TN_TXT, L"до ");
+      tn_catnum(heatWhyBuf, TN_TXT, g_tnHeatHrc);
+      tn_cat(heatWhyBuf, TN_TXT, L" HRC и круг до ");
+      tn_catnum(heatWhyBuf, TN_TXT, g_tnHeatDia);
+      tn_cat(heatWhyBuf, TN_TXT, L" мм — ТО сразу на заготовке, токарная одна");
+      heatWhy = heatWhyBuf;
+    } else {
+      twoTurn = 1;
+    }
   }
   if (s->raDoubt && s->raMin <= 0.8) tn_item(r->check, 1200, L"Ra прочитана без запятой — проверить шероховатость");
   if (!s->nRa && r->cls != TN_REWORK && r->cls != TN_BAR && r->cls != TN_BENT) tn_item(r->check, 1200, L"шероховатость не прочитана — проверить, нужна ли шлифовка");
@@ -1426,7 +1511,7 @@ static void tn_route(const wchar_t *name, const wchar_t *mat, const wchar_t *tex
   }
   if (s->heat & TNH_NORM) tn_opc(r, L"5000", NULL, L"Нормализация (отжиг) заготовки", L"ТТ: нормализация/отжиг");
   if (heatFirst) {
-    tn_cpy(w, 300, harden ? L"Закалка и отпуск заготовки" : L"Улучшение заготовки");
+    tn_cpy(w, 300, harden && (!hrcTop || hrcTop > 35) ? L"Закалка и отпуск заготовки" : L"Улучшение заготовки");
     if (hrc[0]) tn_cat(w, 300, L" до "), tn_cat(w, 300, hrc);
     tn_opc(r, L"5000", NULL, w, heatWhy);
     harden = temper = 0;
@@ -1452,19 +1537,28 @@ static void tn_route(const wchar_t *name, const wchar_t *mat, const wchar_t *tex
     if (s->itMin && s->itMin <= 9) tn_cat(pr, 80, L"IT"), tn_catnum(pr, 80, s->itMin);
     if (s->raMin && s->raMin <= 3.2) tn_cat(pr, 80, pr[0] ? L", Ra " : L"Ra "), tn_catnum(pr, 80, s->raMin);
     if (s->band && s->band <= 0.05) tn_cat(pr, 80, pr[0] ? L", допуск " : L"допуск "), tn_catnum(pr, 80, s->band);
-    tn_cpy(why, TN_TXT, two ? L"две токарные: улучшение между ними, точные поверхности (" : r->clsWhy[0] ? L"тело вращения" : L"");
-    if (two) tn_cat(why, TN_TXT, pr), tn_cat(why, TN_TXT, L") — после ТО");
+    if (two) {
+      tn_cpy(why, TN_TXT, L"две токарные: ТО между ними — круг ");
+      tn_catnum(why, TN_TXT, blankD);
+      tn_cat(why, TN_TXT, L" больше ");
+      tn_catnum(why, TN_TXT, g_tnHeatDia);
+      tn_cat(why, TN_TXT, L" мм");
+      if (pr[0]) tn_cat(why, TN_TXT, L"; точные: "), tn_cat(why, TN_TXT, pr);
+    } else {
+      tn_cpy(why, TN_TXT, r->clsWhy[0] ? L"тело вращения" : L"");
+    }
     tn_opc(r, L"4110", two ? L"черновая" : NULL, w, why);
-    if (temper) {
-      tn_cpy(w, 300, L"Улучшение (закалка и высокий отпуск)");
+    if (two && (temper || harden)) { /* ТО до порога HRC — между черновой и чистовой */
+      tn_cpy(w, 300, harden && (!hrcTop || hrcTop > 35) ? L"Закалка и отпуск" : L"Улучшение (закалка и высокий отпуск)");
       if (hrc[0]) tn_cat(w, 300, L" до "), tn_cat(w, 300, hrc);
-      tn_opc(r, L"5000", NULL, w, L"твёрдость невысокая — ТО до чистовой, чтобы поводки ушли в припуск");
+      tn_opc(r, L"5000", NULL, w, L"твёрдость до порога — ТО до чистовой, чтобы поводки ушли в припуск");
+      harden = temper = 0;
     }
     if (two) {
       tn_cpy(w, 300, L"Точить начисто, фаски, канавки");
       if (grind) tn_cat(w, 300, L"; под шлифование оставить припуск 0,2…0,4 мм на диаметр");
-      tn_cpy(why, TN_TXT, L"после улучшения — в размер: ");
-      tn_cat(why, TN_TXT, pr);
+      tn_cpy(why, TN_TXT, L"после ТО — в размер");
+      if (pr[0]) tn_cat(why, TN_TXT, L": "), tn_cat(why, TN_TXT, pr);
       if (grind) tn_cat(why, TN_TXT, L"; потом шлифование");
       tn_opc(r, L"4110", L"чистовая", w, why);
     }
@@ -1636,6 +1730,7 @@ static void tn_route(const wchar_t *name, const wchar_t *mat, const wchar_t *tex
   tn_opc(r, L"0200", NULL, w, L"");
   tn_after_heat(r);
   tn_mark_holes(r);
+  tn_deburr(r);
 }
 
 /* текст для чата и окна чертежа */
