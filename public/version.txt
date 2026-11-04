@@ -1,7 +1,10 @@
-2026110101
-2026.11.1.1
-sha256 9e575f52caa75a00a56a65e76dc672a616b6ba3a94e1a50edf132c9a7cfe2445
-== 0 signature-rsa-sha256 Ym5jxJxFQuiwzCGif8YJPdOoOLzjwUBgrovjCezApgsUOnbQiXDrjdc3Q1kStqSatr3/0oM1vXBXr8ec0kzrj+koK1uZfHr4YtFLuljTISu0QAlR4b4H6cMoEKatzaA9ULRT1neK7eOubqS/A7GoS8NgFDyTun4V8a3h2cBshUl6Q/2FWimfD9u0b+BMm44qZW/UrZ0HgWxQ7WsC2X0CiRXBSdyGhzy2ScqhX0mGHMc/cUIlGZu9SFEpOpw95Zqc7Ld8iy5oKpLkkQB5cUKDZqY98hEual89LPlMon/bNV1FY8Z8+pQFO4MvQIYi/MU4b48H5BXoxWx17VQN3aoa2DfMqXhSxhdoXFQxGj5H/XjAtQKwVFPUUza2oCpz3XZAKEaMcGBZraoORgOTZ7zOInFebwV5/brJ6ZJaJNsTrzAN+scyQjnYmGoQudp+CBK1XtOaw67Q7atS3QRIY/s3TRwrMd5BWQnl5xgzO7YqNDia+ZkytxeLXxcKMKTseVZN
+2026110401
+2026.11.4.1
+sha256 13a5513ff4078e5c614745c502f74783e1b934016e1e5f1dde411855bd8b1aac
+== 0 signature-rsa-sha256 YhJT1DhZRqI5Z4D87qSDmbmm+ezQlM863c/6pRS7BqSgIFFEOk3AcL+WOydaB2xFsccpyo+GCDTtzETY9zPXbdOCgUrTnMwhy6EBrPuNTebilUHfF8ynawbfWtGbw7Z6Ag38MXrWSMLJwZXh2snNjZhwqB/jTHrR2Hxk7gfpWvXDz3EXJuhMijc9lr0yxhk3W2Y/PAstR7/OXUUwOk/qParu2vJSd7RUWgwAcRidHKbYfFvDrHlnKf0njt4z5G4uMfN2ijaFJXrKyJLrS4EAYwbVObpZIvpcjK8dykQxZ7CLGnkhhI6hieRW7Dsko8EzAJ9bdQ6GB2Tltb/LCVeIcLubTys6xl2C+1rPSKyQsycJJq+FHEqutb4ZW9D38mnfyefrP0d6JqsRcanySOj26bhUamjj2r3nOXG2oe0IdU6wTDjTMs8kESGNXxcxheBLNgAduZtF27JZinSyoQ1PcquB3/lmObCktluw2egTXSFrwaNM+14LwYvKqyJSjzvi
+== 2026.11.4.1
+В окне «ЭСИ и ТП» профессия у операции выбирается из всего справочника завода — ходовые сверху, столбцы растянуты по ширине окна; «Проверить» предупреждает о пустой профессии и о пакете «CursorPad — Союз» старее 1.0.0.13. Маршрут: термообработка до 45 HRC при круге до 80 мм делается сразу на заготовке, твёрже или толще — черновая, термообработка, затем чистовая или шлифование; слесарная операция ставится после каждой механической. Пороги — в Настройках, «Нормирование». В Настройках ИИ появилась галочка «Быстрое чтение штампов и спецификаций (Xiaomi)»: вторая небольшая модель сверяет обозначение в штампе, и если модели прочитали его по-разному, лист попадает в «проверьте» с обоими вариантами. По умолчанию выключена; включённая один раз скачивает около 840 МБ.
+
 == 2026.11.1.1
 Штамп находится и на заводских копиях: рамка ищется по линиям листа, белые поля за рамкой и уменьшенные форматы больше не мешают, штамп первого листа не принимается за «форму 2». Модель теперь читает штамп каждого чертежа — обозначение, наименование и материал не берутся молча из имени файла; если штамп всё же не нашёлся, модель читает правый нижний угол листа. В окне «ЭСИ и ТП» на сборке из двенадцати заводских листов модель прочитала все обозначения сама, а состав обеих сборок совпал со спецификациями.
 
