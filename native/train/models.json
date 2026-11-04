@@ -6,10 +6,18 @@
     "dir": "qwen3.5-4b",
     "gguf": "Qwen3.5-4B-Q4_K_M.gguf",
     "mmproj": "mmproj-F16.gguf",
-    "server": ["--jinja", "--chat-template-kwargs", "{\"enable_thinking\":false}", "--image-min-tokens", "1024"],
+    "server": [
+      "--jinja",
+      "--chat-template-kwargs",
+      "{\"enable_thinking\":false}",
+      "--image-min-tokens",
+      "1024"
+    ],
     "min_image_tokens": 1024,
     "max_image_tokens": 4096,
-    "template_kwargs": {"enable_thinking": false},
+    "template_kwargs": {
+      "enable_thinking": false
+    },
     "lora_targets": ".*language_model.*\\.(gate_proj|up_proj|down_proj|q_proj|k_proj|v_proj|o_proj)$",
     "vision": "visual"
   },
@@ -19,10 +27,35 @@
     "dir": "qwen3-vl-4b",
     "gguf": "Qwen3-VL-4B-Instruct-Q4_K_M.gguf",
     "mmproj": "mmproj-F16.gguf",
-    "server": ["--jinja", "--chat-template-kwargs", "{\"enable_thinking\":false}"],
+    "server": [
+      "--jinja",
+      "--chat-template-kwargs",
+      "{\"enable_thinking\":false}"
+    ],
     "min_image_tokens": 8,
     "max_image_tokens": 4096,
     "template_kwargs": {},
+    "lora_targets": ".*language_model.*\\.(gate_proj|up_proj|down_proj|q_proj|k_proj|v_proj|o_proj)$",
+    "vision": "visual"
+  },
+  "xiaomi-ocr-0": {
+    "title": "Xiaomi-OCR-0 (Qwen3.5-0.8B, проба)",
+    "hf": "xiaomi-research/Xiaomi-OCR-0",
+    "dir": "xiaomi-ocr-0",
+    "gguf": "Xiaomi-OCR-0.Q6_K.gguf",
+    "mmproj": "Xiaomi-OCR-0.mmproj-bf16.gguf",
+    "server": [
+      "--jinja",
+      "--chat-template-kwargs",
+      "{\"enable_thinking\":false}",
+      "--image-min-tokens",
+      "1024"
+    ],
+    "min_image_tokens": 1024,
+    "max_image_tokens": 4096,
+    "template_kwargs": {
+      "enable_thinking": false
+    },
     "lora_targets": ".*language_model.*\\.(gate_proj|up_proj|down_proj|q_proj|k_proj|v_proj|o_proj)$",
     "vision": "visual"
   }

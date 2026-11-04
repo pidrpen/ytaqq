@@ -69,6 +69,8 @@ typedef struct {
   /* то же, прочитанное локальной моделью с картинками (drawrec_vl): графы штампа и ТТ */
   wchar_t vlName[DR_CELL], vlMat[DR_CELL];
   wchar_t vlDes[DR_CELL]; /* обозначение, прочитанное моделью по графе (только vlStamp: rename_by_stamp) */
+  wchar_t vlDesAlt[DR_CELL]; /* обозначение другой моделью, если разошлись (vlDesDoubt) */
+  BYTE vlDesDoubt;    /* модели (Xiaomi-OCR-0 и «Средний») прочитали обозначение по-разному — «проверьте» */
   wchar_t *vlText;    /* ТТ, «Развертка», «n отв.»; NULL — модель не читала */
   BOOL wantText;      /* прочитать и весь лист (кнопка «Маршрут обработки») */
   BOOL vlLater;       /* модель — вторым проходом (dr_vl_later): черновик по Tesseract сразу */
@@ -2312,15 +2314,67 @@ static void dr_json_elements(const wchar_t *j, wchar_t *out, int cap) {
 /* графа «Обозначение» 65…185 × 0…15 мм от верха штампа высотой hmm (форма 1 — 55, форма 2 — 40) — моделью:
    для переименования по штампу и состава ЭСИ. Tesseract на этой графе путает буквы (АДЕ → АМЕ) и теряет
    хвост, а имя файла и состав должны быть точными. Выгрузка (native/train) — всегда: по ней считают «СБ» */
+/* тот же вопрос второй модели — Xiaomi-OCR-0 со своим адаптером (ai_ocr.c): обозначения и спецификации она читает
+   не хуже «Среднего» и в разы быстрее на процессоре. NULL — её нет, выключена или не ответила: спрашивать «Средний» */
+static wchar_t *dr_vl_ask_ocr(const DrImg *im, const wchar_t *question, const char *schema, int maxTokens) {
+#ifdef SET_TEST
+  if (g_drVlDump[0]) return NULL; /* выгрузка: картинка и вопрос те же, что у «Среднего» */
+#endif
+  if (!dr_vl_ok()) return NULL;
+  wchar_t tmp[MAX_PATH], p[MAX_PATH];
+  GetTempPathW(MAX_PATH, tmp);
+  static LONG seq;
+  _snwprintf(p, MAX_PATH, L"%scursorpad-ocr-%lu-%ld.bmp", tmp, GetCurrentThreadId(), InterlockedIncrement(&seq));
+  p[MAX_PATH - 1] = 0;
+  wchar_t *ans = NULL;
+  if (dr_save_bmp(im, p) && ai_ocr_ask(question, p, schema, maxTokens, 240000, &ans) != AI_OK) {
+    free(ans);
+    ans = NULL;
+  }
+  DeleteFileW(p);
+  return ans;
+}
+
+/* обозначения равны без пробелов («КЛМ 1234-…» и «КЛМ1234-…» — одно) */
+static BOOL dr_des_same(const wchar_t *a, const wchar_t *b) {
+  for (;; a++, b++) {
+    while (*a == L' ') a++;
+    while (*b == L' ') b++;
+    if (*a != *b) return FALSE;
+    if (!*a) return TRUE;
+  }
+}
+
+/* Обозначение второй моделью — перекрёстная проверка: совпало с «Средним» — верно; разошлось — в графе вариант
+   Xiaomi-OCR-0 (на заводских листах она точнее: 10 из 10 против 9), второй — в vlDesAlt, лист — «проверьте» */
+static void dr_des_cross(DrPage *pg, const wchar_t *ocr) {
+  wchar_t a[DR_CELL], b[DR_CELL];
+  BOOL ma = pg->vlDes[0] && dr_find_des(pg->vlDes, a, DR_CELL) && dr_des_ok(a);
+  BOOL mb = ocr[0] && dr_find_des(ocr, b, DR_CELL) && dr_des_ok(b);
+  if ((ma && mb && dr_des_same(a, b)) || (!ma && !mb)) return;
+  if (mb) lstrcpynW(pg->vlDesAlt, pg->vlDes, DR_CELL), lstrcpynW(pg->vlDes, ocr, DR_CELL);
+  else lstrcpynW(pg->vlDesAlt, ocr, DR_CELL);
+  pg->vlDesDoubt = 1;
+  ai_log(L"Обозначение: модели разошлись — «%s» и «%s», проверьте", pg->vlDes, pg->vlDesAlt);
+}
+
 static void dr_vl_des(const DrImg *m, const DrStamp *s, DrPage *pg, int hmm) {
   DrImg im;
   if (!dr_img_part(m, s->sl + (int)(64 * s->k), s->by - (int)((hmm + 1) * s->k), s->sl + (int)(186 * s->k),
                    s->by - (int)((hmm - 16) * s->k), 2, 0, &im))
     return;
-  wchar_t *a = dr_vl_ask(&im, L"des", L"На картинке — графа «Обозначение» основной надписи чертежа. Перепиши обозначение точно, "
-                                      L"как написано: буквы, цифры, точки и дефисы, одной строкой. Только текст.", NULL, 40);
+  static const wchar_t q[] = L"На картинке — графа «Обозначение» основной надписи чертежа. Перепиши обозначение точно, "
+                             L"как написано: буквы, цифры, точки и дефисы, одной строкой. Только текст.";
+  wchar_t *a = dr_vl_ask(&im, L"des", q, NULL, 40);
   dr_vl_line(a, pg->vlDes, DR_CELL);
   free(a);
+  wchar_t *b = dr_vl_ask_ocr(&im, q, NULL, 40); /* вторая модель дёшева: обе — и сверить */
+  if (b) {
+    wchar_t x[DR_CELL];
+    dr_vl_line(b, x, DR_CELL);
+    free(b);
+    dr_des_cross(pg, x);
+  }
   dr_img_free(&im);
 }
 
@@ -2655,6 +2709,9 @@ static void dr_vl_spec(const DrImg *m, int x0, int y0, int x1, int y1, DrPage *p
 #ifdef SET_TEST
   if (getenv("CP_SPECFMT")) q = kDrVlSpecQ2, sch = kDrVlSpecSchema2; /* разбор такого ответа — только в замере (cpvl) */
 #endif
+  /* строки — «Средним»: Xiaomi-OCR-0 в окне «ЭСИ и ТП» на заводской папке (4.11) путала раздел («Детали» —
+     «Сборочными единицами»: пропали материалы и операции деталей) и портила наименования — она пока только сверяет
+     обозначение (dr_vl_des); вернуть ей строки — после дообучения, по снимку окна */
   wchar_t *a = dr_vl_ask(&im, L"spec", q, sch, 2500);
   /* ответ оборван на пределе (лист — не больше 30 строк, это ~1700 токенов): модель зациклилась — строки
      Tesseract, если есть, с «проверьте» лучше обрывка */
