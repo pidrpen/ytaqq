@@ -82,9 +82,9 @@ static const AiFile kAiToolLora = {L"pidrpen/ytaqq", L"4bf9d1ba243789ef2d4840119
                                    L"models/tool-lora-qwen3.5-4b.gguf", 42485376ULL,
                                    "00898bb3cdcd3db81300ee63b72275e909e66a0fa68cc199237489fc9905ddbf"};
 static void ai_lora_kick(const wchar_t *model);
-/* Xiaomi-OCR-0 — вторая модель для обозначений и спецификаций (ai_ocr.c): -1 — не трогали (читать ею, если скачана),
-   0 — выключена в Настройках, 1 — включена */
-static int g_aiOcrPref = -1;
+/* Xiaomi-OCR-0 — вторая модель для обозначений и спецификаций (ai_ocr.c): 0 — выключена (по умолчанию: не качается
+   и не запускается, пока не включат в Настройках), 1 — включена */
+static int g_aiOcrPref = 0;
 static void ai_ocr_kick(void);
 static void ai_ocr_stop(void);
 
