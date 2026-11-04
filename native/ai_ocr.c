@@ -19,8 +19,8 @@ static const AiFile kAiOcrFiles[2] = {
      629744384ULL, "6da9896bd738852ec01d463612e463656f43b68e6cfbe09d3b0a3ed6f4ad9fd3"},
     {L"prithivMLmods/Xiaomi-OCR-0-GGUF", L"7bbfa072e0f3d70ac722e26fbccef5b9f64b7121", L"Xiaomi-OCR-0.mmproj-bf16.gguf",
      207346624ULL, "634d6bc95781ebf4a3f06570a59859fa5082d488db540fd474bc6b4061aec90e"}};
-/* адаптер — в репозитории CursorPad; пустой коммит — не закреплён, не качается */
-static const AiFile kAiOcrLora = {L"pidrpen/ytaqq", L"", L"models/draw-lora-xiaomi-ocr-0.gguf", 12793248ULL,
+/* адаптер — в репозитории CursorPad, коммит закреплён (размер и sha256 сверяются); пустой — не качается */
+static const AiFile kAiOcrLora = {L"pidrpen/ytaqq", L"83f44f73c0ceafe6057304e8af17c80eba41d82d", L"models/draw-lora-xiaomi-ocr-0.gguf", 12793248ULL,
                                   "17552978a723d2f353c1f16fbba4011baf87bf2930d05b5761cb6f590594486f"};
 
 static SRWLOCK g_ocrLock = SRWLOCK_INIT; /* запуск и остановка сервера */
