@@ -82,6 +82,11 @@ static const AiFile kAiToolLora = {L"pidrpen/ytaqq", L"4bf9d1ba243789ef2d4840119
                                    L"models/tool-lora-qwen3.5-4b.gguf", 42485376ULL,
                                    "00898bb3cdcd3db81300ee63b72275e909e66a0fa68cc199237489fc9905ddbf"};
 static void ai_lora_kick(const wchar_t *model);
+/* Xiaomi-OCR-0 — вторая модель для обозначений и спецификаций (ai_ocr.c): 0 — выключена (по умолчанию: не качается
+   и не запускается, пока не включат в Настройках), 1 — включена */
+static int g_aiOcrPref = 0;
+static void ai_ocr_kick(void);
+static void ai_ocr_stop(void);
 
 /* --- настройки ------------------------------------------------------------ */
 static volatile LONG g_aiOn;         /* по умолчанию выключен; виден рабочим потокам */
@@ -283,6 +288,7 @@ static void ai_save(void) {
                    g_aiGpu ? 1 : 0, model);
   n += snprintf(buf + n, sizeof(buf) - n, "provider %d\r\nzai_model %s\r\npersona %d\r\nzai_plm %d\r\nthink %d\r\n", g_aiProvider, g_aiZaiModel,
                 g_aiPersona, g_aiZaiPlm ? 1 : 0, g_aiThink ? 1 : 0);
+  if (g_aiOcrPref >= 0) n += snprintf(buf + n, sizeof(buf) - n, "ocr %d\r\n", g_aiOcrPref);
   if (g_aiSrvExe[0]) {
     char se[MAX_PATH * 3];
     WideCharToMultiByte(CP_UTF8, 0, g_aiSrvExe, -1, se, sizeof(se), NULL, NULL);
@@ -324,6 +330,7 @@ static void ai_load(void) {
     else if (sscanf(line, "persona %d", &v) == 1 && v >= 0 && v < AI_PERSONAS) g_aiPersona = v;
     else if (sscanf(line, "zai_plm %d", &v) == 1) g_aiZaiPlm = v == 1;
     else if (sscanf(line, "think %d", &v) == 1) g_aiThink = v == 1;
+    else if (sscanf(line, "ocr %d", &v) == 1) g_aiOcrPref = v ? 1 : 0;
     else if (!strncmp(line, "zai_model ", 10)) {
       migratedZai = !ai_zai_model_valid(line + 10);
       lstrcpynA(g_aiZaiModel, migratedZai ? "glm-4.5-flash" : line + 10, 64);
@@ -845,7 +852,7 @@ static int ai_server_ensure(DWORD deadline, volatile LONG *cancel, int minimumCo
     ReleaseSRWLockExclusive(&g_aiSrvLock);
     return AI_NO_MODEL;
   }
-  if (!g_aiModel[0] && g_aiTier == AI_DRAW_LORA_TIER) ai_lora_kick(model);
+  if (!g_aiModel[0] && g_aiTier == AI_DRAW_LORA_TIER) ai_lora_kick(model), ai_ocr_kick();
   if (!g_aiJob) {
     g_aiJob = CreateJobObjectW(NULL, NULL);
     if (g_aiJob) {
@@ -1359,6 +1366,7 @@ void ai_disable(void) {
   }
   ReleaseSRWLockExclusive(&g_aiJobLock);
   ai_server_stop(); /* only our owned process; external servers are untouched */
+  ai_ocr_stop();
 }
 
 /* запустить ходящий поток и ждать: ответа, отмены (j->cancel или ext) или срока.

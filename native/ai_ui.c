@@ -23,6 +23,7 @@
 #define ID_AI_PERSONA 522 /* характер помощника в чате */
 #define ID_AI_ZPLM 523    /* Z.ai может читать PLM и архив через инструменты ИИ */
 #define ID_AI_THINK 524   /* размышление модели в чате: просить его у локальной модели и показывать свёрнутым */
+#define ID_AI_OCR 525     /* обозначения и спецификации — второй моделью, Xiaomi-OCR-0 (ai_ocr.c) */
 static HWND g_aiPersonaBox;
 static HWND g_aiSource, g_aiZModel, g_aiZKey, g_aiZSave, g_aiZForget, g_aiZInfo, g_aiChkZaiPlm;
 static BOOL ac_provider_change(int provider);
@@ -33,6 +34,7 @@ static void ai_ui_zai_select(void) {
 }
 
 static HWND g_aiBtnReport, g_aiBtnLlama, g_aiBtnCtx, g_aiBtnOff;
+static HWND g_aiChkOcr;
 static HWND g_aiChkOn, g_aiBtnTier[AI_TIERS], g_aiChkGpu, g_aiChkThink, g_aiStat, g_aiBar, g_aiBtnDl, g_aiBtnTest, g_aiBtnDir,
     g_aiPathEdit, g_aiBtnBrowse;
 static int g_aiTestId;          /* идёт «Проверить» */
@@ -45,6 +47,10 @@ static void ai_ui_refresh(void) {
   EnableWindow(g_aiBtnOff, g_aiOn || g_aiProc != NULL);
   SendMessageW(g_aiChkGpu, BM_SETCHECK, g_aiGpu ? BST_CHECKED : BST_UNCHECKED, 0);
   SendMessageW(g_aiChkThink, BM_SETCHECK, g_aiThink ? BST_CHECKED : BST_UNCHECKED, 0);
+  SendMessageW(g_aiChkOcr, BM_SETCHECK, g_aiOcrPref != 0 ? BST_CHECKED : BST_UNCHECKED, 0);
+  SetWindowTextW(g_aiChkOcr, g_aiOcrPref == 0 || ai_ocr_have() ? L"Быстрое чтение штампов и спецификаций (Xiaomi)"
+                             : g_ocrDlBusy ? L"Быстрое чтение штампов и спецификаций (Xiaomi) — скачивается"
+                                           : L"Быстрое чтение штампов и спецификаций (Xiaomi) — скачается с моделью");
   SendMessageW(g_aiChkZaiPlm, BM_SETCHECK, g_aiZaiPlm ? BST_CHECKED : BST_UNCHECKED, 0);
   for (int i = 0; i < AI_TIERS; i++) set_mark(g_aiBtnTier[i], g_aiTier == i && !g_aiModel[0], kAiTiers[i].button);
   wchar_t cx[80];
@@ -179,6 +185,9 @@ static void ai_ui_create(HWND p) {
   g_aiChkThink = CreateWindowExW(0, L"BUTTON", L"Показывать размышление ИИ в чате (медленнее ответ)",
                                  WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 0, 0, 240, 26, p, (HMENU)(INT_PTR)ID_AI_THINK,
                                  NULL, NULL);
+  g_aiChkOcr = CreateWindowExW(0, L"BUTTON", L"Быстрое чтение штампов и спецификаций (Xiaomi)",
+                               WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 0, 0, 240, 26, p, (HMENU)(INT_PTR)ID_AI_OCR,
+                               NULL, NULL);
   g_aiStat = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_LEFT, 0, 0, 200, 40, p,
                              (HMENU)(INT_PTR)ID_AI_STAT, NULL, NULL);
   g_aiBar = CreateWindowExW(0, PROGRESS_CLASSW, L"", WS_CHILD, 0, 0, 200, 6, p, (HMENU)(INT_PTR)ID_AI_BAR, NULL, NULL);
@@ -193,7 +202,7 @@ static void ai_ui_create(HWND p) {
   g_aiPathEdit = CreateWindowExW(0, L"EDIT", g_aiModel, WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 0, 0, 200, 26, p,
                                  (HMENU)(INT_PTR)ID_AI_PATH, NULL, NULL);
   g_aiBtnBrowse = mk_btn(p, L"Обзор…", ID_AI_BROWSE);
-  HWND f[] = {g_aiChkOn, g_aiBtnOff, g_aiChkGpu, g_aiChkThink, g_aiBtnDl, g_aiBtnTest, g_aiBtnDir, g_aiBtnBrowse};
+  HWND f[] = {g_aiChkOn, g_aiBtnOff, g_aiChkGpu, g_aiChkThink, g_aiChkOcr, g_aiBtnDl, g_aiBtnTest, g_aiBtnDir, g_aiBtnBrowse};
   for (int i = 0; i < (int)(sizeof(f) / sizeof(f[0])); i++) SendMessageW(f[i], WM_SETFONT, (WPARAM)g_fontUi, TRUE);
   for (int i = 0; i < AI_TIERS; i++) SendMessageW(g_aiBtnTier[i], WM_SETFONT, (WPARAM)g_fontUi, TRUE);
   SendMessageW(g_aiStat, WM_SETFONT, (WPARAM)g_fontSmall, TRUE);
@@ -207,7 +216,7 @@ static void ai_ui_create(HWND p) {
 /* раскладка вкладки; возвращает новый y */
 static int ai_ui_layout(int pad, int y, int fullW, int cw, int btnH, int gap, int lab, int browseW) {
   HWND cloud[] = {g_aiZModel, g_aiZKey, g_aiZSave, g_aiZForget, g_aiZInfo, g_aiChkZaiPlm};
-  HWND local[] = {g_aiBtnTier[0], g_aiBtnTier[1], g_aiBtnTier[2], g_aiBtnTier[3], g_aiChkGpu, g_aiChkThink, g_aiBtnDl, g_aiBtnDir, g_aiBtnLlama, g_aiPathEdit, g_aiBtnBrowse};
+  HWND local[] = {g_aiBtnTier[0], g_aiBtnTier[1], g_aiBtnTier[2], g_aiBtnTier[3], g_aiChkGpu, g_aiChkThink, g_aiChkOcr, g_aiBtnDl, g_aiBtnDir, g_aiBtnLlama, g_aiPathEdit, g_aiBtnBrowse};
   ShowWindow(g_aiSource, g_layOpen ? SW_SHOW : SW_HIDE);
   ShowWindow(g_aiPersonaBox, g_layOpen ? SW_SHOW : SW_HIDE);
   for (int i = 0; i < 6; i++) { ShowWindow(cloud[i], g_layOpen && g_aiProvider ? SW_SHOW : SW_HIDE); if (!g_aiProvider) MoveWindow(cloud[i], 0, -4000, 300, 26, FALSE); }
@@ -236,6 +245,8 @@ static int ai_ui_layout(int pad, int y, int fullW, int cw, int btnH, int gap, in
   set_place(g_aiChkGpu, pad, y, fullW, btnH);
   y += btnH + gap;
   set_place(g_aiChkThink, pad, y, fullW, btnH);
+  y += btnH + gap;
+  set_place(g_aiChkOcr, pad, y, fullW, btnH);
   y += btnH + gap;
   set_place(g_aiBtnCtx, pad, y, fullW, btnH);
   y += btnH + gap;
@@ -520,6 +531,14 @@ static BOOL ai_ui_command(HWND hwnd, int id, int code) {
   if (id == ID_AI_ZPLM && code == BN_CLICKED) {
     g_aiZaiPlm = SendMessageW(g_aiChkZaiPlm, BM_GETCHECK, 0, 0) == BST_CHECKED;
     ai_save();
+    return TRUE;
+  }
+  if (id == ID_AI_OCR && code == BN_CLICKED) { /* включили — скачать, если нет; выключили — второй сервер прочь */
+    g_aiOcrPref = SendMessageW(g_aiChkOcr, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    ai_save();
+    if (g_aiOcrPref && g_aiOn) InterlockedExchange(&g_ocrDlTried, 0), ai_ocr_kick();
+    if (!g_aiOcrPref) ai_ocr_stop();
+    ai_ui_refresh();
     return TRUE;
   }
   if (id == ID_AI_THINK && code == BN_CLICKED) { /* со следующим ответом; сервер не перезапускается */

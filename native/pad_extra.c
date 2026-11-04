@@ -65,6 +65,7 @@ static void ans_printf(wchar_t *out, int cap, const wchar_t *fmt, ...) {
 #include "files.c"
 #include "update.c"
 #include "ai_local.c" /* локальный ИИ: llama.cpp на этом компьютере (ai.h) */
+#include "ai_ocr.c"   /* вторая модель для чертежей: обозначения и спецификации (Xiaomi-OCR-0) */
 
 static HWND g_answerEdit;
 static BOOL g_picking = FALSE;

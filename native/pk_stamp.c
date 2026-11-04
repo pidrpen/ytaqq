@@ -34,6 +34,7 @@ typedef struct {
   wchar_t des[DR_CELL], name[DR_CELL], kind[40], mat[DR_CELL], mass[40];
   int how;                  /* 2 — модель, 1 — Tesseract, 3 — имя файла, 0 — не прочитано */
   BOOL doubt;               /* обозначение под вопросом */
+  wchar_t desAlt[DR_CELL];  /* вторая модель прочитала обозначение иначе (с 4.11): в «проверьте» — оба варианта */
   BOOL asmDoc;              /* чертёж сборки или спецификация */
   wchar_t docCode[8];       /* «СБ», «ВО», «ГЧ»… — чертёж сборки: сам ляжет документом в её состав */
   wchar_t note[200];
@@ -235,6 +236,7 @@ static void pks_from_page(DrPage *pg, PkStRes *r) {
   if (pg->vlDes[0] && dr_find_des(pg->vlDes, v, DR_CELL) && dr_des_ok(v)) {
     lstrcpynW(raw, pg->vlDes, DR_CELL);
     r->how = 2;
+    if (pg->vlDesDoubt) r->doubt = TRUE, lstrcpynW(r->desAlt, pg->vlDesAlt[0] ? pg->vlDesAlt : L"—", DR_CELL);
   } else if (pg->f[DF_DES][0] && dr_find_des(pg->f[DF_DES], v, DR_CELL)) {
     lstrcpynW(raw, pg->f[DF_DES], DR_CELL);
     r->how = 1;
@@ -515,8 +517,10 @@ static int pks_apply(PkStRes *r) {
   else g_pksMerged++;
   if (r->how >= 1 && r->how <= 3) g_pksBy[r->how]++;
   if (!r->des[0]) g_pksNoDes++;
-  if (r->doubt && wcslen(g_pksDoubt) + wcslen(r->des) + 3 < 120)
+  if (r->doubt && wcslen(g_pksDoubt) + wcslen(r->des) + wcslen(r->desAlt) + 10 < 120) {
     wcscat(g_pksDoubt, g_pksDoubt[0] ? L", " : L""), wcscat(g_pksDoubt, r->des);
+    if (r->desAlt[0]) wcscat(g_pksDoubt, L" или "), wcscat(g_pksDoubt, r->desAlt); /* две модели разошлись */
+  }
   const wchar_t *des = xp_cell(it, row, 0);
   if (asmRow && row == r->parentRow) pks_pend_flush(row); /* у сборки появилось обозначение */
   /* в состав сборки, на которую бросили */
