@@ -52,6 +52,13 @@ static BOOL g_szmAuto[2];              /* в поле стоит наше пре
 static BOOL g_szmSetting;              /* текст в поле ставим сами — уведомления поля не считать правкой */
 static BOOL g_szmMkDirs;               /* в описание — «СОЗДАТЬ_ПАПКИ<Tab>1» (функция 1.0.0.8 досоздаёт уровни) */
 static void szm_propose(void);         /* soyuz_asmfolder.c: предложение папок сборки — в поля и строку состояния */
+/* профессия строкой, как DisplayedName в «Союзе»: «Код, Наименование»; имя уже с кодом впереди — не удваивать */
+static void szm_craft_name(const wchar_t *code, const wchar_t *name, wchar_t out[200]) {
+  if (code[0] && !wcsncmp(name, code, wcslen(code))) lstrcpynW(out, name, 200);
+  else if (code[0]) _snwprintf(out, 200, L"%s, %s", code, name), out[199] = 0;
+  else lstrcpynW(out, name, 200);
+}
+
 static unsigned g_szmPkgVer; /* версия пакета в клиенте по строке «ПАКЕТ\t1.0.0.7» отчёта (szm_ver_num); 0 — до 1.0.0.7 или не знаем */
 #define SZM_VER(a, b, c, d) (((unsigned)(a) << 24) | ((unsigned)(b) << 16) | ((unsigned)(c) << 8) | (unsigned)(d))
 
@@ -681,7 +688,11 @@ static DWORD WINAPI szm_dicts_thread(LPVOID arg) {
   SQLHENV env = SQL_NULL_HENV;
   SQLHDBC dbc = SQL_NULL_HDBC;
   wchar_t err[300] = L"";
-  CardRow *rows = (CardRow *)malloc(sizeof(CardRow) * CARD_ROWS);
+  /* станков и профессий на заводе — тысячи (справочник профессий из каталога IMBASE): 900 строк по алфавиту
+     оставляли в списке «Аппаратчиков», а «Токаря» и «Слесаря» — нет, профессия не выбиралась и не подбиралась
+     (с 04.11). Буфер — на SZM_BIG строк, остальные запросы — как были (TOP 900) */
+  enum { SZM_BIG = 10000 };
+  CardRow *rows = (CardRow *)malloc(sizeof(CardRow) * SZM_BIG);
   if (!d || !rows) goto done;
   g_qTimeout = 20;
   if (!g_szConnect(&env, &dbc, err, 300)) {
@@ -696,7 +707,7 @@ static DWORD WINAPI szm_dicts_thread(LPVOID arg) {
       L"OUTER APPLY (SELECT TOP 1 c.ShortText FROM InfoObjectAttributes AS c WITH(NOLOCK) JOIN NameKeys AS nk WITH(NOLOCK) "
       L"ON nk.NameKeyId=c.NameKeyId AND nk.Value=N'Code' WHERE c.OwnerId=o.InfoObjectId AND c.Outdated=0) AS cd "
       L"WHERE o.Erased=0 ORDER BY cd.ShortText, o.Name",
-      L"SELECT TOP 900 o.InfoObjectId, ISNULL(CAST(md.ShortText AS NVARCHAR(80)),N''), CAST(o.Name AS NVARCHAR(200)), 0, 0 "
+      L"SELECT TOP 10000 o.InfoObjectId, ISNULL(CAST(md.ShortText AS NVARCHAR(80)),N''), CAST(o.Name AS NVARCHAR(200)), 0, 0 "
       L"FROM InfoObjects AS o WITH(NOLOCK) JOIN Templates AS t WITH(NOLOCK) ON t.TemplateId=o.TemplateId AND t.NameKey=N'Equipment' "
       L"OUTER APPLY (SELECT TOP 1 c.ShortText FROM InfoObjectAttributes AS c WITH(NOLOCK) JOIN NameKeys AS nk WITH(NOLOCK) "
       L"ON nk.NameKeyId=c.NameKeyId AND nk.Value=N'EquipmentModel' WHERE c.OwnerId=o.InfoObjectId AND c.Outdated=0) AS md "
@@ -708,7 +719,7 @@ static DWORD WINAPI szm_dicts_thread(LPVOID arg) {
       L"JOIN NamedValues AS nv WITH(NOLOCK) ON nv.NamedValueId=a.Link "
       L"WHERE a.Outdated=0 AND a.DataType=11 GROUP BY CAST(nv.NameUI AS NVARCHAR(200)) ORDER BY 3"};
   for (int q = 0; q < 3; q++) {
-    int n = card_query(dbc, kq[q], rows, CARD_ROWS, err, 300);
+    int n = card_query(dbc, kq[q], rows, q == 1 ? SZM_BIG : CARD_ROWS, err, 300);
     if (n < 0 && q == 2) break; /* признака нет в этой базе — списки участков и станков остаются */
     if (n < 0) {
       lstrcpynW(d->err, err, 300);
@@ -818,38 +829,64 @@ static DWORD WINAPI szm_dicts_thread(LPVOID arg) {
         f->score = rows[i].n3;
       }
   }
-  /* профессии (с 2026.10.30, John: «профессии нет в операциях»): справочник — объекты шаблона профессии и
-     тех шаблонов, на которые ссылается «Профессия» в списке профессий операций ТП и типовых (CraftList → Craft →
-     Craft); строка — как DisplayedName профессии в «Союзе»: «Код, Наименование» */
+  /* профессии (с 2026.10.30, John: «профессии нет в операциях»): строка — как DisplayedName профессии в «Союзе»:
+     «Код, Наименование». С 04.11 — двумя запросами, и без обрезки на 900 по алфавиту: сначала те, что уже стоят в
+     операциях ТП завода и типовых (свежие 30000 операций → их «Профессия», по алфавиту), затем весь справочник —
+     объекты шаблонов «Профессия»/«Является профессией» (так их заводит загрузчик завода KB20.IntermechXML). Первый
+     запрос не прошёл (долго) — список только из справочника; прежний один запрос искал «Профессию» по всей таблице
+     атрибутов и на большой базе мог не уложиться — список выходил пустым молча */
   if (!d->err[0]) {
     g_qTimeout = 40;
-    static const wchar_t kCraft[] =
-        L"SELECT TOP 900 o.InfoObjectId, ISNULL(CAST(cd.ShortText AS NVARCHAR(40)),N''), CAST(o.Name AS NVARCHAR(200)), 0, 0 "
+    static const wchar_t kCraftUsed[] =
+        L"SELECT TOP 900 x.Id, x.C, x.Nm, x.N, 0 FROM (SELECT n.InfoObjectId AS Id, "
+        L"ISNULL(CAST(cd.ShortText AS NVARCHAR(40)),N'') AS C, CAST(n.Name AS NVARCHAR(200)) AS Nm, COUNT(*) AS N "
+        L"FROM (SELECT TOP 30000 io.InfoObjectId AS Id FROM InfoObjects AS io WITH(NOLOCK) JOIN Templates AS t WITH(NOLOCK) "
+        L"ON t.TemplateId=io.TemplateId AND t.NameKey IN (N'TSOperation',N'TypesOperation') WHERE io.Erased=0 "
+        L"ORDER BY io.DateModified DESC) AS o "
+        L"CROSS APPLY (SELECT DISTINCT e.Link AS L FROM InfoObjectAttributes AS e WITH(NOLOCK) JOIN NameKeys AS nke WITH(NOLOCK) "
+        L"ON nke.NameKeyId=e.NameKeyId AND nke.Value=N'Craft' WHERE e.OwnerId=o.Id AND e.Outdated=0 AND e.DataType=6 "
+        L"AND ISNULL(e.Link,0)<>0) AS cr "
+        L"JOIN InfoObjects AS n WITH(NOLOCK) ON n.InfoObjectId=cr.L AND n.Erased=0 "
+        L"OUTER APPLY (SELECT TOP 1 c.ShortText FROM InfoObjectAttributes AS c WITH(NOLOCK) JOIN NameKeys AS nk WITH(NOLOCK) "
+        L"ON nk.NameKeyId=c.NameKeyId AND nk.Value=N'Code' WHERE c.OwnerId=n.InfoObjectId AND c.Outdated=0 "
+        L"AND ISNULL(c.CollectionElementId,0)=0) AS cd "
+        L"GROUP BY n.InfoObjectId, ISNULL(CAST(cd.ShortText AS NVARCHAR(40)),N''), CAST(n.Name AS NVARCHAR(200))) AS x "
+        L"ORDER BY x.Nm";
+    static const wchar_t kCraftAll[] =
+        L"SELECT TOP 10000 o.InfoObjectId, ISNULL(CAST(cd.ShortText AS NVARCHAR(40)),N''), CAST(o.Name AS NVARCHAR(200)), 0, 0 "
         L"FROM InfoObjects AS o WITH(NOLOCK) JOIN Templates AS t WITH(NOLOCK) ON t.TemplateId=o.TemplateId "
+        L"AND t.NameKey IN (N'Craft',N'IsCraft') "
         L"OUTER APPLY (SELECT TOP 1 c.ShortText FROM InfoObjectAttributes AS c WITH(NOLOCK) JOIN NameKeys AS nk WITH(NOLOCK) "
         L"ON nk.NameKeyId=c.NameKeyId AND nk.Value=N'Code' WHERE c.OwnerId=o.InfoObjectId AND c.Outdated=0 "
         L"AND ISNULL(c.CollectionElementId,0)=0) AS cd "
-        L"WHERE o.Erased=0 AND (t.NameKey IN (N'Craft',N'IsCraft') OR o.TemplateId IN (SELECT DISTINCT n.TemplateId FROM "
-        L"(SELECT TOP 3000 a.Link AS L FROM InfoObjectAttributes AS a WITH(NOLOCK) JOIN NameKeys AS nk WITH(NOLOCK) "
-        L"ON nk.NameKeyId=a.NameKeyId AND nk.Value=N'Craft' JOIN InfoObjects AS w WITH(NOLOCK) ON w.InfoObjectId=a.OwnerId "
-        L"JOIN Templates AS wt WITH(NOLOCK) ON wt.TemplateId=w.TemplateId "
-        L"AND wt.NameKey IN (N'TSOperation',N'TSOperationVariant',N'TypesOperation') "
-        L"WHERE a.Outdated=0 AND a.DataType=6 AND ISNULL(a.Link,0)<>0) AS l "
-        L"JOIN InfoObjects AS n WITH(NOLOCK) ON n.InfoObjectId=l.L)) ORDER BY o.Name";
-    int n = card_query(dbc, kCraft, rows, CARD_ROWS, err, 300);
-    if (n > 0) {
-      d->craft = (wchar_t(*)[200])calloc((size_t)n, sizeof(*d->craft));
-      d->craftId = (long *)calloc((size_t)n, sizeof(long));
+        L"WHERE o.Erased=0 ORDER BY o.Name";
+    int nu = card_query(dbc, kCraftUsed, rows, CARD_ROWS, err, 300);
+    if (nu < 0) nu = 0; /* долго или нет таких атрибутов — без «ходовых сверху» */
+    long *usedId = nu ? (long *)malloc(sizeof(long) * (size_t)nu) : NULL;
+    wchar_t(*used)[200] = nu ? (wchar_t(*)[200])malloc(sizeof(*used) * (size_t)nu) : NULL;
+    int nUsed = 0;
+    for (int i = 0; usedId && used && i < nu; i++) {
+      szm_craft_name(rows[i].s1, rows[i].s2, used[nUsed]);
+      if (used[nUsed][0]) usedId[nUsed++] = rows[i].n1;
     }
-    for (int i = 0; d->craft && d->craftId && i < n; i++) {
-      const wchar_t *a = rows[i].s1, *b = rows[i].s2;
-      wchar_t *o = d->craft[d->nc];
-      if (a[0] && !wcsncmp(b, a, wcslen(a))) lstrcpynW(o, b, 200);
-      else if (a[0]) _snwprintf(o, 200, L"%s, %s", a, b), o[199] = 0;
-      else lstrcpynW(o, b, 200);
-      if (!o[0]) continue;
-      d->craftId[d->nc++] = rows[i].n1;
+    int na = card_query(dbc, kCraftAll, rows, SZM_BIG, err, 300);
+    if (na < 0) na = 0;
+    if (nUsed + na > 0) {
+      d->craft = (wchar_t(*)[200])calloc((size_t)(nUsed + na), sizeof(*d->craft));
+      d->craftId = (long *)calloc((size_t)(nUsed + na), sizeof(long));
     }
+    for (int i = 0; d->craft && d->craftId && i < nUsed; i++) {
+      lstrcpynW(d->craft[d->nc], used[i], 200);
+      d->craftId[d->nc++] = usedId[i];
+    }
+    for (int i = 0; d->craft && d->craftId && i < na; i++) {
+      BOOL dup = FALSE;
+      for (int k = 0; k < nUsed && !dup; k++) dup = usedId[k] == rows[i].n1;
+      if (dup) continue;
+      szm_craft_name(rows[i].s1, rows[i].s2, d->craft[d->nc]);
+      if (d->craft[d->nc][0]) d->craftId[d->nc++] = rows[i].n1;
+    }
+    free(usedId), free(used);
   }
   /* какую профессию ставят на операцию с этим кодом на этом участке — как станок (kFit): типовые весят 1000 */
   if (!d->err[0] && d->nc) {
@@ -891,12 +928,13 @@ static DWORD WINAPI szm_dicts_thread(LPVOID arg) {
       }
     /* какие операции у профессии в справочнике (её список «Операции», CraftOperations → Operation) — запасной
        выбор, когда в ТП завода такой операции ещё нет: так предлагает профессии и штатная «Добавить профессию» */
-    size_t cap = (size_t)d->nc * 14 + 2400;
+    int nIn = d->nc < 1500 ? d->nc : 1500; /* профессий в IN (…): ходовые — первыми в списке */
+    size_t cap = (size_t)nIn * 14 + 2400;
     wchar_t *q = (wchar_t *)malloc(cap * sizeof(wchar_t));
     if (q) {
       size_t l = (size_t)_snwprintf(
           q, cap,
-          L"SELECT TOP 900 a.OwnerId, cd.V, N'', 0, 0 FROM InfoObjectAttributes AS a WITH(NOLOCK) JOIN NameKeys AS nk WITH(NOLOCK) "
+          L"SELECT TOP 10000 a.OwnerId, cd.V, N'', 0, 0 FROM InfoObjectAttributes AS a WITH(NOLOCK) JOIN NameKeys AS nk WITH(NOLOCK) "
           L"ON nk.NameKeyId=a.NameKeyId AND nk.Value=N'Operation' "
           L"CROSS APPLY (SELECT TOP 1 COALESCE(NULLIF(LTRIM(RTRIM(CAST(c.ShortText AS NVARCHAR(40)))),N''), "
           L"CONVERT(NVARCHAR(40), c.IntegerNumber), CONVERT(NVARCHAR(40), c.LongNumber)) AS V "
@@ -904,10 +942,10 @@ static DWORD WINAPI szm_dicts_thread(LPVOID arg) {
           L"AND nkc.Value=N'Code' WHERE c.OwnerId=a.Link AND c.Outdated=0 AND ISNULL(c.CollectionElementId,0)=0) AS cd "
           L"WHERE a.Outdated=0 AND a.DataType=6 AND ISNULL(a.Link,0)<>0 AND ISNULL(a.CollectionElementId,0)<>0 "
           L"AND cd.V IS NOT NULL AND a.OwnerId IN (");
-      for (int i = 0; i < d->nc && l + 16 < cap; i++) l += (size_t)_snwprintf(q + l, cap - l, i ? L",%ld" : L"%ld", d->craftId[i]);
+      for (int i = 0; i < nIn && l + 16 < cap; i++) l += (size_t)_snwprintf(q + l, cap - l, i ? L",%ld" : L"%ld", d->craftId[i]);
       _snwprintf(q + l, cap - l, L")");
       q[cap - 1] = 0;
-      n = card_query(dbc, q, rows, CARD_ROWS, err, 300);
+      n = card_query(dbc, q, rows, SZM_BIG, err, 300);
       free(q);
       if (n > 0 && (d->cops = (SzmFit *)calloc((size_t)n, sizeof(SzmFit))) != NULL)
         for (int i = 0; i < n; i++) {

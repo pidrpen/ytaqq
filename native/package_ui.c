@@ -93,6 +93,8 @@ typedef struct {
 static SzmDicts g_szmDicts;
 static BOOL g_szmDictsAsked;
 static void szm_open_text(const wchar_t *text, const wchar_t *label); /* soyuz_make.c */
+static unsigned g_szmPkgVer; /* версия пакета в клиенте — soyuz_make.c (szm_ver_num); здесь — для «Проверить» */
+#define SZM_VER(a, b, c, d) (((unsigned)(a) << 24) | ((unsigned)(b) << 16) | ((unsigned)(c) << 8) | (unsigned)(d))
 static void szm_dicts_start(HWND notify);                               /* soyuz_make.c */
 static int pk_norms_fill(BOOL quiet); /* pk_norms.c: пустые Тпз/Тшт — по таблицам ОМН */
 /* «Вставить»: разбор (pk_paste.c) и раскладка по листам — pk_paste_ui.c, после маршрута (techno.c) */
@@ -422,6 +424,26 @@ static void pk_set_item(int r) {
   }
 }
 
+/* столбцы листа — по ширине таблицы (с 04.11, завод: «профессия не выбирается» — в окне обычной ширины столбец
+   «Профессия» (последний) и «Признак покупки» уходили за правый край): не влезают — все сужаются пропорционально,
+   но не уже PKS(40); влезают — ширины как заданы (kPkSheets) */
+static void pk_cols_fit(void) {
+  if (!g_pkList) return;
+  RECT rc;
+  GetClientRect(g_pkList, &rc);
+  int cw = rc.right - rc.left - GetSystemMetrics(SM_CXVSCROLL);
+  const XpSheetDef *sd = &kPkSheets[g_pkSheet];
+  int sum = 0;
+  for (int c = 0; c < sd->ncols; c++) sum += PKS(sd->width[c] * 7 + 14);
+  if (cw <= 0 || sum <= 0) return;
+  for (int c = 0; c < sd->ncols; c++) {
+    int w = PKS(sd->width[c] * 7 + 14);
+    if (sum > cw) w = (int)((long long)w * cw / sum);
+    if (w < PKS(40)) w = PKS(40);
+    SendMessageW(g_pkList, LVM_SETCOLUMNWIDTH, (WPARAM)c, MAKELPARAM(w, 0));
+  }
+}
+
 static void pk_edit_end(BOOL commit);
 static void pk_fill(BOOL columns) {
   /* правка ячейки — закончить: список перестраивается и прокручивается к началу, поле правки (дочернее окно
@@ -446,6 +468,7 @@ static void pk_fill(BOOL columns) {
       col.iSubItem = c;
       SendMessageW(g_pkList, LVM_INSERTCOLUMNW, (WPARAM)c, (LPARAM)&col);
     }
+    pk_cols_fit();
   }
   for (int i = 0; i < g_pkViewN; i++) {
     int r = g_pkView[i];
@@ -1773,7 +1796,8 @@ static void pk_help(void) {
       L"  (сначала типовые операции, потом ТП завода; нужен вход в базу SQL); сменить — выбором в ячейке.\r\n"
       L"  Профессия пуста — так же: какую ставят на эту операцию в ТП завода, иначе из справочника профессий\r\n"
       L"  (у профессии — список её операций, как в штатной «Добавить профессию»); без базы — её подберёт\r\n"
-      L"  «Союз» (пакет 1.0.0.11) по справочнику операции.\r\n"
+      L"  «Союз» (пакет 1.0.0.11) по справочнику операции. Пакет 1.0.0.13 ставит профессию, участок и станок\r\n"
+      L"  у операции версии ТП, Тпз и Тшт — у операции в варианте: там их хранит «Союз» (в версии видно всё).\r\n"
       L"  Операция без кода в справочнике пропускается; участок и станок, которых нет, не ставятся.\r\n"
       L"  У каждой детали свой ТП — не сквозной (пакет 1.0.0.10 снимает «Сквозной»); версия 1 «В разработке»,\r\n"
       L"  вариант «Основной», признак «основной ТП»; ТП вносится в карточку ТП детали. Если у детали ТП уже\r\n"
@@ -2174,6 +2198,33 @@ static BOOL pk_check(BOOL quiet) {
              bad, nb);
       g_pkSendWarn++;
     }
+  }
+  if (g_szmDicts.nc) { /* профессия пуста — пакет возьмёт её из справочника операции, только если там она одна (с 04.11) */
+    wchar_t ops[300] = L"";
+    int ne = 0;
+    for (int r = 0; r < op->n; r++) {
+      if (xp_cell(op, r, PK_OP_CRAFT)[0] || !xp_cell(op, r, 2)[0] || pk_row_from_soyuz(PK_OPS, r)) continue;
+      ne++;
+      size_t l = wcslen(ops);
+      if (l < 220) _snwprintf(ops + l, 300 - l, L"%s%s %s", l ? L", " : L"", xp_cell(op, r, 0), xp_cell(op, r, 1));
+    }
+    ops[299] = 0;
+    if (ne) {
+      sb_add(&b, L"• Профессия пуста у %d операций (%s) — подобрать по ТП завода не вышло; выберите в ячейке «Профессия» "
+                 L"(набор фильтрует список: «ток» → Токарь), иначе «Союз» поставит её, только если у операции справочника она есть\n",
+             ne, ops);
+      g_pkSendWarn++;
+    }
+  }
+  /* пакет «CursorPad — Союз» в клиенте старее 1.0.0.13 (версия — из прошлого ответа клиента): профессия до 1.0.0.11
+     уходила в вычисляемый список операции в варианте ТП и не сохранялась, 1.0.0.12 писал и в вычисляемые Тпз/Тшт
+     операции версии (с 04.11) */
+  if (op->n && g_szmPkgVer && g_szmPkgVer < SZM_VER(1, 0, 0, 13)) {
+    sb_add(&b, L"• Пакет «CursorPad — Союз» в клиенте — %u.%u.%u.%u: профессия у операций ТП может не сохраниться (пишется в вариант "
+               L"ТП, а «Союз» хранит её у операции версии). Передайте администратору «Союза» конфиг 1.0.0.13 (pidrpen/slack, "
+               L"cursorpad-soyuz)\n",
+           g_szmPkgVer >> 24, (g_szmPkgVer >> 16) & 255, (g_szmPkgVer >> 8) & 255, g_szmPkgVer & 255);
+    g_pkSendWarn++;
   }
   { /* сборка без состава (спецификация не прочиталась, состав не вписан) — не молча (с 31.10) */
     wchar_t emp[400] = L"";
@@ -2645,6 +2696,7 @@ static LRESULT CALLBACK PkProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
   case WM_SIZE:
     if (g_pkEditRow >= 0) pk_edit_end(TRUE);
     pk_layout();
+    pk_cols_fit();
     InvalidateRect(hwnd, NULL, FALSE);
     return 0;
   case WM_DRAWITEM:

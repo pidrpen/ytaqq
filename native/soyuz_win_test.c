@@ -796,6 +796,15 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
       pk_edit_end(FALSE);
       pk_edit_begin(0, 3);
       st_check(g_pkEditCtl == g_pkCombo && SendMessageW(g_pkCombo, CB_GETCOUNT, 0, 0) == 1, L"правка «Участка» — список из базы");
+      { /* столбцы «Операций» — в ширину таблицы: «Профессия» (последний) виден без прокрутки вбок (04.11, завод) */
+        RECT lc, pr;
+        GetClientRect(g_pkList, &lc);
+        pr.top = PK_OP_CRAFT, pr.left = LVIR_BOUNDS;
+        SendMessageW(g_pkList, LVM_GETSUBITEMRECT, 0, (LPARAM)&pr);
+        int wc = (int)SendMessageW(g_pkList, LVM_GETCOLUMNWIDTH, PK_OP_CRAFT, 0);
+        st_check(pr.right <= lc.right && wc >= PKS(40), L"лист «Операции»: все столбцы в ширину таблицы, «Профессия» видна без прокрутки вбок");
+        st_note(L"     таблица %ld, правый край «Профессии» %ld, её ширина %d", lc.right, pr.right, wc);
+      }
       st_shot_wnd(L"9-package.png", g_pkWnd);
       { /* «Ещё»: один пункт «ЭСИ и ТП в Союз» (пункт «Загрузить ЭСИ в Союз» убран 30.10); в окне «Чертежи…» — первая слева */
         int nEsi = 0, nOld = 0;
@@ -934,6 +943,73 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
         st_note(L"     ячейка: раскрыт %d, строк %d, первая «%ls», в ячейке «%ls»", dropped, ccnt, c0, got);
         pk_put(&g_pk[PK_OPS], 0, 2, was); /* дальше стенд ждёт прежнюю операцию */
         if (g_pkSheet == PK_OPS) pk_fill(FALSE);
+        { /* профессия (04.11, завод: «не выбирается / не грузится»): в справочнике завода тысячи профессий, «Токарь» —
+             не в первых 900 по алфавиту; он в списке — подбирается по ТП завода и выбирается набором в ячейке; пустая
+             профессия и старый пакет в клиенте — предупреждения «Проверить» */
+          SzmDicts keepC = g_szmDicts;
+          unsigned keepV = g_szmPkgVer;
+          enum { NBIG = 1200 };
+          wchar_t(*bc)[200] = (wchar_t(*)[200])calloc(NBIG, sizeof(*bc));
+          long *bid = (long *)calloc(NBIG, sizeof(long));
+          XpTable *oc = &g_pk[PK_OPS];
+          int nOps = oc->n, rt = -1;
+          wchar_t(*wasC)[200] = (wchar_t(*)[200])calloc((size_t)(nOps > 0 ? nOps : 1), sizeof(*wasC));
+          if (bc && bid && wasC) {
+            for (int i = 0; i < NBIG - 1; i++) _snwprintf(bc[i], 200, L"%05d, Аппаратчик %d", 10000 + i, i), bid[i] = 100000 + i;
+            lstrcpynW(bc[NBIG - 1], L"19149, Токарь", 200), bid[NBIG - 1] = 777;
+            static SzmFit cf;
+            cf.area = 0, cf.code = 4110, cf.equip = 777, cf.score = 5;
+            g_szmDicts.craft = bc, g_szmDicts.craftId = bid, g_szmDicts.nc = NBIG;
+            g_szmDicts.cfit = &cf, g_szmDicts.ncf = 1, g_szmDicts.cops = NULL, g_szmDicts.nco = 0;
+            for (int r = 0; r < nOps; r++) {
+              lstrcpynW(wasC[r], xp_cell(oc, r, PK_OP_CRAFT), 200);
+              if (rt < 0 && !pk_row_from_soyuz(PK_OPS, r) && pk_op_code(xp_cell(oc, r, 2)) == 4110) rt = r;
+            }
+            BOOL autoOk = FALSE, cellOk = FALSE, emptyWarn = FALSE, verWarn = FALSE, verNone = FALSE;
+            wchar_t gotC[200] = L"";
+            if (rt >= 0) {
+              pk_put(oc, rt, PK_OP_CRAFT, NULL);
+              pk_craft_fill();
+              autoOk = !wcscmp(xp_cell(&g_pk[PK_OPS], rt, PK_OP_CRAFT), L"19149, Токарь");
+              /* ячейка «Профессия»: набор «ток» (как с клавиатуры) → Enter — профессия из справочника */
+              pk_put(&g_pk[PK_OPS], rt, PK_OP_CRAFT, NULL);
+              pk_edit_begin(rt, PK_OP_CRAFT);
+              COMBOBOXINFO ci2;
+              memset(&ci2, 0, sizeof(ci2));
+              ci2.cbSize = sizeof(ci2);
+              GetComboBoxInfo(g_pkCombo, &ci2);
+              SetWindowTextW(g_pkCombo, L"то");
+              SendMessageW(ci2.hwndItem, EM_SETSEL, 2, 2);
+              SendMessageW(ci2.hwndItem, WM_CHAR, L'к', 0);
+              SendMessageW(ci2.hwndItem, WM_KEYDOWN, VK_RETURN, 0);
+              if (g_pkEditRow >= 0) pk_edit_end(FALSE);
+              lstrcpynW(gotC, xp_cell(&g_pk[PK_OPS], rt, PK_OP_CRAFT), 200);
+              cellOk = !wcscmp(gotC, L"19149, Токарь");
+              if (g_pkSheet == PK_OPS) pk_fill(FALSE);
+              st_pump(200);
+              st_shot_wnd(L"9b-profession.png", g_pkWnd); /* профессия в ячейке — для снимка дирижёру */
+              /* пустая профессия — «Проверить» говорит; старый пакет в клиенте — тоже; свежий — молчит */
+              pk_put(&g_pk[PK_OPS], rt, PK_OP_CRAFT, NULL);
+              g_szmPkgVer = SZM_VER(1, 0, 0, 12);
+              pk_check(TRUE);
+              emptyWarn = g_pkLastCheck && wcsstr(g_pkLastCheck, L"Профессия пуста") != NULL;
+              verWarn = g_pkLastCheck && wcsstr(g_pkLastCheck, L"в клиенте — 1.0.0.12") && wcsstr(g_pkLastCheck, L"1.0.0.13");
+              g_szmPkgVer = SZM_VER(1, 0, 0, 13);
+              pk_check(TRUE);
+              verNone = !(g_pkLastCheck && wcsstr(g_pkLastCheck, L"в клиенте — 1."));
+            }
+            st_check(rt >= 0 && autoOk && cellOk,
+                     L"профессия: справочник завода в 1200 строк, «Токарь» — последним; подбор по ТП завода и набор «ток» + Enter в ячейке — «19149, Токарь»");
+            st_note(L"     профессия: строка %d, подбор %d, в ячейке «%ls»", rt, autoOk, gotC);
+            st_check(emptyWarn && verWarn && verNone,
+                     L"«Проверить»: пустая профессия — предупреждение; пакет 1.0.0.12 в клиенте — «передайте конфиг 1.0.0.13», 1.0.0.13 — молчит");
+            for (int r = 0; r < nOps && r < g_pk[PK_OPS].n; r++) pk_put(&g_pk[PK_OPS], r, PK_OP_CRAFT, wasC[r]);
+          }
+          g_szmDicts = keepC;
+          g_szmPkgVer = keepV;
+          free(bc), free(bid), free(wasC);
+          if (g_pkSheet == PK_OPS) pk_fill(FALSE);
+        }
       }
       pk_edit_end(FALSE);
       /* строки таблицы дописывает очередь окна (справочники из базы → pk_equip_fill → pk_fill): ждём её, не таймер */
