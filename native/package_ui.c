@@ -2242,10 +2242,23 @@ static BOOL pk_check(BOOL quiet) {
      операции версии (с 04.11) */
   if (op->n && g_szmPkgVer && g_szmPkgVer < SZM_VER(1, 0, 0, 13)) {
     sb_add(&b, L"• Пакет «CursorPad — Союз» в клиенте — %u.%u.%u.%u: профессия у операций ТП может не сохраниться (пишется в вариант "
-               L"ТП, а «Союз» хранит её у операции версии). Передайте администратору «Союза» конфиг 1.0.0.13 (pidrpen/slack, "
+               L"ТП, а «Союз» хранит её у операции версии). Передайте администратору «Союза» конфиг 1.0.0.14 (pidrpen/slack, "
                L"cursorpad-soyuz)\n",
            g_szmPkgVer >> 24, (g_szmPkgVer >> 16) & 255, (g_szmPkgVer >> 8) & 255, g_szmPkgVer & 255);
     g_pkSendWarn++;
+  }
+  /* пакет старее 1.0.0.14: «Признак покупки» на заводе — ссылка на шаблон (InfoObjects\STD\PurchasedKind\…), а функция
+     до 1.0.0.14 искала значение списка и признак не ставила (John 2026-11-06: «не грузится признак при загрузке») */
+  if (it->n && g_szmPkgVer && g_szmPkgVer < SZM_VER(1, 0, 0, 14)) {
+    int nb = 0;
+    for (int r = 0; r < it->n; r++)
+      if (xp_cell(it, r, 0)[0] && !pk_row_from_soyuz(PK_ITEMS, r) && wcscmp(xp_cell(it, r, 2), L"Документация")) nb++;
+    if (nb) {
+      sb_add(&b, L"• Пакет «CursorPad — Союз» в клиенте — %u.%u.%u.%u: «Признак покупки» не встанет (изделий: %d). Передайте "
+                 L"администратору «Союза» конфиг 1.0.0.14 (pidrpen/slack, cursorpad-soyuz)\n",
+             g_szmPkgVer >> 24, (g_szmPkgVer >> 16) & 255, (g_szmPkgVer >> 8) & 255, g_szmPkgVer & 255, nb);
+      g_pkSendWarn++;
+    }
   }
   { /* сборка без состава (спецификация не прочиталась, состав не вписан) — не молча (с 31.10) */
     wchar_t emp[400] = L"";

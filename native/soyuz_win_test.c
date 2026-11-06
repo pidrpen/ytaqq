@@ -993,8 +993,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
               g_szmPkgVer = SZM_VER(1, 0, 0, 12);
               pk_check(TRUE);
               emptyWarn = g_pkLastCheck && wcsstr(g_pkLastCheck, L"Профессия пуста") != NULL;
-              verWarn = g_pkLastCheck && wcsstr(g_pkLastCheck, L"в клиенте — 1.0.0.12") && wcsstr(g_pkLastCheck, L"1.0.0.13");
-              g_szmPkgVer = SZM_VER(1, 0, 0, 13);
+              verWarn = g_pkLastCheck && wcsstr(g_pkLastCheck, L"в клиенте — 1.0.0.12") && wcsstr(g_pkLastCheck, L"1.0.0.14");
+              g_szmPkgVer = SZM_VER(1, 0, 0, 14); /* свежий пакет: и профессия, и признак покупки (1.0.0.14) */
               pk_check(TRUE);
               verNone = !(g_pkLastCheck && wcsstr(g_pkLastCheck, L"в клиенте — 1."));
             }
@@ -1002,7 +1002,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show) {
                      L"профессия: справочник завода в 1200 строк, «Токарь» — последним; подбор по ТП завода и набор «ток» + Enter в ячейке — «19149, Токарь»");
             st_note(L"     профессия: строка %d, подбор %d, в ячейке «%ls»", rt, autoOk, gotC);
             st_check(emptyWarn && verWarn && verNone,
-                     L"«Проверить»: пустая профессия — предупреждение; пакет 1.0.0.12 в клиенте — «передайте конфиг 1.0.0.13», 1.0.0.13 — молчит");
+                     L"«Проверить»: пустая профессия — предупреждение; пакет 1.0.0.12 в клиенте — «передайте конфиг 1.0.0.14», 1.0.0.14 — молчит");
             for (int r = 0; r < nOps && r < g_pk[PK_OPS].n; r++) pk_put(&g_pk[PK_OPS], r, PK_OP_CRAFT, wasC[r]);
           }
           g_szmDicts = keepC;

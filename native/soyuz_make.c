@@ -712,12 +712,18 @@ static DWORD WINAPI szm_dicts_thread(LPVOID arg) {
       L"OUTER APPLY (SELECT TOP 1 c.ShortText FROM InfoObjectAttributes AS c WITH(NOLOCK) JOIN NameKeys AS nk WITH(NOLOCK) "
       L"ON nk.NameKeyId=c.NameKeyId AND nk.Value=N'EquipmentModel' WHERE c.OwnerId=o.InfoObjectId AND c.Outdated=0) AS md "
       L"WHERE o.Erased=0 ORDER BY md.ShortText, o.Name",
-      /* «Признак покупки» (PurchasedKind у конфигурации изделия, перечисление): какие значения есть в базе */
-      L"SELECT TOP 40 0, N'', CAST(nv.NameUI AS NVARCHAR(200)), 0, 0 "
-      L"FROM InfoObjectAttributes AS a WITH(NOLOCK) JOIN NameKeys AS nk WITH(NOLOCK) "
+      /* «Признак покупки» (PurchasedKind у исполнения изделия): какие значения есть в базе. На заводе это ссылка
+         на шаблон InfoObjects\STD\PurchasedKind\… (тип 22/25 — «Собственного изготовления», «Покупное»,
+         «Кооперация»…), а не перечисление (тип 11): до 2026.11.6 список был пуст, «Проверить» говорил «не список»,
+         а функция пакета до 1.0.0.14 признак не ставила. Берём оба вида */
+      L"SELECT TOP 40 0, N'', v.N, 0, 0 FROM ("
+      L"SELECT CAST(nv.NameUI AS NVARCHAR(200)) AS N FROM InfoObjectAttributes AS a WITH(NOLOCK) JOIN NameKeys AS nk WITH(NOLOCK) "
       L"ON nk.NameKeyId=a.NameKeyId AND nk.Value=N'PurchasedKind' "
-      L"JOIN NamedValues AS nv WITH(NOLOCK) ON nv.NamedValueId=a.Link "
-      L"WHERE a.Outdated=0 AND a.DataType=11 GROUP BY CAST(nv.NameUI AS NVARCHAR(200)) ORDER BY 3"};
+      L"JOIN NamedValues AS nv WITH(NOLOCK) ON nv.NamedValueId=a.Link WHERE a.Outdated=0 AND a.DataType=11 "
+      L"UNION SELECT CAST(t.NameUI AS NVARCHAR(200)) FROM InfoObjectAttributes AS a WITH(NOLOCK) JOIN NameKeys AS nk WITH(NOLOCK) "
+      L"ON nk.NameKeyId=a.NameKeyId AND nk.Value=N'PurchasedKind' "
+      L"JOIN Templates AS t WITH(NOLOCK) ON t.TemplateId=a.Link WHERE a.Outdated=0 AND a.DataType IN (22,25)"
+      L") AS v WHERE v.N<>N'' ORDER BY 3"};
   for (int q = 0; q < 3; q++) {
     int n = card_query(dbc, kq[q], rows, q == 1 ? SZM_BIG : CARD_ROWS, err, 300);
     if (n < 0 && q == 2) break; /* признака нет в этой базе — списки участков и станков остаются */
