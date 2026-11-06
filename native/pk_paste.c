@@ -728,12 +728,14 @@ static void pp_table_head(PpCtx *x, PpRow *rows, int n, int h, const int *col, c
     int nameCol = col[PF_OP] >= 0 ? col[PF_NAME] : -1;
     double kz = col[PF_TPZ] >= 0 && hours[col[PF_TPZ]] ? 60 : 1; /* нормы в часах — в минуты */
     double ks = col[PF_TSHT] >= 0 && hours[col[PF_TSHT]] ? 60 : 1;
+    wchar_t prev[PP_CELL] = L""; /* деталь строкой выше: объединённые ячейки маршрутной карты (с 2026.11.06) */
     for (int i = h + 1; i < n; i++) {
       const PpRow *r = &rows[i];
       if (pp_row_empty(r)) continue;
       const wchar_t *des = pp_at(r, col[PF_DES]);
       if (!des[0]) des = pp_at(r, col[PF_PARENT]);
-      if (!des[0]) des = tdes[0] ? tdes : in->part;
+      if (des[0]) tn_cpy(prev, PP_CELL, des);
+      else des = prev[0] ? prev : tdes[0] ? tdes : in->part;
       wchar_t op[PP_CELL], tz[40] = L"", tsh[40] = L"";
       pp_op_text(pp_at(r, opCol), pp_at(r, col[PF_OPCODE]), op, PP_CELL);
       if (!op[0]) continue;
@@ -747,11 +749,13 @@ static void pp_table_head(PpCtx *x, PpRow *rows, int n, int h, const int *col, c
     return;
   }
   if (blanks) {
+    wchar_t prev[PP_CELL] = L"";
     for (int i = h + 1; i < n; i++) {
       const PpRow *r = &rows[i];
       if (pp_row_empty(r)) continue;
       const wchar_t *des = pp_at(r, col[PF_DES]);
-      if (!des[0]) des = tdes[0] ? tdes : in->part;
+      if (des[0]) tn_cpy(prev, PP_CELL, des);
+      else des = prev[0] ? prev : tdes[0] ? tdes : in->part;
       const wchar_t *mat = pp_at(r, col[PF_MAT]), *norm = pp_at(r, col[PF_NORM]), *sz = pp_at(r, col[PF_SIZES]);
       if (!mat[0] && !norm[0] && !sz[0]) continue;
       if (pp_at(r, col[PF_NAME])[0] && pp_at(r, col[PF_DES])[0])

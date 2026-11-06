@@ -100,6 +100,8 @@ END
 313 RCDATA "karta_zakaza.docx"
 /* исполнитель «Обработки файлов»: пишется в папку задания и идёт Python-ом комплекта ИИ (convert_workbench.c) */
 314 RCDATA "convert_files.py"
+/* пустой шаблон Excel окна «ЭСИ и ТП» («Ещё ▾ → Шаблон Excel», pk_xlsx_ui.c); собран make_esi_template.py */
+315 RCDATA "esi_tp_shablon.xlsx"
 340 CURSOR "cursors/k6_static.cur"
 341 CURSOR "cursors/k6_ibeam.cur"
 342 CURSOR "cursors/k6_hand.cur"

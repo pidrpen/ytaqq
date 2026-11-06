@@ -15,7 +15,10 @@
    изделиях, вид изделия как в «Союзе», операции в справочнике 1С («4110 Токарная»),
    номера «005», размеры заготовки «D=40;L=265». «Что нужно?» — какие данные «Союз» берёт.
    «В Союз…» — сразу в клиент (soyuz_make.c), «Сохранить пакет…» — xlsx для команды PLM
-   «Загрузить ЭСИ из CursorPad». Черновик помнится между запусками (package.txt). */
+   «Загрузить ЭСИ из CursorPad». «Из Excel…» (или книгу мышью в окно) — шаблон «ЭСИ и ТП» или своя
+   таблица с шапкой: строки сами ложатся по листам (pk_xlsx.c, с 2026.11.06); пустой шаблон — «Ещё ▾».
+   Галочка «Обозначение — из имени файла» в подвале: у брошенных чертежей обозначение — из имени файла,
+   остальное — со штампа (pk_stamp.c, с 2026.11.06). Черновик помнится между запусками (package.txt). */
 
 #define ID_PK_TAB 300 /* +лист: 300…303 */
 #define ID_PK_ADD 304
@@ -51,6 +54,9 @@
 #define ID_PK_SOYTP 332      /*   только ТП — операции и заготовки к изделиям, уже заведённым в «Союзе» */
 #define ID_PK_QCRAFT 333     /* строка быстрого ТП: профессия (с 2026.10.30) */
 #define ID_PK_SPECTSV 334    /* «Ещё ▾»: состав из файла спецификации (TSV) — для стенда и ручного импорта (с 31.10) */
+#define ID_PK_XLS 335        /* «Из Excel…» — книга: шаблон «ЭСИ и ТП» или своя таблица (pk_xlsx_ui.c, с 2026.11.06) */
+#define ID_PK_XLSTPL 336     /* «Ещё ▾»: пустой шаблон Excel — сохранить и открыть */
+#define ID_PK_DESFILE 337    /* галочка в подвале: обозначение чертежа — из имени файла (pk_stamp.c, с 2026.11.06) */
 #define PK_OP_CRAFT 7        /* лист «Операции»: столбец «Профессия» — последний (kPkOpsHead) */
 #define WM_PK_ESI (WM_APP + 99) /* lParam — RtJob*, освобождает окно */
 /* чертежи, брошенные мышью (pk_stamp.c): штамп читает рабочий поток */
@@ -135,6 +141,12 @@ static BOOL pk_stamp_ops_on(void);              /* pk_stamp.c: чертёж де
 static void pks_ops_toggle(void);               /* pk_stamp.c: та галочка */
 static void pk_draw_pick(void);                 /* pk_stamp.c: «Чертежи…» — выбрать файлы, сразу и операции */
 static void pk_spec_tsv_pick(void);             /* pk_stamp.c: состав из файла спецификации (TSV) */
+static BOOL pk_stamp_desfile_on(void);          /* pk_stamp.c: обозначение чертежа — из имени файла */
+static void pks_desfile_toggle(void);           /* pk_stamp.c: та галочка */
+static BOOL pk_xlsx_load(const wchar_t *path, BOOL ask); /* pk_xlsx_ui.c: книга Excel → листы окна */
+static void pk_xlsx_pick(void);                 /* pk_xlsx_ui.c: «Из Excel…» */
+static void pk_xlsx_template(void);             /* pk_xlsx_ui.c: «Ещё ▾ → Шаблон Excel…» */
+static void pk_reset(void);                     /* все листы — пусто, без вопроса */
 
 /* Строки, пришедшие из «Союза» («Из Союза»): изделие и связь там уже есть. Пока строка как
    была — в «Союз» не идёт (у изделия функция выровняла бы наименование, пустое стёрла бы);
@@ -1807,6 +1819,8 @@ static void pk_help(void) {
       L"  Перетащите в окно чертежи (PDF, TIF, PNG, JPG; папку — все картинки в ней): обозначение и наименование\r\n"
       L"  со штампа читает мини-ИИ с картинками (если включён; иначе Tesseract — сверьте), файл ложится в «Чертёж».\r\n"
       L"  Не прочиталось (КОМПАС, DWG, без штампа) — из имени файла «АБВГ.123456.002 Корпус.pdf».\r\n"
+      L"  Галочка «Обозначение — из имени файла» (подвал окна): обозначение — всегда из имени файла, а со штампа —\r\n"
+      L"  наименование, материал, масса, состав спецификации; в имени обозначения нет — со штампа, как обычно.\r\n"
       L"  На пустое место — новые изделия; один чертёж на строку детали — в эту строку.\r\n"
       L"  Сборка: «+ Сборка» (или любая строка вида «Сборочные единицы»), и бросайте на её строку чертежи —\r\n"
       L"  лягут в её состав по 1 шт (количество — на листе «Состав»). Её СБ даёт ей обозначение и наименование,\r\n"
@@ -1832,7 +1846,14 @@ static void pk_help(void) {
       L"  ЗАГОТОВКА / ТП / ЧЕРТЕЖ. Операции и заготовка без детали идут к выделенной (выбранной) позиции.\r\n"
       L"  «Из Союза» — изделие, уже заведённое в «Союзе», с составом (серые строки — оттуда, туда не уходят):\r\n"
       L"  выберите позицию в «Изделиях», вставьте ей маршрут — «В Союз…» создаст ТП и привяжет к ней.\r\n"
-      L"  «Распознать чертёж» → «В пакет» — изделия и состав со штампа и спецификации, файл листа — в «Чертёж».\r\n");
+      L"  «Распознать чертёж» → «В пакет» — изделия и состав со штампа и спецификации, файл листа — в «Чертёж».\r\n\r\n"
+      L"ИЗ EXCEL\r\n"
+      L"  «Из Excel…» вверху окна (или книгу мышью в окно): шаблон «ЭСИ и ТП» — листы Изделия, Состав, Операции,\r\n"
+      L"  Заготовки с шапкой в первой строке (как у «Сохранить пакет .xlsx») — ложится столбец в столбец, со всеми\r\n"
+      L"  полями. Пустой шаблон со списками видов и операций — «Ещё ▾ → Шаблон Excel». В «Составе» и «Операциях»\r\n"
+      L"  пустая сборка или деталь — как строкой выше; № операции пуст — следующий; «Токарная» → «4110 Токарная»;\r\n"
+      L"  файл чертежа без папки — рядом с книгой. Свой лист (спецификация, маршрутная карта) — как «Вставить»:\r\n"
+      L"  по шапке. Excel не нужен; старый .xls откроет Excel. В окне уже есть строки — спросит: заменить или добавить.\r\n");
   ShowWindow(g_pkHelp, SW_SHOWNORMAL);
 }
 
@@ -2518,8 +2539,8 @@ static void pk_to_soyuz(int mode) {
   free(text);
 }
 
-static void pk_clear(void) {
-  if (MessageBoxW(g_pkWnd, L"Очистить все листы пакета?", L"ЭСИ и ТП", MB_YESNO | MB_ICONQUESTION) != IDYES) return;
+/* все листы — пусто (без вопроса): «Очистить», «Из Excel…» → «Заменить» */
+static void pk_reset(void) {
   xp_package_free(g_pk);
   pk_soy_clear();
   g_pkCur[0] = 0;
@@ -2529,6 +2550,11 @@ static void pk_clear(void) {
   InterlockedIncrement(&g_pkStGen); /* недочитанные чертежи — мимо */
   pk_stamp_forget();
   pk_init();
+}
+
+static void pk_clear(void) {
+  if (MessageBoxW(g_pkWnd, L"Очистить все листы пакета?", L"ЭСИ и ТП", MB_YESNO | MB_ICONQUESTION) != IDYES) return;
+  pk_reset();
   pk_fill(FALSE);
   pk_changed();
   pk_status(L"Пакет пуст");
@@ -2546,6 +2572,8 @@ static void pk_layout(void) {
   MoveWindow(GetDlgItem(g_pkWnd, ID_PK_ESI), x, y, PKS(100), h, TRUE);
   x -= PKS(6 + 170);
   MoveWindow(g_pkEsiEdit, x, y + PKS(3), PKS(170), h - PKS(6), TRUE);
+  x -= PKS(12 + 104); /* «Из Excel…» — тоже откуда взять строки, рядом с «Из Союза» (с 2026.11.06) */
+  MoveWindow(GetDlgItem(g_pkWnd, ID_PK_XLS), x, y, PKS(104), h, TRUE);
   int foot = rc.bottom - PKS(TOOL_FOOT_H), by = foot + (PKS(TOOL_FOOT_H) - PKS(30)) / 2;
   int ly = PANEL_TITLE_H + PKS(86);
   /* лист «Операции»: над таблицей — строка быстрого ТП */
@@ -2598,7 +2626,36 @@ static void pk_layout(void) {
   }
   static const int hidden[] = {ID_PK_DEL, ID_PK_CLEAR, ID_PK_HELP, ID_PK_FROMXP, ID_PK_SAVE};
   for (int i = 0; i < 5; i++) ShowWindow(GetDlgItem(g_pkWnd, hidden[i]), SW_HIDE);
-  MoveWindow(GetDlgItem(g_pkWnd, ID_PK_SOYUZ), rc.right - PKS(16) - PKS(170), by, PKS(170), PKS(30), TRUE);
+  int soyX = rc.right - PKS(16) - PKS(170);
+  MoveWindow(GetDlgItem(g_pkWnd, ID_PK_SOYUZ), soyX, by, PKS(170), PKS(30), TRUE);
+  /* галочка «Обозначение — из имени файла» (с 2026.11.06, John) — после «Ещё ▾»; не влезает полная надпись —
+     короткая */
+  HWND chk = GetDlgItem(g_pkWnd, ID_PK_DESFILE);
+  if (chk) {
+    int room = soyX - PKS(12) - (x + PKS(4));
+    static const wchar_t *const kLab[] = {L"Обозначение — из имени файла", L"Обозн. из имени файла"};
+    int pick = 1, need = 0;
+    HDC dc = GetDC(chk);
+    HGDIOBJ of = dc && g_fontUi ? SelectObject(dc, g_fontUi) : NULL;
+    for (int i = 0; i < 2 && dc; i++) {
+      SIZE sz = {0, 0};
+      GetTextExtentPoint32W(dc, kLab[i], (int)wcslen(kLab[i]), &sz);
+      need = sz.cx + PKS(26);
+      if (need <= room) {
+        pick = i;
+        break;
+      }
+    }
+    if (dc) {
+      if (of) SelectObject(dc, of);
+      ReleaseDC(chk, dc);
+    }
+    wchar_t cur[60];
+    GetWindowTextW(chk, cur, 60);
+    if (wcscmp(cur, kLab[pick])) SetWindowTextW(chk, kLab[pick]);
+    MoveWindow(chk, x + PKS(4), by + PKS(3), need < room ? need : room, PKS(24), TRUE);
+    ShowWindow(chk, room > PKS(60) ? SW_SHOW : SW_HIDE);
+  }
   InvalidateRect(g_pkWnd, NULL, FALSE); /* карточка и подвал — по новому размеру */
 }
 
@@ -2689,7 +2746,7 @@ static LRESULT CALLBACK PkProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
     return panel_hittest(hwnd, lParam);
   case WM_GETMINMAXINFO: {
     MINMAXINFO *mm = (MINMAXINFO *)lParam;
-    mm->ptMinTrackSize.x = PKS(1080); /* девять кнопок подвала и «Сохранить»; вверху — листы и «Из Союза» */
+    mm->ptMinTrackSize.x = PKS(1080); /* шесть кнопок подвала, галочка и «В Союз…»; вверху — листы, «Из Excel…», «Из Союза» */
     mm->ptMinTrackSize.y = PKS(360);
     return 0;
   }
@@ -2707,6 +2764,13 @@ static LRESULT CALLBACK PkProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
     SetBkColor(hdc, COL_PAPER);
     SetTextColor(hdc, COL_INK);
     return (LRESULT)g_paper;
+  }
+  case WM_CTLCOLORSTATIC:
+  case WM_CTLCOLORBTN: { /* галочка в подвале — на его фоне */
+    HDC hdc = (HDC)wParam;
+    SetBkMode(hdc, TRANSPARENT);
+    SetTextColor(hdc, COL_INK);
+    return (LRESULT)bg_brush(FALSE);
   }
   case WM_NOTIFY: {
     NMHDR *nh = (NMHDR *)lParam;
@@ -2882,6 +2946,7 @@ static LRESULT CALLBACK PkProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
       AppendMenuW(m, MF_STRING, ID_PK_SPECTSV, L"Состав из файла спецификации (TSV: раздел, поз., обозначение, наименование, кол.)…");
       AppendMenuW(m, MF_STRING, ID_PK_FROMXP, L"Из выгрузки из PLM…");
       AppendMenuW(m, MF_STRING, ID_PK_SAVE, L"Сохранить пакет .xlsx для «Загрузить ЭСИ из CursorPad»…");
+      AppendMenuW(m, MF_STRING, ID_PK_XLSTPL, L"Шаблон Excel для «Из Excel…» (пустой, со списками) — сохранить и открыть…");
       AppendMenuW(m, MF_SEPARATOR, 0, NULL);
       AppendMenuW(m, MF_STRING, ID_PK_PRIO, L"Приоритеты операций: участок и станок…");
       AppendMenuW(m, MF_STRING, ID_PK_HELP, L"Что нужно «Союзу»?");
@@ -2901,6 +2966,12 @@ static LRESULT CALLBACK PkProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
     if (id == ID_PK_DRAWTOGGLE) pks_ops_toggle();
     if (id == ID_PK_DRAWOPS) pk_stamp_ops();
     if (id == ID_PK_SPECTSV) pk_spec_tsv_pick();
+    if (id == ID_PK_XLS) pk_xlsx_pick();
+    if (id == ID_PK_XLSTPL) pk_xlsx_template();
+    if (id == ID_PK_DESFILE && HIWORD(wParam) == BN_CLICKED) {
+      pks_desfile_toggle();
+      SendMessageW((HWND)lParam, BM_SETCHECK, pk_stamp_desfile_on() ? BST_CHECKED : BST_UNCHECKED, 0);
+    }
     return 0;
   }
   case WM_KEYDOWN:
@@ -2965,6 +3036,13 @@ static void pk_create(void) {
     mk_btn(g_pkWnd, L"Что нужно?", ID_PK_HELP);
     mk_btn(g_pkWnd, L"В Союз…", ID_PK_SOYUZ);
     mk_btn(g_pkWnd, L"Ещё ▾", ID_PK_MORE);
+    mk_btn(g_pkWnd, L"Из Excel…", ID_PK_XLS);
+    {
+      HWND chk = CreateWindowExW(0, L"BUTTON", L"Обозначение — из имени файла", WS_CHILD | WS_TABSTOP | BS_CHECKBOX, 0, 0,
+                                 10, 10, g_pkWnd, (HMENU)(INT_PTR)ID_PK_DESFILE, g_inst, NULL);
+      if (g_fontUi) SendMessageW(chk, WM_SETFONT, (WPARAM)g_fontUi, FALSE);
+      SendMessageW(chk, BM_SETCHECK, pk_stamp_desfile_on() ? BST_CHECKED : BST_UNCHECKED, 0);
+    }
     g_pkQPart = pk_q_combo(ID_PK_QPART, L"деталь (обозначение)");
     g_pkQOp = pk_q_combo(ID_PK_QOP, L"операция: печатайте «ток», «4110»… Enter");
     g_pkQArea = pk_q_combo(ID_PK_QAREA, L"участок");

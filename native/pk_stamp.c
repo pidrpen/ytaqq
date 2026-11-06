@@ -17,6 +17,10 @@
    решают правила технолога (techno.c), нормы — norms.c; текст маршрута раскладывает «Вставить»
    (pk_paste_text) — операции с кодами 1С на лист «Операции» к этой детали, если своих у неё нет.
    Участок и станок подставит pk_equip_fill. «Операции по чертежам» — то же для уже лежащих строк.
+   Галочка «Обозначение — из имени файла» (подвал окна, package.ini; с 2026.11.06, John: «чтобы бралось
+   обозначение с наименования чертежа»): обозначение и код СБ — из имени файла, со штампа — наименование
+   (если в имени его нет или штамп его прочитал), материал, масса, строки спецификации; в имени
+   обозначения нет — со штампа, как без галочки. Книги Excel, брошенные в окно, — в pk_xlsx_ui.c.
    Чтение — в своём потоке, по одному файлу; результаты — WM_PK_STAMP. «Очистить» прерывает. */
 
 #define PKS_PAGES 8   /* листов спецификации из одного файла */
@@ -46,6 +50,7 @@ typedef struct {
   int nrows;
   int doc;                  /* pp_draw_doc: 0 — чертёж детали, 1 — сборки, 2 — другой документ (ВП, ПЗ…) */
   BOOL ops, opsOnly;        /* составить и операции; только они (строка уже есть — по файлу) */
+  BOOL desFile;             /* обозначение — из имени файла (галочка, с 2026.11.06) */
   wchar_t *route;           /* маршрут по листу, как в чате (tn_text + нормы); malloc, NULL — нет */
   BOOL spec;                /* лист — спецификация (с 31.10): строк нет — не пустая сборка молча, а пометка */
   BOOL nameJunk;            /* наименование со штампа — мусор (графы «№ докум.», «Подп.», латиница вперемешку): пусто + «проверьте» */
@@ -61,7 +66,7 @@ typedef struct PkStJob {
   wchar_t parent[200];
   int parentRow, row;
   wchar_t rowDes[200];
-  BOOL ops, opsOnly;
+  BOOL ops, opsOnly, desFile;
 } PkStJob;
 
 static CRITICAL_SECTION g_pksLock;
@@ -87,6 +92,7 @@ static PkStOrphan g_pksOrph[64];
 static int g_pksOrphN;
 /* операции сразу по чертежу детали: галочка в «Чертежи…» (package.ini); итог для строки состояния */
 static BOOL g_pkAiOps = TRUE, g_pkAiOpsRead;
+static BOOL g_pkDesFile; /* галочка «Обозначение — из имени файла» (package.ini, по умолчанию выключена) */
 static int g_pksOps, g_pksOpsParts, g_pksOpsHad, g_pksOpsNo;
 static int g_pksSpecEmpty;           /* спецификаций без строк (с 31.10) */
 static wchar_t g_pksSpecEmptyDes[200]; /* их обозначения — в карточку и строку состояния */
@@ -329,6 +335,25 @@ static void pks_read(IWICImagingFactory *f, PkStRes *r) {
   for (int k = 0; k < pl.n; k++) dr_page_free(&pl.p[k]);
   free(pl.p);
   if (tmp[0]) dr_rmdir(tmp);
+  if (r->desFile) { /* галочка: обозначение — из имени файла, штамп — остальное */
+    wchar_t fd[DR_CELL], fn[DR_CELL], fc[8];
+    int fdoc = 0;
+    if (pp_file_title_code(r->file, fd, fn, &fdoc, fc)) {
+      lstrcpynW(r->des, fd, DR_CELL);
+      r->how = 3;
+      r->doubt = FALSE; /* имя файла вписал человек — штамп не перепроверяет */
+      r->desAlt[0] = 0;
+      if (fn[0] && (!r->name[0] || r->nameJunk)) lstrcpynW(r->name, fn, DR_CELL), r->nameJunk = FALSE;
+      if (fdoc) { /* «…000 СБ.pdf», «…ВП.pdf» — вид документа по имени */
+        r->doc = fdoc;
+        lstrcpynW(r->docCode, fdoc == 1 ? fc : L"", 8);
+      }
+      r->asmDoc = r->doc == 1 || r->spec;
+      if (r->asmDoc) lstrcpynW(r->kind, L"Сборочные единицы", 40);
+      else if (!r->kind[0] && !r->doc) lstrcpynW(r->kind, L"Детали", 40);
+      if (r->spec) pks_doc05_fix(r);
+    }
+  }
   if (!r->des[0]) { /* штамп не прочитался (КОМПАС, DWG, скан без штампа) — имя файла */
     int doc;
     if (pp_file_title_code(r->file, r->des, r->name, &doc, r->docCode)) {
@@ -375,6 +400,7 @@ static DWORD WINAPI pks_worker(LPVOID arg) {
       r->row = j->n == 1 ? j->row : -1;
       r->ops = j->ops;
       r->opsOnly = j->opsOnly;
+      r->desFile = j->desFile;
       lstrcpynW(r->file, j->files[i], MAX_PATH);
       lstrcpynW(r->parent, j->parent, 200);
       lstrcpynW(r->rowDes, j->rowDes, 200);
@@ -783,6 +809,30 @@ static BOOL pk_stamp_ops_on(void) {
   return g_pkAiOps;
 }
 
+/* галочка «Обозначение — из имени файла» — тоже в package.ini */
+static BOOL pk_stamp_desfile_on(void) {
+  static BOOL read;
+  if (!read && g_dataDir[0]) {
+    wchar_t p[MAX_PATH];
+    _snwprintf(p, MAX_PATH, L"%ls\\package.ini", g_dataDir);
+    p[MAX_PATH - 1] = 0;
+    g_pkDesFile = GetPrivateProfileIntW(L"Чертежи", L"ОбозначениеИзИмени", 0, p) != 0;
+    read = TRUE;
+  }
+  return g_pkDesFile;
+}
+
+static void pks_desfile_toggle(void) {
+  g_pkDesFile = !pk_stamp_desfile_on();
+  wchar_t p[MAX_PATH];
+  _snwprintf(p, MAX_PATH, L"%ls\\package.ini", g_dataDir);
+  p[MAX_PATH - 1] = 0;
+  if (g_dataDir[0]) WritePrivateProfileStringW(L"Чертежи", L"ОбозначениеИзИмени", g_pkDesFile ? L"1" : L"0", p);
+  pk_status(g_pkDesFile ? L"Обозначение чертежа — из имени файла («АБВГ.123456.002 Корпус.pdf»); наименование, материал, масса — "
+                          L"со штампа. В имени обозначения нет — со штампа"
+                        : L"Обозначение чертежа — со штампа (не прочиталось — из имени файла)");
+}
+
 static void pks_ops_toggle(void) {
   pks_ops_pref();
   g_pkAiOps = !g_pkAiOps;
@@ -867,6 +917,7 @@ static BOOL pks_enqueue(TmPaths *pl, int hit, BOOL opsOnly) {
   j->parentRow = j->row = -1;
   j->ops = opsOnly || g_pkAiOps;
   j->opsOnly = opsOnly;
+  j->desFile = pk_stamp_desfile_on();
   wchar_t note[200] = L"";
   if (opsOnly) hit = -1;
   if (g_pkSheet == PK_LINKS && hit >= 0 && hit < g_pk[PK_LINKS].n) { /* на строку состава — в её сборку */
@@ -924,18 +975,31 @@ static BOOL pks_enqueue(TmPaths *pl, int hit, BOOL opsOnly) {
   return TRUE;
 }
 
-/* WM_DROPFILES: файлы (и картинки из папок) — в очередь чтения, цель — строка под мышью */
+/* WM_DROPFILES: файлы (и картинки из папок) — в очередь чтения, цель — строка под мышью; книги Excel —
+   в листы (pk_xlsx_ui.c, с 2026.11.06) */
 static void pk_stamp_drop(HWND hwnd, HDROP hd) {
   POINT pt;
   DragQueryPoint(hd, &pt);
   TmPaths l = {0};
+  wchar_t books[8][MAX_PATH];
+  int nb = 0;
   UINT n = DragQueryFileW(hd, 0xFFFFFFFF, NULL, 0);
   for (UINT i = 0; i < n; i++) {
     wchar_t p[MAX_PATH];
-    if (DragQueryFileW(hd, i, p, MAX_PATH)) pks_add_path(&l, p);
+    if (!DragQueryFileW(hd, i, p, MAX_PATH)) continue;
+    if (pkx_is_book(p)) {
+      if (nb < 8) lstrcpynW(books[nb++], p, MAX_PATH);
+    } else {
+      pks_add_path(&l, p);
+    }
   }
   DragFinish(hd);
   SetForegroundWindow(hwnd);
+  for (int i = 0; i < nb; i++) pk_xlsx_load(books[i], i == 0); /* вторая книга броска — добавляется */
+  if (nb && !l.n) {
+    free(l.p);
+    return;
+  }
   MapWindowPoints(hwnd, g_pkList, &pt, 1);
   LVHITTESTINFO hi;
   memset(&hi, 0, sizeof(hi));
@@ -1246,6 +1310,7 @@ static void pks_test(int argc, wchar_t **argv) {
     PkStRes *r = (PkStRes *)calloc(1, sizeof(PkStRes));
     if (!r) break;
     r->i = i - 3, r->n = argc - 3, r->parentRow = r->row = -1;
+    r->desFile = _wgetenv(L"CP_PKDESFILE") != NULL; /* галочка «Обозначение — из имени файла» */
     lstrcpynW(r->file, argv[i], MAX_PATH);
     ULONGLONG t0 = GetTickCount64();
     pks_read(f, r);

@@ -5216,6 +5216,9 @@ static void create_settings(HWND owner) {
 #include "convert.c" /* Shift-drag conversion ring; real OLE drop target */
 #include "file_link_ui.c" /* плитка «Ссылка» кольца Shift: путь к файлу или к папке — в буфер */
 #include "ai_file_ask.c" /* «прочитай / переведи файл» в чате: Tesseract и исполнитель конвертера — после convert.c */
+#include "xlsx_read.c"  /* книга Excel без Excel: zip, inflate, листы, общие строки (пара к xlsx_write.c) */
+#include "pk_xlsx.c"    /* книга → листы «ЭСИ и ТП»: шаблон — столбец в столбец, своя таблица — как «Вставить» */
+#include "pk_xlsx_ui.c" /* «Из Excel…», книга мышью в окно, «Шаблон Excel…» (после ai_file_ask.c: Excel для .xls) */
 #include "pk_stamp.c" /* чертежи мышью в окно «ЭСИ и ТП»: штамп → строка, сборка → состав (после ai_file_ask.c: PDF) */
 #include "ai_esi.c"   /* действия из чата: «загрузи ЭСИ по чертежам», «выгрузи МВ», «приоритет участков» */
 #include "tools.c" /* после нардов: автообновление смотрит, не открыты ли они */
