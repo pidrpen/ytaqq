@@ -1,7 +1,10 @@
-2026110601
-2026.11.6.1
-sha256 d3470b7cad1acf3948692f16f17a547d01a74792e1892e7fe0e7514bb8f3dafd
-== 0 signature-rsa-sha256 tckAHLUj3Ml4JnsTC5v4MBHsbu5tJDtFlaT4tceaSwI19/HtuLrcxcQca1+xtqzDPZUJ4FRJ5PwGPG+2EwDIwaJBuRrPVviyfCxxeOr6FXEiecdVAPM9lG+wHF1wFZhwFa3pcwJeh++VgmWmPZ9NXwOAx49A4sGQMcGetRlJVfalh6oHAaVcPkvhudL+JfBBmbTvJT8qxq7+lT6SQ4xtnUZ2aO96VUge08W381M9hoJ7JDJZjxqbj2y6WSqXnby8oFJA67S5M1Ys4qB1ry/ofI0kTa6+yKcvdKQgjKCGIR6XiXWGjy3ASGUowGJExSko2r5RD+pY3HVcYB1LITMvfTZFuwxpUtPNVRgW1YrFWJfSPoSJb33fd5G1X7u8qwGlO6aRf5n8uaTtHVYIVoIcOcaIZlgv53ehc0k+MKH3pB8G3cprOcSe+Eq0riZnOp+PHMkTF7eW2iiCHKK8PtXcSu59N8B/W90lhFndQre3xpbzQxFINes+SMCjzxcZGwKv
+2026110602
+2026.11.6.2
+sha256 817b0df0d67b3c2b365f07d36878f1cec585077a40682cc4ace8b46786b83b8f
+== 0 signature-rsa-sha256 cwROe0kHWECm3iTPiURx28rXNqtKBHwOl9HRmeTKmeplvoHcTc+LWu9cxVrI7SpatzUO45FETL9vqyxziR8K6VvzIh+irldS1HD1ptEfR4BjFqcO8/cu6AfgFDoWO0xYNsxg9TE+3tR/USM3jQtpekGmPs/4/dfttN/V9zqeKEwtY1xUSpMuN1r9KP7/aibZRxH39QvFM543diELe7P66bb+HKsInMah3pIDkZCrAc7KTIAcGdV98ERTwx8aXxBSQ2aeHngvf5XRfYUXf6LyZ47cwRPqnO+Do+nqz1+hNlD7dN2T64tz+l0t35CxGp2cV2cgUgvk/cSZmtTYxFQa8LO7U8HTUs6b6zxSQ8KO0DZlhP1W+ySnZGBiJzlhYw5tNBaYXdrXv8RwkXgI+xXZlvjYLOWshspZSkujK2OVaW2wZOaseaYMtgvremtimjKFgcO2FII3Ccu4GnVtZh770ZO7PtRd9DD0n+zDzA+KO/8W6ubwSzXbFceGM7k7KjcO
+== 2026.11.6.2
+Исправлена загрузка «Признака покупки» в «Союз». На заводе он хранится ссылкой на вид («Собственного изготовления», «Покупное», «Кооперация»), а не списком, поэтому раньше не ставился. Значения признака в окне «ЭСИ и ТП» теперь берутся из базы, и «Проверить» больше не пишет, что признак «не список». Для этого администратору «Союза» нужно один раз поставить новый файл конфига «CursorPad — Союз» 1.0.0.14 вместо 1.0.0.13. Со старым конфигом «Проверить» предупредит, что признак не встанет.
+
 == 2026.11.6.1
 В окне «ЭСИ и ТП» внизу появилась галочка «Обозначение — из имени файла». Если она стоит, обозначение берётся из имени файла чертежа («КЛМН.123456.007 Корпус.pdf»), а наименование, материал и остальное — по-прежнему со штампа. Если в имени кода нет, всё работает как раньше; окно помнит, включена ли галочка. Новая кнопка «Из Excel…» загружает книгу Excel в листы окна. Книгу можно и перетащить в окно мышью, в том числе вместе с чертежами. Пустой шаблон со списками видов изделий и операций открывается через «Ещё ▾ → Шаблон Excel…»: в нём листы Изделия, Состав, Операции и Заготовки. Если обозначение в строке пустое, берётся то же, что выше; номер операции без числа ставится с шагом 5; транспортирования, участки, профессии и нормы подставляются сами, как после чертежей. Своя таблица тоже подойдёт, если у неё есть шапка («Обозначение», «Наименование», «Кол.», «Операция»…): она разбирается так же, как «Вставить». Если в окне уже есть строки, окно спросит, заменить их или добавить. Excel для чтения .xlsx не нужен; файлы .xls открываются через Excel.
 
