@@ -60,6 +60,7 @@ static void szm_craft_name(const wchar_t *code, const wchar_t *name, wchar_t out
 }
 
 static unsigned g_szmPkgVer; /* версия пакета в клиенте по строке «ПАКЕТ\t1.0.0.7» отчёта (szm_ver_num); 0 — до 1.0.0.7 или не знаем */
+static int g_szmStepsDropped; /* переходов не отдали последним описанием: пакет старее 1.0.0.15 (или версия неизвестна) */
 #define SZM_VER(a, b, c, d) (((unsigned)(a) << 24) | ((unsigned)(b) << 16) | ((unsigned)(c) << 8) | (unsigned)(d))
 
 /* есть ли в описании строка, которая начинается с tag («ТП\t» — не «ПАПКА_ТП\t») */
@@ -1262,6 +1263,7 @@ static DWORD WINAPI szm_run_thread(LPVOID arg) {
 static int szm_write_text(const wchar_t *path, const wchar_t *folder, const wchar_t *tpFolder, int *dropped) {
   const wchar_t *t = g_szmText ? g_szmText : L"";
   *dropped = 0;
+  g_szmStepsDropped = 0;
   size_t cap = wcslen(t) + SZM_PATH * 2 + 96;
   wchar_t *txt = (wchar_t *)malloc(cap * sizeof(wchar_t));
   if (!txt) return -1;
@@ -1278,6 +1280,7 @@ static int szm_write_text(const wchar_t *path, const wchar_t *folder, const wcha
     const wchar_t *e = wcschr(p, L'\n');
     size_t n = e ? (size_t)(e - p) + 1 : wcslen(p);
     if (g_szmPkgNew != 1 && !wcsncmp(p, L"ЧЕРТЕЖ\t", 7)) (*dropped)++;
+    else if (!wcsncmp(p, L"ПЕРЕХОД\t", 8) && g_szmPkgVer < SZM_VER(1, 0, 0, 15)) g_szmStepsDropped++; /* старый пакет отказал бы */
     else if ((size_t)l + n < cap) memcpy(txt + l, p, n * sizeof(wchar_t)), l += (int)n;
     p += n;
   }
@@ -1293,7 +1296,7 @@ static int szm_write_text(const wchar_t *path, const wchar_t *folder, const wcha
   WideCharToMultiByte(CP_UTF8, 0, txt, -1, u, len8, NULL, NULL);
   /* есть ли что делать, кроме папок: изделия, состав, заготовки, ТП, чертежи */
   BOOL work = wcsstr(txt, L"ИЗДЕЛИЕ\t") || wcsstr(txt, L"СОСТАВ\t") || wcsstr(txt, L"ЗАГОТОВКА\t") || n ||
-              wcsstr(txt, L"ЧЕРТЕЖ\t");
+              wcsstr(txt, L"ЧЕРТЕЖ\t") || wcsstr(txt, L"\nПЕРЕХОД\t");
   free(txt);
   if (!work) {
     free(u);
@@ -1353,8 +1356,9 @@ static BOOL szm_send_text(const wchar_t *text, const wchar_t *folder, const wcha
     return FALSE;
   }
   CloseHandle(th);
-  _snwprintf(msg, cap, L"Передаю в «Союз»: операций %d%s — папка «%s»%s. Ответ клиента появится здесь.", n,
-             dropped ? L" (чертежи не идут: функция в клиенте старая)" : L"", folder[0] ? folder : L"не задана",
+  _snwprintf(msg, cap, L"Передаю в «Союз»: операций %d%s%s — папка «%s»%s. Ответ клиента появится здесь.", n,
+             dropped ? L" (чертежи не идут: функция в клиенте старая)" : L"",
+             g_szmStepsDropped ? L" (переходы не идут: нужен пакет 1.0.0.15)" : L"", folder[0] ? folder : L"не задана",
              tpFolder[0] ? L", ТП — в свою папку" : L"");
   msg[cap - 1] = 0;
   return TRUE;
@@ -1437,6 +1441,12 @@ static void szm_go(void) {
     return;
   }
   if (dropped) _snwprintf(note, 200, L"чертежи (%d) не идут: функция «Союза» старая", dropped);
+  if (g_szmStepsDropped) { /* переходы — только пакету 1.0.0.15 (с 2026.11.11) */
+    size_t l = wcslen(note);
+    _snwprintf(note + l, 200 - l, L"%sпереходы (%d) не идут: в клиенте пакет старее 1.0.0.15", l ? L"; " : L"",
+               g_szmStepsDropped);
+    note[199] = 0;
+  }
   /* запоминаются корни, а не папка сборки: в следующий раз предложение считается от них */
   szm_pref_save(g_szmAuto[0] && g_szmRoot[0][0] ? g_szmRoot[0] : folder, g_szmAuto[1] && g_szmRoot[1][0] ? g_szmRoot[1] : tpFolder);
   SzmRun *r = (SzmRun *)calloc(1, sizeof(SzmRun));

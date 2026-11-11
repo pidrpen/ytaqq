@@ -21,7 +21,12 @@ static void pkx_put_row(void *ctx, int sheet, const wchar_t *const *c, int n) {
   if (sheet < 0 || sheet >= PK_NT) return;
   XpTable *t = &g_pk[sheet];
   int key2 = sheet == PK_LINKS || sheet == PK_OPS ? 1 : -1;
-  int r = c[0][0] && (key2 < 0 || c[key2][0]) ? pk_find_row(t, c[0], key2, key2 >= 0 ? c[key2] : L"") : -1;
+  int r = -1;
+  if (sheet == PK_STEPS) { /* переход — деталь, № операции и № перехода: тот же — новое заменяет */
+    for (int q = 0; q < t->n && r < 0 && n > 2; q++)
+      if (!_wcsicmp(xp_cell(t, q, 0), c[0]) && !wcscmp(xp_cell(t, q, 1), c[1]) && !wcscmp(xp_cell(t, q, 2), c[2])) r = q;
+  } else if (c[0][0] && (key2 < 0 || c[key2][0]))
+    r = pk_find_row(t, c[0], key2, key2 >= 0 ? c[key2] : L"");
   if (r >= 0) {
     BOOL soy = pk_row_from_soyuz(sheet, r);
     for (int k = 1; k < t->ncols && k < n; k++)
@@ -167,7 +172,7 @@ static BOOL pk_xlsx_load(const wchar_t *path, BOOL ask) {
     return FALSE;
   }
   free(d);
-  int have = g_pk[PK_ITEMS].n + g_pk[PK_LINKS].n + g_pk[PK_OPS].n + g_pk[PK_BLANKS].n;
+  int have = g_pk[PK_ITEMS].n + g_pk[PK_LINKS].n + g_pk[PK_OPS].n + g_pk[PK_BLANKS].n + g_pk[PK_STEPS].n;
   if (have && ask && !g_pkNoBox) {
     wchar_t q[400];
     _snwprintf(q, 400,
@@ -224,9 +229,85 @@ static BOOL pk_xlsx_load(const wchar_t *path, BOOL ask) {
   ml = wcslen(more);
   if (o.passed[0] && ml < 250) _snwprintf(more + ml, 300 - ml, L"; не понял листы: %s", o.passed);
   more[299] = 0;
-  pk_status(L"Из Excel «%s»: изделий %d, состав %d, операций %d, заготовок %d%s; листы: %s — дальше «Проверить»", name,
-            x.added[PK_ITEMS], x.added[PK_LINKS], x.added[PK_OPS], x.added[PK_BLANKS], more, o.used);
+  pk_status(L"Из Excel «%s»: изделий %d, состав %d, операций %d, заготовок %d, переходов %d%s; листы: %s — дальше «Проверить»",
+            name, x.added[PK_ITEMS], x.added[PK_LINKS], x.added[PK_OPS], x.added[PK_BLANKS], x.added[PK_STEPS], more, o.used);
   return TRUE;
+}
+
+/* «Вставить» на листе «Переходы» (с 2026.11.11): таблица из буфера (Excel, Word) — первая строка с шапкой листа
+   («№ опер.», «Содержание перехода»…) — по ней; без шапки — по порядку столбцов листа (деталь, № опер., № перех.,
+   текст, То, Тв), два-три столбца — № опер., текст[, То]. Пустые деталь и № операции — как строкой выше (первая —
+   выбранная в окне деталь), пустой № перехода — следующий. Сколько строк легло; msg — что сказать */
+static int pk_steps_paste(const wchar_t *text, const wchar_t *part, wchar_t *msg, int cap) {
+  int lines = 0, maxc = 1;
+  for (const wchar_t *p = text; *p;) {
+    const wchar_t *e = wcschr(p, L'\n');
+    size_t l = e ? (size_t)(e - p) : wcslen(p);
+    int c = 1;
+    for (size_t k = 0; k < l; k++) c += p[k] == L'\t';
+    if (l && !(l == 1 && p[0] == L'\r')) lines++, maxc = c > maxc ? c : maxc;
+    p += l + (e ? 1 : 0);
+  }
+  if (!lines || maxc < 2) {
+    lstrcpynW(msg, L"Переходы: нужна таблица — хотя бы «№ опер.» и «Содержание перехода» (или все столбцы листа)", cap);
+    return 0;
+  }
+  XrSheet s;
+  memset(&s, 0, sizeof(s));
+  s.ncols = maxc > PKX_COLS ? maxc : PKX_COLS;
+  s.nrows = lines + 1;
+  s.cell = (wchar_t **)calloc((size_t)s.nrows * (size_t)s.ncols, sizeof(wchar_t *));
+  if (!s.cell) {
+    lstrcpynW(msg, L"Мало памяти", cap);
+    return 0;
+  }
+  for (int h = 0; h < kPkSheets[PK_STEPS].ncols; h++) s.cell[h] = _wcsdup(kPkSheets[PK_STEPS].head[h]); /* строка 0 — шапка */
+  int r = 1;
+  for (const wchar_t *p = text; *p && r < s.nrows;) {
+    const wchar_t *e = wcschr(p, L'\n');
+    size_t l = e ? (size_t)(e - p) : wcslen(p);
+    if (l && p[l - 1] == L'\r') l--;
+    if (l) {
+      int c = 0;
+      for (size_t a = 0; a <= l && c < s.ncols;) {
+        size_t b = a;
+        while (b < l && p[b] != L'\t') b++;
+        size_t ca = a, cb = b;
+        if (cb > ca + 1 && p[ca] == L'"' && p[cb - 1] == L'"') ca++, cb--; /* ячейка Excel с переводом строки — в кавычках */
+        wchar_t *v = (wchar_t *)calloc(cb - ca + 1, sizeof(wchar_t));
+        if (v) {
+          for (size_t q = 0; q < cb - ca; q++) v[q] = p[ca + q] == L'\r' || p[ca + q] == L'\n' ? L' ' : p[ca + q];
+          s.cell[(size_t)r * (size_t)s.ncols + (size_t)c] = v;
+        }
+        c++;
+        a = b + 1;
+      }
+      r++;
+    }
+    p += (e ? (size_t)(e - p) + 1 : wcslen(p));
+  }
+  int col[PKX_COLS], hrow = 0;
+  if (pkx_head(&s, 1, PK_STEPS, col) > 0) hrow = 1; /* своя шапка в первой строке */
+  else {
+    for (int h = 0; h < PKX_COLS; h++) col[h] = h < kPkSheets[PK_STEPS].ncols ? h : -1;
+    if (maxc <= 3) /* № опер., текст[, То] */
+      col[0] = -1, col[1] = 0, col[2] = -1, col[3] = 1, col[4] = maxc > 2 ? 2 : -1, col[5] = -1;
+  }
+  PkxCtx x;
+  memset(&x, 0, sizeof(x));
+  PkxOut o;
+  memset(&o, 0, sizeof(o));
+  int n = pkx_sheet_tpl(&s, PK_STEPS, hrow, col, NULL, part, pkx_put_row, &x, &o);
+  for (size_t i = 0; i < (size_t)s.nrows * (size_t)s.ncols; i++) free(s.cell[i]);
+  free(s.cell);
+  if (!n)
+    _snwprintf(msg, cap, L"Переходы не легли: в строках нет детали (выберите её в окне), номера операции или текста "
+                         L"(мимо %d)", o.skipped);
+  else
+    _snwprintf(msg, cap, L"Вставлено переходов: %d%s%s", x.added[PK_STEPS],
+               x.merged ? L", заменено прежних" : L"", o.skipped ? L"; строки без операции или текста — мимо" : L"");
+  msg[cap - 1] = 0;
+  return n;
 }
 
 /* «Из Excel…» */

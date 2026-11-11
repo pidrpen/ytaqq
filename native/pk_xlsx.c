@@ -82,6 +82,7 @@ static int pkx_head(const XrSheet *s, int r, int k, int *col) {
   int ok = k == PK_ITEMS    ? col[0] >= 0 && (col[1] >= 0 || col[2] >= 0)
            : k == PK_LINKS  ? col[0] >= 0 && col[1] >= 0
            : k == PK_OPS    ? col[2] >= 0 && (col[0] >= 0 || col[1] >= 0)
+           : k == PK_STEPS  ? col[3] >= 0 && col[1] >= 0 /* текст перехода и № операции */
                             : col[0] >= 0 && col[1] >= 0;
   return ok ? found : 0;
 }
@@ -128,9 +129,9 @@ static int pkx_sheet_tpl(const XrSheet *s, int k, int hrow, const int *col, cons
                          PkxPut put, void *ctx, PkxOut *o) {
   const XpSheetDef *d = &kPkSheets[k];
   wchar_t v[PKX_COLS][PP_CELL];
-  wchar_t prevKey[PP_CELL] = L"", lastPart[PP_CELL] = L"";
+  wchar_t prevKey[PP_CELL] = L"", lastPart[PP_CELL] = L"", prevOp[PP_CELL] = L"";
   tn_cpy(prevKey, PP_CELL, sel ? sel : L"");
-  long lastNum = 0;
+  long lastNum = 0, lastStep = 0;
   int n = 0;
   for (int r = hrow + 1; r < s->nrows; r++) {
     int any = 0;
@@ -166,6 +167,40 @@ static int pkx_sheet_tpl(const XrSheet *s, int k, int hrow, const int *col, cons
       if (k == PK_BLANKS && v[3][0] && !pp_sizes_ok(v[3])) {
         wchar_t sz[PP_CELL];
         if (pp_sizes(v[3], sz, PP_CELL)) tn_cpy(v[3], PP_CELL, sz);
+      }
+    } else if (k == PK_STEPS) { /* пустые деталь и № операции — как строкой выше; пустой № перехода — следующий */
+      if (!v[0][0]) tn_cpy(v[0], PP_CELL, prevKey);
+      if (!v[1][0]) tn_cpy(v[1], PP_CELL, prevOp);
+      if (!v[0][0] || !v[1][0] || !v[3][0]) {
+        o->skipped++;
+        continue;
+      }
+      long on = 0, sn = 0;
+      int dg = 0;
+      const wchar_t *p = v[1];
+      while (*p == L' ') p++;
+      while (tn_isdig(p[dg]) && dg < 5) on = on * 10 + (p[dg] - L'0'), dg++;
+      if (!dg || dg > 4) {
+        o->skipped++;
+        continue;
+      }
+      pp_num3(on, v[1], PP_CELL);
+      if (wcscmp(v[0], prevKey) || wcscmp(v[1], prevOp)) lastStep = 0; /* другая операция — переходы с 1 */
+      tn_cpy(prevKey, PP_CELL, v[0]);
+      tn_cpy(prevOp, PP_CELL, v[1]);
+      p = v[2];
+      dg = 0;
+      while (*p == L' ') p++;
+      while (tn_isdig(p[dg]) && dg < 4) sn = sn * 10 + (p[dg] - L'0'), dg++;
+      if (!dg || p[dg]) sn = lastStep + 1;
+      lastStep = sn;
+      { /* число → текст без printf: тот же код и в стенде на Linux */
+        wchar_t d[12];
+        int nd = 0;
+        long t = sn > 0 ? sn : 1;
+        while (t && nd < 11) d[nd++] = (wchar_t)(L'0' + t % 10), t /= 10;
+        for (int q = 0; q < nd; q++) v[2][q] = d[nd - 1 - q];
+        v[2][nd] = 0;
       }
     } else { /* PK_OPS */
       if (!v[0][0]) tn_cpy(v[0], PP_CELL, prevKey);
@@ -236,7 +271,7 @@ static int pkx_apply(const XrBook *b, const wchar_t *dir, const wchar_t *asmb, c
         int hint = PK_ITEMS;
         wchar_t name[120];
         so_low(s->name, name, 120);
-        for (int q = 0; q < PK_NT; q++) {
+        for (int q = 0; q <= PK_BLANKS; q++) { /* «Вставить» знает четыре листа: переходов в нём нет */
           wchar_t nm[60];
           so_low(kPkSheets[q].name, nm, 60);
           if (pp_pre(name, nm)) hint = q;
@@ -245,7 +280,7 @@ static int pkx_apply(const XrBook *b, const wchar_t *dir, const wchar_t *asmb, c
         PpIn in = {hint, asmb ? asmb : L"", part ? part : L"", pkx_pp_put, &x};
         PpOut po;
         n = pp_parse(t, &in, &po);
-        for (int q = 0; q < PK_NT; q++) o->rows[q] += po.rows[q];
+        for (int q = 0; q <= PK_BLANKS; q++) o->rows[q] += po.rows[q];
         free(t);
         static const wchar_t *const kHow[] = {L"",        L"строки для «Союза»", L"по шапке", L"по содержимому",
                                               L"маршрут", L"операции",          L"список",   L"по порядку столбцов"};

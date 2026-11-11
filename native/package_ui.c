@@ -20,7 +20,6 @@
    Галочка «Обозначение — из имени файла» в подвале: у брошенных чертежей обозначение — из имени файла,
    остальное — со штампа (pk_stamp.c, с 2026.11.06). Черновик помнится между запусками (package.txt). */
 
-#define ID_PK_TAB 300 /* +лист: 300…303 */
 #define ID_PK_ADD 304
 #define ID_PK_DEL 305
 #define ID_PK_PASTE 306
@@ -57,6 +56,7 @@
 #define ID_PK_XLS 335        /* «Из Excel…» — книга: шаблон «ЭСИ и ТП» или своя таблица (pk_xlsx_ui.c, с 2026.11.06) */
 #define ID_PK_XLSTPL 336     /* «Ещё ▾»: пустой шаблон Excel — сохранить и открыть */
 #define ID_PK_DESFILE 337    /* галочка в подвале: обозначение чертежа — из имени файла (pk_stamp.c, с 2026.11.06) */
+#define ID_PK_TAB 360 /* +лист: 360…364 (с 2026.11.11 листов пять — «Переходы»; раньше 300…303, а 304 — «+ строка») */
 #define PK_OP_CRAFT 7        /* лист «Операции»: столбец «Профессия» — последний (kPkOpsHead) */
 #define WM_PK_ESI (WM_APP + 99) /* lParam — RtJob*, освобождает окно */
 /* чертежи, брошенные мышью (pk_stamp.c): штамп читает рабочий поток */
@@ -145,6 +145,7 @@ static BOOL pk_stamp_desfile_on(void);          /* pk_stamp.c: обозначе�
 static void pks_desfile_toggle(void);           /* pk_stamp.c: та галочка */
 static BOOL pk_xlsx_load(const wchar_t *path, BOOL ask); /* pk_xlsx_ui.c: книга Excel → листы окна */
 static void pk_xlsx_pick(void);                 /* pk_xlsx_ui.c: «Из Excel…» */
+static int pk_steps_paste(const wchar_t *text, const wchar_t *part, wchar_t *msg, int cap); /* pk_xlsx_ui.c: на «Переходы» */
 static void pk_xlsx_template(void);             /* pk_xlsx_ui.c: «Ещё ▾ → Шаблон Excel…» */
 static void pk_reset(void);                     /* все листы — пусто, без вопроса */
 
@@ -1019,7 +1020,7 @@ static LRESULT CALLBACK PkEditProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
    изделий, как в «Союзе»; 12 — признак покупки (значения из базы); иначе -1 */
 static int pk_combo_kind(int sheet, int c) {
   if (sheet == PK_OPS && ((c >= 2 && c <= 4) || c == PK_OP_CRAFT)) return c;
-  if ((sheet == PK_OPS || sheet == PK_BLANKS) && c == 0) return 10;
+  if ((sheet == PK_OPS || sheet == PK_BLANKS || sheet == PK_STEPS) && c == 0) return 10;
   if (sheet == PK_LINKS && c <= 1) return 10;
   if (sheet == PK_ITEMS && c == 2) return 11;
   if (sheet == PK_ITEMS && c == 6) return 12;
@@ -1113,9 +1114,9 @@ static int pk_rename_des(const wchar_t *was, const wchar_t *now) {
   lstrcpynW(nw, now ? now : L"", 200);
   pk_q_trim(w), pk_q_trim(nw);
   if (!w[0] || !nw[0] || !_wcsicmp(w, nw)) return 0;
-  static const int kSheet[4] = {PK_OPS, PK_BLANKS, PK_LINKS, PK_LINKS}, kCol[4] = {0, 0, 0, 1};
+  static const int kSheet[5] = {PK_OPS, PK_BLANKS, PK_LINKS, PK_LINKS, PK_STEPS}, kCol[5] = {0, 0, 0, 1, 0};
   int n = 0;
-  for (int k = 0; k < 4; k++) {
+  for (int k = 0; k < 5; k++) {
     XpTable *t = &g_pk[kSheet[k]];
     for (int r = 0; r < t->n; r++)
       if (!_wcsicmp(xp_cell(t, r, kCol[k]), w)) pk_put(t, r, kCol[k], nw), n++;
@@ -1558,7 +1559,8 @@ static void pk_paste(void) {
   wchar_t asmb[200], part[200], msg[400];
   pk_target(asmb, part);
   int show = g_pkSheet;
-  int n = pk_paste_text(text, g_pkSheet, asmb, part, &show, msg, 400);
+  int n = g_pkSheet == PK_STEPS ? pk_steps_paste(text, part, msg, 400) /* переходы — таблицей, своим разбором */
+                                : pk_paste_text(text, g_pkSheet, asmb, part, &show, msg, 400);
   free(text);
   if (n) {
     BOOL cols = show != g_pkSheet;
@@ -1815,6 +1817,11 @@ static void pk_help(void) {
       L"  вариант «Основной», признак «основной ТП»; ТП вносится в карточку ТП детали. Если у детали ТП уже\r\n"
       L"  есть — новый не создаётся (такие позиции «Проверить» назовёт; сквозной назовёт отчёт «Союза»).\r\n"
       L"  Папка для ТП — в окне «В Союз…»; пусто — «Для основных ТП».\r\n\r\n"
+      L"ПЕРЕХОДЫ — деталь, № операции (как на листе «Операции»), № перехода, содержание перехода, То и Тв в минутах.\r\n"
+      L"  В «Союзе» (пакет 1.0.0.15) — переходы в содержании операции, как штатная «Создать переход»; То и Тв — нормы\r\n"
+      L"  перехода, их суммы — То и Тв операции (Тпз и Тшт — с листа «Операции»). ТП детали в «Союзе» уже есть —\r\n"
+      L"  переходы лягут в его операции без переходов. Пустые деталь и № операции — как строкой выше, № перехода —\r\n"
+      L"  следующий. Вставить — таблицей (Ctrl+V на этом листе) или листом «Переходы» книги Excel.\r\n\r\n"
       L"ЧЕРТЕЖИ МЫШЬЮ\r\n"
       L"  Перетащите в окно чертежи (PDF, TIF, PNG, JPG; папку — все картинки в ней): обозначение и наименование\r\n"
       L"  со штампа читает мини-ИИ с картинками (если включён; иначе Tesseract — сверьте), файл ложится в «Чертёж».\r\n"
@@ -2057,7 +2064,7 @@ static BOOL pk_check(BOOL quiet) {
   int errs = 0, fixes = 0;
   g_pkSendWarn = 0;
   XpTable *it = &g_pk[PK_ITEMS], *ln = &g_pk[PK_LINKS], *op = &g_pk[PK_OPS], *bl = &g_pk[PK_BLANKS];
-  if (!it->n && !op->n && !bl->n) sb_add(&b, L"• Пакет пуст\n"), errs++;
+  if (!it->n && !op->n && !bl->n && !g_pk[PK_STEPS].n) sb_add(&b, L"• Пакет пуст\n"), errs++;
   for (int r = 0; r < it->n; r++) {
     const wchar_t *des = xp_cell(it, r, 0);
     if (!des[0]) sb_add(&b, L"• Изделия, строка %d: нет обозначения\n", r + 1), errs++;
@@ -2260,6 +2267,36 @@ static BOOL pk_check(BOOL quiet) {
       g_pkSendWarn++;
     }
   }
+  { /* переходы (с 2026.11.11): операция перехода — та, что на листе «Операции» у той же детали; нет — «Союз» её
+       переходы пропустит (если ТП в «Союзе» уже есть — ищет там по номеру); пакет старее 1.0.0.15 переходов не знает */
+    XpTable *sp = &g_pk[PK_STEPS];
+    wchar_t lost[300] = L"";
+    int nl = 0, ns = 0;
+    for (int r = 0; r < sp->n; r++) {
+      const wchar_t *d4 = xp_cell(sp, r, 0), *o4 = xp_cell(sp, r, 1);
+      if (!d4[0] || !xp_cell(sp, r, 3)[0]) continue;
+      ns++;
+      BOOL has = FALSE;
+      for (int q = 0; q < op->n && !has; q++) has = !_wcsicmp(xp_cell(op, q, 0), d4) && _wtoi(xp_cell(op, q, 1)) == _wtoi(o4);
+      if (has || (r > 0 && !_wcsicmp(xp_cell(sp, r - 1, 0), d4) && !wcscmp(xp_cell(sp, r - 1, 1), o4))) continue;
+      nl++;
+      size_t l = wcslen(lost);
+      if (l < 220) _snwprintf(lost + l, 300 - l, L"%s%s %s", l ? L", " : L"", d4, o4);
+    }
+    lost[299] = 0;
+    if (nl) {
+      sb_add(&b, L"• Переходы без операции на листе «Операции» (%d: %s) — «Союз» найдёт операцию с таким номером, только "
+                 L"если ТП детали в нём уже есть\n",
+             nl, lost);
+      g_pkSendWarn++;
+    }
+    if (ns && g_szmPkgVer && g_szmPkgVer < SZM_VER(1, 0, 0, 15)) {
+      sb_add(&b, L"• Пакет «CursorPad — Союз» в клиенте — %u.%u.%u.%u: переходы (%d) не уйдут — их понимает пакет 1.0.0.15. "
+                 L"Передайте администратору «Союза» конфиг 1.0.0.15 (pidrpen/slack, cursorpad-soyuz)\n",
+             g_szmPkgVer >> 24, (g_szmPkgVer >> 16) & 255, (g_szmPkgVer >> 8) & 255, g_szmPkgVer & 255, ns);
+      g_pkSendWarn++;
+    }
+  }
   { /* сборка без состава (спецификация не прочиталась, состав не вписан) — не молча (с 31.10) */
     wchar_t emp[400] = L"";
     int ne3 = 0;
@@ -2386,7 +2423,7 @@ static void pk_save(void) {
    его наименование. Код операции — число в начале «4110 Токарная» (после «Проверить» названия уже
    в виде 1С), код участка — число в начале участка. Возвращает число строк ТП; что пропущено — в note. */
 typedef struct {
-  int items, links, ops, blanks, draws;
+  int items, links, ops, blanks, draws, steps;
 } PkSent;
 enum { PK_SEND_ALL, PK_SEND_ESI, PK_SEND_TP };
 
@@ -2498,6 +2535,22 @@ static int pk_soyuz_text(wchar_t **out, wchar_t *note, int ncap, PkSent *st, int
     sb_add(&b, L"\r\n");
     st->ops++;
   }
+  /* переходы (с 2026.11.11, пакет 1.0.0.15): операция — по номеру в ТП детали; старому пакету их не отдаёт
+     szm_write_text (он отказал бы на непонятной строке) */
+  XpTable *sp = &g_pk[PK_STEPS];
+  for (int r = 0; r < (tp ? sp->n : 0); r++) {
+    if (!xp_cell(sp, r, 0)[0] || !xp_cell(sp, r, 1)[0] || !xp_cell(sp, r, 3)[0]) continue;
+    sb_add(&b, L"ПЕРЕХОД");
+    for (int c = 0; c < 6; c++) {
+      wchar_t v[1024];
+      lstrcpynW(v, xp_cell(sp, r, c), 1024);
+      for (wchar_t *q = v; *q; q++)
+        if (*q == L'\t' || *q == L'\r' || *q == L'\n') *q = L' '; /* текст перехода — одной ячейкой строки описания */
+      sb_field(&b, v);
+    }
+    sb_add(&b, L"\r\n");
+    st->steps++;
+  }
   if (skipped) _snwprintf(note, ncap, L"операций без кода справочника: %d", skipped);
   if (noName) {
     size_t l = wcslen(note);
@@ -2532,7 +2585,7 @@ static void pk_to_soyuz(int mode) {
     free(text);
     pk_status(mode == PK_SEND_ESI  ? L"Только ЭСИ — нечего отправлять: нет новых изделий, строк состава и чертежей (строки из «Союза» "
                                      L"там уже есть)"
-              : mode == PK_SEND_TP ? L"Только ТП — нечего отправлять: нет операций с кодом справочника и заготовок"
+              : mode == PK_SEND_TP ? L"Только ТП — нечего отправлять: нет операций с кодом справочника, переходов и заготовок"
               : g_pkSoyItN ? L"Нечего отправлять: строки из «Союза» там уже есть — дайте позиции операции, заготовку или чертёж"
                            : L"Нечего отправлять: заполните «Изделия», «Операции» или «Заготовки»");
     return;
@@ -2542,11 +2595,11 @@ static void pk_to_soyuz(int mode) {
     _snwprintf(label, 240, L"Только ЭСИ: изделий %d, состав %d, чертежей %d%s%s", st.items, st.links, st.draws,
                note[0] ? L" · " : L"", note);
   else if (mode == PK_SEND_TP)
-    _snwprintf(label, 240, L"Только ТП (к изделиям в «Союзе»): операций %d, заготовок %d%s%s", st.ops, st.blanks,
-               note[0] ? L" · " : L"", note);
+    _snwprintf(label, 240, L"Только ТП (к изделиям в «Союзе»): операций %d, переходов %d, заготовок %d%s%s", st.ops, st.steps,
+               st.blanks, note[0] ? L" · " : L"", note);
   else
-    _snwprintf(label, 240, L"В «Союз»: изделий %d, состав %d, заготовок %d, операций %d, чертежей %d%s%s", st.items,
-               st.links, st.blanks, st.ops, st.draws, note[0] ? L" · " : L"", note);
+    _snwprintf(label, 240, L"В «Союз»: изделий %d, состав %d, заготовок %d, операций %d, переходов %d, чертежей %d%s%s",
+               st.items, st.links, st.blanks, st.ops, st.steps, st.draws, note[0] ? L" · " : L"", note);
   label[239] = 0;
   szm_open_text(text, label);
   free(text);
@@ -2579,7 +2632,11 @@ static void pk_layout(void) {
   GetClientRect(g_pkWnd, &rc);
   int pad = PKS(26), y = PANEL_TITLE_H + PKS(20), h = PKS(30);
   place_panel_close(g_pkWnd);
-  for (int k = 0; k < PK_NT; k++) MoveWindow(GetDlgItem(g_pkWnd, ID_PK_TAB + k), pad + k * PKS(132), y, PKS(126), h, TRUE);
+  { /* листы — до «Из Excel…» справа: пять листов (с «Переходами») не налезают на кнопки и при узком окне */
+    int room = rc.right - pad - PKS(100 + 6 + 170 + 12 + 104 + 12) - pad, step = PKS(132);
+    if (room / PK_NT < step) step = room / PK_NT > PKS(90) ? room / PK_NT : PKS(90);
+    for (int k = 0; k < PK_NT; k++) MoveWindow(GetDlgItem(g_pkWnd, ID_PK_TAB + k), pad + k * step, y, step - PKS(6), h, TRUE);
+  }
   /* справа: обозначение и «Из Союза» — изделие с составом из базы, «Из выгрузки…» — образец */
   int x = rc.right - pad - PKS(100);
   MoveWindow(GetDlgItem(g_pkWnd, ID_PK_ESI), x, y, PKS(100), h, TRUE);
