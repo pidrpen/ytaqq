@@ -332,14 +332,16 @@ static void test_template(void) {
   XrBook *b = (XrBook *)calloc(1, sizeof(XrBook));
   wchar_t why[200] = L"";
   int n = xr_read(d, (size_t)len, b, why, 200);
-  ok(n == 6, "шаблон: шесть листов");
-  if (n == 6) {
-    static const wchar_t *const nm[] = {L"Как заполнять", L"Списки", L"Изделия", L"Состав", L"Операции", L"Заготовки"};
-    for (int i = 0; i < 6; i++) eqw(b->sh[i].name, nm[i], "имя листа шаблона");
+  ok(n == 7, "шаблон: семь листов");
+  if (n == 7) {
+    static const wchar_t *const nm[] = {L"Как заполнять", L"Списки",    L"Изделия", L"Состав",
+                                        L"Операции",      L"Заготовки", L"Переходы"};
+    for (int i = 0; i < 7; i++) eqw(b->sh[i].name, nm[i], "имя листа шаблона");
     ok(b->sh[1].hidden && !b->sh[2].hidden, "«Списки» скрыт");
     eqw(xr_at(&b->sh[1], 0, 1), L"0000 Списание материалов", "первая операция списка");
     eqw(xr_at(&b->sh[2], 0, 5), L"Чертёж (файл)", "шапка «Изделий»");
     eqw(xr_at(&b->sh[4], 0, 7), L"Профессия", "шапка «Операций»");
+    eqw(xr_at(&b->sh[6], 0, 3), L"Содержание перехода", "шапка «Переходов»");
     ok(b->sh[2].nrows == 1, "в шаблоне — только шапка");
   }
   xr_free(b);
